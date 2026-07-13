@@ -1,0 +1,196 @@
+# Enginery System Overview
+
+- **Status:** Product concept and architecture reference
+- **Date:** 2026-07-14
+- **Audience:** Engineers, prospective collaborators, and engineering leaders
+
+> **Thesis:** Coding agents perform tasks. Enginery engineers the system in which those tasks become trustworthy software outcomes.
+
+## Executive summary
+
+Enginery is an open-source, local-first **agentic engineering control plane**. It coordinates coding-agent harnesses, deterministic engineering operations, policy decisions, evidence collection, and human authority across the full path from work intake to a verified outcome.
+
+It is not a new foundation model, an IDE assistant, a prompt library, or a proprietary replacement for every development tool. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems. Enginery owns the durable workflow around them: what work is being done, why it is allowed, what evidence supports progress, how failures recover, and whether a workflow change is genuinely better.
+
+The product starts with a solo engineer operating local repositories, a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority. It deliberately earns broader autonomy through four falsifiable workflow gates rather than making an undifferentiated claim of “autonomous software engineering.”
+
+## 1. The problem
+
+Coding agents already plan, edit, test, and propose pull requests. GitHub documents that Copilot cloud agent can research a repository, create a plan, make branch changes, run tests and linters, and optionally open a pull request. It runs in an ephemeral GitHub Actions environment and remains bounded by repository and session constraints. [^copilot]
+
+OpenAI describes Codex as a cloud software-engineering agent that can work on parallel tasks in isolated environments, run commands and tests, commit changes, and return log- and test-backed evidence for human review. Its own launch material still requires users to review and validate generated code before integration. [^codex]
+
+Those are useful workers. The surrounding engineering system remains fragmented:
+
+- the ticket, prompt, worktree, agent session, test result, pull request, release, and deployment state live in different places;
+- conversation state and transient processes are mistaken for operational state;
+- agents can claim success without evidence tied to the exact revision or external object;
+- a retry after a timeout can duplicate a pull request, release, deployment, or other side effect;
+- one generic loop is asked to handle low-risk chores, normal features, releases, and incidents with different authority and evidence needs;
+- “auto mode” grants broad authority instead of evaluating one consequential action at a time;
+- process isolation is overstated when a worktree only separates repository changes;
+- workflow improvements are adopted from anecdotes rather than compatible baseline-versus-candidate comparisons.
+
+The missing unit is not a better chat loop. It is a durable, inspectable, versioned **engineering workflow**.
+
+## 2. What Enginery is—and is not
+
+### What it is
+
+Enginery is the control plane that turns engineering intent into verified outcomes. It owns:
+
+- normalized work intake and immutable source snapshots;
+- versioned workflow definitions and routing;
+- durable run, node-attempt, lease, approval, evidence, and outcome state;
+- workspace lifecycle and bounded agent-task envelopes;
+- deterministic command execution, validation, and evidence verification;
+- policy evaluation and explicit human interventions;
+- idempotent external-operation reconciliation;
+- measurement of outcomes and workflow behavior;
+- governed evaluation, canarying, promotion, retention, and rollback of factory changes.
+
+### What it is not
+
+Enginery does **not** build its own coding-agent reasoning loop. It does not replace GitHub, Git, CI, package registries, deployment platforms, or issue-tracker interfaces. It does not start as a hosted multi-tenant service, a browser dashboard, a distributed scheduler, a Kubernetes layer, or a hostile-code sandbox.
+
+A git worktree is an isolated **workspace**, not a security boundary. On the first backend, a process can still share the user’s account, filesystem, network, keychain, and host. Enginery must describe that limit plainly and reserve untrusted workloads for a future container or VM backend.
+
+## 3. Why this approach
+
+Enginery treats engineering value as a deliberate allocation among three actors:
+
+| Actor | Best responsibility | Control required |
+|---|---|---|
+| Engineer | Intent, accountability, judgment, exceptions, final authority | Explicit approvals and interventions |
+| Coding agent | Ambiguous reasoning, synthesis, implementation, diagnosis, review | Bounded task envelope, isolated workspace, evidence requirements |
+| Deterministic code | State transitions, routing inputs, policy evaluation, validation, digesting, reconciliation | Typed contracts and tests |
+
+This model rejects two failures at once: asking a model to repeatedly rediscover deterministic facts, and pretending deterministic code can resolve ambiguous engineering intent. The correct boundary is operational, not ideological: automate what is specifiable; use agents where interpretation or synthesis remains necessary; preserve human authority where policy, ambiguity, or external consequences require it.
+
+The result is a compounding asset. Improving a workflow definition, evidence verifier, routing policy, repair protocol, or capability lock can improve every compatible future work item. That does not justify uncontrolled self-modification. It requires a more rigorous form of improvement: create a candidate, lock its inputs, compare it against a baseline on compatible and held-out cases, approve a bounded canary, then promote or roll back without rewriting history.
+
+## 4. How it works
+
+```mermaid
+flowchart LR
+    Intent[Engineering intent] --> Intake[Work intake and source snapshot]
+    Intake --> Route[Qualification, risk routing, and workflow selection]
+    Route --> Policy[Action-scoped policy decision]
+    Policy -->|allow| Workspace[Reserved isolated workspace]
+    Policy -->|human required| Human[Human decision]
+    Human --> Policy
+    Workspace --> Work[Agent and deterministic workflow nodes]
+    Work --> Evidence[Version-bound evidence verification]
+    Evidence -->|repairable failure| Work
+    Evidence -->|pass| Outcome[PR, release, hotfix, or evaluated factory change]
+    Evidence -->|blocked or ambiguous| Human
+    Outcome --> Observe[Outcome observation and metrics]
+    Observe --> Improve[Governed candidate evaluation]
+    Improve --> Route
+```
+
+A run is bound to the work snapshot, workflow digest, policy version, adapter fingerprints, capability lock, repository revision, and effective configuration. A change to a bound input invalidates dependent approvals and evidence. The old run becomes superseded; the system does not silently continue under different intent or behavior.
+
+Every external side effect receives a stable operation ID. On uncertainty, Enginery reconciles first and obtains one of four answers: `not_found`, `found_matching`, `found_conflicting`, or `indeterminate`. Only `not_found` permits a new execution; `found_matching` adopts the observed result; the other two require explicit reconciliation or human action. Blind retry is prohibited.
+
+## 5. Initial workflows and proof status
+
+The following are **design targets, not demonstrated product capabilities**. Enginery remains a product concept until each target has produced its stated evidence in a real, bounded environment.
+
+| Workflow target | Planned capability under test | Required proof before the terminal claim |
+|---|---|---|
+| Issue to merge-ready PR | Intake, workspaces, agent execution, validation, evidence, review, source supersession, PR/CI reconciliation | A real, non-empty PR whose final evidence is current; forced interruption yields zero duplicate side effects; no-op work ends `no_change_required` |
+| Plan to verified release | Child workflows, dependency scheduling, stacked changes, merge freshness, fixed publication broker, destination verification | A multi-milestone fixture reaches a destination-verified release; ambiguous publication reconciles without a duplicate version |
+| Incident to hotfix and rollback | Urgent routing, release-lineage selection, minimal remediation, non-vacuous regression evidence, separately authorized deployment and rollback | A controlled service is changed, observed, rolled back, and observed at the prior revision |
+| Governed factory self-improvement | Independent cohorts, replay, held-out evaluation, anti-gaming checks, human canary and promotion | A real candidate sourced from earlier runs is evaluated on locked cohorts and reaches promoted, retained, or rejected with rollback evidence |
+
+The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
+
+### Product-hypothesis decision rule
+
+The core product hypothesis is not “agents need orchestration” in the abstract. It is: **a technically skilled local operator will choose Enginery over a manually coordinated agent session when it improves recovery and evidence traceability enough to justify operating a local ledger, coordinator, adapters, backups, and retained artifacts.**
+
+The first pilot must compare the same class of issues against a documented manual baseline. It is a `go` only when it completes at least three representative work items without a duplicate side effect, rejects every injected stale-evidence case, recovers from a forced coordinator loss with an independently inspectable evidence bundle, and the operator reports that the additional operating burden is acceptable. It is a `no-go` when recovery cannot be proved, the workflow needs broad unsafe authority, or the operator prefers the manual baseline after observing the burden. These are discovery thresholds, not claims of product-market fit.
+
+## 6. Market research and positioning
+
+### The market signal
+
+Primary vendor materials show a category of delegated coding work, not independent evidence of market demand. GitHub positions Copilot cloud agent around repository research, planning, branch changes, pull requests, custom agents, hooks, and automation. [^copilot] OpenAI positions Codex around parallel software-engineering tasks, isolated environments, command execution, evidence, and human review. [^codex] Factory positions its “Droids” across coding, testing, and deployment within an agent-native SDLC. [^factory]
+
+Those offerings are a **product-category signal**: major vendors are investing in delegated engineering agents. They do **not** establish demand for a separate, local control plane. That narrower question remains the central product hypothesis.
+
+### Landscape
+
+| Category | Representative products | Primary value | Gap Enginery proposes to test |
+|---|---|---|---|
+| Coding-agent workers | GitHub Copilot cloud agent, Codex, Factory Droids, Devin | Perform delegated coding work in a defined environment | Cross-worker lifecycle semantics, independent durable state, action-scoped authority, and evidence across systems |
+| Agent frameworks | General agent-orchestration frameworks | Build custom agent applications | Engineering-specific state, SCM/CI/release semantics, and falsifiable terminal contracts |
+| Task/worktree runners | CLI and workspace orchestration tools | Run multiple local tasks or agents | Durable reconciliation, policy, outcomes, and governed improvement |
+| Capability registries | Armory and repository-local assets | Distribute reusable instructions and tooling | Runtime execution state, scheduling, policy, and evaluation |
+
+Enginery does not claim that incumbents lack all of these capabilities. It chooses a boundary: an open, local control plane that coordinates worker and delivery providers without becoming another worker or a hosted replacement for them.
+
+### Boundary and operator model
+
+The local ledger is authoritative for execution state: work snapshots, runs, attempts, approvals, evidence, and outcomes. An external tracker remains authoritative for its own UI, comments, and provider-specific metadata; an adapter ingests a normalized snapshot and projects concise lifecycle/evidence summaries back. Git, CI, registries, and deployment providers remain authoritative for their own objects. Enginery verifies those objects against its bound run before making a terminal claim.
+
+The initial operator installs the CLI and configured adapters, starts or invokes the single local coordinator, stores backups, applies migrations, retains or deletes sensitivity-classified artifacts under policy, and responds to blocked reconciliation and human decision requests. This is intentional early-stage operational ownership, not a claim of zero-operations local software.
+
+### Beachhead
+
+The initial user hypothesis is a technically sophisticated solo engineer who already operates coding-agent harnesses and local repositories, delegates repeatable work, and experiences a concrete recovery or evidence failure that scripts and provider-native views do not resolve. Interview and pilot evidence—not the category descriptions above—must establish whether that user will adopt Enginery.
+
+## 7. Differentiation and potential moat
+
+The intended differentiation is a **trustworthy control plane**, not a claim of superior code generation.
+
+Potential defensibility comes from an accumulating, versioned operational corpus:
+
+1. **Evidence and reconciliation semantics.** A stable operation identity, exact-subject evidence, and fault-tested recovery become hard to retrofit into a prompt-oriented runner.
+2. **Policy and approval history.** Action-level decisions, superseded approvals, hard-rule tests, and human interventions form a reusable governance model.
+3. **Comparable outcome data.** Runs, interventions, outcomes, cohorts, and versioned metric derivations enable measured workflow improvement rather than anecdotal prompt changes.
+4. **Provider-neutral integration contracts.** An adapter contract proven by two independent harnesses reduces dependency on a single agent vendor.
+5. **Open local ownership.** A local ledger and inspectable event stream reduce lock-in and make the system suitable for users who do not want a central hosted execution database.
+
+These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect.
+
+## 8. Risks and disconfirming evidence
+
+| Risk | Why it matters | Mitigation or falsifier |
+|---|---|---|
+| Incumbents absorb the control plane | Worker vendors already own agent execution, repository access, and user attention | Prove that provider-neutral durability, policy, and evaluation solve a problem users will adopt independently |
+| Integration surface dominates the product | Trackers, harnesses, SCM, CI, release, and deployment systems change independently | Keep the domain core provider-neutral; ship local contract fixtures before live adapters; track adapter maintenance cost per integration |
+| Local operations outweigh value | A solo operator must run migrations, backups, coordinator recovery, and artifact retention | Measure setup, recovery, and maintenance burden against the documented manual baseline |
+| Retained evidence creates privacy or compliance burden | Logs, source snapshots, and artifacts can contain sensitive repository or issue data | Classify artifacts, define retention/deletion and backup policy, and reject use cases whose controls are not implemented |
+| “Local-first” is conflated with security | Worktrees do not contain hostile processes | State guarantees precisely; confine sensitive credentials to fixed brokers; add stronger isolation only when implemented |
+| Governance creates friction | Excess gates can erase the productivity benefit | Apply policy per action and risk class; compare review and intervention burden with the baseline without weakening hard rules |
+| Metrics create false confidence | A candidate can improve a proxy by excluding hard work or suppressing outcomes | Fixed or independent cohorts, held-out inputs, immutable raw observations, completeness metrics, and adversarial tests |
+| Resource limits undermine the local model | One coordinator and bounded local concurrency can become a bottleneck | Publish measured bounds before performance claims; scale architecture only after a measured need |
+| Product scope expands before proof | Four workflows plus ecosystem integrations can become a broad platform before a usable core exists | Use dependency-ordered gates; do not claim later-stage capabilities early |
+
+## 9. Examples
+
+### Example A: a repository issue becomes a merge-ready PR
+
+This is an **intended Stage 1 behavior**, not an observed result. A GitHub issue enters as an immutable source snapshot. Enginery qualifies acceptance criteria, records an explainable risk route, creates a worktree at the bound base revision, locks approved capabilities, and sends a bounded task envelope to a harness. Deterministic nodes run tests and verify evidence. The PR is opened idempotently, CI is bound to the exact head SHA, and the verifier double-reads work, base, head, PR, and CI state before emitting `merge_ready`. If the issue changes, the base advances, or CI belongs to an old head, the run is superseded or reconciled rather than accepted. The pilot compares this recovery and evidence trace against a documented manual-agent baseline and records the extra operator time.
+
+### Example B: a publication call times out after succeeding
+
+This is an **intended Stage 2 fault-injection test**. A fixed publication broker submits a prebuilt artifact to a configured fixture registry and the client loses the response. Enginery does not publish again. It uses the persisted operation ID and deterministic provider markers to reconcile. A matching destination artifact is adopted; a conflicting artifact or ambiguous result blocks for human reconciliation. The product never declares a release complete until destination version and digest are verified. The relevant pass criterion is no duplicate version after the injected uncertainty.
+
+### Example C: a factory improvement is proposed responsibly
+
+This is an **intended Stage 4 behavior**. If repeated compatible runs show excessive repair attempts, a candidate router version is created without changing the active workflow. An independent evaluator selects development and held-out cohorts after the candidate is locked. Baseline and candidate replay against the same cases with real side effects disabled. The evaluation rejects a candidate that improves a success rate by weakening validation, suppressing outcome attribution, or excluding difficult cases. A valid candidate needs distinct human canary and promotion decisions; rollback restores the previous active-version pointer without deleting history.
+
+## Sources
+
+- [Enginery product direction](../.docs/02_PRODUCT_DIRECTION.md)
+- [Enginery system design](../.docs/03_SYSTEM_DESIGN.md)
+- [Enginery specification review](../.docs/04_SPECIFICATION_REVIEW.md)
+- [Enginery development plan](../.docs/DEVELOPMENT_PLAN.md)
+- [Agentic engineering source analysis](../.docs/01_VIDEO_ANALYSIS.md)
+
+[^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
+[^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.
+[^factory]: Factory, [Factory: Agent-Native Software Development](https://www.factory.ai/), accessed 2026-07-14.
