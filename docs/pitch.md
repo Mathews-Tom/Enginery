@@ -14,6 +14,8 @@ Coding agents are becoming capable workers. They can inspect a repository, write
 
 It does not compete by building another agent. It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
 
+The concrete promise under test: **an interrupted or retried agent action never duplicates a pull request, release, or deployment — and the recovery is inspectable from the evidence bundle.** The mechanism below (operation IDs, reconciliation states, version-bound evidence) is the substantiation for that promise, not the headline. The first public artifact is planned as a recorded fault-injection demonstration: kill the coordinator mid-run, show reconciliation-driven recovery, show zero duplicate side effects, and publish the evidence bundle for independent inspection.
+
 ### Plain-language terms
 
 - **Control plane:** the local program that records and directs engineering work; it does not write product code itself.
@@ -125,6 +127,8 @@ The current market is a **product-category signal**, not a demand study:
 - GitHub offers an agent that operates in a GitHub-hosted ephemeral environment, can use custom instructions, skills, hooks, and automation, and produces branch and PR artifacts. [^copilot]
 - OpenAI positions Codex around parallel, sandboxed software tasks with test and log evidence, while retaining manual review and validation as an essential safeguard. [^codex]
 - Factory positions agent-native “Droids” across coding, testing, and deployment. [^factory]
+
+Since mid-2026 the control-plane vocabulary itself is contested: OpenHands markets a hosted "Agent Control Plane," Databricks open-sourced Omnigent (a cross-harness meta-layer with stateful policy and approval gates), Guild.ai raised on "the control plane for AI agents," and Copilot, Codex, and Claude Code ship native multi-agent orchestration with worktree isolation. Whether any of them implements Enginery's specific reconciliation and evidence mechanisms is unverified in either direction; the [product analysis](analysis.md) treats hands-on verification of the closest entrants as a prerequisite for differentiation claims.
 
 These sources establish that major vendors are investing in delegated coding-agent products. They do not establish adoption, willingness to operate local infrastructure, or demand for a separate control plane.
 

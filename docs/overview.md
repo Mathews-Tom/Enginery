@@ -106,6 +106,8 @@ The following are **design targets, not demonstrated product capabilities**. Eng
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
 
+Release packaging (revised 2026-07-14, per [the product analysis](analysis.md)): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
+
 ### Product-hypothesis decision rule
 
 The core product hypothesis is not “agents need orchestration” in the abstract. It is: **a technically skilled local operator will choose Enginery over a manually coordinated agent session when it improves recovery and evidence traceability enough to justify operating a local ledger, coordinator, adapters, backups, and retained artifacts.**
@@ -128,6 +130,8 @@ Those offerings are a **product-category signal**: major vendors are investing i
 | Agent frameworks | General agent-orchestration frameworks | Build custom agent applications | Engineering-specific state, SCM/CI/release semantics, and falsifiable terminal contracts |
 | Task/worktree runners | CLI and workspace orchestration tools | Run multiple local tasks or agents | Durable reconciliation, policy, outcomes, and governed improvement |
 | Capability registries | Armory and repository-local assets | Distribute reusable instructions and tooling | Runtime execution state, scheduling, policy, and evaluation |
+
+As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them ([analysis](analysis.md) §5, §8).
 
 Enginery does not claim that incumbents lack all of these capabilities. It chooses a boundary: an open, local control plane that coordinates worker and delivery providers without becoming another worker or a hosted replacement for them.
 
@@ -153,7 +157,7 @@ Potential defensibility comes from an accumulating, versioned operational corpus
 4. **Provider-neutral integration contracts.** An adapter contract proven by two independent harnesses reduces dependency on a single agent vendor.
 5. **Open local ownership.** A local ledger and inspectable event stream reduce lock-in and make the system suitable for users who do not want a central hosted execution database.
 
-These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect.
+These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect. Any public claim that a specific mechanism is unique to Enginery additionally requires hands-on verification of the closest control-plane entrants; secondary-source absence is not evidence of absence.
 
 ## 8. Risks and disconfirming evidence
 
