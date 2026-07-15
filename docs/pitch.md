@@ -6,7 +6,7 @@
 
 ## The short version
 
-When an agent or coordinator loses a response after creating a pull request, publishing an artifact, or starting a deployment, a blind retry can duplicate the external effect. The engineering problem is not only generating the code; it is proving what happened and recovering without guessing.
+Have you had a coding agent open a pull request, lose the network response, and a blind retry open a second PR against the same branch? Or watched a release-publish call time out — succeeded or not, nobody can tell — with a retry one step from shipping a duplicate version? The code was never the hard part. Proving what actually happened, and recovering without guessing, is.
 
 **Enginery is an open-source, local-first control plane for that problem.**
 
@@ -39,6 +39,8 @@ Because engineering work is more than code generation. Once agents operate beyon
 - How do we prevent a retry from opening a duplicate PR, publishing a duplicate release, or repeating a deployment?
 - How do we change a prompt, router, validator, or policy without silently altering active engineering behavior?
 - How do we distinguish a workflow that looks faster from one that is actually safer, more reliable, and better for compatible work?
+
+Take the last question concretely. A developer sees an agent fail a task, tweaks the prompt, reruns it on that one case, watches it pass, and ships the new prompt — with no idea whether it just broke fifty other tasks. Enginery's governed evaluation path replaces that guess with a registered baseline-versus-candidate comparison on held-out cases before a workflow change is promoted.
 
 Most current practice distributes these answers across conversations, shell scripts, worktrees, issue trackers, CI, provider-specific interfaces, and human memory. That fragmentation is manageable when an agent is an occasional assistant. It becomes the reliability boundary when agents execute independently and in parallel.
 
@@ -171,7 +173,7 @@ The first pilot is not a company-wide rollout. It is one repository, one technic
 
 ### Operating model
 
-The pilot operator installs the CLI and selected adapters, owns the local SQLite ledger and encrypted backup location, starts the single coordinator, applies migrations, manages artifact retention, and responds to human approval or reconciliation requests. The product does not yet offer a hosted operations team, enterprise administration, or zero-maintenance operation.
+The pilot operator runs their own local SQLite ledger — an immutable record of every run, decision, and piece of evidence, owned and inspectable on their own machine rather than locked inside a vendor's hosted database. That ownership comes with real responsibility: installing the CLI and selected adapters, holding the encrypted backup location, starting the single coordinator, applying migrations, managing artifact retention, and responding to approval or reconciliation requests. The product does not yet offer a hosted operations team, enterprise administration, or zero-maintenance operation — the pilot is testing whether that tradeoff is worth making.
 
 ### Comparison protocol and decision rule
 
