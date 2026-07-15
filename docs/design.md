@@ -31,6 +31,7 @@ Enginery coordinates engineering work across ticket-style work ledgers, coding-a
 - Production or publication credentials in agent processes, arbitrary command nodes, or workspaces.
 - Online mutation of active workflows or generic user-programmable workflow manifests.
 - Universal support for every tracker, source host, CI system, or deployment provider.
+- Outcome comparison and governed factory self-improvement (Stage 4) as first-release deliverables; both are retained as gate-deferred design targets (Section 12).
 
 ## 2. Architectural style
 
@@ -93,6 +94,14 @@ Dependency rules are strict:
 | **Reconcile before retry** | Ambiguous external effects are inspected before another side effect is attempted. |
 | **Workspace honesty** | Worktrees isolate repository changes, not hostile processes. |
 | **Factory changes are production changes** | Active workflow assets are immutable; candidates are independently evaluated before activation. |
+
+These eight invariants are what “workflow integrity” means in practice: durable, evidence-gated, policy-governed execution that survives crashes and rejects stale claims. The next subsection states precisely where that guarantee ends.
+
+### Safety scope and claim boundary
+
+Enginery protects **workflow integrity**, not host integrity. Its first backend is designed to prevent unauthorized workflow transitions, acceptance of stale or incomplete evidence, and blind retries of supported external actions. It also keeps production and publication credentials in fixed broker code rather than agent processes or workspaces. These controls do not contain a malicious, compromised, or prompt-injected agent process: a worktree process can still reach the user's account, filesystem, network, keychain, and other host processes. Stronger execution-containment claims require a separately designed container or VM backend with constrained mounts, network policy, and a distinct operating-system identity.
+
+Every public claim must name its boundary. “Reconciliation before retry” applies only to adapter operations with a stable provider-visible operation ID and a deterministic reconciliation query. It does not make a provider operation atomic, revoke an already-issued request, or establish that competing products lack an equivalent mechanism.
 
 ## 4. Domain model
 
@@ -239,6 +248,10 @@ The initial action namespace includes workspace creation, agent execution, crede
 
 The coordinator is the sole actor that creates an approval request, evaluates policy, grants a lease, ingests a worker result, and commits a terminal transition. An approval channel authenticates an `AuthorityPrincipal` with a stable ID, role, and authorization source; workers cannot invoke that channel. Every intervention stores requester, approver or rejector, action schema, exact digest, decision time, expiry, and supersession state. A principal cannot approve its own produced output, waiver, non-applicability claim, candidate, or override. Cancellation may be requested by the operator or policy, but the coordinator alone records it, fences the attempt, and directs the supervisor to terminate the process group. Waivers and overrides are named actions with the same identity and audit requirements, not CLI bypasses.
 
+### Single-operator authority model
+
+Separation rules fall into two classes. **Producer separation** requires the approving principal to be distinct from the principal that produced the output, waiver subject, non-applicability claim, candidate, or override request. A single-operator deployment satisfies this in the common case: the producer of workflow output is a run or agent principal, so the sole human operator is a distinct principal and may approve it. A human cannot approve an artifact recorded under their own actor identity. **Dual-human separation** requires two distinct human `AuthorityPrincipal`s and applies to factory-change canary approval versus promotion approval (Section 10.4). A single-operator deployment cannot satisfy dual-human separation; this is a declared limit, not a waivable rule. Executing the governed self-improvement workflow therefore requires at least two registered human principals, recorded as a precondition of its entry gate. Every other workflow in this design is single-operator complete.
+
 Policy approvals bind the complete action schema—including explicit nulls—plus work snapshot, configuration, workflow and policy versions, adapter/capability locks, target, diff or artifact digest, acceptance criteria, and evidence bundle. Any change to a bound input supersedes the approval.
 
 ## 7. Evidence and terminal contracts
@@ -262,6 +275,8 @@ A pull request is `merge_ready` only when:
 - the exact verified head SHA is recorded.
 
 The verifier reads the work revision, base SHA, head SHA, PR state, and CI subjects twice: before evidence collection and immediately before committing the terminal transition. Any difference routes back to reconciliation. An all-non-applicable or empty-diff run is not merge-ready; it becomes `no_change_required` after human confirmation.
+
+The double-read narrows the verification race; it does not eliminate it. A window remains between the second read and the terminal-transition commit in which an external subject can change. Where a provider supports conditional operations (for example an ETag or `If-Match` precondition), the verifier must bind its terminal claim to the observed subject version. Where it does not, the residual window is a declared limit: a later external mutation is caught by the adapter's source watch or the next reconciliation, which removes the merge-ready projection and creates a re-verification run. Merge itself remains a separately policy-gated action, which bounds the consequence of the residual window.
 
 ## 8. Adapter boundary
 
@@ -354,7 +369,7 @@ flowchart TD
 
 The proposer cannot select cohorts, inspect held-out inputs, weaken hard evidence, or approve its own candidate. Baseline and candidate operate on identical registered cohorts. Candidates affecting policy, evidence, merge, release, publication, deployment, credentials, migrations, or rollback run only on controlled non-production targets or baseline-authoritative shadow mode.
 
-`FactoryChange` records immutable principal IDs for proposer, cohort selector, evaluator, canary approver, and promotion approver; the policy engine rejects an overlapping identity where separation is required. An `ActiveFactoryPointer` contains asset name, active digest, monotonic version, prior digest, and last approved change ID. Promotion is a compare-and-swap transaction over the expected active digest and pointer version, the approval digest, and the candidate digest. It appends the promotion event and pointer update atomically. Rollback is a separate, audited compare-and-swap that restores the recorded prior digest only when the current pointer still names the candidate; a concurrent divergence blocks for human reconciliation. Candidate and evaluation history are immutable regardless of pointer outcome.
+`FactoryChange` records immutable principal IDs for proposer, cohort selector, evaluator, canary approver, and promotion approver; the policy engine rejects an overlapping identity where separation is required. Canary approval and promotion approval are dual-human separations: two distinct human principals are required (Section 6), which a single-operator deployment cannot provide. This workflow is executable only in deployments with at least two registered human principals. An `ActiveFactoryPointer` contains asset name, active digest, monotonic version, prior digest, and last approved change ID. Promotion is a compare-and-swap transaction over the expected active digest and pointer version, the approval digest, and the candidate digest. It appends the promotion event and pointer update atomically. Rollback is a separate, audited compare-and-swap that restores the recorded prior digest only when the current pointer still names the candidate; a concurrent divergence blocks for human reconciliation. Candidate and evaluation history are immutable regardless of pointer outcome.
 
 ## 11. Scalability, failure handling, and limits
 
@@ -383,16 +398,10 @@ Tests defend contracts rather than implementation plumbing:
 | 3: Incident to hotfix | A controlled fault yields a minimal hotfix, observed deployment, actual rollback, and observed restoration with preserved authority records. |
 | 4: Self-improvement | A real candidate uses prior evidence, fails held-out anti-gaming checks when unsafe, then is independently canaried and promoted, retained, or rolled back. |
 
-## 13. Open decisions and implementation discipline
+### Release packaging (revised 2026-07-14)
+
+Stage 1 is the `v0.1.0` deliverable, shipped together with the outcome-capture schema so runs emit raw, versioned observations from the first release. Stages 2 and 3 follow as `v0.2` and `v0.3`. Stage 4 is retained as a design target but gate-deferred: its milestones may not start until a data-threshold entry gate passes — completed-run and intervention volume across at least two workflow types and risk classes, an outcome-capture completeness floor, at least one recurring evidence-backed workflow deficiency, corpus diversity beyond a single repository, and the dual-human authority precondition in Section 6. The gate is evaluated on a review cadence, never by elapsed time.
 
 The architecture deliberately defers provider selections that do not alter the domain model: repository owner, second independent harness, first fixture publication provider, controlled deployment target, and timing of stronger workspace isolation or a UI.
 
 Implementation must not convert these gaps into hidden assumptions. The product remains credible only if each phase proves its stated terminal claim with exact evidence and declares limits that remain unimplemented.
-
-## Source grounding
-
-- [Product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Approved system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Specification review and safety corrections](../.docs/04_SPECIFICATION_REVIEW.md)
-- [Development plan and staged gates](../.docs/DEVELOPMENT_PLAN.md)
-- [Agentic engineering source analysis](../.docs/01_VIDEO_ANALYSIS.md)

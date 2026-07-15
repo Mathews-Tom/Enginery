@@ -6,13 +6,15 @@
 
 ## The short version
 
-Coding agents are becoming capable workers. They can inspect a repository, write code, run tests, and propose a pull request. The missing layer is the system that decides **which work should run, under what authority, with what evidence, how it recovers from failure, and how the workflow itself improves without becoming unsafe**.
+Have you had a coding agent open a pull request, lose the network response, and a blind retry open a second PR against the same branch? Or watched a release-publish call time out — succeeded or not, nobody can tell — with a retry one step from shipping a duplicate version? The code was never the hard part. Proving what actually happened, and recovering without guessing, is.
 
-**Enginery is an open-source, local-first control plane for that layer.**
+**Enginery is an open-source, local-first control plane for that problem.**
 
 > Coding agents perform tasks. Enginery engineers the system in which tasks become trustworthy software outcomes.
 
-It does not compete by building another agent. It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
+It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
+
+The first claim under test is deliberately narrow: for a supported provider operation, an interrupted or retried run reconciles the persisted operation ID and provider state before another side effect is attempted. The first public artifact is planned as a recorded fault-injection demonstration: kill the coordinator mid-run, show reconciliation-driven recovery, show whether a duplicate effect was prevented for the supported operation, and publish the evidence bundle for independent inspection.
 
 ### Plain-language terms
 
@@ -37,6 +39,8 @@ Because engineering work is more than code generation. Once agents operate beyon
 - How do we prevent a retry from opening a duplicate PR, publishing a duplicate release, or repeating a deployment?
 - How do we change a prompt, router, validator, or policy without silently altering active engineering behavior?
 - How do we distinguish a workflow that looks faster from one that is actually safer, more reliable, and better for compatible work?
+
+Take the last question concretely. A developer sees an agent fail a task, tweaks the prompt, reruns it on that one case, watches it pass, and ships the new prompt — with no idea whether it just broke fifty other tasks. Enginery's governed evaluation path replaces that guess with a registered baseline-versus-candidate comparison on held-out cases before a workflow change is promoted.
 
 Most current practice distributes these answers across conversations, shell scripts, worktrees, issue trackers, CI, provider-specific interfaces, and human memory. That fragmentation is manageable when an agent is an occasional assistant. It becomes the reliability boundary when agents execute independently and in parallel.
 
@@ -126,11 +130,17 @@ The current market is a **product-category signal**, not a demand study:
 - OpenAI positions Codex around parallel, sandboxed software tasks with test and log evidence, while retaining manual review and validation as an essential safeguard. [^codex]
 - Factory positions agent-native “Droids” across coding, testing, and deployment. [^factory]
 
+Since mid-2026 the control-plane vocabulary itself is contested: OpenHands markets a hosted "Agent Control Plane," Databricks open-sourced Omnigent (a cross-harness meta-layer with stateful policy and approval gates), Guild.ai raised on "the control plane for AI agents," and Copilot, Codex, and Claude Code ship native multi-agent orchestration with worktree isolation. Whether any of them implements Enginery's specific reconciliation and evidence mechanisms is unverified in either direction.
+
 These sources establish that major vendors are investing in delegated coding-agent products. They do not establish adoption, willingness to operate local infrastructure, or demand for a separate control plane.
 
 Enginery’s hypothesis is narrower: these systems are workers or worker platforms; a defined user segment also needs a local, inspectable, provider-neutral program for lifecycle semantics, evidence, reconciliation, policy, and evaluated workflow evolution.
 
 That hypothesis can be wrong. A worker vendor can add these layers, users may accept provider-specific operation, or the governance burden may exceed its value. Enginery should earn adoption by solving a concrete failure mode for a real workflow, not by asserting that control planes are inherently valuable.
+
+### Evidence before differentiation
+
+Enginery should not claim that its mechanisms are unique, that existing workers cannot recover safely, or that agent failures are widespread without direct evidence. The first research work is a hands-on capability matrix for the closest alternatives, exercised against the same ambiguous-side-effect, stale-evidence, approval-supersession, and recovery scenarios. The product case then rests on observed operator failures and a documented baseline comparison of recovery effort, intervention count, evidence completeness, and maintenance burden—not on category labels.
 
 ## Potential differentiation—not a proven moat
 
@@ -163,7 +173,7 @@ The first pilot is not a company-wide rollout. It is one repository, one technic
 
 ### Operating model
 
-The pilot operator installs the CLI and selected adapters, owns the local SQLite ledger and encrypted backup location, starts the single coordinator, applies migrations, manages artifact retention, and responds to human approval or reconciliation requests. The product does not yet offer a hosted operations team, enterprise administration, or zero-maintenance operation.
+The pilot operator runs their own local SQLite ledger — an immutable record of every run, decision, and piece of evidence, owned and inspectable on their own machine rather than locked inside a vendor's hosted database. That ownership comes with real responsibility: installing the CLI and selected adapters, holding the encrypted backup location, starting the single coordinator, applying migrations, managing artifact retention, and responding to approval or reconciliation requests. The product does not yet offer a hosted operations team, enterprise administration, or zero-maintenance operation — the pilot is testing whether that tradeoff is worth making.
 
 ### Comparison protocol and decision rule
 
@@ -216,9 +226,6 @@ Use at least three comparable low- or medium-risk issues, each with explicit acc
 - [System overview](overview.md)
 - [System design](design.md)
 - [Workflow examples](workflows.md)
-- [Approved product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Approved design](../.docs/03_SYSTEM_DESIGN.md)
-- [Development plan](../.docs/DEVELOPMENT_PLAN.md)
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.

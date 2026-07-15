@@ -43,6 +43,46 @@ A harness adapter normalizes agent lifecycle events, declared outputs, terminal 
 - source-host, CI, tracker, registry, or deployment-provider internals;
 - human judgment or final authority where policy requires a human decision.
 
+### Agent loops operate inside, not instead of, SDLC
+
+Whether a team calls an agent interaction “loop engineering” or uses another label, the agent remains one participant in a delivery system. The everyday work still requires a clear request, an accountable decision about risk, an implementation, independent checks, review, integration, release or rollback when applicable, and an observable outcome. Enginery does not rename those controls. It makes their inputs, decisions, and evidence durable across the handoffs where an agent session, shell command, or provider response can disappear.
+
+All Enginery contributions in this table are intended behavior, not implemented capability. Risk classification and delivery decisions remain human-owned; Enginery applies the declared workflow and policy to each run.
+
+| Daily SDLC activity | Existing accountable practice | Enginery's intended contribution | What stays outside Enginery |
+|---|---|---|---|
+| Frame work | Engineer clarifies the objective, acceptance criteria, constraints, and priority | Snapshot the work item, qualify missing or contradictory inputs, and bind the accepted scope to a run | Product judgment and backlog ownership |
+| Choose an approach | Engineer owns the risk level, review requirement, and delivery path | Route according to the declared risk profile; apply action-scoped policy, budgets, and capability constraints | Architecture judgment and policy ownership |
+| Implement | Preferred coding agent changes the code; engineer directs, reviews, or contributes according to the chosen workflow | Reserve a bound-revision workspace, issue a typed task envelope, and retain declared outputs and attempt history | Agent reasoning and code authorship |
+| Validate and review | Deterministic checks, CI, reviewers, and the engineer assess the change | Bind test, review, and CI evidence to the exact revision; route repair or block unresolved findings | The meaning of acceptance criteria and human final judgment |
+| Integrate | Source control and authorized humans merge accepted work | Verify the current base, head, policy, and evidence before a merge-ready claim; reconcile source-host effects before retry | Source-host merge authority |
+| Release or recover | Release owners ship, observe, remediate, and roll back | Bind broker actions to approved artifacts, retain outcome evidence, and reconcile ambiguous provider effects | Production ownership and host/process containment |
+| Learn | The team inspects defects, reopens, intervention cost, and delivery outcomes | Preserve comparable outcome observations so workflow changes can be evaluated against a baseline | Product strategy and the decision to adopt a candidate |
+
+#### A normal work item
+
+1. An engineer records a bounded issue with acceptance criteria. Enginery snapshots it, detects missing prerequisites, and selects the permitted workflow rather than treating the latest chat message as the specification.
+2. The preferred agent works in a reserved workspace from the bound revision. The engineer directs, reviews, or contributes according to the workflow. The agent can propose a patch, tests, and explanation, but its “done” message is an artifact—not a release decision.
+3. Deterministic checks and, where required, an independent reviewer examine the exact patch. A failure creates a bounded repair attempt or an explicit blocked state; it does not silently become success.
+4. Enginery verifies that the evidence, pull-request head, and CI result still refer to the same current work. If the base or requirements changed, the run is superseded or reconciled rather than carried forward by assumption.
+5. A human performs the policy-required decision. Enginery records that decision against the exact action and inputs, so a later change invalidates it instead of inheriting authority accidentally.
+6. If a source host or provider times out, Enginery reconciles the durable operation ID before another effect is attempted. The work either resumes from an observed matching result, safely retries when nothing exists, or blocks with a recovery packet.
+7. After completion, the team can inspect the outcome and operating cost alongside the work record. Repeated evidence can improve a workflow only through the governed evaluation path; a fashionable label or a faster-looking agent run is not proof of improvement.
+
+This example ends with a verified, policy-approved merge-ready claim; it does not silently become a release. A release or rollback follows its own workflow, with release owners retaining production authority and Enginery applying the same artifact binding, evidence, and reconciliation controls.
+
+#### The difference from a wrapper
+
+| An agent-loop wrapper primarily manages | Enginery adds to the established SDLC control |
+|---|---|
+| A prompt, agent session, and immediate tool output | A bound work snapshot, workflow version, policy decision, workspace, attempt history, and retained evidence |
+| A local “success” response | An evidence-backed terminal claim for a current revision and external subject |
+| Retry logic around a failed request | Reconciliation before retry using a stable operation ID and provider-visible facts |
+| A single agent's self-assessment | Deterministic validation, constrained independent review, and human authority where policy requires it |
+| Informal prompt or process iteration | Versioned workflow assets, comparable outcome data, and governed candidate evaluation |
+
+Enginery is useful only when these controls reduce real coordination or recovery cost without adding more operational burden than they remove. It must prove that result against a manually coordinated baseline; it is not a replacement name for SDLC, a claim that agents no longer need supervision, or a substitute for the engineering practices already known to work.
+
 ## 2. Example: one preferred agent implements a small change
 
 ### Situation
@@ -255,6 +295,34 @@ sequenceDiagram
 
 The preferred agent did not need to solve the provider failure. Enginery owns the durable operation ID, the supervisor observations, the fencing token, and the reconciliation state. It does not claim that fencing can revoke an already-issued external request; that is why provider-visible correlation and reconciliation are mandatory.
 
+### Required operator recovery experience
+
+The recovery path is a product interaction, not a ledger-debugging exercise. The default CLI must render a concise recovery packet; JSON Lines remains an opt-in machine interface, and no resolution may require direct SQLite access. The following illustrates the required behavior, not implemented command output:
+
+```text
+$ enginery run inspect run_01
+Run: run_01
+Status: blocked — external operation requires reconciliation
+Operation: pull_request.open / op_7f2a
+Expected: repository=acme/api, branch=enginery/work-42, head=8de2c1a
+Observed: PR #405, branch=enginery/work-42, head=91a6f77
+Reason: provider result conflicts with the bound head revision
+Evidence: reconciliation bundle for run_01
+Next permitted action: enginery work reconcile WORK-42
+```
+
+The reconciliation command must show the immutable operation ID, target, expected and observed bindings, provider facts, available evidence, policy requirement, and the consequences of every permitted decision. `found_matching` is adopted automatically only when the provider-visible correlation and every required binding match. `not_found` permits the scheduler to retry under the same operation ID. `found_conflicting` and `indeterminate` remain blocked until a human records a typed resolution bound to the same reconciliation packet; a generic “yes, adopt” confirmation is not sufficient.
+
+The typed human resolution must choose one declared outcome: supersede the run and create a new run from a newly bound source snapshot; cancel the run while preserving the conflict and evidence record; or request a separately policy-gated remedial action against the external object. Resolution never mutates the original bindings, converts an indeterminate result into success, or authorizes another create operation. The recorded intervention includes the selected outcome, rationale, principal, time, and the exact reconciliation-packet digest.
+
+The CLI acceptance contract is:
+
+- human-readable output names the current state, reason, evidence, and next permitted action;
+- `--events jsonl` is optional and preserves the complete versioned event stream for automation;
+- a recovery command never exposes raw database queries as the operator interface;
+- an approval or reconciliation decision binds the displayed operation, target, evidence, and expiry, then becomes superseded if those inputs change; and
+- `doctor`, backup, restore, migration, retention, approval, and reconciliation paths have fault-injection and terminal-output tests.
+
 ## 6. How users choose agents and models
 
 ### User preference is the default
@@ -284,23 +352,20 @@ The control plane does not infer model identity from a label or assume different
 
 ## 7. Practical boundaries
 
-### Workspaces are not hostile-code sandboxes
+### Workspace isolation is precise, not absolute
 
-A git worktree prevents accidental repository collision. It does not stop a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require a future container or VM backend with explicit guarantees.
+Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Explicit containerization is required for untrusted external code execution — a future container or VM backend, not a property of the first release. Until then, a workspace process can still reach the user account, network, filesystem, keychain, and other processes.
 
 ### Agents never receive production or publication credentials
 
-Production and publication actions run through fixed, reviewed brokers outside agent workspaces. A broker receives typed parameters bound to an approved artifact digest and target; it never executes agent-authored shell commands, scripts, or executables under privileged credentials.
+The planned credential model runs production and publication actions through fixed, reviewed brokers outside agent workspaces. A broker receives typed parameters bound to an approved artifact digest and target; it never executes agent-authored shell commands, scripts, or executables under privileged credentials.
 
 ### Evidence is revision-bound
 
-A test result must apply to the exact current subject. Enginery rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why the process can be more trustworthy than a generic “tests passed” statement.
+The evidence contract requires every test result to apply to the exact current subject. It rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why an evidence-complete terminal claim is stronger than a generic “tests passed” statement.
 
 ## 8. Source grounding
 
 - [System overview](overview.md)
 - [System design](design.md)
 - [Colleague pitch](pitch.md)
-- [Approved product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Approved system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Specification review](../.docs/04_SPECIFICATION_REVIEW.md)

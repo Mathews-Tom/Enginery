@@ -8,11 +8,11 @@
 
 ## Executive summary
 
-Enginery is an open-source, local-first **agentic engineering control plane**. It coordinates coding-agent harnesses, deterministic engineering operations, policy decisions, evidence collection, and human authority across the full path from work intake to a verified outcome.
+Enginery is an open-source, local-first **agentic engineering control plane**. It coordinates coding-agent harnesses, deterministic engineering operations, policy decisions, evidence collection, and human authority across the path from work intake to a verified outcome.
 
-It is not a new foundation model, an IDE assistant, a prompt library, or a proprietary replacement for every development tool. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems. Enginery owns the durable workflow around them: what work is being done, why it is allowed, what evidence supports progress, how failures recover, and whether a workflow change is genuinely better.
+Its claim is workflow integrity: bind each run to explicit inputs, require evidence before terminal claims, gate consequential actions through policy, and reconcile supported external actions before retrying. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems.
 
-The product starts with a solo engineer operating local repositories, a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority. It deliberately earns broader autonomy through four falsifiable workflow gates rather than making an undifferentiated claim of “autonomous software engineering.”
+The first backend uses a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority to bind every run to explicit inputs and reconcile external effects before retry. Enginery earns broader autonomy through falsifiable workflow gates rather than an undifferentiated claim of “autonomous software engineering”; Section 10 states its safety scope precisely.
 
 ## 1. The problem
 
@@ -33,9 +33,7 @@ Those are useful workers. The surrounding engineering system remains fragmented:
 
 The missing unit is not a better chat loop. It is a durable, inspectable, versioned **engineering workflow**.
 
-## 2. What Enginery is—and is not
-
-### What it is
+## 2. What Enginery is
 
 Enginery is the control plane that turns engineering intent into verified outcomes. It owns:
 
@@ -49,11 +47,7 @@ Enginery is the control plane that turns engineering intent into verified outcom
 - measurement of outcomes and workflow behavior;
 - governed evaluation, canarying, promotion, retention, and rollback of factory changes.
 
-### What it is not
-
-Enginery does **not** build its own coding-agent reasoning loop. It does not replace GitHub, Git, CI, package registries, deployment platforms, or issue-tracker interfaces. It does not start as a hosted multi-tenant service, a browser dashboard, a distributed scheduler, a Kubernetes layer, or a hostile-code sandbox.
-
-A git worktree is an isolated **workspace**, not a security boundary. On the first backend, a process can still share the user’s account, filesystem, network, keychain, and host. Enginery must describe that limit plainly and reserve untrusted workloads for a future container or VM backend.
+It delegates coding-agent reasoning, and GitHub, Git, CI, package-registry, deployment-platform, and issue-tracker interfaces, through typed adapters rather than replacing them. Section 10 states precisely where its safety guarantees end.
 
 ## 3. Why this approach
 
@@ -93,6 +87,8 @@ A run is bound to the work snapshot, workflow digest, policy version, adapter fi
 
 Every external side effect receives a stable operation ID. On uncertainty, Enginery reconciles first and obtains one of four answers: `not_found`, `found_matching`, `found_conflicting`, or `indeterminate`. Only `not_found` permits a new execution; `found_matching` adopts the observed result; the other two require explicit reconciliation or human action. Blind retry is prohibited.
 
+This protocol prevents blind retries; it does not make an external provider operation atomic or revoke a request already issued to a provider. Each supported adapter must prove its provider-visible correlation and reconciliation behavior with fault injection before Enginery claims duplicate-effect prevention for that operation.
+
 ## 5. Initial workflows and proof status
 
 The following are **design targets, not demonstrated product capabilities**. Enginery remains a product concept until each target has produced its stated evidence in a real, bounded environment.
@@ -105,6 +101,8 @@ The following are **design targets, not demonstrated product capabilities**. Eng
 | Governed factory self-improvement | Independent cohorts, replay, held-out evaluation, anti-gaming checks, human canary and promotion | A real candidate sourced from earlier runs is evaluated on locked cohorts and reaches promoted, retained, or rejected with rollback evidence |
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
+
+Release packaging (revised 2026-07-14): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
 
 ### Product-hypothesis decision rule
 
@@ -128,6 +126,8 @@ Those offerings are a **product-category signal**: major vendors are investing i
 | Agent frameworks | General agent-orchestration frameworks | Build custom agent applications | Engineering-specific state, SCM/CI/release semantics, and falsifiable terminal contracts |
 | Task/worktree runners | CLI and workspace orchestration tools | Run multiple local tasks or agents | Durable reconciliation, policy, outcomes, and governed improvement |
 | Capability registries | Armory and repository-local assets | Distribute reusable instructions and tooling | Runtime execution state, scheduling, policy, and evaluation |
+
+As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them.
 
 Enginery does not claim that incumbents lack all of these capabilities. It chooses a boundary: an open, local control plane that coordinates worker and delivery providers without becoming another worker or a hosted replacement for them.
 
@@ -153,7 +153,11 @@ Potential defensibility comes from an accumulating, versioned operational corpus
 4. **Provider-neutral integration contracts.** An adapter contract proven by two independent harnesses reduces dependency on a single agent vendor.
 5. **Open local ownership.** A local ledger and inspectable event stream reduce lock-in and make the system suitable for users who do not want a central hosted execution database.
 
-These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect.
+These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect. Any public claim that a specific mechanism is unique to Enginery additionally requires hands-on verification of the closest control-plane entrants; secondary-source absence is not evidence of absence.
+
+### Differentiation evidence required
+
+Before claiming a mechanism is unique or a competitor gap is material, Enginery must test the closest entrants against the same scenarios: ambiguous side effects, exact-head CI and evidence binding, approval supersession after input changes, and provider-neutral recovery. Product discovery must also record actual operator incidents and compare recovery effort, intervention count, evidence completeness, and maintenance burden against a manually coordinated agent-session baseline. A plausible failure mode is a test case, not a market claim.
 
 ## 8. Risks and disconfirming evidence
 
@@ -183,13 +187,13 @@ This is an **intended Stage 2 fault-injection test**. A fixed publication broker
 
 This is an **intended Stage 4 behavior**. If repeated compatible runs show excessive repair attempts, a candidate router version is created without changing the active workflow. An independent evaluator selects development and held-out cohorts after the candidate is locked. Baseline and candidate replay against the same cases with real side effects disabled. The evaluation rejects a candidate that improves a success rate by weakening validation, suppressing outcome attribution, or excluding difficult cases. A valid candidate needs distinct human canary and promotion decisions; rollback restores the previous active-version pointer without deleting history.
 
-## Sources
+## 10. Safety scope and roadmap
 
-- [Enginery product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Enginery system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Enginery specification review](../.docs/04_SPECIFICATION_REVIEW.md)
-- [Enginery development plan](../.docs/DEVELOPMENT_PLAN.md)
-- [Agentic engineering source analysis](../.docs/01_VIDEO_ANALYSIS.md)
+Enginery earns broader autonomy through falsifiable workflow gates, not through an undifferentiated claim of “autonomous software engineering.” Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Explicit containerization is required for untrusted external code execution and is planned as a future backend, not a property of the first release.
+
+The near-term focus is workflow integrity for a local operator: binding runs to explicit inputs, requiring evidence before terminal claims, gating consequential actions through policy, and reconciling supported external actions before retry. A hosted multi-tenant service, browser dashboard, distributed scheduler, Kubernetes layer, and a stronger process-containment backend are deferred roadmap items, earned after the workflow-integrity core is proven — not abandoned goals.
+
+The planned first backend binds supported external actions to stable operation IDs and keeps production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user’s account, filesystem, network, keychain, or other host processes; that guarantee ships with the future container or VM backend. Product copy must not imply otherwise.
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.
