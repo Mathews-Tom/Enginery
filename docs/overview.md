@@ -102,7 +102,7 @@ The following are **design targets, not demonstrated product capabilities**. Eng
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
 
-Release packaging (revised 2026-07-14, per internal product-analysis notes): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
+Release packaging (revised 2026-07-14): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
 
 ### Product-hypothesis decision rule
 
@@ -127,7 +127,7 @@ Those offerings are a **product-category signal**: major vendors are investing i
 | Task/worktree runners | CLI and workspace orchestration tools | Run multiple local tasks or agents | Durable reconciliation, policy, outcomes, and governed improvement |
 | Capability registries | Armory and repository-local assets | Distribute reusable instructions and tooling | Runtime execution state, scheduling, policy, and evaluation |
 
-As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them (internal product-analysis notes §5, §8).
+As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them.
 
 Enginery does not claim that incumbents lack all of these capabilities. It chooses a boundary: an open, local control plane that coordinates worker and delivery providers without becoming another worker or a hosted replacement for them.
 
@@ -194,16 +194,6 @@ Enginery earns broader autonomy through falsifiable workflow gates, not through 
 The near-term focus is workflow integrity for a local operator: binding runs to explicit inputs, requiring evidence before terminal claims, gating consequential actions through policy, and reconciling supported external actions before retry. A hosted multi-tenant service, browser dashboard, distributed scheduler, Kubernetes layer, and a stronger process-containment backend are deferred roadmap items, earned after the workflow-integrity core is proven — not abandoned goals.
 
 The planned first backend binds supported external actions to stable operation IDs and keeps production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user’s account, filesystem, network, keychain, or other host processes; that guarantee ships with the future container or VM backend. Product copy must not imply otherwise.
-
-## Sources
-
-Internal planning documents (not published in this repository):
-
-- Enginery product direction (`.docs/02_PRODUCT_DIRECTION.md`)
-- Enginery system design (`.docs/03_SYSTEM_DESIGN.md`)
-- Enginery specification review (`.docs/04_SPECIFICATION_REVIEW.md`)
-- Enginery development plan (`.docs/DEVELOPMENT_PLAN.md`)
-- Agentic engineering source analysis (`.docs/01_VIDEO_ANALYSIS.md`)
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.

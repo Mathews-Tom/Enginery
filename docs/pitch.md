@@ -130,7 +130,7 @@ The current market is a **product-category signal**, not a demand study:
 - OpenAI positions Codex around parallel, sandboxed software tasks with test and log evidence, while retaining manual review and validation as an essential safeguard. [^codex]
 - Factory positions agent-native “Droids” across coding, testing, and deployment. [^factory]
 
-Since mid-2026 the control-plane vocabulary itself is contested: OpenHands markets a hosted "Agent Control Plane," Databricks open-sourced Omnigent (a cross-harness meta-layer with stateful policy and approval gates), Guild.ai raised on "the control plane for AI agents," and Copilot, Codex, and Claude Code ship native multi-agent orchestration with worktree isolation. Whether any of them implements Enginery's specific reconciliation and evidence mechanisms is unverified in either direction; internal product-analysis notes treat hands-on verification of the closest entrants as a prerequisite for differentiation claims.
+Since mid-2026 the control-plane vocabulary itself is contested: OpenHands markets a hosted "Agent Control Plane," Databricks open-sourced Omnigent (a cross-harness meta-layer with stateful policy and approval gates), Guild.ai raised on "the control plane for AI agents," and Copilot, Codex, and Claude Code ship native multi-agent orchestration with worktree isolation. Whether any of them implements Enginery's specific reconciliation and evidence mechanisms is unverified in either direction.
 
 These sources establish that major vendors are investing in delegated coding-agent products. They do not establish adoption, willingness to operate local infrastructure, or demand for a separate control plane.
 
@@ -226,12 +226,6 @@ Use at least three comparable low- or medium-risk issues, each with explicit acc
 - [System overview](overview.md)
 - [System design](design.md)
 - [Workflow examples](workflows.md)
-
-Internal planning documents (not published in this repository):
-
-- Approved product direction (`.docs/02_PRODUCT_DIRECTION.md`)
-- Approved design (`.docs/03_SYSTEM_DESIGN.md`)
-- Development plan (`.docs/DEVELOPMENT_PLAN.md`)
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.
