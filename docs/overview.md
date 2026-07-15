@@ -12,7 +12,7 @@ Enginery is an open-source, local-first **agentic engineering control plane**. I
 
 Its claim is workflow integrity: bind each run to explicit inputs, require evidence before terminal claims, gate consequential actions through policy, and reconcile supported external actions before retrying. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems.
 
-That claim is deliberately narrower than hostile-agent containment. The first backend uses a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority. A worktree protects repository coordination, not the host from an untrusted process. Enginery earns broader autonomy through falsifiable workflow gates rather than an undifferentiated claim of “autonomous software engineering.”
+The first backend uses a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority to bind every run to explicit inputs and reconcile external effects before retry. Enginery earns broader autonomy through falsifiable workflow gates rather than an undifferentiated claim of “autonomous software engineering”; Section 10 states its safety scope precisely.
 
 ## 1. The problem
 
@@ -33,9 +33,7 @@ Those are useful workers. The surrounding engineering system remains fragmented:
 
 The missing unit is not a better chat loop. It is a durable, inspectable, versioned **engineering workflow**.
 
-## 2. What Enginery is—and is not
-
-### What it is
+## 2. What Enginery is
 
 Enginery is the control plane that turns engineering intent into verified outcomes. It owns:
 
@@ -49,11 +47,7 @@ Enginery is the control plane that turns engineering intent into verified outcom
 - measurement of outcomes and workflow behavior;
 - governed evaluation, canarying, promotion, retention, and rollback of factory changes.
 
-### Safety claim boundary
-
-Enginery does not build its own coding-agent reasoning loop or replace GitHub, Git, CI, package registries, deployment platforms, or issue-tracker interfaces. It does not start as a hosted multi-tenant service, browser dashboard, distributed scheduler, Kubernetes layer, or hostile-code sandbox.
-
-The planned first backend is designed to prevent accidental repository collision, bind supported external actions to stable operation IDs, and keep production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user's account, filesystem, network, keychain, or other host processes. Untrusted workloads require a future container or VM backend; product copy must not imply otherwise.
+It delegates coding-agent reasoning, and GitHub, Git, CI, package-registry, deployment-platform, and issue-tracker interfaces, through typed adapters rather than replacing them. Section 10 states precisely where its safety guarantees end.
 
 ## 3. Why this approach
 
@@ -133,7 +127,7 @@ Those offerings are a **product-category signal**: major vendors are investing i
 | Task/worktree runners | CLI and workspace orchestration tools | Run multiple local tasks or agents | Durable reconciliation, policy, outcomes, and governed improvement |
 | Capability registries | Armory and repository-local assets | Distribute reusable instructions and tooling | Runtime execution state, scheduling, policy, and evaluation |
 
-As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them ([analysis](analysis.md) §5, §8).
+As of July 2026 the category vocabulary is contested beyond the worker products above. OpenHands markets a hosted "Agent Control Plane" (policy, least-privilege scoping, cost budgets, audit trails); Databricks open-sourced Omnigent, an Apache-2.0 cross-harness meta-layer with stateful policy, spend caps, and human-approval gates; Guild.ai raised a Series A on "the control plane for AI agents"; and the GitHub Copilot desktop app, Codex subagents, and Claude Code agent teams ship native worktree-isolated multi-agent orchestration. Category overlap is therefore high. Mechanism overlap is a separate question: none of these products has been verified — in either direction — to implement stable-operation-ID reconciliation before retry, version-bound evidence invalidation, or fault-injected interrupted-run recovery. Hands-on verification of the closest entrants precedes any claim that Enginery alone provides them (internal product-analysis notes §5, §8).
 
 Enginery does not claim that incumbents lack all of these capabilities. It chooses a boundary: an open, local control plane that coordinates worker and delivery providers without becoming another worker or a hosted replacement for them.
 
@@ -192,6 +186,14 @@ This is an **intended Stage 2 fault-injection test**. A fixed publication broker
 ### Example C: a factory improvement is proposed responsibly
 
 This is an **intended Stage 4 behavior**. If repeated compatible runs show excessive repair attempts, a candidate router version is created without changing the active workflow. An independent evaluator selects development and held-out cohorts after the candidate is locked. Baseline and candidate replay against the same cases with real side effects disabled. The evaluation rejects a candidate that improves a success rate by weakening validation, suppressing outcome attribution, or excluding difficult cases. A valid candidate needs distinct human canary and promotion decisions; rollback restores the previous active-version pointer without deleting history.
+
+## 10. Safety scope and roadmap
+
+Enginery earns broader autonomy through falsifiable workflow gates, not through an undifferentiated claim of “autonomous software engineering.” Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Explicit containerization is required for untrusted external code execution and is planned as a future backend, not a property of the first release.
+
+The near-term focus is workflow integrity for a local operator: binding runs to explicit inputs, requiring evidence before terminal claims, gating consequential actions through policy, and reconciling supported external actions before retry. A hosted multi-tenant service, browser dashboard, distributed scheduler, Kubernetes layer, and a stronger process-containment backend are deferred roadmap items, earned after the workflow-integrity core is proven — not abandoned goals.
+
+The planned first backend binds supported external actions to stable operation IDs and keeps production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user’s account, filesystem, network, keychain, or other host processes; that guarantee ships with the future container or VM backend. Product copy must not imply otherwise.
 
 ## Sources
 
