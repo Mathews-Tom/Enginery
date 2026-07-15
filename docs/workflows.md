@@ -43,6 +43,46 @@ A harness adapter normalizes agent lifecycle events, declared outputs, terminal 
 - source-host, CI, tracker, registry, or deployment-provider internals;
 - human judgment or final authority where policy requires a human decision.
 
+### Agent loops operate inside, not instead of, SDLC
+
+Whether a team calls an agent interaction “loop engineering” or uses another label, the agent remains one participant in a delivery system. The everyday work still requires a clear request, an accountable decision about risk, an implementation, independent checks, review, integration, release or rollback when applicable, and an observable outcome. Enginery does not rename those controls. It makes their inputs, decisions, and evidence durable across the handoffs where an agent session, shell command, or provider response can disappear.
+
+All Enginery contributions in this table are intended behavior, not implemented capability. Risk classification and delivery decisions remain human-owned; Enginery applies the declared workflow and policy to each run.
+
+| Daily SDLC activity | Existing accountable practice | Enginery's intended contribution | What stays outside Enginery |
+|---|---|---|---|
+| Frame work | Engineer clarifies the objective, acceptance criteria, constraints, and priority | Snapshot the work item, qualify missing or contradictory inputs, and bind the accepted scope to a run | Product judgment and backlog ownership |
+| Choose an approach | Engineer owns the risk level, review requirement, and delivery path | Route according to the declared risk profile; apply action-scoped policy, budgets, and capability constraints | Architecture judgment and policy ownership |
+| Implement | Preferred coding agent changes the code; engineer directs, reviews, or contributes according to the chosen workflow | Reserve a bound-revision workspace, issue a typed task envelope, and retain declared outputs and attempt history | Agent reasoning and code authorship |
+| Validate and review | Deterministic checks, CI, reviewers, and the engineer assess the change | Bind test, review, and CI evidence to the exact revision; route repair or block unresolved findings | The meaning of acceptance criteria and human final judgment |
+| Integrate | Source control and authorized humans merge accepted work | Verify the current base, head, policy, and evidence before a merge-ready claim; reconcile source-host effects before retry | Source-host merge authority |
+| Release or recover | Release owners ship, observe, remediate, and roll back | Bind broker actions to approved artifacts, retain outcome evidence, and reconcile ambiguous provider effects | Production ownership and host/process containment |
+| Learn | The team inspects defects, reopens, intervention cost, and delivery outcomes | Preserve comparable outcome observations so workflow changes can be evaluated against a baseline | Product strategy and the decision to adopt a candidate |
+
+#### A normal work item
+
+1. An engineer records a bounded issue with acceptance criteria. Enginery snapshots it, detects missing prerequisites, and selects the permitted workflow rather than treating the latest chat message as the specification.
+2. The preferred agent works in a reserved workspace from the bound revision. The engineer directs, reviews, or contributes according to the workflow. The agent can propose a patch, tests, and explanation, but its “done” message is an artifact—not a release decision.
+3. Deterministic checks and, where required, an independent reviewer examine the exact patch. A failure creates a bounded repair attempt or an explicit blocked state; it does not silently become success.
+4. Enginery verifies that the evidence, pull-request head, and CI result still refer to the same current work. If the base or requirements changed, the run is superseded or reconciled rather than carried forward by assumption.
+5. A human performs the policy-required decision. Enginery records that decision against the exact action and inputs, so a later change invalidates it instead of inheriting authority accidentally.
+6. If a source host or provider times out, Enginery reconciles the durable operation ID before another effect is attempted. The work either resumes from an observed matching result, safely retries when nothing exists, or blocks with a recovery packet.
+7. After completion, the team can inspect the outcome and operating cost alongside the work record. Repeated evidence can improve a workflow only through the governed evaluation path; a fashionable label or a faster-looking agent run is not proof of improvement.
+
+This example ends with a verified, policy-approved merge-ready claim; it does not silently become a release. A release or rollback follows its own workflow, with release owners retaining production authority and Enginery applying the same artifact binding, evidence, and reconciliation controls.
+
+#### The difference from a wrapper
+
+| An agent-loop wrapper primarily manages | Enginery adds to the established SDLC control |
+|---|---|
+| A prompt, agent session, and immediate tool output | A bound work snapshot, workflow version, policy decision, workspace, attempt history, and retained evidence |
+| A local “success” response | An evidence-backed terminal claim for a current revision and external subject |
+| Retry logic around a failed request | Reconciliation before retry using a stable operation ID and provider-visible facts |
+| A single agent's self-assessment | Deterministic validation, constrained independent review, and human authority where policy requires it |
+| Informal prompt or process iteration | Versioned workflow assets, comparable outcome data, and governed candidate evaluation |
+
+Enginery is useful only when these controls reduce real coordination or recovery cost without adding more operational burden than they remove. It must prove that result against a manually coordinated baseline; it is not a replacement name for SDLC, a claim that agents no longer need supervision, or a substitute for the engineering practices already known to work.
+
 ## 2. Example: one preferred agent implements a small change
 
 ### Situation
