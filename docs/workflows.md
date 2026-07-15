@@ -255,6 +255,34 @@ sequenceDiagram
 
 The preferred agent did not need to solve the provider failure. Enginery owns the durable operation ID, the supervisor observations, the fencing token, and the reconciliation state. It does not claim that fencing can revoke an already-issued external request; that is why provider-visible correlation and reconciliation are mandatory.
 
+### Required operator recovery experience
+
+The recovery path is a product interaction, not a ledger-debugging exercise. The default CLI must render a concise recovery packet; JSON Lines remains an opt-in machine interface, and no resolution may require direct SQLite access. The following illustrates the required behavior, not implemented command output:
+
+```text
+$ enginery run inspect run_01
+Run: run_01
+Status: blocked — external operation requires reconciliation
+Operation: pull_request.open / op_7f2a
+Expected: repository=acme/api, branch=enginery/work-42, head=8de2c1a
+Observed: PR #405, branch=enginery/work-42, head=91a6f77
+Reason: provider result conflicts with the bound head revision
+Evidence: reconciliation bundle for run_01
+Next permitted action: enginery work reconcile WORK-42
+```
+
+The reconciliation command must show the immutable operation ID, target, expected and observed bindings, provider facts, available evidence, policy requirement, and the consequences of every permitted decision. `found_matching` is adopted automatically only when the provider-visible correlation and every required binding match. `not_found` permits the scheduler to retry under the same operation ID. `found_conflicting` and `indeterminate` remain blocked until a human records a typed resolution bound to the same reconciliation packet; a generic “yes, adopt” confirmation is not sufficient.
+
+The typed human resolution must choose one declared outcome: supersede the run and create a new run from a newly bound source snapshot; cancel the run while preserving the conflict and evidence record; or request a separately policy-gated remedial action against the external object. Resolution never mutates the original bindings, converts an indeterminate result into success, or authorizes another create operation. The recorded intervention includes the selected outcome, rationale, principal, time, and the exact reconciliation-packet digest.
+
+The CLI acceptance contract is:
+
+- human-readable output names the current state, reason, evidence, and next permitted action;
+- `--events jsonl` is optional and preserves the complete versioned event stream for automation;
+- a recovery command never exposes raw database queries as the operator interface;
+- an approval or reconciliation decision binds the displayed operation, target, evidence, and expiry, then becomes superseded if those inputs change; and
+- `doctor`, backup, restore, migration, retention, approval, and reconciliation paths have fault-injection and terminal-output tests.
+
 ## 6. How users choose agents and models
 
 ### User preference is the default
@@ -286,15 +314,15 @@ The control plane does not infer model identity from a label or assume different
 
 ### Workspaces are not hostile-code sandboxes
 
-A git worktree prevents accidental repository collision. It does not stop a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require a future container or VM backend with explicit guarantees.
+The planned first backend uses git worktrees to prevent accidental repository collision. It does not stop a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require a future container or VM backend with explicit guarantees.
 
 ### Agents never receive production or publication credentials
 
-Production and publication actions run through fixed, reviewed brokers outside agent workspaces. A broker receives typed parameters bound to an approved artifact digest and target; it never executes agent-authored shell commands, scripts, or executables under privileged credentials.
+The planned credential model runs production and publication actions through fixed, reviewed brokers outside agent workspaces. A broker receives typed parameters bound to an approved artifact digest and target; it never executes agent-authored shell commands, scripts, or executables under privileged credentials.
 
 ### Evidence is revision-bound
 
-A test result must apply to the exact current subject. Enginery rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why the process can be more trustworthy than a generic “tests passed” statement.
+The evidence contract requires every test result to apply to the exact current subject. It rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why an evidence-complete terminal claim is stronger than a generic “tests passed” statement.
 
 ## 8. Source grounding
 
