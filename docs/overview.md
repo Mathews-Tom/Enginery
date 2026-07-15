@@ -108,7 +108,7 @@ The following are **design targets, not demonstrated product capabilities**. Eng
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
 
-Release packaging (revised 2026-07-14, per [the product analysis](analysis.md)): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
+Release packaging (revised 2026-07-14, per internal product-analysis notes): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
 
 ### Product-hypothesis decision rule
 
@@ -195,11 +195,13 @@ This is an **intended Stage 4 behavior**. If repeated compatible runs show exces
 
 ## Sources
 
-- [Enginery product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Enginery system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Enginery specification review](../.docs/04_SPECIFICATION_REVIEW.md)
-- [Enginery development plan](../.docs/DEVELOPMENT_PLAN.md)
-- [Agentic engineering source analysis](../.docs/01_VIDEO_ANALYSIS.md)
+Internal planning documents (not published in this repository):
+
+- Enginery product direction (`.docs/02_PRODUCT_DIRECTION.md`)
+- Enginery system design (`.docs/03_SYSTEM_DESIGN.md`)
+- Enginery specification review (`.docs/04_SPECIFICATION_REVIEW.md`)
+- Enginery development plan (`.docs/DEVELOPMENT_PLAN.md`)
+- Agentic engineering source analysis (`.docs/01_VIDEO_ANALYSIS.md`)
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.

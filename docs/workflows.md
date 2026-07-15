@@ -369,6 +369,9 @@ The evidence contract requires every test result to apply to the exact current s
 - [System overview](overview.md)
 - [System design](design.md)
 - [Colleague pitch](pitch.md)
-- [Approved product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Approved system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Specification review](../.docs/04_SPECIFICATION_REVIEW.md)
+
+Internal planning documents (not published in this repository):
+
+- Approved product direction (`.docs/02_PRODUCT_DIRECTION.md`)
+- Approved system design (`.docs/03_SYSTEM_DESIGN.md`)
+- Specification review (`.docs/04_SPECIFICATION_REVIEW.md`)

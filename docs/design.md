@@ -397,7 +397,7 @@ Tests defend contracts rather than implementation plumbing:
 
 ### Release packaging (revised 2026-07-14)
 
-Stage 1 is the `v0.1.0` deliverable, shipped together with the outcome-capture schema so runs emit raw, versioned observations from the first release. Stages 2 and 3 follow as `v0.2` and `v0.3`. Stage 4 is retained as a design target but gate-deferred: its milestones may not start until a data-threshold entry gate passes — completed-run and intervention volume across at least two workflow types and risk classes, an outcome-capture completeness floor, at least one recurring evidence-backed workflow deficiency, corpus diversity beyond a single repository, and the dual-human authority precondition in Section 6. The gate is evaluated on a review cadence, never by elapsed time. See the development plan's decision gates and [`analysis.md`](analysis.md) Section 7.
+Stage 1 is the `v0.1.0` deliverable, shipped together with the outcome-capture schema so runs emit raw, versioned observations from the first release. Stages 2 and 3 follow as `v0.2` and `v0.3`. Stage 4 is retained as a design target but gate-deferred: its milestones may not start until a data-threshold entry gate passes — completed-run and intervention volume across at least two workflow types and risk classes, an outcome-capture completeness floor, at least one recurring evidence-backed workflow deficiency, corpus diversity beyond a single repository, and the dual-human authority precondition in Section 6. The gate is evaluated on a review cadence, never by elapsed time. See the development plan's decision gates and internal product-analysis notes (`.docs/analysis.md`), Section 7.
 
 The architecture deliberately defers provider selections that do not alter the domain model: repository owner, second independent harness, first fixture publication provider, controlled deployment target, and timing of stronger workspace isolation or a UI.
 
@@ -405,8 +405,10 @@ Implementation must not convert these gaps into hidden assumptions. The product 
 
 ## Source grounding
 
-- [Product direction](../.docs/02_PRODUCT_DIRECTION.md)
-- [Approved system design](../.docs/03_SYSTEM_DESIGN.md)
-- [Specification review and safety corrections](../.docs/04_SPECIFICATION_REVIEW.md)
-- [Development plan and staged gates](../.docs/DEVELOPMENT_PLAN.md)
-- [Agentic engineering source analysis](../.docs/01_VIDEO_ANALYSIS.md)
+Internal planning documents (not published in this repository):
+
+- Product direction (`.docs/02_PRODUCT_DIRECTION.md`)
+- Approved system design (`.docs/03_SYSTEM_DESIGN.md`)
+- Specification review and safety corrections (`.docs/04_SPECIFICATION_REVIEW.md`)
+- Development plan and staged gates (`.docs/DEVELOPMENT_PLAN.md`)
+- Agentic engineering source analysis (`.docs/01_VIDEO_ANALYSIS.md`)
