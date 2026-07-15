@@ -94,6 +94,9 @@ Dependency rules are strict:
 | **Reconcile before retry** | Ambiguous external effects are inspected before another side effect is attempted. |
 | **Workspace honesty** | Worktrees isolate repository changes, not hostile processes. |
 | **Factory changes are production changes** | Active workflow assets are immutable; candidates are independently evaluated before activation. |
+
+These eight invariants are what “workflow integrity” means in practice: durable, evidence-gated, policy-governed execution that survives crashes and rejects stale claims. The next subsection states precisely where that guarantee ends.
+
 ### Safety scope and claim boundary
 
 Enginery protects **workflow integrity**, not host integrity. Its first backend is designed to prevent unauthorized workflow transitions, acceptance of stale or incomplete evidence, and blind retries of supported external actions. It also keeps production and publication credentials in fixed broker code rather than agent processes or workspaces. These controls do not contain a malicious, compromised, or prompt-injected agent process: a worktree process can still reach the user's account, filesystem, network, keychain, and other host processes. Stronger execution-containment claims require a separately designed container or VM backend with constrained mounts, network policy, and a distinct operating-system identity.

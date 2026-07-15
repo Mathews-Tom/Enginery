@@ -352,9 +352,9 @@ The control plane does not infer model identity from a label or assume different
 
 ## 7. Practical boundaries
 
-### Workspaces are not hostile-code sandboxes
+### Workspace isolation is precise, not absolute
 
-The planned first backend uses git worktrees to prevent accidental repository collision. It does not stop a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require a future container or VM backend with explicit guarantees.
+Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Explicit containerization is required for untrusted external code execution — a future container or VM backend, not a property of the first release. Until then, a workspace process can still reach the user account, network, filesystem, keychain, and other processes.
 
 ### Agents never receive production or publication credentials
 
