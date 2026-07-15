@@ -8,11 +8,11 @@
 
 ## Executive summary
 
-Enginery is an open-source, local-first **agentic engineering control plane**. It coordinates coding-agent harnesses, deterministic engineering operations, policy decisions, evidence collection, and human authority across the full path from work intake to a verified outcome.
+Enginery is an open-source, local-first **agentic engineering control plane**. It coordinates coding-agent harnesses, deterministic engineering operations, policy decisions, evidence collection, and human authority across the path from work intake to a verified outcome.
 
-It is not a new foundation model, an IDE assistant, a prompt library, or a proprietary replacement for every development tool. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems. Enginery owns the durable workflow around them: what work is being done, why it is allowed, what evidence supports progress, how failures recover, and whether a workflow change is genuinely better.
+Its claim is workflow integrity: bind each run to explicit inputs, require evidence before terminal claims, gate consequential actions through policy, and reconcile supported external actions before retrying. Coding agents remain interchangeable workers. GitHub, local ledgers, CI, package registries, deployment targets, and capability registries remain external systems.
 
-The product starts with a solo engineer operating local repositories, a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority. It deliberately earns broader autonomy through four falsifiable workflow gates rather than making an undifferentiated claim of “autonomous software engineering.”
+That claim is deliberately narrower than hostile-agent containment. The first backend uses a CLI, a versioned JSON Lines event stream, a local SQLite ledger, git worktrees, and policy-gated authority. A worktree protects repository coordination, not the host from an untrusted process. Enginery earns broader autonomy through falsifiable workflow gates rather than an undifferentiated claim of “autonomous software engineering.”
 
 ## 1. The problem
 
@@ -49,11 +49,11 @@ Enginery is the control plane that turns engineering intent into verified outcom
 - measurement of outcomes and workflow behavior;
 - governed evaluation, canarying, promotion, retention, and rollback of factory changes.
 
-### What it is not
+### Safety claim boundary
 
-Enginery does **not** build its own coding-agent reasoning loop. It does not replace GitHub, Git, CI, package registries, deployment platforms, or issue-tracker interfaces. It does not start as a hosted multi-tenant service, a browser dashboard, a distributed scheduler, a Kubernetes layer, or a hostile-code sandbox.
+Enginery does not build its own coding-agent reasoning loop or replace GitHub, Git, CI, package registries, deployment platforms, or issue-tracker interfaces. It does not start as a hosted multi-tenant service, browser dashboard, distributed scheduler, Kubernetes layer, or hostile-code sandbox.
 
-A git worktree is an isolated **workspace**, not a security boundary. On the first backend, a process can still share the user’s account, filesystem, network, keychain, and host. Enginery must describe that limit plainly and reserve untrusted workloads for a future container or VM backend.
+The planned first backend is designed to prevent accidental repository collision, bind supported external actions to stable operation IDs, and keep production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user's account, filesystem, network, keychain, or other host processes. Untrusted workloads require a future container or VM backend; product copy must not imply otherwise.
 
 ## 3. Why this approach
 
@@ -92,6 +92,8 @@ flowchart LR
 A run is bound to the work snapshot, workflow digest, policy version, adapter fingerprints, capability lock, repository revision, and effective configuration. A change to a bound input invalidates dependent approvals and evidence. The old run becomes superseded; the system does not silently continue under different intent or behavior.
 
 Every external side effect receives a stable operation ID. On uncertainty, Enginery reconciles first and obtains one of four answers: `not_found`, `found_matching`, `found_conflicting`, or `indeterminate`. Only `not_found` permits a new execution; `found_matching` adopts the observed result; the other two require explicit reconciliation or human action. Blind retry is prohibited.
+
+This protocol prevents blind retries; it does not make an external provider operation atomic or revoke a request already issued to a provider. Each supported adapter must prove its provider-visible correlation and reconciliation behavior with fault injection before Enginery claims duplicate-effect prevention for that operation.
 
 ## 5. Initial workflows and proof status
 
@@ -158,6 +160,10 @@ Potential defensibility comes from an accumulating, versioned operational corpus
 5. **Open local ownership.** A local ledger and inspectable event stream reduce lock-in and make the system suitable for users who do not want a central hosted execution database.
 
 These are **moat hypotheses**, not established facts. Incumbents can reproduce features; open-source projects can reproduce architecture. The durable advantage must come from reliable implementation, trustworthy evidence, ecosystem adoption, and a body of comparative workflow results that users can inspect. Any public claim that a specific mechanism is unique to Enginery additionally requires hands-on verification of the closest control-plane entrants; secondary-source absence is not evidence of absence.
+
+### Differentiation evidence required
+
+Before claiming a mechanism is unique or a competitor gap is material, Enginery must test the closest entrants against the same scenarios: ambiguous side effects, exact-head CI and evidence binding, approval supersession after input changes, and provider-neutral recovery. Product discovery must also record actual operator incidents and compare recovery effort, intervention count, evidence completeness, and maintenance burden against a manually coordinated agent-session baseline. A plausible failure mode is a test case, not a market claim.
 
 ## 8. Risks and disconfirming evidence
 

@@ -6,15 +6,15 @@
 
 ## The short version
 
-Coding agents are becoming capable workers. They can inspect a repository, write code, run tests, and propose a pull request. The missing layer is the system that decides **which work should run, under what authority, with what evidence, how it recovers from failure, and how the workflow itself improves without becoming unsafe**.
+When an agent or coordinator loses a response after creating a pull request, publishing an artifact, or starting a deployment, a blind retry can duplicate the external effect. The engineering problem is not only generating the code; it is proving what happened and recovering without guessing.
 
-**Enginery is an open-source, local-first control plane for that layer.**
+**Enginery is an open-source, local-first control plane for that problem.**
 
 > Coding agents perform tasks. Enginery engineers the system in which tasks become trustworthy software outcomes.
 
-It does not compete by building another agent. It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
+It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
 
-The concrete promise under test: **an interrupted or retried agent action never duplicates a pull request, release, or deployment — and the recovery is inspectable from the evidence bundle.** The mechanism below (operation IDs, reconciliation states, version-bound evidence) is the substantiation for that promise, not the headline. The first public artifact is planned as a recorded fault-injection demonstration: kill the coordinator mid-run, show reconciliation-driven recovery, show zero duplicate side effects, and publish the evidence bundle for independent inspection.
+The first claim under test is deliberately narrow: for a supported provider operation, an interrupted or retried run reconciles the persisted operation ID and provider state before another side effect is attempted. The first public artifact is planned as a recorded fault-injection demonstration: kill the coordinator mid-run, show reconciliation-driven recovery, show whether a duplicate effect was prevented for the supported operation, and publish the evidence bundle for independent inspection.
 
 ### Plain-language terms
 
@@ -135,6 +135,10 @@ These sources establish that major vendors are investing in delegated coding-age
 Enginery’s hypothesis is narrower: these systems are workers or worker platforms; a defined user segment also needs a local, inspectable, provider-neutral program for lifecycle semantics, evidence, reconciliation, policy, and evaluated workflow evolution.
 
 That hypothesis can be wrong. A worker vendor can add these layers, users may accept provider-specific operation, or the governance burden may exceed its value. Enginery should earn adoption by solving a concrete failure mode for a real workflow, not by asserting that control planes are inherently valuable.
+
+### Evidence before differentiation
+
+Enginery should not claim that its mechanisms are unique, that existing workers cannot recover safely, or that agent failures are widespread without direct evidence. The first research work is a hands-on capability matrix for the closest alternatives, exercised against the same ambiguous-side-effect, stale-evidence, approval-supersession, and recovery scenarios. The product case then rests on observed operator failures and a documented baseline comparison of recovery effort, intervention count, evidence completeness, and maintenance burden—not on category labels.
 
 ## Potential differentiation—not a proven moat
 
