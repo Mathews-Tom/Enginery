@@ -1,4 +1,4 @@
-"""CLI exit-code contract (03_SYSTEM_DESIGN.md §23.2).
+"""CLI exit-code contract.
 
 Maps every ``FailureClass`` to a stable, distinct process exit code so
 scripts driving the CLI can distinguish success, policy denial, human

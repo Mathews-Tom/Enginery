@@ -1,7 +1,7 @@
 """Enginery CLI entry point.
 
-Implements only ``--version`` and ``doctor`` for this milestone
-(03_SYSTEM_DESIGN.md §23.1). Later milestones add the ``work``, ``run``,
+Implements only ``--version`` and ``doctor`` for this milestone. Later
+milestones add the ``work``, ``run``,
 ``evidence``, ``workflow``, ``factory-change``, ``adapter``, ``policy``, and
 ``gc`` command families.
 """
