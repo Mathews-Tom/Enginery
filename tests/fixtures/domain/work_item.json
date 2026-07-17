@@ -1,0 +1,26 @@
+{
+  "data": {
+    "acceptance_criteria": [
+      "exhaustion includes failed evidence",
+      "exhaustion is a named state"
+    ],
+    "aggregate_version": 2,
+    "constraints": [
+      "no schema break"
+    ],
+    "dependencies": [],
+    "external_reference": "Mathews-Tom/Enginery#42",
+    "id": "wi-golden-1",
+    "objective": "Report the exact evidence bundle when repair budget is exhausted",
+    "repository_targets": [
+      "Mathews-Tom/Enginery"
+    ],
+    "risk_class": "low",
+    "source_provider": "github",
+    "source_snapshot_reference": "a1b2c3d4",
+    "state": "ready",
+    "title": "Fix retry budget exhaustion reporting",
+    "work_kind": "issue"
+  },
+  "schema_version": 1
+}

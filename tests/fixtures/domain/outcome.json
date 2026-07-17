@@ -1,0 +1,15 @@
+{
+  "data": {
+    "detail": {
+      "pr_number": 42
+    },
+    "id": "outcome-golden-1",
+    "kind": "pr_accepted",
+    "linked_work_item_id": null,
+    "observed_at": "2026-07-17T12:00:00+00:00",
+    "run_id": "run-golden-1",
+    "schema_version": 1,
+    "work_item_id": "wi-golden-1"
+  },
+  "schema_version": 1
+}

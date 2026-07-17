@@ -1,0 +1,29 @@
+{
+  "data": {
+    "actor": "omp-worker-1",
+    "attempt_number": 2,
+    "completed_at": null,
+    "cost_amount": 0.87,
+    "duration_seconds": 42.5,
+    "emitted_event_range": [
+      101,
+      140
+    ],
+    "evidence_result": "indeterminate",
+    "failure_class": null,
+    "id": "attempt-golden-1",
+    "input_digest": "sha256:8e6070618215bc80f473914ea839813fb1cdc0cdc34804db620ced93c9aa25f8",
+    "lease_expires_at": "2026-07-17T12:00:00+00:00",
+    "lease_owner": "coordinator-1",
+    "node_id": "implement",
+    "output_artifact_ids": [
+      "artifact-golden-1"
+    ],
+    "reconciliation_result": "found_matching",
+    "run_id": "run-golden-1",
+    "schema_version": 1,
+    "started_at": "2026-07-17T12:00:00+00:00",
+    "state": "evidence_pending"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,121 @@
+{
+  "data": {
+    "compatibility": {},
+    "id": "wf-golden-1",
+    "input_schema": {},
+    "name": "issue to merge-ready pull request",
+    "nodes": {
+      "implement": {
+        "actor_type": "agent",
+        "branch_conditions": [],
+        "budget": {
+          "max_attempts": 1,
+          "max_cost": null,
+          "max_duration_seconds": 60.0
+        },
+        "dependencies": [
+          "normalize"
+        ],
+        "emitted_event_types": [],
+        "evidence_contract": [],
+        "idempotency_behavior": "not_applicable",
+        "input_schema": {
+          "objective": {
+            "required": true,
+            "type": "string"
+          }
+        },
+        "kind": "execute_agent_task",
+        "output_schema": {
+          "patch": {
+            "required": true,
+            "type": "string"
+          }
+        },
+        "parallel_group": null,
+        "policy_action": null,
+        "reconciliation_operation": null,
+        "required_capabilities": [],
+        "side_effect_class": "none",
+        "subworkflow": null
+      },
+      "normalize": {
+        "actor_type": "deterministic",
+        "branch_conditions": [],
+        "budget": {
+          "max_attempts": 1,
+          "max_cost": null,
+          "max_duration_seconds": 60.0
+        },
+        "dependencies": [],
+        "emitted_event_types": [],
+        "evidence_contract": [],
+        "idempotency_behavior": "not_applicable",
+        "input_schema": {
+          "issue_reference": {
+            "required": true,
+            "type": "string"
+          }
+        },
+        "kind": "normalize_work",
+        "output_schema": {
+          "objective": {
+            "required": true,
+            "type": "string"
+          }
+        },
+        "parallel_group": null,
+        "policy_action": null,
+        "reconciliation_operation": null,
+        "required_capabilities": [],
+        "side_effect_class": "none",
+        "subworkflow": null
+      },
+      "open_pr": {
+        "actor_type": "deterministic",
+        "branch_conditions": [],
+        "budget": {
+          "max_attempts": 1,
+          "max_cost": null,
+          "max_duration_seconds": 60.0
+        },
+        "dependencies": [
+          "implement"
+        ],
+        "emitted_event_types": [],
+        "evidence_contract": [],
+        "idempotency_behavior": "reconciliation_query",
+        "input_schema": {
+          "patch": {
+            "required": true,
+            "type": "string"
+          }
+        },
+        "kind": "open_or_update_pull_request",
+        "output_schema": {
+          "pr_number": {
+            "required": true,
+            "type": "integer"
+          }
+        },
+        "parallel_group": null,
+        "policy_action": null,
+        "reconciliation_operation": "query by branch name",
+        "required_capabilities": [],
+        "side_effect_class": "side_effecting",
+        "subworkflow": null
+      }
+    },
+    "output_schema": {},
+    "schema_version": 1,
+    "terminal_state_mapping": {
+      "open_pr": "merge_ready"
+    },
+    "terminal_states": [
+      "blocked",
+      "failed",
+      "merge_ready"
+    ]
+  },
+  "schema_version": 1
+}

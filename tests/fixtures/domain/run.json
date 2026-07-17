@@ -1,0 +1,22 @@
+{
+  "data": {
+    "adapter_versions": {
+      "github": "1.2.0",
+      "omp": "0.9.1"
+    },
+    "aggregate_version": 5,
+    "base_revision": "deadbeefcafefeed",
+    "capability_lock_digest": "sha256:018ec76a4e48cf99b7a9f7eb07cd539156dd74057ac5649740b37667621b5420",
+    "configuration_snapshot_digest": "sha256:7b14b100808b3286dd6ab5958777ce974393e0eeb1f1331ee8f1185534afb56b",
+    "environment_manifest_digest": "sha256:d8c55293ccff5cded249936f49d3c174a011ca5721e5e52b3e44c8a90e00f216",
+    "id": "run-golden-1",
+    "policy_set_version": "policy-2026-07-17",
+    "repository": "Mathews-Tom/Enginery",
+    "state": "running",
+    "work_item_id": "wi-golden-1",
+    "work_item_snapshot_digest": "sha256:adf3ab40bff90e72cde07c1c6e683ec122d44dcd9a423e72979d0ab0fd68ef3d",
+    "workflow_definition_digest": "sha256:c5b93821758874f5a7450fe73be53d42b8d5315c55d88d326490d1620a955496",
+    "workflow_definition_id": "wf-issue-to-pr"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "actor": "jane@example.com",
+    "detail": {
+      "channel": "cli"
+    },
+    "id": "intervention-golden-1",
+    "kind": "approval",
+    "occurred_at": "2026-07-17T12:00:00+00:00",
+    "rationale": "approved plan after reviewing acceptance criteria",
+    "run_id": "run-golden-1"
+  },
+  "schema_version": 1
+}

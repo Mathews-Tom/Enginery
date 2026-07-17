@@ -61,6 +61,10 @@ class WorkflowManifest:
         """A deterministic digest of the full manifest content (§9.2)."""
         return Digest.of_json(_manifest_to_json(self))
 
+    def to_mapping(self) -> dict[str, object]:
+        """A JSON-serializable mapping accepted verbatim by ``from_mapping``."""
+        return _manifest_to_json(self)
+
     def operation_id_for(
         self, *, run_id: RunId, node_id: NodeId, target_scope: str, ordinal: int
     ) -> OperationId:

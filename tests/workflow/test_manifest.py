@@ -6,10 +6,14 @@ Covers the verification surface named in .docs/DEVELOPMENT_PLAN.md M2:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from enginery.domain import serialization
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.ids import NodeId, RunId, WorkflowDefinitionId
+from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId
 from enginery.domain.workflow.budget import Budget
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import (
@@ -550,7 +554,6 @@ class TestWorkflowManifestOperationIdentity:
         from_manifest = manifest.operation_id_for(
             run_id=run_id, node_id=NodeId("open_pr"), target_scope="github:org/repo#7", ordinal=0
         )
-        from enginery.domain.ids import OperationId
 
         derived_directly = OperationId.derive(
             run_id=run_id,
@@ -561,3 +564,72 @@ class TestWorkflowManifestOperationIdentity:
         )
 
         assert from_manifest == derived_directly
+
+
+# ---------------------------------------------------------------------------
+# golden compatibility fixture (03_SYSTEM_DESIGN.md §11, §9.2)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowManifestGoldenFixture:
+    """Mirrors tests/domain/test_serialization.py for the one manifest type
+    that lives under enginery.domain.workflow instead of enginery.domain."""
+
+    @staticmethod
+    def _fixture_path() -> Path:
+        return Path(__file__).parent.parent / "fixtures" / "workflow" / "manifest.json"
+
+    @staticmethod
+    def _golden_manifest() -> WorkflowManifest:
+        return _make_manifest(
+            id="wf-golden-1",
+            name="issue to merge-ready pull request",
+            nodes={
+                "normalize": _pure_node_raw(
+                    input_schema={"issue_reference": {"type": "string"}},
+                    output_schema={"objective": {"type": "string"}},
+                ),
+                "implement": _pure_node_raw(
+                    kind="execute_agent_task",
+                    actor_type="agent",
+                    input_schema={"objective": {"type": "string"}},
+                    output_schema={"patch": {"type": "string"}},
+                    dependencies=["normalize"],
+                ),
+                "open_pr": _pure_node_raw(
+                    kind="open_or_update_pull_request",
+                    side_effect_class="side_effecting",
+                    idempotency_behavior="reconciliation_query",
+                    reconciliation_operation="query by branch name",
+                    input_schema={"patch": {"type": "string"}},
+                    output_schema={"pr_number": {"type": "integer"}},
+                    dependencies=["implement"],
+                ),
+            },
+        )
+
+    def test_fixture_deserializes_into_the_exact_golden_manifest(self) -> None:
+        fixture = json.loads(self._fixture_path().read_text())
+
+        loaded = serialization.workflow_manifest_from_dict(fixture)
+
+        assert loaded == self._golden_manifest()
+
+    def test_reserializing_the_golden_manifest_reproduces_the_fixture_exactly(self) -> None:
+        fixture = json.loads(self._fixture_path().read_text())
+
+        assert serialization.workflow_manifest_to_dict(self._golden_manifest()) == fixture
+
+    def test_round_trip_through_serialize_and_deserialize_is_lossless(self) -> None:
+        original = self._golden_manifest()
+
+        payload = serialization.workflow_manifest_to_dict(original)
+
+        assert serialization.workflow_manifest_from_dict(payload) == original
+
+    def test_a_mismatched_schema_version_is_rejected(self) -> None:
+        payload = serialization.workflow_manifest_to_dict(self._golden_manifest())
+        payload["schema_version"] = 999
+
+        with pytest.raises(InvalidInputError, match="schema_version"):
+            serialization.workflow_manifest_from_dict(payload)
