@@ -1,20 +1,23 @@
 """``Run``: one workflow instance bound to a work item (03_SYSTEM_DESIGN.md §9.3).
 
-Declares the aggregate and its fourteen-state lifecycle vocabulary (§10.2).
-Guarded transition enforcement lands in a later slice of this stack
-alongside the shared transition-table machinery.
+Declares the aggregate, its fourteen-state lifecycle vocabulary (§10.2), and
+guarded transition enforcement built on the shared ``TransitionTable``
+machinery. Note that ``blocked`` is a *terminal* state for a run — unlike a
+work item's recoverable ``blocked`` state — matching the design's explicit
+"Terminal states" line for §10.2.
 """
 
 from __future__ import annotations
 
 import enum
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.immutable import freeze_mapping
+from enginery.domain.state_machine import TransitionTable
 
 
 class RunState(enum.Enum):
@@ -34,6 +37,80 @@ class RunState(enum.Enum):
     CANCELLED = "cancelled"
     FAILED = "failed"
     SUPERSEDED = "superseded"
+
+
+RUN_TRANSITIONS: TransitionTable[RunState] = TransitionTable(
+    edges={
+        RunState.CREATED: frozenset({RunState.PREFLIGHT}),
+        RunState.PREFLIGHT: frozenset(
+            {
+                RunState.AWAITING_POLICY,
+                RunState.QUEUED,
+                RunState.BLOCKED,
+                RunState.REJECTED,
+                RunState.SUPERSEDED,
+            }
+        ),
+        RunState.AWAITING_POLICY: frozenset(
+            {RunState.QUEUED, RunState.AWAITING_HUMAN, RunState.REJECTED, RunState.SUPERSEDED}
+        ),
+        RunState.QUEUED: frozenset({RunState.RUNNING, RunState.CANCELLED, RunState.SUPERSEDED}),
+        RunState.RUNNING: frozenset(
+            {
+                RunState.AWAITING_POLICY,
+                RunState.AWAITING_HUMAN,
+                RunState.RECONCILING,
+                RunState.EVIDENCE_VERIFICATION,
+                RunState.BLOCKED,
+                RunState.CANCELLED,
+                RunState.FAILED,
+                RunState.SUPERSEDED,
+            }
+        ),
+        RunState.AWAITING_HUMAN: frozenset(
+            {
+                RunState.QUEUED,
+                RunState.RUNNING,
+                RunState.RECONCILING,
+                RunState.REJECTED,
+                RunState.CANCELLED,
+                RunState.SUPERSEDED,
+            }
+        ),
+        RunState.RECONCILING: frozenset(
+            {
+                RunState.QUEUED,
+                RunState.RUNNING,
+                RunState.EVIDENCE_VERIFICATION,
+                RunState.AWAITING_HUMAN,
+                RunState.BLOCKED,
+                RunState.FAILED,
+                RunState.SUPERSEDED,
+            }
+        ),
+        RunState.EVIDENCE_VERIFICATION: frozenset(
+            {
+                RunState.RUNNING,
+                RunState.RECONCILING,
+                RunState.AWAITING_HUMAN,
+                RunState.SUCCEEDED,
+                RunState.BLOCKED,
+                RunState.FAILED,
+                RunState.SUPERSEDED,
+            }
+        ),
+    },
+    terminal_states=frozenset(
+        {
+            RunState.SUCCEEDED,
+            RunState.BLOCKED,
+            RunState.REJECTED,
+            RunState.CANCELLED,
+            RunState.FAILED,
+            RunState.SUPERSEDED,
+        }
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +149,12 @@ class Run:
                 )
         freeze_mapping(self, "adapter_versions", self.adapter_versions)
 
+    def transition_to(self, target: RunState) -> Run:
+        """Return a new ``Run`` in ``target`` state, or raise if the
+        transition is not legal from the current state (§10.2)."""
+        RUN_TRANSITIONS.require(self.state, target)
+        return replace(self, state=target, aggregate_version=self.aggregate_version + 1)
+
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
@@ -80,4 +163,4 @@ def _require_non_blank(value: str, *, field_name: str) -> None:
         )
 
 
-__all__ = ["Run", "RunState"]
+__all__ = ["RUN_TRANSITIONS", "Run", "RunState"]

@@ -8,7 +8,8 @@ import pytest
 
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.ids import WorkItemId
-from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.domain.work_item import WORK_ITEM_TRANSITIONS, WorkItem, WorkItemState
+from tests.domain.test_state_machine import TestEveryDomainTransitionTableHasNoDeadEnds
 
 
 def _make_work_item(**overrides: object) -> WorkItem:
@@ -126,3 +127,85 @@ class TestWorkItem:
         reordered = replace(base, acceptance_criteria=("b", "a"))
 
         assert base.bound_field_digest != reordered.bound_field_digest
+
+
+class TestWorkItemTransitions:
+    def test_has_no_dead_ends(self) -> None:
+        TestEveryDomainTransitionTableHasNoDeadEnds.assert_every_non_terminal_state_reaches_a_terminal(
+            WORK_ITEM_TRANSITIONS
+        )
+
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            (WorkItemState.NEW, WorkItemState.QUALIFYING),
+            (WorkItemState.QUALIFYING, WorkItemState.READY),
+            (WorkItemState.QUALIFYING, WorkItemState.BLOCKED),
+            (WorkItemState.QUALIFYING, WorkItemState.REJECTED),
+            (WorkItemState.READY, WorkItemState.ACTIVE),
+            (WorkItemState.READY, WorkItemState.CANCELLED),
+            (WorkItemState.ACTIVE, WorkItemState.OUTCOME_PENDING),
+            (WorkItemState.ACTIVE, WorkItemState.BLOCKED),
+            (WorkItemState.ACTIVE, WorkItemState.CANCELLED),
+            (WorkItemState.ACTIVE, WorkItemState.FAILED),
+            (WorkItemState.BLOCKED, WorkItemState.QUALIFYING),
+            (WorkItemState.BLOCKED, WorkItemState.ACTIVE),
+            (WorkItemState.BLOCKED, WorkItemState.REJECTED),
+            (WorkItemState.BLOCKED, WorkItemState.CANCELLED),
+            (WorkItemState.OUTCOME_PENDING, WorkItemState.COMPLETED),
+            (WorkItemState.OUTCOME_PENDING, WorkItemState.BLOCKED),
+            (WorkItemState.OUTCOME_PENDING, WorkItemState.FAILED),
+        ],
+    )
+    def test_every_designed_edge_is_legal(
+        self, source: WorkItemState, target: WorkItemState
+    ) -> None:
+        assert WORK_ITEM_TRANSITIONS.allows(source, target)
+
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            (WorkItemState.NEW, WorkItemState.ACTIVE),
+            (WorkItemState.READY, WorkItemState.QUALIFYING),
+            (WorkItemState.COMPLETED, WorkItemState.ACTIVE),
+            (WorkItemState.REJECTED, WorkItemState.NEW),
+        ],
+    )
+    def test_undesigned_edges_are_illegal(
+        self, source: WorkItemState, target: WorkItemState
+    ) -> None:
+        assert not WORK_ITEM_TRANSITIONS.allows(source, target)
+
+    def test_terminal_states_are_exactly_the_four_designed_terminals(self) -> None:
+        assert WORK_ITEM_TRANSITIONS.terminal_states == frozenset(
+            {
+                WorkItemState.COMPLETED,
+                WorkItemState.REJECTED,
+                WorkItemState.CANCELLED,
+                WorkItemState.FAILED,
+            }
+        )
+
+    def test_blocked_is_not_terminal_for_a_work_item(self) -> None:
+        assert not WORK_ITEM_TRANSITIONS.is_terminal(WorkItemState.BLOCKED)
+
+    def test_transition_to_advances_state_and_increments_version(self) -> None:
+        item = _make_work_item()
+
+        advanced = item.transition_to(WorkItemState.QUALIFYING)
+
+        assert advanced.state is WorkItemState.QUALIFYING
+        assert advanced.aggregate_version == 1
+        assert item.state is WorkItemState.NEW
+
+    def test_transition_to_rejects_an_illegal_transition(self) -> None:
+        item = _make_work_item()
+
+        with pytest.raises(Exception, match="illegal transition"):
+            item.transition_to(WorkItemState.ACTIVE)
+
+    def test_blocked_can_recover_to_qualifying_or_active(self) -> None:
+        blocked = _make_work_item(state=WorkItemState.BLOCKED)
+
+        assert blocked.transition_to(WorkItemState.QUALIFYING).state is WorkItemState.QUALIFYING
+        assert blocked.transition_to(WorkItemState.ACTIVE).state is WorkItemState.ACTIVE
