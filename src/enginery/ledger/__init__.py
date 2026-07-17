@@ -27,6 +27,7 @@ from enginery.ledger.inbox import InboxRecord
 from enginery.ledger.leases import LeaseRecord, LeaseWrite
 from enginery.ledger.outbox import OutboxRecord, OutboxWrite
 from enginery.ledger.process_manager import ProcessManagerStateRecord, ProcessManagerStateWrite
+from enginery.ledger.projections import ProjectionRecord, RebuildReport
 from enginery.ledger.service import LedgerService
 
 __all__ = [
@@ -48,6 +49,8 @@ __all__ = [
     "OutboxWrite",
     "ProcessManagerStateRecord",
     "ProcessManagerStateWrite",
+    "ProjectionRecord",
     "RawCredentialDetectedError",
+    "RebuildReport",
     "SchemaVersionUnsupportedError",
 ]
