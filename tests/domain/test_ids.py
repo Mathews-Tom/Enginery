@@ -55,12 +55,12 @@ class TestIdentifierType:
     def test_is_immutable(self, id_type: type) -> None:
         identifier = id_type("wi-000001")
         with pytest.raises(AttributeError):
-            identifier.value = "other"  # type: ignore[misc]
+            identifier.value = "other"
 
 
 def test_distinct_id_types_holding_the_same_string_are_never_equal() -> None:
-    assert ids.WorkItemId("shared") != ids.RunId("shared")
-    assert ids.RunId("shared") != ids.NodeAttemptId("shared")
+    assert ids.WorkItemId("shared") != ids.RunId("shared")  # type: ignore[comparison-overlap]
+    assert ids.RunId("shared") != ids.NodeAttemptId("shared")  # type: ignore[comparison-overlap]
 
 
 class TestOperationId:

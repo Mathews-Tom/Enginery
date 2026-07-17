@@ -10,11 +10,13 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass
 from enginery.domain.ids import ArtifactId, NodeAttemptId, NodeId, RunId
 from enginery.domain.node_attempt import (
+    NODE_ATTEMPT_TRANSITIONS,
     EvidenceResult,
     NodeAttempt,
     NodeAttemptState,
     ReconciliationResult,
 )
+from tests.domain.test_state_machine import TestEveryDomainTransitionTableHasNoDeadEnds
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -131,3 +133,111 @@ class TestNodeAttempt:
     def test_rejects_schema_version_below_one(self) -> None:
         with pytest.raises(Exception, match="schema_version"):
             _make_attempt(schema_version=0)
+
+
+class TestNodeAttemptTransitions:
+    def test_has_no_dead_ends(self) -> None:
+        TestEveryDomainTransitionTableHasNoDeadEnds.assert_every_non_terminal_state_reaches_a_terminal(
+            NODE_ATTEMPT_TRANSITIONS
+        )
+
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            (NodeAttemptState.PENDING, NodeAttemptState.LEASED),
+            (NodeAttemptState.PENDING, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.LEASED, NodeAttemptState.RUNNING),
+            (NodeAttemptState.LEASED, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.LEASED, NodeAttemptState.TIMED_OUT),
+            (NodeAttemptState.RUNNING, NodeAttemptState.OUTPUT_PENDING),
+            (NodeAttemptState.RUNNING, NodeAttemptState.RECONCILING),
+            (NodeAttemptState.RUNNING, NodeAttemptState.FAILED),
+            (NodeAttemptState.RUNNING, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.RUNNING, NodeAttemptState.TIMED_OUT),
+            (NodeAttemptState.RECONCILING, NodeAttemptState.OUTPUT_PENDING),
+            (NodeAttemptState.RECONCILING, NodeAttemptState.FAILED),
+            (NodeAttemptState.RECONCILING, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.RECONCILING, NodeAttemptState.TIMED_OUT),
+            (NodeAttemptState.OUTPUT_PENDING, NodeAttemptState.EVIDENCE_PENDING),
+            (NodeAttemptState.OUTPUT_PENDING, NodeAttemptState.FAILED),
+            (NodeAttemptState.OUTPUT_PENDING, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.OUTPUT_PENDING, NodeAttemptState.TIMED_OUT),
+            (NodeAttemptState.EVIDENCE_PENDING, NodeAttemptState.PASSED),
+            (NodeAttemptState.EVIDENCE_PENDING, NodeAttemptState.FAILED),
+            (NodeAttemptState.EVIDENCE_PENDING, NodeAttemptState.CANCELLED),
+            (NodeAttemptState.EVIDENCE_PENDING, NodeAttemptState.TIMED_OUT),
+        ],
+    )
+    def test_every_designed_edge_is_legal(
+        self, source: NodeAttemptState, target: NodeAttemptState
+    ) -> None:
+        assert NODE_ATTEMPT_TRANSITIONS.allows(source, target)
+
+    @pytest.mark.parametrize(
+        ("source", "target"),
+        [
+            (NodeAttemptState.PENDING, NodeAttemptState.RUNNING),
+            (NodeAttemptState.PASSED, NodeAttemptState.RUNNING),
+            (NodeAttemptState.FAILED, NodeAttemptState.PENDING),
+        ],
+    )
+    def test_undesigned_edges_are_illegal(
+        self, source: NodeAttemptState, target: NodeAttemptState
+    ) -> None:
+        assert not NODE_ATTEMPT_TRANSITIONS.allows(source, target)
+
+    def test_terminal_states(self) -> None:
+        assert NODE_ATTEMPT_TRANSITIONS.terminal_states == frozenset(
+            {
+                NodeAttemptState.PASSED,
+                NodeAttemptState.FAILED,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        )
+
+    def test_transition_to_advances_state(self) -> None:
+        attempt = _make_attempt()
+
+        advanced = attempt.transition_to(NodeAttemptState.LEASED)
+
+        assert advanced.state is NodeAttemptState.LEASED
+        assert attempt.state is NodeAttemptState.PENDING
+
+    def test_transition_to_rejects_an_illegal_transition(self) -> None:
+        attempt = _make_attempt()
+
+        with pytest.raises(Exception, match="illegal transition"):
+            attempt.transition_to(NodeAttemptState.PASSED)
+
+    def test_resolve_reconciliation_found_matching_adopts_output_pending(self) -> None:
+        attempt = _make_attempt(state=NodeAttemptState.RECONCILING)
+
+        resolved = attempt.resolve_reconciliation(ReconciliationResult.FOUND_MATCHING)
+
+        assert resolved.state is NodeAttemptState.OUTPUT_PENDING
+        assert resolved.reconciliation_result is ReconciliationResult.FOUND_MATCHING
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            ReconciliationResult.NOT_FOUND,
+            ReconciliationResult.FOUND_CONFLICTING,
+            ReconciliationResult.INDETERMINATE,
+        ],
+    )
+    def test_resolve_reconciliation_other_results_end_the_attempt_as_failed(
+        self, result: ReconciliationResult
+    ) -> None:
+        attempt = _make_attempt(state=NodeAttemptState.RECONCILING)
+
+        resolved = attempt.resolve_reconciliation(result)
+
+        assert resolved.state is NodeAttemptState.FAILED
+        assert resolved.reconciliation_result is result
+
+    def test_resolve_reconciliation_requires_a_state_that_can_reach_the_outcome(self) -> None:
+        attempt = _make_attempt(state=NodeAttemptState.LEASED)
+
+        with pytest.raises(Exception, match="illegal transition"):
+            attempt.resolve_reconciliation(ReconciliationResult.FOUND_MATCHING)

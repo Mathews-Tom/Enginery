@@ -1,25 +1,24 @@
 """``WorkItem``: a normalized unit of engineering intent (03_SYSTEM_DESIGN.md §9.1).
 
-This module declares the immutable aggregate and its closed lifecycle-state
-vocabulary (§10.1). Guarded transition enforcement is added in a later
-milestone slice alongside the shared transition-table machinery; this slice
-only proves the aggregate's fields and invariants are correctly typed and
-validated.
+This module declares the immutable aggregate, its closed lifecycle-state
+vocabulary (§10.1), and guarded transition enforcement built on the shared
+``TransitionTable`` machinery.
 """
 
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import WorkItemId
+from enginery.domain.state_machine import TransitionTable
 
 
 class WorkItemState(enum.Enum):
-    """The seven work-item lifecycle states (§10.1)."""
+    """The ten work-item lifecycle states (§10.1)."""
 
     NEW = "new"
     QUALIFYING = "qualifying"
@@ -31,6 +30,44 @@ class WorkItemState(enum.Enum):
     REJECTED = "rejected"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+
+WORK_ITEM_TRANSITIONS: TransitionTable[WorkItemState] = TransitionTable(
+    edges={
+        WorkItemState.NEW: frozenset({WorkItemState.QUALIFYING}),
+        WorkItemState.QUALIFYING: frozenset(
+            {WorkItemState.READY, WorkItemState.BLOCKED, WorkItemState.REJECTED}
+        ),
+        WorkItemState.READY: frozenset({WorkItemState.ACTIVE, WorkItemState.CANCELLED}),
+        WorkItemState.ACTIVE: frozenset(
+            {
+                WorkItemState.OUTCOME_PENDING,
+                WorkItemState.BLOCKED,
+                WorkItemState.CANCELLED,
+                WorkItemState.FAILED,
+            }
+        ),
+        WorkItemState.BLOCKED: frozenset(
+            {
+                WorkItemState.QUALIFYING,
+                WorkItemState.ACTIVE,
+                WorkItemState.REJECTED,
+                WorkItemState.CANCELLED,
+            }
+        ),
+        WorkItemState.OUTCOME_PENDING: frozenset(
+            {WorkItemState.COMPLETED, WorkItemState.BLOCKED, WorkItemState.FAILED}
+        ),
+    },
+    terminal_states=frozenset(
+        {
+            WorkItemState.COMPLETED,
+            WorkItemState.REJECTED,
+            WorkItemState.CANCELLED,
+            WorkItemState.FAILED,
+        }
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +128,12 @@ class WorkItem:
             }
         )
 
+    def transition_to(self, target: WorkItemState) -> WorkItem:
+        """Return a new ``WorkItem`` in ``target`` state, or raise if the
+        transition is not legal from the current state (§10.1)."""
+        WORK_ITEM_TRANSITIONS.require(self.state, target)
+        return replace(self, state=target, aggregate_version=self.aggregate_version + 1)
+
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
@@ -99,4 +142,4 @@ def _require_non_blank(value: str, *, field_name: str) -> None:
         )
 
 
-__all__ = ["WorkItem", "WorkItemState"]
+__all__ = ["WORK_ITEM_TRANSITIONS", "WorkItem", "WorkItemState"]

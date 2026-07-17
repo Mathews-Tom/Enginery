@@ -2,20 +2,20 @@
 
 Declares the aggregate, its ten-state lifecycle vocabulary (§10.3), the
 reconciliation-result vocabulary reused by the shared four-result
-reconciliation contract (§7.10, §10.3), and the three-value evidence result
-(§16.1) a completed attempt carries. Guarded transition enforcement lands in
-a later slice of this stack.
+reconciliation contract (§7.10, §10.3), the three-value evidence result
+(§16.1) a completed attempt carries, and guarded transition enforcement.
 """
 
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.ids import ArtifactId, NodeAttemptId, NodeId, RunId
+from enginery.domain.state_machine import TransitionTable
 
 
 class NodeAttemptState(enum.Enum):
@@ -48,6 +48,69 @@ class EvidenceResult(enum.Enum):
     PASS = "pass"
     FAIL = "fail"
     INDETERMINATE = "indeterminate"
+
+
+NODE_ATTEMPT_TRANSITIONS: TransitionTable[NodeAttemptState] = TransitionTable(
+    edges={
+        NodeAttemptState.PENDING: frozenset({NodeAttemptState.LEASED, NodeAttemptState.CANCELLED}),
+        NodeAttemptState.LEASED: frozenset(
+            {
+                NodeAttemptState.RUNNING,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        ),
+        NodeAttemptState.RUNNING: frozenset(
+            {
+                NodeAttemptState.OUTPUT_PENDING,
+                NodeAttemptState.RECONCILING,
+                NodeAttemptState.FAILED,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        ),
+        NodeAttemptState.RECONCILING: frozenset(
+            {
+                NodeAttemptState.OUTPUT_PENDING,
+                NodeAttemptState.FAILED,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        ),
+        NodeAttemptState.OUTPUT_PENDING: frozenset(
+            {
+                NodeAttemptState.EVIDENCE_PENDING,
+                NodeAttemptState.FAILED,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        ),
+        NodeAttemptState.EVIDENCE_PENDING: frozenset(
+            {
+                NodeAttemptState.PASSED,
+                NodeAttemptState.FAILED,
+                NodeAttemptState.CANCELLED,
+                NodeAttemptState.TIMED_OUT,
+            }
+        ),
+    },
+    terminal_states=frozenset(
+        {
+            NodeAttemptState.PASSED,
+            NodeAttemptState.FAILED,
+            NodeAttemptState.CANCELLED,
+            NodeAttemptState.TIMED_OUT,
+        }
+    ),
+)
+
+
+_RECONCILIATION_OUTCOME_STATE: dict[ReconciliationResult, NodeAttemptState] = {
+    ReconciliationResult.FOUND_MATCHING: NodeAttemptState.OUTPUT_PENDING,
+    ReconciliationResult.NOT_FOUND: NodeAttemptState.FAILED,
+    ReconciliationResult.FOUND_CONFLICTING: NodeAttemptState.FAILED,
+    ReconciliationResult.INDETERMINATE: NodeAttemptState.FAILED,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +170,25 @@ class NodeAttempt:
                 details={"schema_version": self.schema_version},
             )
 
+    def transition_to(self, target: NodeAttemptState) -> NodeAttempt:
+        """Return a new ``NodeAttempt`` in ``target`` state, or raise if the
+        transition is not legal from the current state (§10.3)."""
+        NODE_ATTEMPT_TRANSITIONS.require(self.state, target)
+        return replace(self, state=target)
+
+    def resolve_reconciliation(self, result: ReconciliationResult) -> NodeAttempt:
+        """Apply a reconciliation outcome from the ``reconciling`` state (§7.10, §10.3).
+
+        ``found_matching`` adopts the observed result and continues to
+        ``output_pending``. ``not_found``, ``found_conflicting``, and
+        ``indeterminate`` all end the attempt with a classified ``failed``
+        result; the run, not this attempt, decides whether to create a new
+        attempt under the same operation ID or escalate to a human.
+        """
+        target = _RECONCILIATION_OUTCOME_STATE[result]
+        NODE_ATTEMPT_TRANSITIONS.require(self.state, target)
+        return replace(self, state=target, reconciliation_result=result)
+
 
 def _require_aware(value: datetime | None, *, field_name: str) -> None:
     if value is not None and value.tzinfo is None:
@@ -115,4 +197,10 @@ def _require_aware(value: datetime | None, *, field_name: str) -> None:
         )
 
 
-__all__ = ["EvidenceResult", "NodeAttempt", "NodeAttemptState", "ReconciliationResult"]
+__all__ = [
+    "NODE_ATTEMPT_TRANSITIONS",
+    "EvidenceResult",
+    "NodeAttempt",
+    "NodeAttemptState",
+    "ReconciliationResult",
+]
