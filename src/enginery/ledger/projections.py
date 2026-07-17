@@ -122,30 +122,36 @@ def rebuild_projections(
     rebuilt = 0
     with transaction(connection):
         connection.execute("DELETE FROM projections")
-        latest_versions = connection.execute(
-            "SELECT aggregate_type, aggregate_id, MAX(aggregate_version) AS aggregate_version "
-            "FROM events GROUP BY aggregate_type, aggregate_id"
+        latest_events = connection.execute(
+            """
+            SELECT e.aggregate_type, e.aggregate_id, e.aggregate_version,
+                   e.event_type, e.schema_version, e.payload
+            FROM events e
+            INNER JOIN (
+                SELECT aggregate_type, aggregate_id, MAX(aggregate_version) AS aggregate_version
+                FROM events
+                GROUP BY aggregate_type, aggregate_id
+            ) latest
+            ON e.aggregate_type = latest.aggregate_type
+            AND e.aggregate_id = latest.aggregate_id
+            AND e.aggregate_version = latest.aggregate_version
+            """
         ).fetchall()
-        for row in latest_versions:
-            event_row = connection.execute(
-                "SELECT event_type, schema_version, payload FROM events "
-                "WHERE aggregate_type = ? AND aggregate_id = ? AND aggregate_version = ?",
-                (row["aggregate_type"], row["aggregate_id"], row["aggregate_version"]),
-            ).fetchone()
-            if event_row["schema_version"] > max_supported_schema_version:
+        for row in latest_events:
+            if row["schema_version"] > max_supported_schema_version:
                 raise SchemaVersionUnsupportedError(
-                    f"event schema version {event_row['schema_version']} for "
+                    f"event schema version {row['schema_version']} for "
                     f"{row['aggregate_type']}:{row['aggregate_id']} exceeds the maximum "
                     f"supported version {max_supported_schema_version}",
                     details={
                         "aggregate_type": row["aggregate_type"],
                         "aggregate_id": row["aggregate_id"],
-                        "schema_version": event_row["schema_version"],
+                        "schema_version": row["schema_version"],
                         "max_supported_schema_version": max_supported_schema_version,
                     },
                 )
             try:
-                json.loads(event_row["payload"])
+                json.loads(row["payload"])
             except json.JSONDecodeError as error:
                 raise CorruptedEventError(
                     f"event payload for {row['aggregate_type']}:{row['aggregate_id']} at "
@@ -161,9 +167,9 @@ def rebuild_projections(
                 aggregate_type=row["aggregate_type"],
                 aggregate_id=row["aggregate_id"],
                 aggregate_version=row["aggregate_version"],
-                event_type=event_row["event_type"],
-                schema_version=event_row["schema_version"],
-                payload_json=event_row["payload"],
+                event_type=row["event_type"],
+                schema_version=row["schema_version"],
+                payload_json=row["payload"],
             )
             rebuilt += 1
     return RebuildReport(aggregates_rebuilt=rebuilt)
