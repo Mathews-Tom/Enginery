@@ -1,12 +1,11 @@
-"""``WorkflowManifest``: an immutable, versioned, validated workflow graph
-(03_SYSTEM_DESIGN.md §9.2, §12.1).
+"""``WorkflowManifest``: an immutable, versioned, validated workflow graph.
 
 Validation rejects unknown node references, dependency cycles, an absent
 entry node, and terminal-state claims that no path can actually reach
 ("unreachable terminal claims"). ``operation_id_for`` derives a stable
 operation identity for a side-effecting node using only run, node,
 side-effect kind (the node's registered ``NodeKind``), target scope, and
-ordinal — never an attempt number (§7.10).
+ordinal — never an attempt number.
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ class WorkflowManifest:
 
     @property
     def content_digest(self) -> Digest:
-        """A deterministic digest of the full manifest content (§9.2)."""
+        """A deterministic digest of the full manifest content."""
         return Digest.of_json(_manifest_to_json(self))
 
     def to_mapping(self) -> dict[str, object]:
@@ -68,7 +67,7 @@ class WorkflowManifest:
     def operation_id_for(
         self, *, run_id: RunId, node_id: NodeId, target_scope: str, ordinal: int
     ) -> OperationId:
-        """Derive the stable operation ID for one side-effecting node (§7.10).
+        """Derive the stable operation ID for one side-effecting node.
 
         The logical side-effect kind is the node's registered ``NodeKind``;
         callers never supply it separately, so the same node always derives
