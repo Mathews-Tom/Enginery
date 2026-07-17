@@ -9,6 +9,7 @@ from enum import Enum
 from uuid import uuid4
 
 from enginery.domain.digests import Digest
+from enginery.domain.policy_decision import ApprovalAttestation, PolicyAction
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.policy.rules import HardRuleEnforcer
 from enginery.policy.schemas import ApprovalSchema
@@ -40,6 +41,17 @@ class ApprovalRecord:
             self.outcome is ApprovalOutcome.APPROVED
             and not self.superseded
             and (self.expires_at is None or self.expires_at >= reference_time)
+        )
+
+    def attestation(self) -> ApprovalAttestation:
+        """Project this policy-layer record into a domain approval fact."""
+
+        return ApprovalAttestation(
+            action=PolicyAction(self.action),
+            schema_digest=self.schema_digest,
+            approved=self.outcome is ApprovalOutcome.APPROVED,
+            expires_at=self.expires_at,
+            superseded=self.superseded,
         )
 
 

@@ -24,6 +24,8 @@ from enginery.cli.ledger import (
     run_verify,
 )
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
+from enginery.domain.policy_decision import PolicyResult
+from enginery.policy.evaluator import PolicyEvaluator
 
 _DISTRIBUTION = "enginery"
 
@@ -68,6 +70,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "rebuild-projections", help="Rebuild ledger projections from stored events."
     )
     rebuild_parser.add_argument("--database", required=True, type=Path)
+
+    policy_parser = subparsers.add_parser("policy", help="Explain policy decisions.")
+    policy_subparsers = policy_parser.add_subparsers(dest="policy_command")
+    explain_parser = policy_subparsers.add_parser(
+        "explain",
+        help="Explain a policy request without authorizing it.",
+    )
+    explain_parser.add_argument("request", type=Path)
+    explain_parser.add_argument("--json", action="store_true")
 
     return parser
 
@@ -140,6 +151,43 @@ def _run_ledger(args: argparse.Namespace) -> int:
     raise AssertionError(f"unhandled ledger command: {args.ledger_command}")  # pragma: no cover
 
 
+def _run_policy(args: argparse.Namespace) -> int:
+    if args.policy_command is None:
+        raise InvalidInputError("a policy subcommand is required", details={"command": "policy"})
+    if args.policy_command != "explain":
+        raise AssertionError(f"unhandled policy command: {args.policy_command}")  # pragma: no cover
+    try:
+        request = json.loads(args.request.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise InvalidInputError(
+            "unable to read policy request",
+            details={"path": str(args.request), "error": str(error)},
+        ) from error
+    except json.JSONDecodeError as error:
+        raise InvalidInputError(
+            "policy request must be JSON",
+            details={"path": str(args.request), "error": error.msg},
+        ) from error
+    if not isinstance(request, dict) or not isinstance(request.get("action"), str):
+        raise InvalidInputError("policy request requires a string action")
+    explanation = PolicyEvaluator(
+        policy_version=str(request.get("policy_version", "unversioned"))
+    ).explain_action_name(request["action"])
+    payload = {
+        "action": explanation.action,
+        "result": explanation.result.value,
+        "rule_id": explanation.rule_id,
+        "rationale": explanation.rationale,
+        "normalized_inputs": explanation.normalized_inputs,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    if explanation.result is PolicyResult.ALLOW:
+        return SUCCESS
+    if explanation.result is PolicyResult.REQUIRE_HUMAN:
+        return exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
+    return exit_code_for(FailureClass.POLICY_DENIAL)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -153,6 +201,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_doctor(as_json=args.json)
         if args.command == "ledger":
             return _run_ledger(args)
+        if args.command == "policy":
+            return _run_policy(args)
     except EngineryError as error:
         print(str(error), file=sys.stderr)
         return exit_code_for(error.failure_class)
