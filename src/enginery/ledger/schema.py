@@ -69,6 +69,62 @@ _MIGRATION_0001_LEDGER_CORE = Migration(
     ),
 )
 
-MIGRATIONS: tuple[Migration, ...] = (_MIGRATION_0001_LEDGER_CORE,)
+_MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER = Migration(
+    version=2,
+    description="command inbox, transactional outbox, process-manager state, node leases",
+    statements=(
+        """
+        CREATE TABLE command_inbox (
+            command_id TEXT PRIMARY KEY,
+            idempotency_key TEXT UNIQUE,
+            command_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'processed', 'rejected')),
+            processed_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE outbox (
+            outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            correlation_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            dispatched_at TEXT,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'dispatched', 'failed'))
+        )
+        """,
+        "CREATE INDEX outbox_status_idx ON outbox (status)",
+        """
+        CREATE TABLE process_manager_state (
+            process_manager_name TEXT NOT NULL,
+            state_key TEXT NOT NULL,
+            state_version INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (process_manager_name, state_key)
+        )
+        """,
+        """
+        CREATE TABLE node_leases (
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            owner TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            expires_at TEXT,
+            PRIMARY KEY (run_id, node_id)
+        )
+        """,
+    ),
+)
+
+MIGRATIONS: tuple[Migration, ...] = (
+    _MIGRATION_0001_LEDGER_CORE,
+    _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER,
+)
 
 __all__ = ["MIGRATIONS", "Migration"]

@@ -5,10 +5,13 @@ One :func:`append` call is one SQLite transaction. Every event in an
 first :class:`~enginery.ledger.errors.ExpectedVersionConflictError` raised
 while checking any event's expected aggregate version aborts the whole
 command, rolling back every event already written earlier in the same
-call. Later milestones extend :class:`AppendCommand` with artifact
-metadata references, lease/process-manager updates, projection writes,
-inbox acknowledgement, and outbox rows — all folded into this same
-transaction rather than a second commit.
+call. :class:`AppendCommand` also carries inbox acknowledgement, outbox
+entries, process-manager state updates, and node-lease updates — all
+folded into this same transaction, satisfying the one-transaction-per-
+command contract for expected aggregate versions, events, lease/
+scheduling updates, process-manager updates, inbox acknowledgement, and
+outbox rows. Artifact metadata references are added by a later milestone
+PR in this same stack.
 """
 
 from __future__ import annotations
@@ -22,6 +25,10 @@ from datetime import UTC, datetime
 from enginery.domain.errors import InvalidInputError
 from enginery.ledger.connection import transaction
 from enginery.ledger.errors import ExpectedVersionConflictError
+from enginery.ledger.inbox import acknowledge_command
+from enginery.ledger.leases import LeaseWrite, apply_lease_update
+from enginery.ledger.outbox import OutboxWrite, write_entry
+from enginery.ledger.process_manager import ProcessManagerStateWrite, apply_process_manager_update
 
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
@@ -73,10 +80,22 @@ class EventWrite:
 class AppendCommand:
     """One atomic unit of ledger work: at least one event, one shared
     ``correlation_id`` binding every event and side record this command
-    produces."""
+    produces.
+
+    ``inbox_command_id``, when set, acknowledges that pending
+    :mod:`enginery.ledger.inbox` row as ``processed`` inside this same
+    transaction. ``outbox_entries``, ``process_manager_updates``, and
+    ``lease_updates`` write their respective tables inside this same
+    transaction too, so a caller building one command from one operator
+    request never needs a second commit for its side effects.
+    """
 
     correlation_id: str
     events: tuple[EventWrite, ...] = field(default_factory=tuple)
+    inbox_command_id: str | None = None
+    outbox_entries: tuple[OutboxWrite, ...] = field(default_factory=tuple)
+    process_manager_updates: tuple[ProcessManagerStateWrite, ...] = field(default_factory=tuple)
+    lease_updates: tuple[LeaseWrite, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         _require_non_blank(self.correlation_id, field_name="correlation_id")
@@ -96,9 +115,19 @@ class AppendedEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AppendedProcessManagerState:
+    process_manager_name: str
+    state_key: str
+    state_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class AppendResult:
     correlation_id: str
     events: tuple[AppendedEvent, ...]
+    inbox_acknowledged: bool = False
+    outbox_ids: tuple[int, ...] = field(default_factory=tuple)
+    process_manager_states: tuple[AppendedProcessManagerState, ...] = field(default_factory=tuple)
 
 
 def _current_aggregate_version(
@@ -112,14 +141,19 @@ def _current_aggregate_version(
 
 
 def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResult:
-    """Append every event in ``command`` inside one transaction.
+    """Append every event in ``command``, plus its inbox acknowledgement,
+    outbox entries, process-manager updates, and lease updates, inside one
+    transaction.
 
     Raises :class:`ExpectedVersionConflictError` without writing anything
-    if any event's ``expected_version`` is stale by the time its turn is
-    checked; SQLite's transaction rollback on the raised exception
-    guarantees earlier writes in the same command are undone too.
+    if any event's or process-manager update's expected version is stale,
+    or if ``inbox_command_id`` is unknown or already processed; SQLite's
+    transaction rollback on the raised exception guarantees every write
+    already performed earlier in the same command is undone too.
     """
     appended: list[AppendedEvent] = []
+    process_manager_results: list[AppendedProcessManagerState] = []
+    outbox_ids: list[int] = []
     with transaction(connection):
         for event in command.events:
             current_version = _current_aggregate_version(
@@ -179,7 +213,42 @@ def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResu
                     aggregate_version=new_version,
                 )
             )
-    return AppendResult(correlation_id=command.correlation_id, events=tuple(appended))
+
+        for pm_write in command.process_manager_updates:
+            new_pm_version = apply_process_manager_update(connection, pm_write)
+            process_manager_results.append(
+                AppendedProcessManagerState(
+                    process_manager_name=pm_write.process_manager_name,
+                    state_key=pm_write.state_key,
+                    state_version=new_pm_version,
+                )
+            )
+
+        for lease_write in command.lease_updates:
+            apply_lease_update(connection, lease_write)
+
+        for outbox_write in command.outbox_entries:
+            outbox_ids.append(
+                write_entry(connection, correlation_id=command.correlation_id, entry=outbox_write)
+            )
+
+        if command.inbox_command_id is not None:
+            acknowledge_command(connection, command.inbox_command_id)
+
+    return AppendResult(
+        correlation_id=command.correlation_id,
+        events=tuple(appended),
+        inbox_acknowledged=command.inbox_command_id is not None,
+        outbox_ids=tuple(outbox_ids),
+        process_manager_states=tuple(process_manager_results),
+    )
 
 
-__all__ = ["AppendCommand", "AppendResult", "AppendedEvent", "EventWrite", "append"]
+__all__ = [
+    "AppendCommand",
+    "AppendResult",
+    "AppendedEvent",
+    "AppendedProcessManagerState",
+    "EventWrite",
+    "append",
+]
