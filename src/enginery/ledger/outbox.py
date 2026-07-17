@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
 from enginery.ledger.connection import transaction
+from enginery.ledger.redaction import assert_mapping_has_no_raw_credentials
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,7 @@ def _row_to_record(row: sqlite3.Row) -> OutboxRecord:
 
 def write_entry(connection: sqlite3.Connection, *, correlation_id: str, entry: OutboxWrite) -> int:
     """Insert one pending outbox row. Assumes a caller-owned transaction."""
+    assert_mapping_has_no_raw_credentials(entry.payload)
     payload_json = json.dumps(dict(entry.payload), sort_keys=True, separators=(",", ":"))
     cursor = connection.execute(
         """

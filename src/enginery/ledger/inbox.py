@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from enginery.domain.errors import InvalidInputError
 from enginery.ledger.connection import transaction
 from enginery.ledger.errors import ExpectedVersionConflictError
+from enginery.ledger.redaction import assert_mapping_has_no_raw_credentials
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,7 @@ def enqueue_command(
         if existing is not None:
             return existing
 
+    assert_mapping_has_no_raw_credentials(payload)
     received_at = datetime.now(UTC).isoformat()
     payload_json = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
     with transaction(connection):

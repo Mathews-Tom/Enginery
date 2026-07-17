@@ -6,12 +6,14 @@ first :class:`~enginery.ledger.errors.ExpectedVersionConflictError` raised
 while checking any event's expected aggregate version aborts the whole
 command, rolling back every event already written earlier in the same
 call. :class:`AppendCommand` also carries inbox acknowledgement, outbox
-entries, process-manager state updates, and node-lease updates — all
-folded into this same transaction, satisfying the one-transaction-per-
-command contract for expected aggregate versions, events, lease/
-scheduling updates, process-manager updates, inbox acknowledgement, and
-outbox rows. Artifact metadata references are added by a later milestone
-PR in this same stack.
+entries, process-manager state updates, node-lease updates, and content-
+addressed artifact metadata references — all folded into this same
+transaction, satisfying the one-transaction-per-command contract for
+expected aggregate versions, events, artifact metadata references,
+lease/scheduling updates, process-manager updates, inbox acknowledgement,
+and outbox rows. Every event payload is scanned for credential-shaped
+content before it is written, matching "raw harness/provider payloads
+cannot enter the ledger before adapter-side normalization/redaction."
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.artifacts import ArtifactMetadataWrite, apply_artifact_metadata
 from enginery.ledger.connection import transaction
 from enginery.ledger.errors import ExpectedVersionConflictError
 from enginery.ledger.inbox import acknowledge_command
@@ -30,6 +34,7 @@ from enginery.ledger.leases import LeaseWrite, apply_lease_update
 from enginery.ledger.outbox import OutboxWrite, write_entry
 from enginery.ledger.process_manager import ProcessManagerStateWrite, apply_process_manager_update
 from enginery.ledger.projections import apply_projection_update
+from enginery.ledger.redaction import assert_mapping_has_no_raw_credentials
 
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
@@ -85,10 +90,13 @@ class AppendCommand:
 
     ``inbox_command_id``, when set, acknowledges that pending
     :mod:`enginery.ledger.inbox` row as ``processed`` inside this same
-    transaction. ``outbox_entries``, ``process_manager_updates``, and
-    ``lease_updates`` write their respective tables inside this same
-    transaction too, so a caller building one command from one operator
-    request never needs a second commit for its side effects.
+    transaction. ``outbox_entries``, ``process_manager_updates``,
+    ``lease_updates``, and ``artifact_references`` write their respective
+    tables inside this same transaction too, so a caller building one
+    command from one operator request never needs a second commit for its
+    side effects. ``artifact_references`` requires ``append`` to be called
+    with a non-``None`` ``artifact_store`` — the ledger only ever records
+    metadata for bytes that store can prove are already published.
     """
 
     correlation_id: str
@@ -97,6 +105,7 @@ class AppendCommand:
     outbox_entries: tuple[OutboxWrite, ...] = field(default_factory=tuple)
     process_manager_updates: tuple[ProcessManagerStateWrite, ...] = field(default_factory=tuple)
     lease_updates: tuple[LeaseWrite, ...] = field(default_factory=tuple)
+    artifact_references: tuple[ArtifactMetadataWrite, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         _require_non_blank(self.correlation_id, field_name="correlation_id")
@@ -129,6 +138,7 @@ class AppendResult:
     inbox_acknowledged: bool = False
     outbox_ids: tuple[int, ...] = field(default_factory=tuple)
     process_manager_states: tuple[AppendedProcessManagerState, ...] = field(default_factory=tuple)
+    artifact_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _current_aggregate_version(
@@ -141,20 +151,35 @@ def _current_aggregate_version(
     return int(row["version"]) if row is not None else 0
 
 
-def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResult:
+def append(
+    connection: sqlite3.Connection,
+    command: AppendCommand,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> AppendResult:
     """Append every event in ``command``, plus its inbox acknowledgement,
-    outbox entries, process-manager updates, and lease updates, inside one
-    transaction.
+    outbox entries, process-manager updates, lease updates, and artifact
+    metadata references, inside one transaction.
 
     Raises :class:`ExpectedVersionConflictError` without writing anything
     if any event's or process-manager update's expected version is stale,
-    or if ``inbox_command_id`` is unknown or already processed; SQLite's
-    transaction rollback on the raised exception guarantees every write
+    or if ``inbox_command_id`` is unknown or already processed;
+    :class:`~enginery.ledger.errors.RawCredentialDetectedError` if any
+    event payload looks credential-shaped; and
+    :class:`InvalidInputError` if ``command.artifact_references`` is
+    non-empty but ``artifact_store`` was not provided. SQLite's
+    transaction rollback on any raised exception guarantees every write
     already performed earlier in the same command is undone too.
     """
+    if command.artifact_references and artifact_store is None:
+        raise InvalidInputError(
+            "command carries artifact_references but no artifact_store was provided"
+        )
+
     appended: list[AppendedEvent] = []
     process_manager_results: list[AppendedProcessManagerState] = []
     outbox_ids: list[int] = []
+    artifact_ids: list[str] = []
     with transaction(connection):
         for event in command.events:
             current_version = _current_aggregate_version(
@@ -175,6 +200,7 @@ def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResu
                 )
             new_version = current_version + 1
             causation_id = event.causation_id or command.correlation_id
+            assert_mapping_has_no_raw_credentials(event.payload)
             payload_json = json.dumps(dict(event.payload), sort_keys=True, separators=(",", ":"))
             cursor = connection.execute(
                 """
@@ -242,6 +268,11 @@ def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResu
                 write_entry(connection, correlation_id=command.correlation_id, entry=outbox_write)
             )
 
+        for artifact_write in command.artifact_references:
+            assert artifact_store is not None  # validated above
+            apply_artifact_metadata(connection, artifact_write, store=artifact_store)
+            artifact_ids.append(str(artifact_write.artifact_id))
+
         if command.inbox_command_id is not None:
             acknowledge_command(connection, command.inbox_command_id)
 
@@ -251,6 +282,7 @@ def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResu
         inbox_acknowledged=command.inbox_command_id is not None,
         outbox_ids=tuple(outbox_ids),
         process_manager_states=tuple(process_manager_results),
+        artifact_ids=tuple(artifact_ids),
     )
 
 

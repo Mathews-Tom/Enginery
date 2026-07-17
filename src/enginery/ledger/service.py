@@ -14,6 +14,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
 
+from enginery.domain.digests import Digest
+from enginery.domain.errors import InvalidInputError
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.artifacts import ArtifactMetadataRecord
+from enginery.ledger.artifacts import read_artifact_metadata as _read_artifact_metadata
 from enginery.ledger.commit_cursors import advance_cursor as _advance_cursor
 from enginery.ledger.commit_cursors import read_cursor as _read_cursor
 from enginery.ledger.connection import open_connection
@@ -38,32 +43,55 @@ from enginery.ledger.projections import rebuild_projections as _rebuild_projecti
 class LedgerService:
     """A migrated SQLite ledger and its command-append API."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self, connection: sqlite3.Connection, *, artifact_store: ArtifactStore | None = None
+    ) -> None:
         self._connection = connection
+        self._artifact_store = artifact_store
 
     @classmethod
-    def open(cls, database_path: Path) -> LedgerService:
+    def open(cls, database_path: Path, *, artifact_store_root: Path | None = None) -> LedgerService:
         """Open ``database_path``, applying every pending migration first.
 
         Raises before returning a usable service if any migration fails —
         a caller must never receive a partially migrated ledger, matching
         the "interrupted migration does not start the application"
-        acceptance criterion.
+        acceptance criterion. ``artifact_store_root``, when given, roots
+        an :class:`~enginery.ledger.artifact_store.ArtifactStore`
+        alongside the ledger so ``append`` can accept
+        ``artifact_references``.
         """
         connection = open_connection(database_path)
         apply_pending_migrations(connection)
-        return cls(connection)
+        artifact_store = (
+            ArtifactStore(artifact_store_root) if artifact_store_root is not None else None
+        )
+        return cls(connection, artifact_store=artifact_store)
 
     @property
     def connection(self) -> sqlite3.Connection:
         return self._connection
 
     @property
+    def artifact_store(self) -> ArtifactStore | None:
+        return self._artifact_store
+
+    @property
     def schema_version(self) -> int:
         return current_schema_version(self._connection)
 
     def append(self, command: AppendCommand) -> AppendResult:
-        return append(self._connection, command)
+        return append(self._connection, command, artifact_store=self._artifact_store)
+
+    def publish_artifact_bytes(
+        self, data: bytes, *, media_type: str = "application/octet-stream"
+    ) -> Digest:
+        if self._artifact_store is None:
+            raise InvalidInputError("no artifact_store configured for this LedgerService")
+        return self._artifact_store.publish_bytes(data, media_type=media_type)
+
+    def read_artifact_metadata(self, artifact_id: str) -> ArtifactMetadataRecord | None:
+        return _read_artifact_metadata(self._connection, artifact_id)
 
     def enqueue_command(
         self,

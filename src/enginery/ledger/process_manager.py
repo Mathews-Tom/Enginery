@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
 from enginery.ledger.errors import ExpectedVersionConflictError
+from enginery.ledger.redaction import assert_mapping_has_no_raw_credentials
 
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
@@ -92,6 +93,7 @@ def apply_process_manager_update(
             },
         )
     new_version = current_version + 1
+    assert_mapping_has_no_raw_credentials(write.state)
     state_json = json.dumps(dict(write.state), sort_keys=True, separators=(",", ":"))
     connection.execute(
         """
