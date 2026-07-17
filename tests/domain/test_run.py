@@ -170,7 +170,7 @@ class TestRunTransitions:
 
     def test_superseded_is_directly_reachable_from_every_state_except_created(self) -> None:
         # source divergence can supersede a run from every state where it can
-        # occur (§2.3); "created" precedes the first source-digest check.
+        # occur; "created" precedes the first source-digest check.
         non_created_states = set(RUN_TRANSITIONS.edges) - {RunState.CREATED}
         for source in non_created_states:
             assert RUN_TRANSITIONS.allows(source, RunState.SUPERSEDED), source

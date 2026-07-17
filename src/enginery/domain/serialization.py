@@ -1,5 +1,5 @@
-"""Versioned JSON serialization for domain aggregates (03_SYSTEM_DESIGN.md §11:
-"event payloads and schemas are versioned").
+"""Versioned JSON serialization for domain aggregates: event payloads and
+schemas are versioned.
 
 Every aggregate has exactly one currently supported ``schema_version`` per
 envelope in this milestone. ``from_dict`` rejects any other version rather

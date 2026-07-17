@@ -14,8 +14,7 @@ Pre-`v0.1.0`. The repository currently contains the project scaffold: a
 licensed `uv` package, package boundaries, a central error taxonomy, and a
 `enginery` CLI skeleton (`--version`, `doctor`). No workflow, persistence,
 policy, or adapter behavior is implemented yet. See
-[`.docs/DEVELOPMENT_PLAN.md`](.docs/DEVELOPMENT_PLAN.md) for the milestone
-plan and [`docs/`](docs) for the finalized product design documents.
+[`docs/`](docs) for the finalized product design documents.
 
 ## Installation
 

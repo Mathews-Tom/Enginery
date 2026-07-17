@@ -1,7 +1,7 @@
-"""``WorkItem``: a normalized unit of engineering intent (03_SYSTEM_DESIGN.md §9.1).
+"""``WorkItem``: a normalized unit of engineering intent.
 
 This module declares the immutable aggregate, its closed lifecycle-state
-vocabulary (§10.1), and guarded transition enforcement built on the shared
+vocabulary, and guarded transition enforcement built on the shared
 ``TransitionTable`` machinery.
 """
 
@@ -18,7 +18,7 @@ from enginery.domain.state_machine import TransitionTable
 
 
 class WorkItemState(enum.Enum):
-    """The ten work-item lifecycle states (§10.1)."""
+    """The ten work-item lifecycle states."""
 
     NEW = "new"
     QUALIFYING = "qualifying"
@@ -111,7 +111,7 @@ class WorkItem:
 
     @property
     def bound_field_digest(self) -> Digest:
-        """The deterministic digest checked for source supersession (§18.2).
+        """The deterministic digest checked for source supersession.
 
         Covers exactly the fields the design binds and rechecks before
         every human approval, side-effecting node, evidence-verification
@@ -130,7 +130,7 @@ class WorkItem:
 
     def transition_to(self, target: WorkItemState) -> WorkItem:
         """Return a new ``WorkItem`` in ``target`` state, or raise if the
-        transition is not legal from the current state (§10.1)."""
+        transition is not legal from the current state."""
         WORK_ITEM_TRANSITIONS.require(self.state, target)
         return replace(self, state=target, aggregate_version=self.aggregate_version + 1)
 

@@ -1,4 +1,4 @@
-"""Immutable, validated workflow manifests (03_SYSTEM_DESIGN.md §12).
+"""Immutable, validated workflow manifests.
 
 A workflow manifest is repository-owned orchestration data: node graph,
 typed schemas, retry/budget declarations, and terminal-state mapping. It

@@ -1,4 +1,4 @@
-"""Content-addressed digests (03_SYSTEM_DESIGN.md §7.7, §9.2, §9.5, §11).
+"""Content-addressed digests.
 
 Every content-addressed asset in the design — workflow-definition content,
 work-item bound-field snapshots, artifact bytes, and node-attempt inputs —

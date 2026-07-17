@@ -1,4 +1,4 @@
-"""Provider-neutral aggregate and value identifiers (03_SYSTEM_DESIGN.md §9).
+"""Provider-neutral aggregate and value identifiers.
 
 Every aggregate and cross-aggregate reference in the domain layer is
 identified by a dedicated frozen value type rather than a bare ``str``. This
@@ -100,7 +100,7 @@ class FactoryChangeId(_Identifier):
 
 @dataclass(frozen=True, slots=True)
 class OperationId:
-    """A stable side-effect identity, reused across every retry (§7.10).
+    """A stable side-effect identity, reused across every retry.
 
     Derived once from the run ID, node ID, logical side-effect kind, target
     scope, and operation ordinal *before* the first attempt. The attempt

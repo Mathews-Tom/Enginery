@@ -1,5 +1,6 @@
-"""Defensive immutability helpers for frozen dataclasses (03_SYSTEM_DESIGN.md
-§8.1 selects "immutable value objects" for every domain aggregate).
+"""Defensive immutability helpers for frozen dataclasses.
+
+Domain aggregates model every field as an immutable value object.
 
 A frozen dataclass field typed as ``Mapping[K, V]`` still accepts a plain
 mutable ``dict`` at construction; without normalization, the caller's later

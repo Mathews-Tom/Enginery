@@ -1,5 +1,4 @@
-"""Retry, timeout, and cost budget declarations for workflow nodes
-(03_SYSTEM_DESIGN.md §9.2, §12.1).
+"""Retry, timeout, and cost budget declarations for workflow nodes.
 
 Every side-effecting node declares bounded retry, time, and cost limits so
 a run can never retry or spend unboundedly; invalid limits are rejected at

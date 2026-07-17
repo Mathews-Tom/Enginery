@@ -1,4 +1,4 @@
-"""Typed node declarations for workflow manifests (03_SYSTEM_DESIGN.md §12.2).
+"""Typed node declarations for workflow manifests.
 
 Executable behavior lives in typed, tested modules outside this package;
 ``NodeDeclaration`` only carries the *contract* a registered node type
@@ -22,7 +22,7 @@ from enginery.domain.workflow.schema import IOSchema
 
 
 class NodeKind(enum.Enum):
-    """The eighteen registered node families (§12.2)."""
+    """The eighteen registered node families."""
 
     NORMALIZE_WORK = "normalize_work"
     REQUEST_HUMAN_DECISION = "request_human_decision"
@@ -53,14 +53,14 @@ class ActorType(enum.Enum):
 
 
 class SideEffectClass(enum.Enum):
-    """Whether a node causes an external side effect (§7.10, §12.2)."""
+    """Whether a node causes an external side effect."""
 
     NONE = "none"
     SIDE_EFFECTING = "side_effecting"
 
 
 class IdempotencyBehavior(enum.Enum):
-    """How a side-effecting node achieves idempotency (§7.10, §12.2)."""
+    """How a side-effecting node achieves idempotency."""
 
     NOT_APPLICABLE = "not_applicable"
     NATIVE_IDEMPOTENCY_KEY = "native_idempotency_key"
@@ -68,7 +68,7 @@ class IdempotencyBehavior(enum.Enum):
 
 
 class BranchOperator(enum.Enum):
-    """The closed set of branch-condition comparisons (§12.1).
+    """The closed set of branch-condition comparisons.
 
     Deliberately not an expression language: a condition compares one
     upstream output field against a fixed set of literal values.
@@ -198,7 +198,7 @@ class NodeDeclaration:
             if self.idempotency_behavior is IdempotencyBehavior.NOT_APPLICABLE:
                 raise InvalidInputError(
                     "a side-effecting node must declare an idempotency behavior "
-                    "(§7.10: undeclared side effects are rejected)",
+                    "(undeclared side effects are rejected)",
                     details={"node_id": str(self.node_id)},
                 )
             if (

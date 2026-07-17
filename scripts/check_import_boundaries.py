@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the modular-monolith package-boundary rules (03_SYSTEM_DESIGN.md §8.1).
+"""Enforce the modular-monolith package-boundary rules.
 
 Given a layer name, parse every module under ``src/enginery/<layer>`` with
 ``ast`` and reject any import of an ``enginery`` subpackage the layer is not
@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "enginery"
 PACKAGE = "enginery"
 
-# Allowed import direction between enginery.* layers (03_SYSTEM_DESIGN.md §8.1, §8).
+# Allowed import direction between enginery.* layers.
 LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain"}),
     "application": frozenset({"domain", "application"}),

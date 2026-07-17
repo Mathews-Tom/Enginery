@@ -1,5 +1,5 @@
-"""Invariant coverage summary: proves every designed state-machine edge from
-03_SYSTEM_DESIGN.md §10 is exercised by a dedicated test, not merely sampled.
+"""Invariant coverage summary: proves every designed state-machine edge is
+exercised by a dedicated test, not merely sampled.
 
 Each per-aggregate test module (``test_work_item.py``, ``test_run.py``,
 ``test_node_attempt.py``, ``test_factory_change.py``) parametrizes over the
@@ -32,9 +32,9 @@ def _edges(table: TransitionTable[Any]) -> set[tuple[object, object]]:
 
 class TestDesignedEdgeCounts:
     """One assertion per state machine, matching the exact edge count
-    transcribed by hand from 03_SYSTEM_DESIGN.md §10 in the PR description
-    for m02/domain-03. A change to any table must update this constant
-    deliberately, which is the point: it cannot drift silently."""
+    transcribed by hand from the system design's transition tables in the
+    PR description for m02/domain-03. A change to any table must update
+    this constant deliberately, which is the point: it cannot drift silently."""
 
     def test_work_item_has_seventeen_designed_edges(self) -> None:
         assert _edge_count(WORK_ITEM_TRANSITIONS) == 17
@@ -52,7 +52,7 @@ class TestDesignedEdgeCounts:
 class TestNoTransitionTableAllowsAnUndeclaredEdge:
     """For every (source, target) pair over each table's own state universe,
     ``allows`` is true iff the pair is a declared edge — proving the guard
-    has no accidental extra permissiveness beyond exactly what §10 lists."""
+    has no accidental extra permissiveness beyond the declared transitions."""
 
     @staticmethod
     def _assert_allows_matches_declared_edges(table: TransitionTable[Any]) -> None:

@@ -1,5 +1,4 @@
-"""Typed input/output schema declarations for workflow nodes and manifests
-(03_SYSTEM_DESIGN.md §9.2, §12.1, §12.2).
+"""Typed input/output schema declarations for workflow nodes and manifests.
 
 A schema is data, never code: each field names a closed ``FieldType`` and a
 required flag. This is deliberately too small to express computation, which

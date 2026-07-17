@@ -1,9 +1,9 @@
-"""``NodeAttempt``: one attempt to execute a workflow node (03_SYSTEM_DESIGN.md §9.4).
+"""``NodeAttempt``: one attempt to execute a workflow node.
 
-Declares the aggregate, its ten-state lifecycle vocabulary (§10.3), the
+Declares the aggregate, its ten-state lifecycle vocabulary, the
 reconciliation-result vocabulary reused by the shared four-result
-reconciliation contract (§7.10, §10.3), the three-value evidence result
-(§16.1) a completed attempt carries, and guarded transition enforcement.
+reconciliation contract, the three-value evidence result a completed
+attempt carries, and guarded transition enforcement.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from enginery.domain.state_machine import TransitionTable
 
 
 class NodeAttemptState(enum.Enum):
-    """The ten node-attempt lifecycle states (§10.3)."""
+    """The ten node-attempt lifecycle states."""
 
     PENDING = "pending"
     LEASED = "leased"
@@ -34,7 +34,7 @@ class NodeAttemptState(enum.Enum):
 
 
 class ReconciliationResult(enum.Enum):
-    """The four reconciliation outcomes for an ambiguous side effect (§7.10)."""
+    """The four reconciliation outcomes for an ambiguous side effect."""
 
     NOT_FOUND = "not_found"
     FOUND_MATCHING = "found_matching"
@@ -43,7 +43,7 @@ class ReconciliationResult(enum.Enum):
 
 
 class EvidenceResult(enum.Enum):
-    """The three evidence-verification outcomes (§16.1). Only ``PASS`` succeeds."""
+    """The three evidence-verification outcomes. Only ``PASS`` succeeds."""
 
     PASS = "pass"
     FAIL = "fail"
@@ -172,12 +172,12 @@ class NodeAttempt:
 
     def transition_to(self, target: NodeAttemptState) -> NodeAttempt:
         """Return a new ``NodeAttempt`` in ``target`` state, or raise if the
-        transition is not legal from the current state (§10.3)."""
+        transition is not legal from the current state."""
         NODE_ATTEMPT_TRANSITIONS.require(self.state, target)
         return replace(self, state=target)
 
     def resolve_reconciliation(self, result: ReconciliationResult) -> NodeAttempt:
-        """Apply a reconciliation outcome from the ``reconciling`` state (§7.10, §10.3).
+        """Apply a reconciliation outcome from the ``reconciling`` state.
 
         ``found_matching`` adopts the observed result and continues to
         ``output_pending``. ``not_found``, ``found_conflicting``, and

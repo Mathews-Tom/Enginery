@@ -1,9 +1,9 @@
-"""A generic, self-validating guarded state-transition table (03_SYSTEM_DESIGN.md §10).
+"""A generic, self-validating guarded state-transition table.
 
 Every domain aggregate with a lifecycle state (``WorkItem``, ``Run``,
 ``NodeAttempt``, ``FactoryChange``) reuses one ``TransitionTable`` instance
 instead of re-implementing guard logic per aggregate, so the exact edges and
-terminal semantics transcribed from §10 are enforced identically everywhere.
+terminal semantics are enforced identically everywhere.
 """
 
 from __future__ import annotations
@@ -65,8 +65,7 @@ class TransitionTable[StateT]:
 
         An empty result for a non-terminal state means that state is a dead
         end — proving the absence of dead ends is exactly the "unreachable
-        terminal claims" invariant the design requires (§10, acceptance
-        criteria of M2).
+        terminal claims" invariant this module enforces.
         """
         seen: set[StateT] = set()
         frontier = [source]

@@ -1,6 +1,6 @@
 """Tests for enginery.domain.workflow: schema, budget, node, and manifest.
 
-Covers the verification surface named in .docs/DEVELOPMENT_PLAN.md M2:
+Covers the verification surface for M2:
 ``uv run pytest tests/domain tests/workflow/test_manifest.py -q``.
 """
 
@@ -567,7 +567,7 @@ class TestWorkflowManifestOperationIdentity:
 
 
 # ---------------------------------------------------------------------------
-# golden compatibility fixture (03_SYSTEM_DESIGN.md §11, §9.2)
+# golden compatibility fixture
 # ---------------------------------------------------------------------------
 
 

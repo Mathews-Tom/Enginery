@@ -1,5 +1,4 @@
-"""``Outcome``: a post-execution observation, distinct from workflow completion
-(03_SYSTEM_DESIGN.md §9.8).
+"""``Outcome``: a post-execution observation, distinct from workflow completion.
 
 Outcomes never rewrite a completed work item. A reopened issue or escaped
 defect creates a new linked work item and retains the prior item and
@@ -20,7 +19,7 @@ from enginery.domain.immutable import freeze_mapping
 
 
 class OutcomeKind(enum.Enum):
-    """The observation categories named in §9.8."""
+    """The observation categories this module recognizes."""
 
     PR_ACCEPTED = "pr_accepted"
     PR_REJECTED = "pr_rejected"
