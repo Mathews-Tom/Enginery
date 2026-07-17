@@ -1,0 +1,17 @@
+{
+  "data": {
+    "attempt_id": "attempt-golden-1",
+    "byte_size": 2048,
+    "created_at": "2026-07-17T12:00:00+00:00",
+    "digest": "sha256:6521df166eb07efaf36eba5b6bedefd9d6a252e9c80bab1c99653700ec71473c",
+    "id": "artifact-golden-1",
+    "kind": "patch",
+    "media_type": "text/x-diff",
+    "node_id": "implement",
+    "redaction": "internal",
+    "run_id": "run-golden-1",
+    "schema_version": 1,
+    "storage_reference": "cas://sha256/deadbeef"
+  },
+  "schema_version": 1
+}

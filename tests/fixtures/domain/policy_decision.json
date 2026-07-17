@@ -1,0 +1,21 @@
+{
+  "data": {
+    "action": "pull_request.open",
+    "decided_at": "2026-07-17T12:00:00+00:00",
+    "id": "decision-golden-1",
+    "input_digest": "sha256:aa3e154b665f448fd8ba772a2d87235a985140b4f68969f0d8df8d13771d870e",
+    "normalized_inputs": {
+      "repository": "Mathews-Tom/Enginery",
+      "risk_class": "low"
+    },
+    "policy_rule_id": "rule-pr-open-low-risk",
+    "policy_version": "policy-2026-07-17",
+    "rationale": "low-risk PR open matches auto-allow rule",
+    "required_approver": null,
+    "required_evidence": [],
+    "result": "allow",
+    "superseded": false,
+    "superseded_by": null
+  },
+  "schema_version": 1
+}

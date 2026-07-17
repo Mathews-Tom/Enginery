@@ -1,0 +1,20 @@
+{
+  "data": {
+    "affected_asset": "workflows/issue_to_pr.yaml",
+    "aggregate_version": 2,
+    "approval_state": null,
+    "baseline_version": "v3",
+    "canary_cohort": [],
+    "candidate_version": "v4-candidate",
+    "comparison_result": {
+      "exhaustion_rate_delta": -0.08
+    },
+    "evaluation_set_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "hypothesis": "raising the repair budget from 2 to 3 reduces exhaustion below 5%",
+    "id": "fc-golden-1",
+    "problem_statement": "repair budget exhausted on 12% of runs last month",
+    "promotion_result": null,
+    "state": "evaluating"
+  },
+  "schema_version": 1
+}
