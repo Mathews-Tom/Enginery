@@ -101,3 +101,26 @@ CREATE TABLE node_leases (
             PRIMARY KEY (run_id, node_id)
         )
 ```
+
+## Migration 3: latest-state projections and durable consumer commit cursors
+
+```sql
+CREATE TABLE projections (
+            aggregate_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            aggregate_version INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (aggregate_type, aggregate_id)
+        )
+```
+
+```sql
+CREATE TABLE commit_cursors (
+            consumer_name TEXT PRIMARY KEY,
+            last_commit_seq INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+```

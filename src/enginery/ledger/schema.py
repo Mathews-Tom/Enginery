@@ -122,9 +122,36 @@ _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER = Migration(
     ),
 )
 
+_MIGRATION_0003_PROJECTIONS_AND_CURSORS = Migration(
+    version=3,
+    description="latest-state projections and durable consumer commit cursors",
+    statements=(
+        """
+        CREATE TABLE projections (
+            aggregate_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            aggregate_version INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (aggregate_type, aggregate_id)
+        )
+        """,
+        """
+        CREATE TABLE commit_cursors (
+            consumer_name TEXT PRIMARY KEY,
+            last_commit_seq INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+    ),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     _MIGRATION_0001_LEDGER_CORE,
     _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER,
+    _MIGRATION_0003_PROJECTIONS_AND_CURSORS,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]

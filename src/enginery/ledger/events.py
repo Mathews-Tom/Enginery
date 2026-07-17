@@ -29,6 +29,7 @@ from enginery.ledger.inbox import acknowledge_command
 from enginery.ledger.leases import LeaseWrite, apply_lease_update
 from enginery.ledger.outbox import OutboxWrite, write_entry
 from enginery.ledger.process_manager import ProcessManagerStateWrite, apply_process_manager_update
+from enginery.ledger.projections import apply_projection_update
 
 
 def _require_non_blank(value: str, *, field_name: str) -> None:
@@ -202,6 +203,15 @@ def append(connection: sqlite3.Connection, command: AppendCommand) -> AppendResu
                 DO UPDATE SET version = excluded.version
                 """,
                 (event.aggregate_type, event.aggregate_id, new_version),
+            )
+            apply_projection_update(
+                connection,
+                aggregate_type=event.aggregate_type,
+                aggregate_id=event.aggregate_id,
+                aggregate_version=new_version,
+                event_type=event.event_type,
+                schema_version=event.schema_version,
+                payload_json=payload_json,
             )
             commit_seq = cursor.lastrowid
             assert commit_seq is not None

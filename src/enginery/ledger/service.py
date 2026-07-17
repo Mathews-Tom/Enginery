@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
 
+from enginery.ledger.commit_cursors import advance_cursor as _advance_cursor
+from enginery.ledger.commit_cursors import read_cursor as _read_cursor
 from enginery.ledger.connection import open_connection
 from enginery.ledger.events import AppendCommand, AppendResult, append
 from enginery.ledger.inbox import InboxRecord
@@ -28,6 +30,9 @@ from enginery.ledger.outbox import list_pending as _list_pending_outbox
 from enginery.ledger.outbox import mark_dispatched as _mark_outbox_dispatched
 from enginery.ledger.process_manager import ProcessManagerStateRecord
 from enginery.ledger.process_manager import read_process_manager_state as _read_pm_state
+from enginery.ledger.projections import ProjectionRecord, RebuildReport
+from enginery.ledger.projections import read_projection as _read_projection
+from enginery.ledger.projections import rebuild_projections as _rebuild_projections
 
 
 class LedgerService:
@@ -99,6 +104,20 @@ class LedgerService:
 
     def read_lease(self, *, run_id: str, node_id: str) -> LeaseRecord | None:
         return _read_lease(self._connection, run_id=run_id, node_id=node_id)
+
+    def read_projection(self, *, aggregate_type: str, aggregate_id: str) -> ProjectionRecord | None:
+        return _read_projection(
+            self._connection, aggregate_type=aggregate_type, aggregate_id=aggregate_id
+        )
+
+    def rebuild_projections(self) -> RebuildReport:
+        return _rebuild_projections(self._connection)
+
+    def read_cursor(self, consumer_name: str) -> int:
+        return _read_cursor(self._connection, consumer_name)
+
+    def advance_cursor(self, consumer_name: str, commit_seq: int, *, force: bool = False) -> None:
+        _advance_cursor(self._connection, consumer_name, commit_seq, force=force)
 
     def close(self) -> None:
         self._connection.close()
