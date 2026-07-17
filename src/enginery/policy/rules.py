@@ -57,11 +57,22 @@ class HardRuleEnforcer:
         return schema.action in _DUAL_HUMAN_ACTIONS
 
     @staticmethod
+    def _require(schema: ApprovalSchema, *fields: str) -> None:
+        try:
+            schema.require_fields(*fields)
+        except ActionSchemaError as error:
+            raise HardRuleError(str(error)) from error
+
+    @staticmethod
     def enforce_request(schema: ApprovalSchema) -> None:
         """Reject unsafe input before policy rules can consider it."""
 
         if schema.action is PolicyAction.CREDENTIAL_GRANT:
-            schema.require_fields("credential_delivery_target")
+            HardRuleEnforcer._require(
+                schema,
+                "credential_delivery_target",
+                "agent_authored_executable",
+            )
             if schema.credential_delivery_target != "fixed_broker":
                 raise HardRuleError(
                     "production and publication credentials may only be granted "
@@ -74,27 +85,47 @@ class HardRuleEnforcer:
             and schema.reconciliation_complete is not True
         ):
             raise HardRuleError("an ambiguous side effect must reconcile before retry")
+        if schema.action is PolicyAction.FACTORY_CHANGE_PROPOSE:
+            HardRuleEnforcer._require(
+                schema,
+                "mutates_active_factory_asset",
+                "candidate_received_held_out_input",
+            )
         if schema.mutates_active_factory_asset is True:
             raise HardRuleError("active factory assets cannot be mutated in place")
         if schema.candidate_received_held_out_input is True:
             raise HardRuleError("candidates cannot inspect held-out evaluation inputs")
-        if (
-            schema.action is PolicyAction.FACTORY_CHANGE_CANARY
-            and schema.candidate_affects_protected_control is True
-            and schema.canary_target != "non_production_shadow"
-        ):
-            raise HardRuleError(
-                "protected-control candidates may only canary in non-production shadow mode"
+        if schema.action is PolicyAction.FACTORY_CHANGE_CANARY:
+            HardRuleEnforcer._require(
+                schema,
+                "candidate_affects_protected_control",
+                "canary_target",
             )
+            if (
+                schema.candidate_affects_protected_control is True
+                and schema.canary_target != "non_production_shadow"
+            ):
+                raise HardRuleError(
+                    "protected-control candidates may only canary in non-production shadow mode"
+                )
         if schema.action is PolicyAction.POLICY_OVERRIDE:
-            schema.require_fields("override_reason", "override_scope", "override_expires_at")
+            HardRuleEnforcer._require(
+                schema,
+                "override_reason",
+                "override_scope",
+                "override_expires_at",
+            )
             if _FORBIDDEN_OVERRIDE_SCOPES.intersection(schema.override_scope or ()):
                 raise HardRuleError("a policy override cannot relax a hard rule")
         if (
             schema.action is PolicyAction.CAPABILITY_MATERIALIZE
             and schema.capability_introduced_by_run is True
         ):
-            schema.require_fields("requested_capability", "diff_or_artifact_digest")
+            HardRuleEnforcer._require(
+                schema,
+                "requested_capability",
+                "diff_or_artifact_digest",
+            )
 
     @staticmethod
     def enforce_approval(
