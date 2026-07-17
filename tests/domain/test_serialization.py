@@ -1,5 +1,5 @@
 """Tests for enginery.domain.serialization: versioned round-trips and golden
-compatibility fixtures (03_SYSTEM_DESIGN.md §11).
+compatibility fixtures.
 
 Each golden fixture under ``tests/fixtures/domain/`` is a committed,
 schema-versioned JSON envelope. These tests prove two independent things:
