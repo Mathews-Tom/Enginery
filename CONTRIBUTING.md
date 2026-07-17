@@ -30,8 +30,7 @@ mood, lowercase start, no trailing period.
 
 ## Package boundaries
 
-The source tree is a modular monolith with strict inward dependencies
-(`03_SYSTEM_DESIGN.md` §8.1):
+The source tree is a modular monolith with strict inward dependencies:
 
 - `domain` imports nothing else in this repository.
 - `application` may import `domain`.
