@@ -1,9 +1,8 @@
-"""``PolicyDecision``: a durable policy evaluation record (03_SYSTEM_DESIGN.md §9.6, §15).
+"""``PolicyDecision``: a durable policy evaluation record.
 
 This module only encodes the closed action namespace and the decision
 record shape. Policy *evaluation* — matching rules, granting authority, and
-enforcing the non-overridable hard-rule set — is out of scope for M2 (see
-`.docs/DEVELOPMENT_PLAN.md` M4).
+enforcing the non-overridable hard-rule set — is out of scope for M2.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from enginery.domain.immutable import freeze_mapping
 
 
 class PolicyAction(enum.Enum):
-    """The closed initial action namespace (§15). An action outside this set
+    """The closed initial action namespace. An action outside this set
     cannot be represented — matching the hard rule that unknown actions are
     denied rather than silently permitted."""
 
@@ -44,7 +43,7 @@ class PolicyAction(enum.Enum):
 
 
 class PolicyResult(enum.Enum):
-    """The three policy evaluation results (§15)."""
+    """The three policy evaluation results."""
 
     ALLOW = "allow"
     DENY = "deny"

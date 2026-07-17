@@ -1,4 +1,4 @@
-"""``Artifact``: one content-addressed output or evidence item (03_SYSTEM_DESIGN.md §9.5)."""
+"""``Artifact``: one content-addressed output or evidence item."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from enginery.domain.ids import ArtifactId, NodeAttemptId, NodeId, RunId
 
 
 class ArtifactKind(enum.Enum):
-    """The artifact kinds named as examples in §9.5."""
+    """Illustrative artifact kinds; not an exhaustive vocabulary."""
 
     PLAN = "plan"
     PATCH = "patch"
@@ -27,7 +27,7 @@ class ArtifactKind(enum.Enum):
 
 
 class RedactionClassification(enum.Enum):
-    """The sensitivity classification an artifact carries before persistence (§17.2)."""
+    """The sensitivity classification an artifact carries before persistence."""
 
     PUBLIC = "public"
     INTERNAL = "internal"

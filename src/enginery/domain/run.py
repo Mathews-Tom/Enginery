@@ -1,10 +1,10 @@
-"""``Run``: one workflow instance bound to a work item (03_SYSTEM_DESIGN.md §9.3).
+"""``Run``: one workflow instance bound to a work item.
 
-Declares the aggregate, its fourteen-state lifecycle vocabulary (§10.2), and
+Declares the aggregate, its fourteen-state lifecycle vocabulary, and
 guarded transition enforcement built on the shared ``TransitionTable``
 machinery. Note that ``blocked`` is a *terminal* state for a run — unlike a
 work item's recoverable ``blocked`` state — matching the design's explicit
-"Terminal states" line for §10.2.
+"Terminal states" distinction for run lifecycle transitions.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from enginery.domain.state_machine import TransitionTable
 
 
 class RunState(enum.Enum):
-    """The fourteen run lifecycle states (§10.2)."""
+    """The fourteen run lifecycle states."""
 
     CREATED = "created"
     PREFLIGHT = "preflight"
@@ -151,7 +151,7 @@ class Run:
 
     def transition_to(self, target: RunState) -> Run:
         """Return a new ``Run`` in ``target`` state, or raise if the
-        transition is not legal from the current state (§10.2)."""
+        transition is not legal from the current state."""
         RUN_TRANSITIONS.require(self.state, target)
         return replace(self, state=target, aggregate_version=self.aggregate_version + 1)
 

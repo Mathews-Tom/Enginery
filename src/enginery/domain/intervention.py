@@ -1,4 +1,4 @@
-"""``Intervention``: a human action linked to a run (03_SYSTEM_DESIGN.md §9.7)."""
+"""``Intervention``: a human action linked to a run."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from enginery.domain.immutable import freeze_mapping
 
 
 class InterventionKind(enum.Enum):
-    """The seven intervention kinds named in §9.7."""
+    """The seven intervention kinds this module recognizes."""
 
     APPROVAL = "approval"
     REJECTION = "rejection"

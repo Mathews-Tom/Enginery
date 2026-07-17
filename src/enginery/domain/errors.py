@@ -1,9 +1,9 @@
 """Central failure-class taxonomy and exception hierarchy.
 
 Every exception raised across Enginery's layers carries a stable
-``FailureClass`` (03_SYSTEM_DESIGN.md §24) so callers such as the CLI exit-
-code mapping, retry policy, and evidence recording can react to failures
-without parsing exception messages. This module has zero outward imports:
+``FailureClass`` so callers such as the CLI exit-code mapping, retry
+policy, and evidence recording can react to failures without parsing
+exception messages. This module has zero outward imports:
 every other layer, including adapters and the CLI, may import it.
 """
 

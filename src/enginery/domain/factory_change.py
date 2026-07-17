@@ -1,8 +1,7 @@
-"""``FactoryChange``: a candidate change to a workflow-system asset
-(03_SYSTEM_DESIGN.md §9.9, §10.4, §21).
+"""``FactoryChange``: a candidate change to a workflow-system asset.
 
 Declares the aggregate, its nine-state lifecycle vocabulary, and guarded
-transition enforcement. "Active workflows are immutable" (§7.8): a
+transition enforcement. "Active workflows are immutable": a
 ``FactoryChange`` always proposes a distinct ``candidate_version`` next to
 the unchanged ``baseline_version`` rather than editing it in place.
 """
@@ -20,7 +19,7 @@ from enginery.domain.state_machine import TransitionTable
 
 
 class FactoryChangeState(enum.Enum):
-    """The nine factory-change lifecycle states (§10.4)."""
+    """The nine factory-change lifecycle states."""
 
     PROPOSED = "proposed"
     EVALUATION_READY = "evaluation_ready"
@@ -106,7 +105,7 @@ class FactoryChange:
 
     def transition_to(self, target: FactoryChangeState) -> FactoryChange:
         """Return a new ``FactoryChange`` in ``target`` state, or raise if the
-        transition is not legal from the current state (§10.4)."""
+        transition is not legal from the current state."""
         FACTORY_CHANGE_TRANSITIONS.require(self.state, target)
         return replace(self, state=target, aggregate_version=self.aggregate_version + 1)
 
