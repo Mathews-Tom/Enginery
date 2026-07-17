@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.artifacts import ArtifactMetadataRecord, ArtifactMetadataWrite
+from enginery.ledger.backup import BackupManifest, backup_ledger, restore_ledger
 from enginery.ledger.errors import (
     ArtifactDigestMismatchError,
     ArtifactMissingError,
@@ -31,6 +32,7 @@ from enginery.ledger.outbox import OutboxRecord, OutboxWrite
 from enginery.ledger.process_manager import ProcessManagerStateRecord, ProcessManagerStateWrite
 from enginery.ledger.projections import ProjectionRecord, RebuildReport
 from enginery.ledger.service import LedgerService
+from enginery.ledger.verify import VerificationIssue, VerificationReport, verify_ledger
 
 __all__ = [
     "AppendCommand",
@@ -42,6 +44,7 @@ __all__ = [
     "ArtifactMetadataWrite",
     "ArtifactMissingError",
     "ArtifactStore",
+    "BackupManifest",
     "CorruptedEventError",
     "EventWrite",
     "ExpectedVersionConflictError",
@@ -58,4 +61,9 @@ __all__ = [
     "RawCredentialDetectedError",
     "RebuildReport",
     "SchemaVersionUnsupportedError",
+    "VerificationIssue",
+    "VerificationReport",
+    "backup_ledger",
+    "restore_ledger",
+    "verify_ledger",
 ]

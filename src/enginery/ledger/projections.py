@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from enginery.ledger.connection import transaction
-from enginery.ledger.errors import SchemaVersionUnsupportedError
+from enginery.ledger.errors import CorruptedEventError, SchemaVersionUnsupportedError
 
 CURRENT_MAX_SUPPORTED_SCHEMA_VERSION = 1
 
@@ -87,13 +87,20 @@ def read_projection(
     ).fetchone()
     if row is None:
         return None
+    try:
+        state = json.loads(row["state_json"])
+    except json.JSONDecodeError as error:
+        raise CorruptedEventError(
+            f"projection state for {aggregate_type}:{aggregate_id} is not valid JSON: {error}",
+            details={"aggregate_type": aggregate_type, "aggregate_id": aggregate_id},
+        ) from error
     return ProjectionRecord(
         aggregate_type=row["aggregate_type"],
         aggregate_id=row["aggregate_id"],
         aggregate_version=row["aggregate_version"],
         event_type=row["event_type"],
         schema_version=row["schema_version"],
-        state=json.loads(row["state_json"]),
+        state=state,
         updated_at=row["updated_at"],
     )
 
@@ -137,6 +144,18 @@ def rebuild_projections(
                         "max_supported_schema_version": max_supported_schema_version,
                     },
                 )
+            try:
+                json.loads(event_row["payload"])
+            except json.JSONDecodeError as error:
+                raise CorruptedEventError(
+                    f"event payload for {row['aggregate_type']}:{row['aggregate_id']} at "
+                    f"version {row['aggregate_version']} is not valid JSON: {error}",
+                    details={
+                        "aggregate_type": row["aggregate_type"],
+                        "aggregate_id": row["aggregate_id"],
+                        "aggregate_version": row["aggregate_version"],
+                    },
+                ) from error
             apply_projection_update(
                 connection,
                 aggregate_type=row["aggregate_type"],
