@@ -148,10 +148,36 @@ _MIGRATION_0003_PROJECTIONS_AND_CURSORS = Migration(
     ),
 )
 
+_MIGRATION_0004_ARTIFACTS = Migration(
+    version=4,
+    description="content-addressed artifact metadata",
+    statements=(
+        """
+        CREATE TABLE artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            digest TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            media_type TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            storage_reference TEXT NOT NULL,
+            redaction TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        )
+        """,
+        "CREATE INDEX artifacts_digest_idx ON artifacts (digest)",
+        "CREATE INDEX artifacts_run_idx ON artifacts (run_id)",
+    ),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     _MIGRATION_0001_LEDGER_CORE,
     _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER,
     _MIGRATION_0003_PROJECTIONS_AND_CURSORS,
+    _MIGRATION_0004_ARTIFACTS,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]

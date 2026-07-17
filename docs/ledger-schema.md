@@ -124,3 +124,30 @@ CREATE TABLE commit_cursors (
             updated_at TEXT NOT NULL
         )
 ```
+
+## Migration 4: content-addressed artifact metadata
+
+```sql
+CREATE TABLE artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            digest TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            media_type TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            storage_reference TEXT NOT NULL,
+            redaction TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        )
+```
+
+```sql
+CREATE INDEX artifacts_digest_idx ON artifacts (digest)
+```
+
+```sql
+CREATE INDEX artifacts_run_idx ON artifacts (run_id)
+```

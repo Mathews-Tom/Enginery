@@ -7,6 +7,8 @@ Rule: ``ledger`` may import ``domain`` and
 
 from __future__ import annotations
 
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.artifacts import ArtifactMetadataRecord, ArtifactMetadataWrite
 from enginery.ledger.errors import (
     ArtifactDigestMismatchError,
     ArtifactMissingError,
@@ -36,7 +38,10 @@ __all__ = [
     "AppendedEvent",
     "AppendedProcessManagerState",
     "ArtifactDigestMismatchError",
+    "ArtifactMetadataRecord",
+    "ArtifactMetadataWrite",
     "ArtifactMissingError",
+    "ArtifactStore",
     "CorruptedEventError",
     "EventWrite",
     "ExpectedVersionConflictError",
