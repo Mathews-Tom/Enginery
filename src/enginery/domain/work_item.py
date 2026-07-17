@@ -1,0 +1,102 @@
+"""``WorkItem``: a normalized unit of engineering intent (03_SYSTEM_DESIGN.md §9.1).
+
+This module declares the immutable aggregate and its closed lifecycle-state
+vocabulary (§10.1). Guarded transition enforcement is added in a later
+milestone slice alongside the shared transition-table machinery; this slice
+only proves the aggregate's fields and invariants are correctly typed and
+validated.
+"""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+
+from enginery.domain.digests import Digest
+from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.errors import InvalidInputError
+from enginery.domain.ids import WorkItemId
+
+
+class WorkItemState(enum.Enum):
+    """The seven work-item lifecycle states (§10.1)."""
+
+    NEW = "new"
+    QUALIFYING = "qualifying"
+    READY = "ready"
+    ACTIVE = "active"
+    BLOCKED = "blocked"
+    OUTCOME_PENDING = "outcome_pending"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItem:
+    """A normalized, provider-neutral unit of engineering intent."""
+
+    id: WorkItemId
+    work_kind: WorkKind
+    source_provider: str
+    external_reference: str
+    source_snapshot_reference: str
+    title: str
+    objective: str
+    acceptance_criteria: tuple[str, ...]
+    constraints: tuple[str, ...]
+    risk_class: RiskClass
+    repository_targets: tuple[str, ...]
+    dependencies: tuple[WorkItemId, ...]
+    state: WorkItemState
+    aggregate_version: int = field(default=0)
+
+    def __post_init__(self) -> None:
+        _require_non_blank(self.source_provider, field_name="source_provider")
+        _require_non_blank(self.external_reference, field_name="external_reference")
+        _require_non_blank(self.source_snapshot_reference, field_name="source_snapshot_reference")
+        _require_non_blank(self.title, field_name="title")
+        _require_non_blank(self.objective, field_name="objective")
+        if not self.acceptance_criteria:
+            raise InvalidInputError("a work item requires at least one acceptance criterion")
+        if not self.repository_targets:
+            raise InvalidInputError("a work item requires at least one repository target")
+        if self.id in self.dependencies:
+            raise InvalidInputError(
+                "a work item cannot depend on itself", details={"work_item_id": str(self.id)}
+            )
+        if self.aggregate_version < 0:
+            raise InvalidInputError(
+                "aggregate_version cannot be negative",
+                details={"aggregate_version": self.aggregate_version},
+            )
+
+    @property
+    def bound_field_digest(self) -> Digest:
+        """The deterministic digest checked for source supersession (§18.2).
+
+        Covers exactly the fields the design binds and rechecks before
+        every human approval, side-effecting node, evidence-verification
+        pass, and terminal transition: objective, acceptance criteria,
+        constraints, dependencies, and repository targets.
+        """
+        return Digest.of_json(
+            {
+                "objective": self.objective,
+                "acceptance_criteria": list(self.acceptance_criteria),
+                "constraints": list(self.constraints),
+                "dependencies": [str(dependency) for dependency in self.dependencies],
+                "repository_targets": list(self.repository_targets),
+            }
+        )
+
+
+def _require_non_blank(value: str, *, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(
+            f"{field_name} must be a non-blank string", details={"field": field_name}
+        )
+
+
+__all__ = ["WorkItem", "WorkItemState"]
