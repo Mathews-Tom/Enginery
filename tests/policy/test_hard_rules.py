@@ -8,7 +8,7 @@ from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator, PolicyRule
-from enginery.policy.rules import HardRuleError
+from enginery.policy.rules import HardRuleEnforcer, HardRuleError
 from enginery.policy.schemas import ApprovalSchema
 
 
@@ -76,6 +76,8 @@ def test_single_human_deployment_blocks_dual_human_action() -> None:
         requesting_principal_id=agent.id,
         producer_principal_ids=(agent.id,),
         target_resource="candidate-1",
+        candidate_affects_protected_control=False,
+        canary_target="test-cohort",
     )
     registry = ApprovalRegistry((operator,))
 
@@ -97,6 +99,7 @@ def test_two_registered_humans_can_approve_dual_human_action() -> None:
         producer_principal_ids=(agent.id,),
         target_resource="candidate-1",
         canary_target="non_production_shadow",
+        candidate_affects_protected_control=False,
     )
     registry = ApprovalRegistry((first, second))
 
@@ -284,3 +287,65 @@ def test_soft_policy_override_requires_and_accepts_independent_human() -> None:
     registry.record_approval(schema, (operator,))
 
     assert _evaluator(registry).evaluate(schema).result is PolicyResult.ALLOW
+
+
+@pytest.mark.parametrize(
+    "unsafe_schema",
+    (
+        ApprovalSchema(
+            action=PolicyAction.FACTORY_CHANGE_PROPOSE,
+            mutates_active_factory_asset=True,
+        ),
+        ApprovalSchema(
+            action=PolicyAction.FACTORY_CHANGE_PROPOSE,
+            candidate_received_held_out_input=True,
+        ),
+        ApprovalSchema(
+            action=PolicyAction.FACTORY_CHANGE_CANARY,
+            candidate_affects_protected_control=True,
+            canary_target="production",
+        ),
+    ),
+)
+def test_factory_hard_rules_reject_generated_control_bypasses(
+    unsafe_schema: ApprovalSchema,
+) -> None:
+    with pytest.raises(HardRuleError):
+        HardRuleEnforcer.enforce_request(unsafe_schema)
+
+
+def test_factory_hard_rule_boundaries_allow_safe_candidate_controls() -> None:
+    safe_candidate = ApprovalSchema(
+        action=PolicyAction.FACTORY_CHANGE_PROPOSE,
+        mutates_active_factory_asset=False,
+        candidate_received_held_out_input=False,
+    )
+    safe_canary = ApprovalSchema(
+        action=PolicyAction.FACTORY_CHANGE_CANARY,
+        candidate_affects_protected_control=True,
+        canary_target="non_production_shadow",
+    )
+
+    HardRuleEnforcer.enforce_request(safe_candidate)
+    HardRuleEnforcer.enforce_request(safe_canary)
+
+
+@pytest.mark.parametrize(
+    "incomplete_schema",
+    (
+        ApprovalSchema(
+            action=PolicyAction.CREDENTIAL_GRANT,
+            credential_delivery_target="fixed_broker",
+        ),
+        ApprovalSchema(action=PolicyAction.FACTORY_CHANGE_PROPOSE),
+        ApprovalSchema(
+            action=PolicyAction.FACTORY_CHANGE_CANARY,
+            candidate_affects_protected_control=False,
+        ),
+    ),
+)
+def test_hard_rule_inputs_are_explicit_and_cannot_default_to_safe(
+    incomplete_schema: ApprovalSchema,
+) -> None:
+    with pytest.raises(HardRuleError):
+        HardRuleEnforcer.enforce_request(incomplete_schema)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from enginery.domain.digests import Digest
@@ -152,6 +153,32 @@ def test_all_non_applicable_claims_cannot_replace_positive_implementation() -> N
 
     assert evaluation.result is EvidenceResult.FAIL
     assert "positive implementation evidence" in evaluation.reasons[0]
+
+
+def test_hard_required_evidence_cannot_be_waived_by_non_applicability() -> None:
+    now = datetime.now(UTC)
+    attestation = ApprovalAttestation(
+        action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+        schema_digest=Digest.of_json({"criterion": "criterion-1", "kind": "waiver"}),
+        approved=True,
+    )
+    decision = NonApplicabilityDecision(
+        criterion_id="criterion-1",
+        target_resource="criterion-1",
+        schema_digest=attestation.schema_digest,
+        approval=attestation,
+    )
+    context = replace(
+        _merge_context(now),
+        evidence_items=(),
+        non_applicability=(decision,),
+    )
+
+    evaluation = MergeReadyVerifier().verify(context, now)
+
+    assert evaluation.result is EvidenceResult.INDETERMINATE
+    assert evaluation.evidence_evaluation is not None
+    assert evaluation.evidence_evaluation.missing == ("ci",)
 
 
 def test_merge_ready_rejects_stale_current_head_evidence() -> None:
