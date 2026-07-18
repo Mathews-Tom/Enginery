@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease
+from enginery.engine.recovery import RecoveryCoordinator
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.runtime import CoordinatorRuntime, DispatchedFixture, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
@@ -71,7 +73,9 @@ def _repository(root: Path) -> tuple[Path, str]:
     return repository, _git("rev-parse", "HEAD", cwd=repository)
 
 
-def _request(repository: Path, revision: str, workspace: Path, attempt: str) -> FixtureDispatch:
+def _request(
+    repository: Path, revision: str, workspace: Path, attempt: str, *, persistent: bool
+) -> FixtureDispatch:
     return FixtureDispatch(
         run_id="run-1",
         node_id="node-1",
@@ -80,7 +84,11 @@ def _request(repository: Path, revision: str, workspace: Path, attempt: str) -> 
         repository_path=repository,
         workspace_path=workspace,
         base_revision=revision,
-        command=(sys.executable, "-c", "pass"),
+        command=(
+            (sys.executable, "-c", "import signal; signal.pause()")
+            if persistent
+            else (sys.executable, "-c", "pass")
+        ),
         expected_attempt_version=0,
         operation_id=f"operation-{attempt}",
     )
@@ -111,7 +119,7 @@ def _stop_for_result(
     )
 
 
-def _takeover_and_reconcile(ledger: LedgerService, now: datetime) -> None:
+def _takeover_and_reconcile(ledger: LedgerService, now: datetime, workspace_path: Path) -> None:
     replacement = Coordinator(ledger, owner="replacement")
     replacement.acquire(now=now + timedelta(seconds=61), heartbeat_window=timedelta(seconds=60))
     current = replacement.current_epoch()
@@ -122,21 +130,12 @@ def _takeover_and_reconcile(ledger: LedgerService, now: datetime) -> None:
         state_key="run-1:node-1",
     )
     lease_record = ledger.read_lease(run_id="run-1", node_id="node-1")
-    if record is None or lease_record is None:
+    if record is None or lease_record is None or lease_record.expires_at is None:
         return
     state = record.state
-    pid = state.get("pid")
-    process_group_id = state.get("process_group_id")
-    start_identity = state.get("start_identity")
     operation_id = state.get("operation_id")
-    if not (
-        isinstance(pid, int)
-        and isinstance(process_group_id, int)
-        and isinstance(start_identity, str)
-        and isinstance(operation_id, str)
-        and lease_record.expires_at is not None
-    ):
-        return
+    if not isinstance(operation_id, str):
+        raise AssertionError("supervisor state is missing its operation ID")
     lease = FencedNodeLease(
         run_id=lease_record.run_id,
         node_id=lease_record.node_id,
@@ -147,6 +146,31 @@ def _takeover_and_reconcile(ledger: LedgerService, now: datetime) -> None:
         owner=lease_record.owner,
         expires_at=datetime.fromisoformat(lease_record.expires_at),
     )
+    pid = state.get("pid")
+    process_group_id = state.get("process_group_id")
+    start_identity = state.get("start_identity")
+    if not (
+        isinstance(pid, int)
+        and isinstance(process_group_id, int)
+        and isinstance(start_identity, str)
+    ):
+        if state.get("status") != "launch_intended":
+            raise AssertionError("missing worker identity was not durably marked as launch intent")
+        try:
+            RecoveryCoordinator(ledger, replacement).re_lease(
+                run_id=lease.run_id,
+                node_id=lease.node_id,
+                attempt_id="attempt-2",
+                epoch=lease.epoch + 1,
+                now=now + timedelta(seconds=61),
+                lease_window=timedelta(seconds=30),
+                expected_attempt_version=1,
+                operation_id="operation-attempt-2",
+                workspace_path=workspace_path,
+            )
+        except HumanActionRequiredError:
+            return
+        raise AssertionError("ambiguous launch was automatically re-leased")
     identity = ProcessIdentity(pid, process_group_id, start_identity)
     WorkerSupervisor(ledger, replacement).enforce_heartbeat(
         lease=lease,
@@ -166,7 +190,13 @@ def _run_boundary(point: str) -> None:
             repository, revision = _repository(root)
             gate = FaultGate(point if point == "epoch_acquired" else None)
             runtime = CoordinatorRuntime(ledger, owner="first", fault_hook=gate.trigger)
-            request = _request(repository, revision, root / "workspace", "attempt-1")
+            request = _request(
+                repository,
+                revision,
+                root / "workspace",
+                "attempt-1",
+                persistent=point != "worker_process_started",
+            )
             limits = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
             dispatched: DispatchedFixture | None = None
             try:
@@ -244,6 +274,7 @@ def _run_boundary(point: str) -> None:
                                 revision,
                                 root / "workspace",
                                 "attempt-2",
+                                persistent=True,
                             ),
                             epoch=initial.epoch.epoch,
                             now=now + timedelta(seconds=2),
@@ -253,7 +284,7 @@ def _run_boundary(point: str) -> None:
                     raise AssertionError(f"wrong fault boundary: {error}") from error
             else:
                 raise AssertionError(f"fault boundary {point} did not interrupt execution")
-            _takeover_and_reconcile(ledger, now)
+            _takeover_and_reconcile(ledger, now, root / "workspace")
         finally:
             ledger.close()
 
