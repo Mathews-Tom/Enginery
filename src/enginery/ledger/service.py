@@ -26,6 +26,7 @@ from enginery.ledger.events import AppendCommand, AppendResult, append
 from enginery.ledger.inbox import InboxRecord
 from enginery.ledger.inbox import enqueue_command as _enqueue_command
 from enginery.ledger.inbox import find_by_idempotency_key as _find_by_idempotency_key
+from enginery.ledger.inbox import list_pending_commands as _list_pending_commands
 from enginery.ledger.inbox import read_command as _read_inbox_command
 from enginery.ledger.leases import LeaseRecord
 from enginery.ledger.leases import read_lease as _read_lease
@@ -116,6 +117,9 @@ class LedgerService:
 
     def find_inbox_command_by_idempotency_key(self, idempotency_key: str) -> InboxRecord | None:
         return _find_by_idempotency_key(self._connection, idempotency_key)
+
+    def list_pending_inbox_commands(self, *, limit: int = 100) -> tuple[InboxRecord, ...]:
+        return _list_pending_commands(self._connection, limit=limit)
 
     def list_pending_outbox(self, *, limit: int = 100) -> tuple[OutboxRecord, ...]:
         return _list_pending_outbox(self._connection, limit=limit)

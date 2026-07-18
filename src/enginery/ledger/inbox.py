@@ -29,6 +29,7 @@ class InboxRecord:
     command_id: str
     idempotency_key: str | None
     command_type: str
+    payload: Mapping[str, object]
     correlation_id: str
     status: str
     received_at: str
@@ -36,10 +37,16 @@ class InboxRecord:
 
 
 def _row_to_record(row: sqlite3.Row) -> InboxRecord:
+    payload = json.loads(row["payload"])
+    if not isinstance(payload, dict):
+        raise InvalidInputError(
+            "stored command payload must be an object", details={"command_id": row["command_id"]}
+        )
     return InboxRecord(
         command_id=row["command_id"],
         idempotency_key=row["idempotency_key"],
         command_type=row["command_type"],
+        payload=payload,
         correlation_id=row["correlation_id"],
         status=row["status"],
         received_at=row["received_at"],
@@ -52,6 +59,24 @@ def read_command(connection: sqlite3.Connection, command_id: str) -> InboxRecord
         "SELECT * FROM command_inbox WHERE command_id = ?", (command_id,)
     ).fetchone()
     return _row_to_record(row) if row is not None else None
+
+
+def list_pending_commands(
+    connection: sqlite3.Connection, *, limit: int = 100
+) -> tuple[InboxRecord, ...]:
+    """Return the oldest pending operator commands in deterministic order."""
+    if limit < 1:
+        raise InvalidInputError("limit must be positive", details={"limit": limit})
+    rows = connection.execute(
+        """
+        SELECT * FROM command_inbox
+        WHERE status = 'pending'
+        ORDER BY received_at, command_id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return tuple(_row_to_record(row) for row in rows)
 
 
 def find_by_idempotency_key(
@@ -115,6 +140,7 @@ def enqueue_command(
         command_id=command_id,
         idempotency_key=idempotency_key,
         command_type=command_type,
+        payload=dict(payload),
         correlation_id=correlation_id,
         status="pending",
         received_at=received_at,
@@ -122,17 +148,21 @@ def enqueue_command(
     )
 
 
-def acknowledge_command(connection: sqlite3.Connection, command_id: str) -> None:
-    """Mark ``command_id`` processed. Must run inside a caller-owned
-    transaction (:func:`enginery.ledger.events.append`) rather than
-    opening its own, so acknowledgement commits atomically with the
-    events, projections, and outbox rows the command produced.
+def acknowledge_command(
+    connection: sqlite3.Connection,
+    command_id: str,
+    *,
+    status: str = "processed",
+) -> None:
+    """Set the terminal inbox status inside a caller-owned transaction.
 
-    Raises :class:`ExpectedVersionConflictError` if the command is
-    unknown or was already processed or rejected — acknowledging the
-    same durable pointer twice indicates a race the caller must not
-    silently ignore.
+    The coordinator records an event explaining a rejected command in the
+    same transaction. This function changes only the durable inbox status.
     """
+    if status not in {"processed", "rejected"}:
+        raise InvalidInputError(
+            "inbox status must be processed or rejected", details={"status": status}
+        )
     row = connection.execute(
         "SELECT status FROM command_inbox WHERE command_id = ?", (command_id,)
     ).fetchone()
@@ -147,8 +177,8 @@ def acknowledge_command(connection: sqlite3.Connection, command_id: str) -> None
             details={"command_id": command_id, "status": row["status"]},
         )
     connection.execute(
-        "UPDATE command_inbox SET status = 'processed', processed_at = ? WHERE command_id = ?",
-        (datetime.now(UTC).isoformat(), command_id),
+        "UPDATE command_inbox SET status = ?, processed_at = ? WHERE command_id = ?",
+        (status, datetime.now(UTC).isoformat(), command_id),
     )
 
 
@@ -157,5 +187,6 @@ __all__ = [
     "acknowledge_command",
     "enqueue_command",
     "find_by_idempotency_key",
+    "list_pending_commands",
     "read_command",
 ]
