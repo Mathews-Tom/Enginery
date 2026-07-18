@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -15,9 +16,20 @@ from fault_injection.framework import FaultScenario, main_for
 def _workspace_lock_blocks() -> None:
     with tempfile.TemporaryDirectory() as directory:
         workspace = Path(directory)
+        subprocess.run(["git", "init", str(workspace)], check=True, capture_output=True, text=True)
+        lock = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--git-path", "index.lock"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        lock_path = Path(lock.stdout.strip())
+        if not lock_path.is_absolute():
+            lock_path = workspace / lock_path
+        lock_path.touch()
         result = assess_workspace_quiescence(workspace)
-        if result.ready_to_release:
-            raise AssertionError("non-Git workspace was incorrectly considered quiescent")
+        if result.ready_to_release or result.reason != "workspace_git_lock_present":
+            raise AssertionError("Git lock did not block automatic recovery")
 
 
 def _platform_supported() -> None:
@@ -37,8 +49,8 @@ def main() -> int:
                 _platform_supported,
             ),
             FaultScenario(
-                "ambiguous_workspace",
-                "uninspectable workspace blocks recovery",
+                "workspace_lock",
+                "Git index lock blocks automatic recovery",
                 _workspace_lock_blocks,
             ),
         )

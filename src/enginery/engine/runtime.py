@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,7 +62,14 @@ class FixtureRuntime:
     second worker to start.
     """
 
-    def __init__(self, ledger: LedgerService, coordinator: Coordinator) -> None:
+    def __init__(
+        self,
+        ledger: LedgerService,
+        coordinator: Coordinator,
+        *,
+        fault_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        self._fault_hook = fault_hook
         self._leases = FencedNodeLeases(ledger, coordinator)
         self._supervisor = WorkerSupervisor(ledger, coordinator)
         self._workspaces = GitWorktreeBackend(ledger, coordinator)
@@ -83,8 +91,10 @@ class FixtureRuntime:
             epoch=epoch,
             now=now,
         )
+        self._fault("workspace_reserved")
         if reservation.status == "reserved":
             reservation = self._workspaces.materialize(reservation, epoch=epoch, now=now)
+        self._fault("workspace_materialized")
         if reservation.status != "materialized":
             raise InvalidInputError("fixture dispatch requires a materialized workspace")
         lease = self._leases.grant(
@@ -96,13 +106,19 @@ class FixtureRuntime:
             lease_window=lease_window,
             expected_attempt_version=request.expected_attempt_version,
         )
+        self._fault("lease_granted")
         identity = self._supervisor.start(
             lease=lease,
             command=request.command,
             cwd=reservation.workspace_path,
             now=now,
         )
+        self._fault("worker_started")
         return DispatchedFixture(lease=lease, identity=identity, workspace=reservation)
+
+    def _fault(self, point: str) -> None:
+        if self._fault_hook is not None:
+            self._fault_hook(point)
 
 
 __all__ = ["DispatchedFixture", "FixtureDispatch", "FixtureRuntime"]
