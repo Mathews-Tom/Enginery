@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from enginery.domain.errors import InvalidInputError
+from enginery.ledger.errors import ExpectedVersionConflictError
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.leases import LeaseWrite
 from enginery.ledger.service import LedgerService
@@ -86,3 +87,42 @@ def test_lease_write_rejects_blank_owner() -> None:
 def test_lease_write_rejects_negative_fencing_token() -> None:
     with pytest.raises(InvalidInputError):
         LeaseWrite(run_id="run-1", node_id="node-a", epoch=1, fencing_token=-1, owner="worker-1")
+
+
+def test_stale_lease_update_rolls_back_the_entire_command(ledger_service: LedgerService) -> None:
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="initial",
+            events=(_event(),),
+            lease_updates=(
+                LeaseWrite(
+                    run_id="run-1",
+                    node_id="node-a",
+                    epoch=2,
+                    fencing_token=2,
+                    owner="worker-2",
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(ExpectedVersionConflictError, match="current fencing token"):
+        ledger_service.append(
+            AppendCommand(
+                correlation_id="stale",
+                events=(_event(expected_version=1, event_type="run.stale"),),
+                lease_updates=(
+                    LeaseWrite(
+                        run_id="run-1",
+                        node_id="node-a",
+                        epoch=1,
+                        fencing_token=1,
+                        owner="worker-1",
+                    ),
+                ),
+            )
+        )
+
+    run = ledger_service.read_projection(aggregate_type="run", aggregate_id="run-1")
+    assert run is not None
+    assert run.aggregate_version == 1

@@ -151,3 +151,10 @@ CREATE INDEX artifacts_digest_idx ON artifacts (digest)
 ```sql
 CREATE INDEX artifacts_run_idx ON artifacts (run_id)
 ```
+
+## Migration 5: node lease attempt identities
+
+```sql
+ALTER TABLE node_leases
+        ADD COLUMN attempt_id TEXT NOT NULL DEFAULT 'unbound'
+```

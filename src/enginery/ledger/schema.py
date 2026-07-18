@@ -173,11 +173,24 @@ _MIGRATION_0004_ARTIFACTS = Migration(
     ),
 )
 
+
+_MIGRATION_0005_NODE_LEASE_ATTEMPTS = Migration(
+    version=5,
+    description="node lease attempt identities",
+    statements=(
+        """
+        ALTER TABLE node_leases
+        ADD COLUMN attempt_id TEXT NOT NULL DEFAULT 'unbound'
+        """,
+    ),
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     _MIGRATION_0001_LEDGER_CORE,
     _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER,
     _MIGRATION_0003_PROJECTIONS_AND_CURSORS,
     _MIGRATION_0004_ARTIFACTS,
+    _MIGRATION_0005_NODE_LEASE_ATTEMPTS,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]
