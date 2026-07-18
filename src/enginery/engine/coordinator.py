@@ -142,6 +142,26 @@ class Coordinator:
         state_version = result.process_manager_states[0].state_version
         return CoordinatorEpoch(epoch, self._owner, deadline, state_version)
 
+    def epoch_guard(self, *, epoch: int, now: datetime) -> ProcessManagerStateWrite:
+        """Return the transactional compare-and-swap guard for this epoch.
+
+        Every coordinator-owned append carries this update. A takeover that
+        commits between the caller's read and append changes the expected
+        state version and rolls back the stale coordinator's entire command.
+        """
+        _require_aware(now, field_name="now")
+        current = self._require_current_owner(epoch=epoch, now=now)
+        return ProcessManagerStateWrite(
+            process_manager_name=_COORDINATOR_NAME,
+            state_key=_COORDINATOR_STATE_KEY,
+            expected_version=current.state_version,
+            state=_epoch_state(
+                epoch=current.epoch,
+                owner=current.owner,
+                heartbeat_deadline=current.heartbeat_deadline,
+            ),
+        )
+
     def consume_pending(
         self,
         *,
