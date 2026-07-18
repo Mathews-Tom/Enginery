@@ -6,6 +6,7 @@ from enginery.ledger.errors import RawCredentialDetectedError
 from enginery.ledger.redaction import (
     assert_mapping_has_no_raw_credentials,
     assert_no_raw_credentials,
+    redact_credential_shaped_text,
     scan_for_credentials,
 )
 
@@ -27,6 +28,16 @@ def test_credential_shaped_text_is_detected(text: str) -> None:
     assert findings
     with pytest.raises(RawCredentialDetectedError):
         assert_no_raw_credentials(text)
+
+
+def test_credential_shaped_text_is_redacted_before_persistence() -> None:
+    redacted = redact_credential_shaped_text(
+        "token=abcdefghijklmnopqrstuvwx and AKIAABCDEFGHIJKLMNOP"
+    )
+
+    assert "abcdefghijklmnopqrstuvwx" not in redacted
+    assert "AKIAABCDEFGHIJKLMNOP" not in redacted
+    assert_no_raw_credentials(redacted)
 
 
 @pytest.mark.parametrize(

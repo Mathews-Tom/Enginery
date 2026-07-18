@@ -54,6 +54,14 @@ def scan_for_credentials(text: str) -> tuple[Finding, ...]:
     return tuple(findings)
 
 
+def redact_credential_shaped_text(text: str) -> str:
+    """Replace known credential-shaped content before persistence."""
+    redacted = text
+    for name, pattern in _PATTERNS:
+        redacted = pattern.sub(f"[REDACTED:{name}]", redacted)
+    return redacted
+
+
 def assert_no_raw_credentials(text: str) -> None:
     """Raise :class:`RawCredentialDetectedError` if ``text`` contains
     credential-shaped content."""
@@ -92,5 +100,6 @@ __all__ = [
     "Finding",
     "assert_mapping_has_no_raw_credentials",
     "assert_no_raw_credentials",
+    "redact_credential_shaped_text",
     "scan_for_credentials",
 ]
