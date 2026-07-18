@@ -8,7 +8,13 @@ import pytest
 
 from enginery.domain.digests import Digest
 from enginery.domain.ids import PolicyDecisionId
-from enginery.domain.policy_decision import PolicyAction, PolicyDecision, PolicyResult
+from enginery.domain.policy_decision import (
+    ApprovalAttestation,
+    PolicyAction,
+    PolicyDecision,
+    PolicyResult,
+)
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -59,6 +65,60 @@ class TestPolicyResult:
             "deny",
             "require_human",
         }
+
+
+class TestApprovalAttestation:
+    def test_binds_canonical_inputs_and_independent_human_approver(self) -> None:
+        normalized_inputs = {
+            "action": PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT.value,
+            "requesting_principal_id": "run-1",
+            "producer_principal_ids": ["run-1"],
+            "target_resource": "criterion-1",
+        }
+        approver = AuthorityPrincipal("operator-1", PrincipalType.HUMAN, "operator", "test")
+        attestation = ApprovalAttestation(
+            action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+            schema_digest=Digest.of_json(normalized_inputs),
+            normalized_inputs=normalized_inputs,
+            approvers=(approver,),
+            approved=True,
+        )
+        normalized_inputs["target_resource"] = "changed"
+        normalized_inputs["producer_principal_ids"].append(approver.id)
+
+        assert attestation.binds_input("target_resource", "criterion-1")
+        assert attestation.has_independent_human_approval()
+        self_approved_inputs = {
+            "action": PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT.value,
+            "requesting_principal_id": approver.id,
+            "producer_principal_ids": [approver.id],
+            "target_resource": "criterion-1",
+        }
+        self_approved = ApprovalAttestation(
+            action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+            schema_digest=Digest.of_json(self_approved_inputs),
+            normalized_inputs=self_approved_inputs,
+            approvers=(approver,),
+            approved=True,
+        )
+
+        assert not self_approved.has_independent_human_approval()
+
+    def test_rejects_digest_that_does_not_bind_normalized_inputs(self) -> None:
+        normalized_inputs = {
+            "action": PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT.value,
+            "target_resource": "criterion-1",
+        }
+        approver = AuthorityPrincipal("operator-1", PrincipalType.HUMAN, "operator", "test")
+
+        with pytest.raises(Exception, match="inputs do not match"):
+            ApprovalAttestation(
+                action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+                schema_digest=Digest.of_json({"different": "payload"}),
+                normalized_inputs=normalized_inputs,
+                approvers=(approver,),
+                approved=True,
+            )
 
 
 class TestPolicyDecision:

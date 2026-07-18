@@ -67,6 +67,8 @@ class NonApplicabilityDecision:
             self.approval.action is PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT
             and self.target_resource == self.criterion_id
             and self.approval.schema_digest == self.schema_digest
+            and self.approval.binds_input("target_resource", self.target_resource)
+            and self.approval.has_independent_human_approval()
             and self.approval.is_current(reference_time)
         )
 
@@ -203,6 +205,8 @@ class ReleaseRemediationDecision:
             self.approval.action is PolicyAction.POLICY_OVERRIDE
             and "irreversible_publication_remediation" in self.override_scope
             and self.approval.schema_digest == self.schema_digest
+            and self.approval.binds_input("override_scope", sorted(self.override_scope))
+            and self.approval.has_independent_human_approval()
             and self.approval.is_current(reference_time)
         )
 

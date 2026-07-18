@@ -26,4 +26,35 @@ def freeze_mapping[K, V](instance: object, field_name: str, value: Mapping[K, V]
     object.__setattr__(instance, field_name, MappingProxyType(dict(value)))
 
 
-__all__ = ["freeze_mapping"]
+def thaw_json_value(value: object) -> object:
+    """Return a mutable JSON-compatible value for canonical serialization."""
+
+    if isinstance(value, Mapping):
+        return {key: thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw_json_value(item) for item in value]
+    return value
+
+
+def freeze_json_mapping(
+    instance: object,
+    field_name: str,
+    value: Mapping[str, object],
+) -> None:
+    """Store a deeply immutable JSON mapping snapshot on a frozen dataclass."""
+
+    frozen = _freeze_json_value(value)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("JSON mapping snapshot must remain a mapping")
+    object.__setattr__(instance, field_name, frozen)
+
+
+def _freeze_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+__all__ = ["freeze_json_mapping", "freeze_mapping", "thaw_json_value"]

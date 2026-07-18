@@ -24,10 +24,28 @@ from enginery.evidence.terminal import (
     ReleasedSubject,
     ReleasedVerifier,
 )
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.schemas import ApprovalSchema
 
 
 def _agent() -> AuthorityPrincipal:
     return AuthorityPrincipal("agent-1", PrincipalType.AGENT, "worker", "fixture")
+
+
+def _approved_non_applicability(
+    now: datetime,
+    criterion_id: str,
+) -> ApprovalAttestation:
+    producer = _agent()
+    approver = AuthorityPrincipal("operator-1", PrincipalType.HUMAN, "operator", "fixture")
+    schema = ApprovalSchema(
+        action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+        requesting_principal_id=producer.id,
+        producer_principal_ids=(producer.id,),
+        target_resource=criterion_id,
+    )
+    registry = ApprovalRegistry((approver,))
+    return registry.record_approval(schema, (approver,), decided_at=now).attestation()
 
 
 def _allowed_policy(action: PolicyAction) -> PolicyDecision:
@@ -125,11 +143,7 @@ def test_merge_ready_rejects_empty_diff_claim() -> None:
 
 def test_all_non_applicable_claims_cannot_replace_positive_implementation() -> None:
     now = datetime.now(UTC)
-    attestation = ApprovalAttestation(
-        action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
-        schema_digest=Digest.of_json({"criterion": "criterion-1"}),
-        approved=True,
-    )
+    attestation = _approved_non_applicability(now, "criterion-1")
     non_applicability = NonApplicabilityDecision(
         criterion_id="criterion-1",
         target_resource="criterion-1",
@@ -155,13 +169,43 @@ def test_all_non_applicable_claims_cannot_replace_positive_implementation() -> N
     assert "positive implementation evidence" in evaluation.reasons[0]
 
 
-def test_hard_required_evidence_cannot_be_waived_by_non_applicability() -> None:
+def test_merge_ready_rejects_self_approved_non_applicability() -> None:
     now = datetime.now(UTC)
+    operator = AuthorityPrincipal("operator-1", PrincipalType.HUMAN, "operator", "fixture")
+    schema = ApprovalSchema(
+        action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+        requesting_principal_id=operator.id,
+        producer_principal_ids=(operator.id,),
+        target_resource="criterion-2",
+    )
     attestation = ApprovalAttestation(
         action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
-        schema_digest=Digest.of_json({"criterion": "criterion-1", "kind": "waiver"}),
+        schema_digest=schema.digest(),
+        normalized_inputs=schema.canonical_inputs(),
+        approvers=(operator,),
         approved=True,
     )
+    non_applicability = NonApplicabilityDecision(
+        criterion_id="criterion-2",
+        target_resource="criterion-2",
+        schema_digest=attestation.schema_digest,
+        approval=attestation,
+    )
+    context = replace(
+        _merge_context(now),
+        acceptance_criteria=("criterion-1", "criterion-2"),
+        non_applicability=(non_applicability,),
+    )
+
+    evaluation = MergeReadyVerifier().verify(context, now)
+
+    assert evaluation.result is EvidenceResult.FAIL
+    assert "criterion-2" in evaluation.reasons[0]
+
+
+def test_hard_required_evidence_cannot_be_waived_by_non_applicability() -> None:
+    now = datetime.now(UTC)
+    attestation = _approved_non_applicability(now, "criterion-1")
     decision = NonApplicabilityDecision(
         criterion_id="criterion-1",
         target_resource="criterion-1",

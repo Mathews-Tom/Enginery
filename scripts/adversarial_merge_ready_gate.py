@@ -26,6 +26,8 @@ from enginery.evidence.terminal import (
     MergeReadyVerifier,
     NonApplicabilityDecision,
 )
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.schemas import ApprovalSchema
 
 
 def _token(rng: random.Random) -> str:
@@ -162,10 +164,27 @@ def run_gate() -> None:
         )
 
         criterion = context.acceptance_criteria[0]
-        attestation = ApprovalAttestation(
+        producer = context.evidence_items[0].producer
+        approver = AuthorityPrincipal(
+            f"operator-{_token(rng)}",
+            PrincipalType.HUMAN,
+            "operator",
+            "generated-fixture",
+        )
+        schema = ApprovalSchema(
             action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
-            schema_digest=Digest.of_json({"criterion": criterion, "seed": seed}),
-            approved=True,
+            requesting_principal_id=producer.id,
+            producer_principal_ids=(producer.id,),
+            target_resource=criterion,
+        )
+        attestation = (
+            ApprovalRegistry((approver,))
+            .record_approval(
+                schema,
+                (approver,),
+                decided_at=now,
+            )
+            .attestation()
         )
         non_applicability = NonApplicabilityDecision(
             criterion_id=criterion,
@@ -184,6 +203,45 @@ def run_gate() -> None:
             ).result
             is EvidenceResult.FAIL,
             "all-non-applicable implementation claim passed",
+        )
+
+        self_approver = AuthorityPrincipal(
+            f"self-{_token(rng)}",
+            PrincipalType.HUMAN,
+            "operator",
+            "generated-fixture",
+        )
+        self_criterion = f"unproven-{_token(rng)}"
+        self_schema = ApprovalSchema(
+            action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+            requesting_principal_id=self_approver.id,
+            producer_principal_ids=(self_approver.id,),
+            target_resource=self_criterion,
+        )
+        self_attestation = ApprovalAttestation(
+            action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+            schema_digest=self_schema.digest(),
+            normalized_inputs=self_schema.canonical_inputs(),
+            approvers=(self_approver,),
+            approved=True,
+        )
+        self_non_applicability = NonApplicabilityDecision(
+            criterion_id=self_criterion,
+            target_resource=self_criterion,
+            schema_digest=self_attestation.schema_digest,
+            approval=self_attestation,
+        )
+        _assert(
+            verifier.verify(
+                replace(
+                    context,
+                    acceptance_criteria=(criterion, self_criterion),
+                    non_applicability=(self_non_applicability,),
+                ),
+                now,
+            ).result
+            is EvidenceResult.FAIL,
+            "self-approved non-applicability claim passed",
         )
         cases += 1
     print(f"PASS merge-ready adversarial cases={cases} seed={seed}")
