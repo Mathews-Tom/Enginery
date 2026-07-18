@@ -105,6 +105,43 @@ def read_projection(
     )
 
 
+def list_projections(
+    connection: sqlite3.Connection, *, aggregate_type: str
+) -> tuple[ProjectionRecord, ...]:
+    """Return every latest-state projection for one aggregate type."""
+    rows = connection.execute(
+        "SELECT * FROM projections WHERE aggregate_type = ? ORDER BY aggregate_id",
+        (aggregate_type,),
+    ).fetchall()
+    records: list[ProjectionRecord] = []
+    for row in rows:
+        try:
+            state = json.loads(row["state_json"])
+        except json.JSONDecodeError as error:
+            raise CorruptedEventError(
+                (
+                    f"projection state for {aggregate_type}:{row['aggregate_id']} "
+                    f"is not valid JSON: {error}"
+                ),
+                details={
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": row["aggregate_id"],
+                },
+            ) from error
+        records.append(
+            ProjectionRecord(
+                aggregate_type=row["aggregate_type"],
+                aggregate_id=row["aggregate_id"],
+                aggregate_version=row["aggregate_version"],
+                event_type=row["event_type"],
+                schema_version=row["schema_version"],
+                state=state,
+                updated_at=row["updated_at"],
+            )
+        )
+    return tuple(records)
+
+
 def rebuild_projections(
     connection: sqlite3.Connection,
     *,

@@ -69,6 +69,7 @@ def test_heartbeat_expiry_is_durably_reconciled_by_takeover(
         now=now,
         lease_window=timedelta(seconds=120),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
     supervisor = WorkerSupervisor(ledger_service, coordinator)
     identity = supervisor.start(
@@ -99,5 +100,5 @@ def test_heartbeat_expiry_is_durably_reconciled_by_takeover(
         process_manager_name="worker-supervisor", state_key="run-1:node-1"
     )
     assert state is not None
-    assert state.state["status"] == "exit_observed"
+    assert state.state["status"] == "exit_reconciled"
     assert state.state["reconciled_epoch"] == 2
