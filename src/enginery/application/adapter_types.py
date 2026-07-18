@@ -165,6 +165,8 @@ def require_matching_fingerprints(
     bound: Mapping[str, Digest], discovered: Mapping[str, AdapterStatus]
 ) -> None:
     """Fail before provider use when a bound adapter is unavailable or changed."""
+    if not bound:
+        raise MissingPrerequisiteError("run has no bound adapter fingerprints")
     for provider_id, expected_digest in bound.items():
         status = discovered.get(provider_id)
         if status is None:

@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from importlib import metadata
 from pathlib import Path
 
+from enginery.adapters.local import local_provider_statuses
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.doctor import run_doctor
 from enginery.cli.ledger import (
@@ -43,6 +44,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor", help="Report locally implemented prerequisites."
     )
     doctor_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    adapter_parser = subparsers.add_parser("adapter", help="Inspect configured adapter providers.")
+    adapter_subparsers = adapter_parser.add_subparsers(dest="adapter_command")
+    adapter_doctor_parser = adapter_subparsers.add_parser(
+        "doctor", help="Report deterministic local provider capabilities."
+    )
+    adapter_doctor_parser.add_argument("--json", action="store_true")
 
     ledger_parser = subparsers.add_parser("ledger", help="Ledger consistency and storage commands.")
     ledger_subparsers = ledger_parser.add_subparsers(dest="ledger_command")
@@ -99,6 +107,33 @@ def _run_doctor(*, as_json: bool) -> int:
             status = "ok" if check.ok else "fail"
             print(f"[{status}] {check.name}: {check.detail}")
     return SUCCESS if report.ok else exit_code_for(FailureClass.MISSING_PREREQUISITE)
+
+
+def _run_adapter_doctor(*, as_json: bool) -> int:
+    statuses = local_provider_statuses()
+    if as_json:
+        payload: list[dict[str, object]] = []
+        for status in statuses:
+            fingerprint = status.fingerprint
+            assert fingerprint is not None
+            payload.append(
+                {
+                    "availability": status.availability.value,
+                    "capabilities": [capability.name for capability in fingerprint.capabilities],
+                    "fingerprint": str(fingerprint.digest),
+                    "kind": status.kind.value,
+                    "provider_id": fingerprint.provider_id,
+                }
+            )
+        print(json.dumps(payload, indent=2))
+    else:
+        for status in statuses:
+            assert status.fingerprint is not None
+            print(
+                f"[{status.availability.value}] {status.kind.value}: "
+                f"{status.fingerprint.provider_id} {status.fingerprint.digest}"
+            )
+    return SUCCESS
 
 
 def _run_ledger_verify(args: argparse.Namespace) -> int:
@@ -203,6 +238,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_ledger(args)
         if args.command == "policy":
             return _run_policy(args)
+        if args.command == "adapter":
+            if args.adapter_command == "doctor":
+                return _run_adapter_doctor(as_json=args.json)
+            raise InvalidInputError("adapter requires a subcommand")
     except EngineryError as error:
         print(str(error), file=sys.stderr)
         return exit_code_for(error.failure_class)

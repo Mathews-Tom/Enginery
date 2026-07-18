@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,10 @@ def _golden_run() -> Run:
         base_revision="deadbeefcafefeed",
         policy_set_version="policy-2026-07-17",
         adapter_versions={"github": "1.2.0", "omp": "0.9.1"},
+        adapter_fingerprints={
+            "github": Digest.of_bytes(b"github adapter"),
+            "omp": Digest.of_bytes(b"omp adapter"),
+        },
         capability_lock_digest=Digest.of_bytes(b"capability-lock"),
         environment_manifest_digest=Digest.of_bytes(b"environment-manifest"),
         configuration_snapshot_digest=Digest.of_bytes(b"configuration-snapshot"),
@@ -293,3 +298,23 @@ class TestGoldenCompatibilityFixtures:
 
         with pytest.raises(InvalidInputError, match="data"):
             from_dict(payload)
+
+
+def test_run_v1_fixture_migrates_without_adapter_fingerprints() -> None:
+    fixture = _load_fixture("run")
+    fixture["schema_version"] = 1
+    data = fixture["data"]
+    assert isinstance(data, dict)
+    del data["adapter_fingerprints"]
+
+    migrated = ser.run_from_dict(fixture)
+
+    assert migrated.adapter_fingerprints == {}
+
+
+def test_run_with_unbound_adapter_version_cannot_be_persisted() -> None:
+    run = _golden_run()
+    unbound = replace(run, adapter_fingerprints={})
+
+    with pytest.raises(InvalidInputError, match="must name the same adapters"):
+        ser.run_to_dict(unbound)

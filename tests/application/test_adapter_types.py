@@ -126,6 +126,9 @@ def test_missing_bound_provider_blocks_before_provider_use() -> None:
     with pytest.raises(MissingPrerequisiteError, match="not configured"):
         require_matching_fingerprints({"local-git": Digest.of_bytes(b"bound")}, {})
 
+    with pytest.raises(MissingPrerequisiteError, match="no bound"):
+        require_matching_fingerprints({}, {})
+
 
 def test_matching_fingerprints_allow_provider_use() -> None:
     fingerprint = _fingerprint()

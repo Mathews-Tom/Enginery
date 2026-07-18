@@ -10,11 +10,7 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-Pre-`v0.1.0`. The repository currently contains the project scaffold: a
-licensed `uv` package, package boundaries, a central error taxonomy, and a
-`enginery` CLI skeleton (`--version`, `doctor`). No workflow, persistence,
-policy, or adapter behavior is implemented yet. See
-[`docs/`](docs) for the finalized product design documents.
+Pre-`v0.1.0`. The repository implements typed workflow, persistence, policy, coordinator, and deterministic local-adapter foundations. It is not yet a published package or a complete issue-to-PR automation product. The local adapter set provides contract-tested work-ledger, harness, workspace, Git, validation, publication, deployment-fixture, and capability-source implementations.
 
 ## Installation
 
@@ -31,6 +27,7 @@ uv sync --all-extras --dev
 ```bash
 uv run enginery --version
 uv run enginery doctor
+uv run enginery adapter doctor --json
 ```
 
 ## Development

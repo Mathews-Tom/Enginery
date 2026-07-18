@@ -126,6 +126,7 @@ class Run:
     base_revision: str
     policy_set_version: str
     adapter_versions: Mapping[str, str]
+    adapter_fingerprints: Mapping[str, Digest]
     capability_lock_digest: Digest
     environment_manifest_digest: Digest
     configuration_snapshot_digest: Digest
@@ -148,6 +149,13 @@ class Run:
                     details={"adapter": adapter, "version": version},
                 )
         freeze_mapping(self, "adapter_versions", self.adapter_versions)
+        for adapter, fingerprint in self.adapter_fingerprints.items():
+            if not adapter.strip() or not isinstance(fingerprint, Digest):
+                raise InvalidInputError(
+                    "adapter_fingerprints keys must be non-blank and values must be digests",
+                    details={"adapter": adapter},
+                )
+        freeze_mapping(self, "adapter_fingerprints", self.adapter_fingerprints)
 
     def transition_to(self, target: RunState) -> Run:
         """Return a new ``Run`` in ``target`` state, or raise if the

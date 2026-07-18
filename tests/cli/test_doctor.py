@@ -39,6 +39,26 @@ def test_run_doctor_returns_both_checks() -> None:
     assert report.ok is True
 
 
+def test_adapter_doctor_reports_all_local_provider_kinds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(["adapter", "doctor", "--json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {provider["kind"] for provider in payload} == {
+        "capability_source",
+        "deployment",
+        "harness",
+        "release",
+        "source_control",
+        "validation",
+        "work_ledger",
+        "workspace",
+    }
+    assert all(provider["availability"] == "available" for provider in payload)
+
+
 def test_check_python_version_flags_unsupported_version() -> None:
     check = _check_python_version(actual=(3, 11, 0))
 

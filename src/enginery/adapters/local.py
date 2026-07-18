@@ -393,6 +393,20 @@ class LocalCapabilitySource:
         )
 
 
+def local_provider_statuses() -> tuple[AdapterStatus, ...]:
+    """Return the deterministic local provider inventory for adapter diagnostics."""
+    return (
+        _status(ProviderKind.WORK_LEDGER, "local-work-ledger", ("fetch", "publish")),
+        _status(ProviderKind.HARNESS, "scripted-harness", ("events", "cancel")),
+        _status(ProviderKind.WORKSPACE, "local-git-worktree", ("create", "cleanup", "retain")),
+        _status(ProviderKind.SOURCE_CONTROL, "local-git", ("branches", "commits", "diff")),
+        _status(ProviderKind.VALIDATION, "local-validation", ("commands",)),
+        _status(ProviderKind.RELEASE, "local-publication", ("publish", "verify")),
+        _status(ProviderKind.DEPLOYMENT, "local-deployment-fixture", ("deploy", "rollback")),
+        _status(ProviderKind.CAPABILITY_SOURCE, "local-capability-source", ("discover", "resolve")),
+    )
+
+
 __all__ = [
     "LocalCapabilitySource",
     "LocalDeploymentFixture",
@@ -402,4 +416,5 @@ __all__ = [
     "LocalWorkLedger",
     "LocalWorkspace",
     "ScriptedHarness",
+    "local_provider_statuses",
 ]
