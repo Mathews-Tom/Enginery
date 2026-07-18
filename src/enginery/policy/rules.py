@@ -66,6 +66,8 @@ class HardRuleEnforcer:
     @staticmethod
     def enforce_request(schema: ApprovalSchema) -> None:
         """Reject unsafe input before policy rules can consider it."""
+        if HardRuleEnforcer.requires_human(schema):
+            HardRuleEnforcer._require(schema, "requesting_principal_id")
 
         if schema.action is PolicyAction.CREDENTIAL_GRANT:
             HardRuleEnforcer._require(

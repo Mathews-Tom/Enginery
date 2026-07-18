@@ -15,7 +15,8 @@ from datetime import datetime
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import PolicyDecisionId
-from enginery.domain.immutable import freeze_mapping
+from enginery.domain.immutable import freeze_json_mapping, freeze_mapping, thaw_json_value
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 
 
 class PolicyAction(enum.Enum):
@@ -52,13 +53,26 @@ class PolicyResult(enum.Enum):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalAttestation:
-    """A digest-bound approval fact consumable outside the policy layer."""
+    """A digest-bound, provenance-carrying approval fact."""
 
     action: PolicyAction
     schema_digest: Digest
+    normalized_inputs: Mapping[str, object]
+    approvers: tuple[AuthorityPrincipal, ...]
     approved: bool
     expires_at: datetime | None = None
     superseded: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.approvers:
+            raise InvalidInputError("approval attestation requires at least one approver")
+        if self.normalized_inputs.get("action") != self.action.value:
+            raise InvalidInputError("approval attestation action does not match normalized inputs")
+        if Digest.of_json(thaw_json_value(self.normalized_inputs)) != self.schema_digest:
+            raise InvalidInputError("approval attestation inputs do not match schema digest")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            raise InvalidInputError("approval attestation expiry must be timezone-aware")
+        freeze_json_mapping(self, "normalized_inputs", self.normalized_inputs)
 
     def is_current(self, reference_time: datetime) -> bool:
         if reference_time.tzinfo is None:
@@ -67,6 +81,29 @@ class ApprovalAttestation:
             self.approved
             and not self.superseded
             and (self.expires_at is None or self.expires_at >= reference_time)
+        )
+
+    def binds_input(self, field_name: str, value: object) -> bool:
+        """Return whether this attestation binds the exact claimed input."""
+
+        return thaw_json_value(self.normalized_inputs.get(field_name)) == thaw_json_value(value)
+
+    def has_independent_human_approval(self) -> bool:
+        """Return whether current provenance proves human producer separation."""
+
+        requester = self.normalized_inputs.get("requesting_principal_id")
+        producer_ids = self.normalized_inputs.get("producer_principal_ids")
+        if not isinstance(requester, str) or not requester:
+            return False
+        if producer_ids is not None and (
+            not isinstance(producer_ids, (list, tuple))
+            or any(not isinstance(producer_id, str) for producer_id in producer_ids)
+        ):
+            return False
+        excluded_ids = {requester, *(producer_ids or [])}
+        return all(
+            approver.principal_type is PrincipalType.HUMAN and approver.id not in excluded_ids
+            for approver in self.approvers
         )
 
 

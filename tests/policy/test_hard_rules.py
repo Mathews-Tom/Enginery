@@ -129,6 +129,8 @@ def test_changed_digest_supersedes_prior_decision() -> None:
     registry.record_approval(second, (operator,), request_id="request-1")
 
     assert first_record.superseded is False
+    assert first_record.normalized_inputs["producer_principal_ids"] == (agent.id,)
+    assert next(record for record in registry.records if record.id == first_record.id).superseded
     assert registry.get_approval(first) is None
     assert _evaluator(registry).evaluate(first).result is PolicyResult.REQUIRE_HUMAN
     assert _evaluator(registry).evaluate(second).result is PolicyResult.ALLOW
@@ -154,6 +156,21 @@ def test_expired_approval_cannot_authorize_action() -> None:
     )
 
     assert _evaluator(registry).evaluate(schema).result is PolicyResult.REQUIRE_HUMAN
+
+
+def test_approval_record_rejects_naive_reference_time() -> None:
+    agent = _agent()
+    operator = _human("operator-1")
+    schema = ApprovalSchema(
+        action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+        requesting_principal_id=agent.id,
+        producer_principal_ids=(agent.id,),
+        target_resource="criterion-2",
+    )
+    record = ApprovalRegistry((operator,)).record_approval(schema, (operator,))
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record.is_current(datetime(2026, 7, 18))
 
 
 @pytest.mark.parametrize(
@@ -322,6 +339,7 @@ def test_factory_hard_rule_boundaries_allow_safe_candidate_controls() -> None:
     )
     safe_canary = ApprovalSchema(
         action=PolicyAction.FACTORY_CHANGE_CANARY,
+        requesting_principal_id="run-1",
         candidate_affects_protected_control=True,
         canary_target="non_production_shadow",
     )
@@ -338,6 +356,10 @@ def test_factory_hard_rule_boundaries_allow_safe_candidate_controls() -> None:
             credential_delivery_target="fixed_broker",
         ),
         ApprovalSchema(action=PolicyAction.FACTORY_CHANGE_PROPOSE),
+        ApprovalSchema(
+            action=PolicyAction.EVIDENCE_NON_APPLICABILITY_ACCEPT,
+            target_resource="criterion-1",
+        ),
         ApprovalSchema(
             action=PolicyAction.FACTORY_CHANGE_CANARY,
             candidate_affects_protected_control=False,
