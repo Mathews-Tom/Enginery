@@ -51,6 +51,7 @@ def test_dispatch_persists_workspace_lease_and_supervised_worker(
         base_revision=base_revision,
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
 
     dispatched = runtime.dispatch(
@@ -93,6 +94,7 @@ def test_repository_reservation_blocks_second_run(
         base_revision=base_revision,
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
     dispatched = runtime.dispatch(
         request=first,
@@ -110,6 +112,7 @@ def test_repository_reservation_blocks_second_run(
         base_revision=base_revision,
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         expected_attempt_version=0,
+        operation_id="operation-2",
     )
 
     with pytest.raises(ExternalConflictError, match="reserved by another run"):
@@ -151,6 +154,7 @@ def test_lease_boundary_fault_leaves_no_unrecorded_worker(
         base_revision=base_revision,
         command=("must-not-start",),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
 
     with pytest.raises(RuntimeError, match="injected coordinator crash"):

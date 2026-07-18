@@ -25,6 +25,7 @@ def _lease(ledger_service: LedgerService, *, now: datetime) -> tuple[Coordinator
         now=now,
         lease_window=timedelta(seconds=30),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
     return coordinator, lease
 
@@ -66,6 +67,7 @@ def test_cancellation_terminates_supervised_process_group(
         now=now,
         lease_window=timedelta(seconds=30),
         expected_attempt_version=0,
+        operation_id="operation-1",
     )
     supervisor = WorkerSupervisor(ledger_service, coordinator)
     identity = supervisor.start(

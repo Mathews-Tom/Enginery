@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +35,16 @@ class WorkspaceReservation:
 class GitWorktreeBackend:
     """Reserve one repository workspace per run; worktrees are not containment."""
 
-    def __init__(self, ledger: LedgerService, coordinator: Coordinator) -> None:
+    def __init__(
+        self,
+        ledger: LedgerService,
+        coordinator: Coordinator,
+        *,
+        fault_hook: Callable[[str], None] | None = None,
+    ) -> None:
         self._ledger = ledger
         self._coordinator = coordinator
+        self._fault_hook = fault_hook
 
     def reserve(
         self,
@@ -85,7 +93,7 @@ class GitWorktreeBackend:
                 ),
             )
         )
-        return WorkspaceReservation(
+        reservation = WorkspaceReservation(
             repository_id,
             run_id,
             repository_path,
@@ -94,6 +102,8 @@ class GitWorktreeBackend:
             "reserved",
             result.process_manager_states[1].state_version,
         )
+        self._fault("workspace_reserved")
+        return reservation
 
     def materialize(
         self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
@@ -123,29 +133,34 @@ class GitWorktreeBackend:
                     "repository_id": reservation.repository_id,
                 },
             )
-        return self._record_status(reservation, status="materialized", epoch=epoch, now=now)
+        materialized = self._record_status(reservation, status="materialized", epoch=epoch, now=now)
+        self._fault("workspace_materialized")
+        return materialized
 
     def cleanup(
         self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
     ) -> WorkspaceReservation:
         if reservation.status not in {"materialized", "reserved", "retained"}:
             raise InvalidInputError("workspace is already cleaned")
+        cleaning = self._record_status(reservation, status="cleanup_started", epoch=epoch, now=now)
+        self._fault("workspace_cleanup_started")
         completed = subprocess.run(
             [
                 "git",
                 "-C",
-                str(reservation.repository_path),
+                str(cleaning.repository_path),
                 "worktree",
                 "remove",
                 "--force",
-                str(reservation.workspace_path),
+                str(cleaning.workspace_path),
             ],
             text=True,
             capture_output=True,
             check=False,
         )
         if completed.returncode != 0:
-            retained = self._record_status(reservation, status="retained", epoch=epoch, now=now)
+            retained = self._record_status(cleaning, status="retained", epoch=epoch, now=now)
+            self._fault("workspace_cleanup_recorded")
             raise ExternalConflictError(
                 "git worktree cleanup failed; workspace retained for reconciliation",
                 details={
@@ -153,7 +168,9 @@ class GitWorktreeBackend:
                     "stderr": completed.stderr.strip(),
                 },
             )
-        return self._record_status(reservation, status="cleaned", epoch=epoch, now=now)
+        cleaned = self._record_status(cleaning, status="cleaned", epoch=epoch, now=now)
+        self._fault("workspace_cleanup_recorded")
+        return cleaned
 
     def _record_status(
         self, reservation: WorkspaceReservation, *, status: str, epoch: int, now: datetime
@@ -194,6 +211,39 @@ class GitWorktreeBackend:
             status,
             result.process_manager_states[1].state_version,
         )
+
+    def retain(
+        self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
+    ) -> WorkspaceReservation:
+        """Retain a materialized workspace while an operator decision is pending."""
+        if reservation.status not in {"materialized", "cleanup_started", "retained"}:
+            raise InvalidInputError("only an active workspace can be retained")
+        return self._record_status(reservation, status="retained", epoch=epoch, now=now)
+
+    def resume(
+        self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
+    ) -> WorkspaceReservation:
+        """Return a retained, present workspace to the scheduler."""
+        if reservation.status != "retained":
+            raise InvalidInputError("only a retained workspace can be resumed")
+        if not reservation.workspace_path.is_dir():
+            raise ExternalConflictError(
+                "retained workspace is missing; human reconciliation is required",
+                details={"workspace_path": str(reservation.workspace_path)},
+            )
+        return self._record_status(reservation, status="materialized", epoch=epoch, now=now)
+
+    def read_reservation(self, repository_id: str) -> WorkspaceReservation | None:
+        record = self._ledger.read_process_manager_state(
+            process_manager_name=_MANAGER_NAME, state_key=repository_id
+        )
+        if record is None:
+            return None
+        return _reservation_from_state(record.state, record.state_version)
+
+    def _fault(self, point: str) -> None:
+        if self._fault_hook is not None:
+            self._fault_hook(point)
 
 
 def _workspace_event(

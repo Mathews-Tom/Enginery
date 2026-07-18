@@ -37,6 +37,7 @@ from enginery.ledger.outbox import mark_dispatched as _mark_outbox_dispatched
 from enginery.ledger.process_manager import ProcessManagerStateRecord
 from enginery.ledger.process_manager import read_process_manager_state as _read_pm_state
 from enginery.ledger.projections import ProjectionRecord, RebuildReport
+from enginery.ledger.projections import list_projections as _list_projections
 from enginery.ledger.projections import read_projection as _read_projection
 from enginery.ledger.projections import rebuild_projections as _rebuild_projections
 
@@ -141,6 +142,9 @@ class LedgerService:
         return _read_projection(
             self._connection, aggregate_type=aggregate_type, aggregate_id=aggregate_id
         )
+
+    def list_projections(self, *, aggregate_type: str) -> tuple[ProjectionRecord, ...]:
+        return _list_projections(self._connection, aggregate_type=aggregate_type)
 
     def rebuild_projections(self) -> RebuildReport:
         return _rebuild_projections(self._connection)

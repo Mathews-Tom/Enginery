@@ -42,6 +42,7 @@ class RecoveryCoordinator:
         now: datetime,
         lease_window: timedelta,
         expected_attempt_version: int,
+        operation_id: str,
         workspace_path: Path,
     ) -> FencedNodeLease:
         process_state = self._ledger.read_process_manager_state(
@@ -67,6 +68,7 @@ class RecoveryCoordinator:
             now=now,
             lease_window=lease_window,
             expected_attempt_version=expected_attempt_version,
+            operation_id=operation_id,
         )
 
     def reconcile(
@@ -82,7 +84,7 @@ class RecoveryCoordinator:
         if not assessment.ready_to_release:
             return assessment
         state = dict(record.state)
-        state["status"] = "exit_observed"
+        state["status"] = "exit_reconciled"
         state["reconciled_epoch"] = epoch
         projection = self._ledger.read_projection(
             aggregate_type="worker", aggregate_id=f"{lease.run_id}:{lease.node_id}"
