@@ -88,20 +88,21 @@ class AppendCommand:
     ``correlation_id`` binding every event and side record this command
     produces.
 
-    ``inbox_command_id``, when set, acknowledges that pending
-    :mod:`enginery.ledger.inbox` row as ``processed`` inside this same
-    transaction. ``outbox_entries``, ``process_manager_updates``,
-    ``lease_updates``, and ``artifact_references`` write their respective
-    tables inside this same transaction too, so a caller building one
-    command from one operator request never needs a second commit for its
-    side effects. ``artifact_references`` requires ``append`` to be called
-    with a non-``None`` ``artifact_store`` — the ledger only ever records
-    metadata for bytes that store can prove are already published.
+    ``inbox_command_id``, when set, records the supplied terminal inbox
+    status inside this same transaction. ``outbox_entries``,
+    ``process_manager_updates``, ``lease_updates``, and
+    ``artifact_references`` write their respective tables inside this same
+    transaction too, so a caller building one command from one operator
+    request never needs a second commit for its side effects.
+    ``artifact_references`` requires ``append`` to be called with a
+    non-``None`` ``artifact_store`` — the ledger only ever records metadata
+    for bytes that store can prove are already published.
     """
 
     correlation_id: str
     events: tuple[EventWrite, ...] = field(default_factory=tuple)
     inbox_command_id: str | None = None
+    inbox_status: str = "processed"
     outbox_entries: tuple[OutboxWrite, ...] = field(default_factory=tuple)
     process_manager_updates: tuple[ProcessManagerStateWrite, ...] = field(default_factory=tuple)
     lease_updates: tuple[LeaseWrite, ...] = field(default_factory=tuple)
@@ -111,6 +112,11 @@ class AppendCommand:
         _require_non_blank(self.correlation_id, field_name="correlation_id")
         if not self.events:
             raise InvalidInputError("an AppendCommand must write at least one event")
+        if self.inbox_status not in {"processed", "rejected"}:
+            raise InvalidInputError(
+                "inbox_status must be processed or rejected",
+                details={"inbox_status": self.inbox_status},
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +280,7 @@ def append(
             artifact_ids.append(str(artifact_write.artifact_id))
 
         if command.inbox_command_id is not None:
-            acknowledge_command(connection, command.inbox_command_id)
+            acknowledge_command(connection, command.inbox_command_id, status=command.inbox_status)
 
     return AppendResult(
         correlation_id=command.correlation_id,
