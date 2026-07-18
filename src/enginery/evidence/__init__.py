@@ -9,6 +9,13 @@ from .evaluator import (
     EvidenceEvaluator,
     EvidenceRequirement,
 )
+from .terminal import (
+    MergeReadyContext,
+    MergeReadyVerifier,
+    ReleasedContext,
+    ReleasedVerifier,
+    TerminalContractError,
+)
 
 __all__ = [
     "EvidenceContract",
@@ -16,4 +23,9 @@ __all__ = [
     "EvidenceEvaluationError",
     "EvidenceEvaluator",
     "EvidenceRequirement",
+    "MergeReadyContext",
+    "MergeReadyVerifier",
+    "ReleasedContext",
+    "ReleasedVerifier",
+    "TerminalContractError",
 ]

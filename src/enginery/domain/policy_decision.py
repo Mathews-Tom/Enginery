@@ -51,6 +51,26 @@ class PolicyResult(enum.Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalAttestation:
+    """A digest-bound approval fact consumable outside the policy layer."""
+
+    action: PolicyAction
+    schema_digest: Digest
+    approved: bool
+    expires_at: datetime | None = None
+    superseded: bool = False
+
+    def is_current(self, reference_time: datetime) -> bool:
+        if reference_time.tzinfo is None:
+            raise InvalidInputError("approval reference_time must be timezone-aware")
+        return (
+            self.approved
+            and not self.superseded
+            and (self.expires_at is None or self.expires_at >= reference_time)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyDecision:
     """A durable record of one policy evaluation for one requested action."""
 
@@ -85,4 +105,4 @@ class PolicyDecision:
         freeze_mapping(self, "normalized_inputs", self.normalized_inputs)
 
 
-__all__ = ["PolicyAction", "PolicyDecision", "PolicyResult"]
+__all__ = ["ApprovalAttestation", "PolicyAction", "PolicyDecision", "PolicyResult"]
