@@ -70,7 +70,10 @@ def assess_orphan(
     Any malformed process state, PID reuse, live process, Git failure, or
     in-progress Git lock blocks automatic recovery.
     """
-    identity = _identity_from_state(process_state)
+    try:
+        identity = _identity_from_state(process_state)
+    except InternalInvariantViolationError:
+        return RecoveryAssessment(False, "supervisor_identity_missing_or_invalid")
     observed = probe_process(identity.pid)
     if observed is not None:
         if observed != identity:

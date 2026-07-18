@@ -41,26 +41,83 @@ class WorkerSupervisor:
     def start(
         self, *, lease: FencedNodeLease, command: tuple[str, ...], cwd: Path, now: datetime
     ) -> ProcessIdentity:
+        """Persist launch intent before spawning so crash recovery fails closed."""
         if not command:
             raise InvalidInputError("worker command must not be empty")
-        process = subprocess.Popen(command, cwd=cwd, start_new_session=True)
+        launch_state = _state(lease, identity=None, status="launching")
+        launch_result = self._ledger.append(
+            AppendCommand(
+                correlation_id=f"worker-launch-intent:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
+                events=(_event(self._ledger, lease, "worker.launch_intended", launch_state),),
+                process_manager_updates=(
+                    self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
+                    ProcessManagerStateWrite(_MANAGER, _key(lease), 0, launch_state),
+                ),
+            )
+        )
+        try:
+            process = subprocess.Popen(command, cwd=cwd, start_new_session=True)
+        except OSError as error:
+            self._record_launch_failure(
+                lease=lease,
+                state_version=launch_result.process_manager_states[1].state_version,
+                now=now,
+                error=error,
+            )
+            raise ExternalConflictError("worker process launch failed") from error
         identity = probe_process(process.pid)
         if identity is None:
             raise InternalInvariantViolationError(
-                "started worker disappeared before identity capture"
+                "started worker disappeared before identity capture; human reconciliation required"
             )
-        state = _state(lease, identity)
+        self._record_running(
+            lease=lease,
+            identity=identity,
+            state_version=launch_result.process_manager_states[1].state_version,
+            now=now,
+        )
+        return identity
+
+    def _record_running(
+        self,
+        *,
+        lease: FencedNodeLease,
+        identity: ProcessIdentity,
+        state_version: int,
+        now: datetime,
+    ) -> None:
+        state = _state(lease, identity=identity, status="running")
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"worker-start:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
                 events=(_event(self._ledger, lease, "worker.started", state),),
                 process_manager_updates=(
                     self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
-                    ProcessManagerStateWrite(_MANAGER, _key(lease), 0, state),
+                    ProcessManagerStateWrite(_MANAGER, _key(lease), state_version, state),
                 ),
             )
         )
-        return identity
+
+    def _record_launch_failure(
+        self,
+        *,
+        lease: FencedNodeLease,
+        state_version: int,
+        now: datetime,
+        error: OSError,
+    ) -> None:
+        state = _state(lease, identity=None, status="launch_failed")
+        state["error"] = str(error)
+        self._ledger.append(
+            AppendCommand(
+                correlation_id=f"worker-launch-failed:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
+                events=(_event(self._ledger, lease, "worker.launch_failed", state),),
+                process_manager_updates=(
+                    self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
+                    ProcessManagerStateWrite(_MANAGER, _key(lease), state_version, state),
+                ),
+            )
+        )
 
     def cancel(self, *, lease: FencedNodeLease, identity: ProcessIdentity, now: datetime) -> None:
         current = probe_process(identity.pid)
@@ -92,7 +149,7 @@ class WorkerSupervisor:
     def _record_exit(
         self, *, lease: FencedNodeLease, identity: ProcessIdentity, now: datetime, event_type: str
     ) -> None:
-        state = _state(lease, identity, status="exited")
+        state = _state(lease, identity=identity, status="exit_observed")
         record = self._ledger.read_process_manager_state(
             process_manager_name=_MANAGER, state_key=_key(lease)
         )
@@ -142,19 +199,25 @@ def _key(lease: FencedNodeLease) -> str:
 
 
 def _state(
-    lease: FencedNodeLease, identity: ProcessIdentity, status: str = "running"
+    lease: FencedNodeLease, *, identity: ProcessIdentity | None, status: str
 ) -> dict[str, object]:
-    return {
+    state: dict[str, object] = {
         "run_id": lease.run_id,
         "node_id": lease.node_id,
         "attempt_id": lease.attempt_id,
         "epoch": lease.epoch,
         "fencing_token": lease.fencing_token,
-        "pid": identity.pid,
-        "process_group_id": identity.process_group_id,
-        "start_identity": identity.start_identity,
         "status": status,
     }
+    if identity is not None:
+        state.update(
+            {
+                "pid": identity.pid,
+                "process_group_id": identity.process_group_id,
+                "start_identity": identity.start_identity,
+            }
+        )
+    return state
 
 
 def _event(
