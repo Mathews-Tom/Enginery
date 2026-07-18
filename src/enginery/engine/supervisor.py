@@ -142,8 +142,15 @@ class WorkerSupervisor:
         current = probe_process(identity.pid)
         if current is not None and current != identity:
             raise ExternalConflictError("process identity changed; refusing PID-reuse termination")
-        if current is not None:
-            os.killpg(identity.process_group_id, signal.SIGTERM)
+        if current is None:
+            return True
+        os.killpg(identity.process_group_id, signal.SIGTERM)
+        try:
+            os.waitpid(identity.pid, 0)
+        except ChildProcessError as error:
+            raise InternalInvariantViolationError(
+                "supervised worker was reaped without an observed heartbeat-expiry exit"
+            ) from error
         return True
 
     def _record_exit(
