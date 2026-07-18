@@ -4,6 +4,10 @@
       "github": "1.2.0",
       "omp": "0.9.1"
     },
+    "adapter_fingerprints": {
+      "github": "sha256:b7718e0914b5ba7fd7b911dff986af55f68e0762962feb3b1397f8d81227a9f7",
+      "omp": "sha256:d85e26b533cc80adbbad9974414ce41a3a0386cc639968c42ec71953b0754cb0"
+    },
     "aggregate_version": 5,
     "base_revision": "deadbeefcafefeed",
     "capability_lock_digest": "sha256:018ec76a4e48cf99b7a9f7eb07cd539156dd74057ac5649740b37667621b5420",
@@ -18,5 +22,5 @@
     "workflow_definition_digest": "sha256:c5b93821758874f5a7450fe73be53d42b8d5315c55d88d326490d1620a955496",
     "workflow_definition_id": "wf-issue-to-pr"
   },
-  "schema_version": 1
+  "schema_version": 2
 }

@@ -46,7 +46,7 @@ from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.manifest import WorkflowManifest
 
 WORK_ITEM_SCHEMA_VERSION = 1
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 NODE_ATTEMPT_SCHEMA_VERSION = 1
 ARTIFACT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
@@ -169,6 +169,10 @@ def work_item_from_dict(raw: Mapping[str, object]) -> WorkItem:
 
 
 def run_to_dict(run: Run) -> dict[str, object]:
+    if set(run.adapter_versions) != set(run.adapter_fingerprints):
+        raise InvalidInputError(
+            "Run adapter_versions and adapter_fingerprints must name the same adapters"
+        )
     return _envelope(
         RUN_SCHEMA_VERSION,
         {
@@ -181,6 +185,10 @@ def run_to_dict(run: Run) -> dict[str, object]:
             "base_revision": run.base_revision,
             "policy_set_version": run.policy_set_version,
             "adapter_versions": dict(run.adapter_versions),
+            "adapter_fingerprints": {
+                adapter: _encode_digest(fingerprint)
+                for adapter, fingerprint in run.adapter_fingerprints.items()
+            },
             "capability_lock_digest": _encode_digest(run.capability_lock_digest),
             "environment_manifest_digest": _encode_digest(run.environment_manifest_digest),
             "configuration_snapshot_digest": _encode_digest(run.configuration_snapshot_digest),
@@ -191,10 +199,21 @@ def run_to_dict(run: Run) -> dict[str, object]:
 
 
 def run_from_dict(raw: Mapping[str, object]) -> Run:
-    data = _unwrap_envelope(raw, expected_schema_version=RUN_SCHEMA_VERSION, type_name="Run")
+    schema_version = raw.get("schema_version")
+    if schema_version not in {1, RUN_SCHEMA_VERSION}:
+        raise InvalidInputError(
+            "unsupported Run schema_version",
+            details={"expected": RUN_SCHEMA_VERSION, "actual": schema_version},
+        )
+    data = raw.get("data")
+    if not isinstance(data, Mapping):
+        raise InvalidInputError("Run envelope is missing 'data'")
     adapter_versions_raw = data.get("adapter_versions")
     if not isinstance(adapter_versions_raw, Mapping):
         raise InvalidInputError("adapter_versions must be a mapping")
+    adapter_fingerprints_raw = data.get("adapter_fingerprints", {})
+    if not isinstance(adapter_fingerprints_raw, Mapping):
+        raise InvalidInputError("adapter_fingerprints must be a mapping")
     return Run(
         id=RunId(_str(data, "id")),
         work_item_id=WorkItemId(_str(data, "work_item_id")),
@@ -208,7 +227,11 @@ def run_from_dict(raw: Mapping[str, object]) -> Run:
         repository=_str(data, "repository"),
         base_revision=_str(data, "base_revision"),
         policy_set_version=_str(data, "policy_set_version"),
-        adapter_versions=dict(adapter_versions_raw),
+        adapter_versions={str(key): str(value) for key, value in adapter_versions_raw.items()},
+        adapter_fingerprints={
+            str(adapter): _decode_digest(fingerprint, field_name="adapter_fingerprints")
+            for adapter, fingerprint in adapter_fingerprints_raw.items()
+        },
         capability_lock_digest=_decode_digest(
             data.get("capability_lock_digest"), field_name="capability_lock_digest"
         ),

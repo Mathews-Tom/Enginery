@@ -21,6 +21,7 @@ def _make_run(**overrides: object) -> Run:
         "base_revision": "deadbeef",
         "policy_set_version": "policy-2026-07-17",
         "adapter_versions": {"github": "1.0.0"},
+        "adapter_fingerprints": {"github": Digest.of_bytes(b"github adapter")},
         "capability_lock_digest": Digest.of_bytes(b"capabilities"),
         "environment_manifest_digest": Digest.of_bytes(b"environment"),
         "configuration_snapshot_digest": Digest.of_bytes(b"config"),
