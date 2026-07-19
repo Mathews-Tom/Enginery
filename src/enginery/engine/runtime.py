@@ -501,7 +501,7 @@ class CoordinatorRuntime:
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
     def ingest_result(self, *, envelope: WorkerResultEnvelope, now: datetime) -> None:
-        """Validate and ingest an exact current-lease worker result."""
+        """Validate and ingest an exact active-lease worker result once."""
         request = self._request_for(envelope.run_id, envelope.node_id)
         _require_agent_node(_runtime_state(self._ledger, request))
         if request.attempt_id != envelope.attempt_id:
@@ -511,13 +511,16 @@ class CoordinatorRuntime:
         )
         if attempt is None:
             raise InternalInvariantViolationError("worker result has no durable node attempt")
+        epoch = self._require_owned_epoch(now=now)
         self._fault("result_received")
         WorkerSupervisor(self._ledger, self._coordinator, fault_hook=self._fault_hook).observe_exit(
             lease=self._lease_for_envelope(envelope),
+            coordinator_epoch=epoch.epoch,
             now=now,
         )
         self._leases.ingest_result(
             envelope=envelope,
+            coordinator_epoch=epoch.epoch,
             now=now,
             expected_attempt_version=attempt.aggregate_version,
         )
@@ -526,7 +529,7 @@ class CoordinatorRuntime:
             request=request,
             status=envelope.terminal_result,
             event_type="runtime_node.completed",
-            epoch=envelope.epoch,
+            epoch=epoch.epoch,
             now=now,
         )
         reservation = self._workspaces.read_reservation(request.repository_id)
@@ -535,9 +538,9 @@ class CoordinatorRuntime:
                 "worker result has no matching workspace reservation"
             )
         if request.retain_workspace:
-            self._workspaces.retain(reservation, epoch=envelope.epoch, now=now)
+            self._workspaces.retain(reservation, epoch=epoch.epoch, now=now)
         else:
-            self._workspaces.cleanup(reservation, epoch=envelope.epoch, now=now)
+            self._workspaces.cleanup(reservation, epoch=epoch.epoch, now=now)
 
     def verify_implementation_branch(self, *, run_id: str, head_branch: str) -> str:
         """Verify the retained implementation workspace is ready for its configured PR branch."""
@@ -603,6 +606,7 @@ class CoordinatorRuntime:
                     artifact_references=(),
                     result={"cancellation": "operator_requested"},
                 ),
+                coordinator_epoch=transition_epoch,
                 now=now,
                 expected_attempt_version=attempt.aggregate_version,
                 allow_expired_cancellation=True,
@@ -684,6 +688,7 @@ class CoordinatorRuntime:
             raise InternalInvariantViolationError("human wait has no durable node attempt")
         self._leases.ingest_result(
             envelope=envelope,
+            coordinator_epoch=dispatched.lease.epoch,
             now=now,
             expected_attempt_version=attempt.aggregate_version,
         )
@@ -741,6 +746,14 @@ class CoordinatorRuntime:
                     "workflow node dependencies are not completed",
                     details={"run_id": run_id, "node_id": node_id},
                 )
+
+    def _require_owned_epoch(self, *, now: datetime) -> CoordinatorEpoch:
+        epoch = self._coordinator.current_epoch()
+        if epoch is None or not epoch.active_at(now) or epoch.owner != self._coordinator.owner:
+            raise ExternalConflictError(
+                "worker result collection requires an active owned coordinator epoch"
+            )
+        return epoch
 
     def _acquire_or_renew(self, *, now: datetime, heartbeat_window: timedelta) -> CoordinatorEpoch:
         current = self._coordinator.current_epoch()
