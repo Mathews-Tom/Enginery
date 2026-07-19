@@ -12,6 +12,9 @@ from enginery.domain.errors import (
     InternalInvariantViolationError,
     InvalidInputError,
 )
+from enginery.domain.ids import NodeId
+from enginery.domain.workflow.manifest import WorkflowManifest
+from enginery.domain.workflow.node import NodeKind
 from enginery.engine.coordinator import CommandConsumption, Coordinator, CoordinatorEpoch
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.recovery import RecoveryCoordinator
@@ -69,6 +72,23 @@ class FixtureDispatch:
             raise InvalidInputError("fixture dispatch dependencies must be non-blank node keys")
         if self.workflow_definition_id is not None and not self.workflow_definition_id.strip():
             raise InvalidInputError("workflow definition id must be non-blank when present")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDispatch:
+    """One manifest-bound agent node delegated to the coordinator runtime."""
+
+    request: FixtureDispatch
+    manifest: WorkflowManifest
+
+    def __post_init__(self) -> None:
+        if self.request.workflow_definition_id != self.manifest.id.value:
+            raise InvalidInputError("workflow dispatch request must bind its manifest identity")
+        node = self.manifest.nodes.get(NodeId(self.request.node_id))
+        if node is None:
+            raise InvalidInputError("workflow dispatch references an unknown manifest node")
+        if node.kind is not NodeKind.EXECUTE_AGENT_TASK:
+            raise InvalidInputError("workflow dispatch requires an agent-task manifest node")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +202,7 @@ class CoordinatorRuntime:
         heartbeat_window: timedelta,
         lease_window: timedelta,
         limits: SchedulingLimits,
-        requests: tuple[FixtureDispatch, ...] = (),
+        requests: tuple[FixtureDispatch | WorkflowDispatch, ...] = (),
     ) -> RuntimeTickResult:
         """Consume commands, derive durable readiness, and launch a fair batch."""
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
@@ -192,8 +212,12 @@ class CoordinatorRuntime:
             now=now,
             heartbeat_window=heartbeat_window,
         )
-        for request in requests:
-            self._register(request=request, epoch=epoch.epoch, now=now)
+        for dispatch in requests:
+            self._register(
+                request=_fixture_request(dispatch),
+                epoch=epoch.epoch,
+                now=now,
+            )
         requests_by_key = self._requests_from_ledger()
         nodes = tuple(
             _schedulable(request, state=_runtime_state(self._ledger, request))
@@ -487,6 +511,12 @@ class CoordinatorRuntime:
             self._fault_hook(point)
 
 
+def _fixture_request(dispatch: FixtureDispatch | WorkflowDispatch) -> FixtureDispatch:
+    if isinstance(dispatch, WorkflowDispatch):
+        return dispatch.request
+    return dispatch
+
+
 def _node_id(request: FixtureDispatch) -> str:
     return f"{request.run_id}:{request.node_id}"
 
@@ -613,4 +643,5 @@ __all__ = [
     "FixtureDispatch",
     "FixtureRuntime",
     "RuntimeTickResult",
+    "WorkflowDispatch",
 ]
