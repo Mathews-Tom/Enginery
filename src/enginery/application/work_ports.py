@@ -293,9 +293,10 @@ class PullRequestReview:
 
     reviewer: str
     state: str
+    head_revision: str
 
     def __post_init__(self) -> None:
-        if not self.reviewer.strip() or not self.state.strip():
+        if not self.reviewer.strip() or not self.state.strip() or not self.head_revision.strip():
             raise ValueError("pull request review fields must be non-blank")
 
 
@@ -325,6 +326,8 @@ class PullRequestEvidence:
     mergeable: bool | None
 
     def __post_init__(self) -> None:
+        if any(review.head_revision != self.pull_request.head_revision for review in self.reviews):
+            raise ValueError("pull request reviews must bind the current pull-request head")
         if any(check.head_revision != self.pull_request.head_revision for check in self.checks):
             raise ValueError("pull request checks must bind the current pull-request head")
 
