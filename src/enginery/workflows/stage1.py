@@ -62,6 +62,11 @@ from enginery.workflows.stage1_runtime import (
     Stage1ValidationExecutor,
     Stage1ValidationResult,
 )
+from enginery.workflows.verification import (
+    Stage1VerificationExecutor,
+    Stage1VerificationRequest,
+    Stage1VerificationResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +250,7 @@ class Stage1ProgressionAction(StrEnum):
     AWAIT_HUMAN_REVIEW = "await_human_review"
     OPEN_PR = "open_pr"
     WAIT_FOR_CI = "wait_for_ci"
+    VERIFY = "verify"
     WAIT = "wait"
 
 
@@ -352,6 +358,11 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.WAIT_FOR_CI, run)
         if wait_for_ci_status != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        verify_status = self._node_status(run_id, "verify")
+        if verify_status in {None, "queued"}:
+            return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
+        if verify_status != "passed":
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         return Stage1Progression(Stage1ProgressionAction.WAIT, run)
 
     def advance(
@@ -390,6 +401,8 @@ class Stage1RunService:
             self.open_pull_request(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.WAIT_FOR_CI:
             self.wait_for_ci(request, now=now, heartbeat_window=heartbeat_window)
+        elif progression.action is Stage1ProgressionAction.VERIFY:
+            self.verify_merge_ready(request, now=now, heartbeat_window=heartbeat_window)
         return self.next_action(run_id)
 
     def qualify(
@@ -659,6 +672,17 @@ class Stage1RunService:
             )
         return projection.state
 
+    def _require_attempt_state(self, attempt_id: str) -> Mapping[str, object]:
+        projection = self.ledger.read_projection(
+            aggregate_type="node_attempt", aggregate_id=attempt_id
+        )
+        if projection is None:
+            raise MissingPrerequisiteError(
+                "Stage 1 merge-ready verification requires a durable implementation attempt",
+                details={"attempt_id": attempt_id},
+            )
+        return projection.state
+
     def wait_for_ci(
         self,
         request: Stage1RunRequest,
@@ -712,6 +736,75 @@ class Stage1RunService:
             extra={"pull_request_outcome": outcome.value},
         )
         return outcome
+
+    def verify_merge_ready(
+        self,
+        request: Stage1RunRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> Stage1VerificationResult:
+        """Double-read current subjects before recording a merge-ready evidence bundle."""
+        self._require_passed_node(request.run.id, "wait_for_ci")
+        open_pr = self._node_state(request.run.id, "open_pr")
+        implementation = self._require_attempt_state(request.implementation.attempt_id)
+        validation = self._node_state(request.run.id, "validate")
+        verification_request = Stage1VerificationRequest(
+            run_id=request.run.id,
+            lifecycle_operation_id=OperationId.derive(
+                run_id=request.run.id,
+                node_id=NodeId("verify"),
+                side_effect_kind="publish_merge_ready",
+                target_scope=request.work_snapshot.work_item.external_reference,
+                ordinal=0,
+            ),
+            external_reference=request.work_snapshot.work_item.external_reference,
+            issue_revision=request.work_snapshot.source_revision,
+            issue_digest=str(request.work_snapshot.work_item.bound_field_digest),
+            base_revision=request.run.base_revision,
+            pull_request_number=_integer(open_pr, "pull_request_number"),
+            requirements=PullRequestRequirements(
+                expected_head_revision=_string(open_pr, "head_revision"),
+                required_checks=request.required_checks,
+                require_approved_review=False,
+            ),
+            implementation_artifacts=_digest_tuple(implementation, "artifact_references"),
+            verification_artifacts=(
+                _digest_from_string(_string(validation, "validation_artifact_digest")),
+            ),
+        )
+        dispatch = WorkflowNodeDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="verify",
+                attempt_id="verify-0",
+                operation_id=str(verification_request.lifecycle_operation_id),
+                command=("verify_merge_ready",),
+                dependencies=((str(request.run.id), "wait_for_ci"),),
+            ),
+            request.manifest,
+        )
+        epoch = self.runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+        )
+        result = Stage1VerificationExecutor(
+            work_ledger=self._require_work_ledger(),
+            pull_requests=self._require_pull_requests(),
+        ).verify(request=verification_request, observed_at=now)
+        if result.outcome is PullRequestOutcome.WAITING:
+            return result
+        extra: dict[str, object] = {"pull_request_outcome": result.outcome.value}
+        if result.evidence is not None:
+            extra["evidence_digest"] = str(result.evidence.digest)
+        self.runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id="verify",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed" if result.outcome is PullRequestOutcome.MERGE_READY else "failed",
+            extra=extra,
+        )
+        return result
 
     def _review_outcome(self, run_id: RunId) -> ReviewOutcome | None:
         projection = self.ledger.read_projection(
@@ -885,6 +978,28 @@ def _string(state: Mapping[str, object], field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidInputError(f"Stage 1 run projection {field_name} must be a non-blank string")
     return value
+
+
+def _digest_from_string(value: str) -> Digest:
+    algorithm, separator, hex_value = value.partition(":")
+    if not separator:
+        raise InvalidInputError("Stage 1 artifact reference must be an algorithm:hex digest")
+    return Digest(algorithm=algorithm, hex_value=hex_value)
+
+
+def _digest_tuple(state: Mapping[str, object], field_name: str) -> tuple[Digest, ...]:
+    values = state.get(field_name)
+    if not isinstance(values, list) or not values:
+        raise MissingPrerequisiteError(
+            f"Stage 1 merge-ready verification requires {field_name}",
+            details={"field": field_name},
+        )
+    if any(not isinstance(value, str) for value in values):
+        raise InternalInvariantViolationError(
+            "Stage 1 implementation artifacts have an invalid type",
+            details={"field": field_name},
+        )
+    return tuple(_digest_from_string(value) for value in values)
 
 
 def _string_from_list(value: object, field_name: str) -> str:

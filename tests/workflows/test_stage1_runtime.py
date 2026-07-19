@@ -12,6 +12,7 @@ import pytest
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import (
+    LifecycleProjection,
     PullRequestCheck,
     PullRequestEvidence,
     PullRequestPort,
@@ -28,6 +29,7 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
 )
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.manifest import WorkflowManifest
@@ -39,6 +41,7 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
@@ -156,6 +159,33 @@ class RecordingWorkLedger:
         assert node is not None
         assert node.state["status"] == "queued"
         return self.snapshot
+
+
+class TerminalWorkLedger:
+    def __init__(
+        self,
+        snapshot: WorkLedgerSnapshot,
+        *,
+        terminal_snapshot: WorkLedgerSnapshot | None = None,
+    ) -> None:
+        self.snapshot = snapshot
+        self.terminal_snapshot = terminal_snapshot
+        self.fetch_count = 0
+        self.published: list[LifecycleProjection] = []
+
+    def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
+        if external_reference != self.snapshot.work_item.external_reference:
+            raise AssertionError("unexpected external reference")
+        self.fetch_count += 1
+        if self.fetch_count > 1 and self.terminal_snapshot is not None:
+            return self.terminal_snapshot
+        return self.snapshot
+
+    def publish_lifecycle(
+        self, projection: LifecycleProjection, *, operation_id: OperationId
+    ) -> ReconciliationResult:
+        self.published.append(projection)
+        return ReconciliationResult.FOUND_MATCHING
 
 
 def test_qualification_persists_manifest_node_before_provider_fetch(
@@ -724,11 +754,58 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
 
 
 @pytest.mark.parametrize(
-    ("final_check_status", "final_check_conclusion", "head_revision", "outcome", "next_action"),
     (
-        ("completed", "success", "head-revision", "merge_ready", "wait"),
-        ("completed", "failure", "head-revision", "blocked", "await_human_review"),
-        ("completed", "success", "superseding-head", "superseded", "await_human_review"),
+        "final_check_status",
+        "final_check_conclusion",
+        "head_revision",
+        "source_drift",
+        "base_drift",
+        "verify_waiting",
+        "ci_outcome",
+        "next_action",
+    ),
+    (
+        ("completed", "success", "head-revision", False, False, True, "merge_ready", "wait"),
+        (
+            "completed",
+            "failure",
+            "head-revision",
+            False,
+            False,
+            False,
+            "blocked",
+            "await_human_review",
+        ),
+        (
+            "completed",
+            "success",
+            "superseding-head",
+            False,
+            False,
+            False,
+            "superseded",
+            "await_human_review",
+        ),
+        (
+            "completed",
+            "success",
+            "head-revision",
+            True,
+            False,
+            False,
+            "merge_ready",
+            "await_human_review",
+        ),
+        (
+            "completed",
+            "success",
+            "head-revision",
+            False,
+            True,
+            False,
+            "merge_ready",
+            "await_human_review",
+        ),
     ),
 )
 def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
@@ -737,7 +814,10 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     final_check_status: str,
     final_check_conclusion: str,
     head_revision: str,
-    outcome: str,
+    source_drift: bool,
+    base_drift: bool,
+    verify_waiting: bool,
+    ci_outcome: str,
     next_action: str,
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
@@ -802,9 +882,14 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     )
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
+    terminal_snapshot = (
+        replace(snapshot, source_revision="superseding-issue") if source_drift else None
+    )
+    work_ledger = TerminalWorkLedger(snapshot, terminal_snapshot=terminal_snapshot)
     service = Stage1RunService(
         runtime=runtime,
         ledger=ledger_service,
+        work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -841,8 +926,28 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             node_id=node_id,
             epoch=epoch.epoch,
             now=now,
+            extra=(
+                {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+                if node_id == "validate"
+                else None
+            ),
         )
 
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="implementation-artifacts",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id=request.implementation.attempt_id,
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                ),
+            ),
+        )
+    )
     service.review_implementation(
         request,
         ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
@@ -868,11 +973,44 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     pull_requests.check_status = final_check_status
     pull_requests.check_conclusion = final_check_conclusion
     pull_requests.head_revision = head_revision
+    pull_requests.base_revision = "advanced-base" if base_drift else "base-revision"
     assert (
         service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
-        == outcome
+        == ci_outcome
     )
-    assert service.next_action(request.run.id).action.value == next_action
+    assert service.next_action(request.run.id).action.value == (
+        "verify" if ci_outcome == "merge_ready" else next_action
+    )
+    if ci_outcome == "merge_ready":
+        if verify_waiting:
+            pull_requests.check_status = "in_progress"
+            pull_requests.check_conclusion = None
+            assert (
+                service.verify_merge_ready(
+                    request, now=now, heartbeat_window=timedelta(seconds=60)
+                ).outcome.value
+                == "waiting"
+            )
+            assert service.next_action(request.run.id).action.value == "verify"
+            pull_requests.check_status = final_check_status
+            pull_requests.check_conclusion = final_check_conclusion
+            work_ledger.fetch_count = 0
+        result = service.verify_merge_ready(
+            request, now=now, heartbeat_window=timedelta(seconds=60)
+        )
+        assert result.outcome.value == (
+            "superseded" if source_drift or base_drift else "merge_ready"
+        )
+        assert service.next_action(request.run.id).action.value == next_action
+        if result.evidence is not None:
+            verify_node = ledger_service.read_projection(
+                aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:verify"
+            )
+            assert verify_node is not None
+            assert verify_node.state["evidence_digest"] == str(result.evidence.digest)
+            assert work_ledger.published[0].evidence_digest == result.evidence.digest
+        else:
+            assert not work_ledger.published
 
 
 class RecordingPullRequests:
@@ -884,6 +1022,7 @@ class RecordingPullRequests:
         self.check_status = "completed"
         self.check_conclusion: str | None = "success"
         self.head_revision = "head-revision"
+        self.base_revision = "base-revision"
 
     def probe(self) -> object:
         raise AssertionError("not used by this test")
@@ -914,7 +1053,7 @@ class RecordingPullRequests:
             head_branch=request.head_branch,
             head_revision=self.head_revision,
             base_branch=request.base_branch,
-            base_revision="base-revision",
+            base_revision=self.base_revision,
         )
 
     def evidence(self, number: int) -> PullRequestEvidence:
