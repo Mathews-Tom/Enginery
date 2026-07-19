@@ -34,7 +34,10 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     Stage1RunService,
 )
-from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
+from enginery.workflows.stage1_runtime import (
+    Stage1QualificationExecutor,
+    Stage1ValidationExecutor,
+)
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -142,6 +145,47 @@ def test_qualification_persists_manifest_node_before_provider_fetch(
     assert node is not None
     assert node.state["status"] == "passed"
     assert node.state["source_revision"] == "1"
+
+
+def test_validation_persists_node_before_running_commands(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    artifact_store = ArtifactStore(tmp_path / "artifacts")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+
+    def run_command(
+        command: tuple[str, ...], workspace_path: Path
+    ) -> subprocess.CompletedProcess[str]:
+        node = ledger_service.read_projection(
+            aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+        )
+        assert command == ("validate",)
+        assert workspace_path == dispatch.request.workspace_path
+        assert node is not None
+        assert node.state["status"] == "queued"
+        return subprocess.CompletedProcess(command, 0, "token=0123456789abcdef", "")
+
+    result = Stage1ValidationExecutor(
+        runtime=runtime,
+        artifact_store=artifact_store,
+        command_runner=run_command,
+    ).validate(
+        dispatch=dispatch,
+        commands=(("validate",),),
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+    )
+    assert result.passed is True
+    assert node is not None
+    assert node.state["status"] == "passed"
+    assert node.state["validation_artifact_digest"] == str(result.artifact_digest)
+    assert b"0123456789abcdef" not in artifact_store.read_bytes(result.artifact_digest)
 
 
 def test_tick_does_not_dispatch_a_recovered_deterministic_node(
@@ -477,7 +521,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         permitted_capabilities=("git",),
         evidence_requirements=("redacted harness transcript",),
     )
-    with pytest.raises(MissingPrerequisiteError, match="successful qualification"):
+    with pytest.raises(MissingPrerequisiteError, match="successful node 'qualify'"):
         service.dispatch_implementation(
             request,
             execution_request,

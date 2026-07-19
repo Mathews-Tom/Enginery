@@ -8,9 +8,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from enginery.adapters.omp import OmpHarness
-from enginery.application.work_ports import HarnessTask, WorkLedgerPort, WorkLedgerSnapshot
+from enginery.application.work_ports import (
+    HarnessResult,
+    HarnessTask,
+    WorkLedgerPort,
+    WorkLedgerSnapshot,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.errors import (
+    ExternalConflictError,
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
@@ -37,8 +43,13 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
+from enginery.workflows.implementation import Stage1ImplementationExecutor
 from enginery.workflows.issue_to_pr import IssueQualification
-from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
+from enginery.workflows.stage1_runtime import (
+    Stage1QualificationExecutor,
+    Stage1ValidationExecutor,
+    Stage1ValidationResult,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +265,9 @@ class Stage1RunService:
             time_budget_seconds=execution.time_budget_seconds,
             cost_budget=execution.cost_budget,
         )
-        result_path = request.workspace_path / f".enginery-omp-{execution.operation_id}.json"
+        result_path = request.workspace_path / (
+            f".enginery-omp-{Digest.of_bytes(str(execution.operation_id).encode())}.json"
+        )
         dispatch = WorkflowDispatch(
             _fixture_dispatch(
                 request,
@@ -275,13 +288,84 @@ class Stage1RunService:
             limits=limits,
             requests=(dispatch,),
         )
-        if len(tick.dispatched) != 1:
-            raise InternalInvariantViolationError(
-                "qualified implementation was not dispatched",
-                details={"run_id": str(request.run.id)},
+        matching = tuple(
+            fixture
+            for fixture in tick.dispatched
+            if fixture.lease.run_id == str(request.run.id)
+            and fixture.lease.node_id == "implement"
+            and fixture.lease.attempt_id == execution.attempt_id
+            and fixture.lease.operation_id == str(execution.operation_id)
+        )
+        if len(matching) != 1:
+            raise ExternalConflictError(
+                "qualified implementation was not scheduled",
+                details={
+                    "run_id": str(request.run.id),
+                    "dispatched_nodes": [
+                        f"{fixture.lease.run_id}:{fixture.lease.node_id}"
+                        for fixture in tick.dispatched
+                    ],
+                },
             )
-        return Stage1ImplementationDispatch(
-            task=task, fixture=tick.dispatched[0], result_path=result_path
+        fixture = matching[0]
+        return Stage1ImplementationDispatch(task=task, fixture=fixture, result_path=result_path)
+
+    def collect_implementation(
+        self,
+        request: Stage1RunRequest,
+        dispatch: Stage1ImplementationDispatch,
+        *,
+        now: datetime,
+    ) -> HarnessResult:
+        """Ingest the exact supervised OMP result through the coordinator."""
+        if dispatch.task.run_id != request.run.id:
+            raise InvalidInputError("OMP dispatch does not belong to the Stage 1 run")
+        return Stage1ImplementationExecutor(
+            runtime=self.runtime,
+            harness=self._require_omp_harness(),
+            manifest=request.manifest,
+        ).collect(
+            dispatched=dispatch.fixture,
+            task=dispatch.task,
+            now=now,
+            result_path=dispatch.result_path,
+        )
+
+    def validate_implementation(
+        self,
+        request: Stage1RunRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> Stage1ValidationResult:
+        """Run configured focused validation after the OMP result is durable."""
+        self._require_passed_node(request.run.id, "implement")
+        return Stage1ValidationExecutor(
+            runtime=self.runtime,
+            artifact_store=self._require_omp_harness().artifact_store,
+        ).validate(
+            dispatch=WorkflowNodeDispatch(
+                _fixture_dispatch(
+                    request,
+                    node_id="validate",
+                    attempt_id="validate-0",
+                    operation_id=str(
+                        OperationId.derive(
+                            run_id=request.run.id,
+                            node_id=NodeId("validate"),
+                            side_effect_kind="validation",
+                            target_scope=request.repository_id,
+                            ordinal=0,
+                        )
+                    ),
+                    command=request.validation_commands[0],
+                    dependencies=((str(request.run.id), "implement"),),
+                ),
+                request.manifest,
+            ),
+            commands=request.validation_commands,
+            now=now,
+            heartbeat_window=heartbeat_window,
         )
 
     def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
@@ -291,7 +375,7 @@ class Stage1RunService:
         )
         if projection is None or projection.state.get("status") != "passed":
             raise MissingPrerequisiteError(
-                "Stage 1 implementation requires successful qualification",
+                f"Stage 1 requires successful node {node_id!r}",
                 details={"run_id": str(run_id), "node_id": node_id},
             )
 
