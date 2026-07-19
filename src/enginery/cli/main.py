@@ -99,12 +99,6 @@ def _build_parser() -> argparse.ArgumentParser:
             lifecycle_parser.add_argument("--run-id", required=True)
         if command == "watch":
             lifecycle_parser.add_argument("--advance", action="store_true")
-            lifecycle_parser.add_argument("--github-repository")
-            lifecycle_parser.add_argument("--github-credential-reference")
-            lifecycle_parser.add_argument("--github-executable", default="gh")
-            lifecycle_parser.add_argument("--omp-credential-reference")
-            lifecycle_parser.add_argument("--omp-executable", default="omp")
-            lifecycle_parser.add_argument("--artifact-root", type=Path)
         if command in {"approve", "reject", "cancel", "resume"}:
             lifecycle_parser.add_argument("--node-id", required=True)
         if command in {"approve", "reject"}:

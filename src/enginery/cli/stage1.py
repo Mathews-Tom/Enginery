@@ -16,7 +16,11 @@ from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRunt
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
+from enginery.workflows.stage1 import (
+    Stage1RunRequest,
+    Stage1RunService,
+    stage1_request_from_state,
+)
 
 _HEARTBEAT_WINDOW = timedelta(seconds=60)
 
@@ -66,7 +70,9 @@ def _watch(args: argparse.Namespace) -> None:
         service = Stage1RunService(runtime=runtime, ledger=ledger)
         previous = service.next_action(RunId(args.run_id))
         if args.advance:
-            service = _advancing_service(args, runtime=runtime, ledger=ledger)
+            service = _advancing_service(
+                runtime=runtime, ledger=ledger, request=previous.run.request
+            )
             progression = service.advance(
                 RunId(args.run_id),
                 now=_now(),
@@ -92,28 +98,20 @@ def _watch(args: argparse.Namespace) -> None:
 
 
 def _advancing_service(
-    args: argparse.Namespace, *, runtime: CoordinatorRuntime, ledger: LedgerService
+    *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
-    github_repository = _required_option(args.github_repository, "--github-repository")
-    github_credential_reference = _required_option(
-        args.github_credential_reference, "--github-credential-reference"
-    )
-    omp_credential_reference = _required_option(
-        args.omp_credential_reference, "--omp-credential-reference"
-    )
-    if args.artifact_root is None:
-        raise InvalidInputError("stage1 watch --advance requires --artifact-root")
+    configuration = request.execution_configuration
     github = GitHubAdapterConfig(
-        repository=github_repository,
-        credential_reference=github_credential_reference,
-        executable=args.github_executable,
+        repository=configuration.github_repository,
+        credential_reference=configuration.github_credential_reference,
+        executable=configuration.github_executable,
     )
     harness = OmpHarness(
         OmpAdapterConfig(
-            credential_reference=omp_credential_reference,
-            executable=args.omp_executable,
+            credential_reference=configuration.omp_credential_reference,
+            executable=configuration.omp_executable,
         ),
-        ArtifactStore(args.artifact_root),
+        ArtifactStore(configuration.artifact_root),
     )
     return Stage1RunService(
         runtime=runtime,
@@ -121,12 +119,6 @@ def _advancing_service(
         work_ledger=GitHubWorkLedger(github),
         omp_harness=harness,
     )
-
-
-def _required_option(value: object, option: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise InvalidInputError(f"stage1 watch --advance requires {option}")
-    return value
 
 
 def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
