@@ -29,13 +29,16 @@ class WorkLedgerSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class LifecycleProjection:
-    """A concise lifecycle update suitable for an external work ledger."""
+    """A concise lifecycle update for one normalized external work reference."""
 
     run_id: RunId
+    external_reference: str
     state: str
     evidence_digest: Digest | None
 
     def __post_init__(self) -> None:
+        if not self.external_reference.strip():
+            raise ValueError("lifecycle projection external_reference must be non-blank")
         if not self.state.strip():
             raise ValueError("lifecycle projection state must be non-blank")
 
