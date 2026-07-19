@@ -40,6 +40,7 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     watched = json.loads(capsys.readouterr().out)
     assert watched["run_id"] == "run-stage1"
     assert watched["nodes"] == []
+    assert watched["next_action"] == "qualify"
 
     assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
     evidence = json.loads(capsys.readouterr().out)

@@ -538,8 +538,9 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     fake_omp.write_text(
         "#!/usr/bin/env python3\n"
         "import json\n"
-        "for event in ('session', 'agent_start', 'agent_end'):\n"
-        "    print(json.dumps({'type': event}))\n",
+        "for event in ('session', 'agent_start'):\n"
+        "    print(json.dumps({'type': event}))\n"
+        "raise SystemExit(1)\n",
         encoding="utf-8",
     )
     fake_omp.chmod(0o755)
@@ -605,6 +606,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    assert service.next_action(request.run.id).action.value == "qualify"
     with pytest.raises(MissingPrerequisiteError, match="successful node 'qualify'"):
         service.dispatch_implementation(
             request,
@@ -620,6 +622,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         now=now + timedelta(seconds=1),
         heartbeat_window=timedelta(seconds=60),
     )
+    assert service.next_action(request.run.id).action.value == "implement"
     implementation = service.dispatch_implementation(
         request,
         now=now + timedelta(seconds=2),
@@ -627,11 +630,13 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         lease_window=timedelta(seconds=30),
         limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
     )
+    assert service.next_action(request.run.id).action.value == "wait"
     deadline = time.monotonic() + 5
     while not implementation.result_path.is_file():
         if time.monotonic() >= deadline:
             pytest.fail("supervised OMP worker did not retain a result")
         time.sleep(0.01)
+    assert service.next_action(request.run.id).action.value == "collect_implementation"
     recovered = Stage1RunService(
         runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
         ledger=ledger_service,
@@ -649,6 +654,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             time.sleep(0.01)
         else:
             break
+    assert recovered.next_action(request.run.id).action.value == "await_human_review"
     second = service.start(
         request,
         now=now + timedelta(seconds=3),
@@ -665,9 +671,9 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         aggregate_type="runtime_node", aggregate_id="run-stage1:implement"
     )
     assert implementation_node is not None
-    assert implementation_node.state["status"] == "passed"
+    assert implementation_node.state["status"] == "failed"
     assert implementation_node.state["retain_workspace"] is True
-    assert result.terminal_status == "succeeded"
+    assert result.terminal_status == "failed"
     epoch = runtime.claim_epoch(
         now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
     )
