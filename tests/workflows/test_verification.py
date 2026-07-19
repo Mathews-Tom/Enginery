@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from enginery.application.work_ports import (
+    LifecycleProjection,
     PullRequestCheck,
     PullRequestEvidence,
     PullRequestPort,
@@ -15,7 +16,8 @@ from enginery.application.work_ports import (
 )
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.ids import WorkItemId
+from enginery.domain.ids import OperationId, RunId, WorkItemId
+from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.workflows.pull_request import PullRequestOutcome, PullRequestRequirements
 from enginery.workflows.verification import (
@@ -66,6 +68,13 @@ class SequenceWorkLedger:
     def __init__(self, snapshots: tuple[WorkLedgerSnapshot, ...]) -> None:
         self._snapshots = iter(snapshots)
 
+    def publish_lifecycle(
+        self, projection: LifecycleProjection, *, operation_id: OperationId
+    ) -> ReconciliationResult:
+        assert operation_id == OperationId("lifecycle-1")
+        assert projection.state == PullRequestOutcome.MERGE_READY.value
+        return ReconciliationResult.FOUND_MATCHING
+
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
         assert external_reference == "issue:1"
         return next(self._snapshots)
@@ -84,6 +93,8 @@ def _request(snapshot: WorkLedgerSnapshot) -> Stage1VerificationRequest:
     return Stage1VerificationRequest(
         external_reference="issue:1",
         issue_revision=snapshot.source_revision,
+        run_id=RunId("run-1"),
+        lifecycle_operation_id=OperationId("lifecycle-1"),
         issue_digest=str(snapshot.work_item.bound_field_digest),
         base_revision="base",
         pull_request_number=1,

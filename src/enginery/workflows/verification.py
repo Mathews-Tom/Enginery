@@ -5,9 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from enginery.application.work_ports import PullRequestPort, WorkLedgerPort, WorkLedgerSnapshot
+from enginery.application.work_ports import (
+    LifecycleProjection,
+    PullRequestPort,
+    WorkLedgerPort,
+    WorkLedgerSnapshot,
+)
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import ExternalConflictError, InvalidInputError
+from enginery.domain.ids import OperationId, RunId
+from enginery.domain.node_attempt import ReconciliationResult
 from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.pull_request import (
     PullRequestOutcome,
@@ -20,6 +27,8 @@ from enginery.workflows.pull_request import (
 class Stage1VerificationRequest:
     """Immutable subjects required by one terminal merge-ready evaluation."""
 
+    run_id: RunId
+    lifecycle_operation_id: OperationId
     external_reference: str
     issue_revision: str
     issue_digest: str
@@ -87,19 +96,28 @@ class Stage1VerificationExecutor:
         if terminal_outcome is not PullRequestOutcome.MERGE_READY:
             return Stage1VerificationResult(terminal_outcome, None)
 
-        return Stage1VerificationResult(
-            PullRequestOutcome.MERGE_READY,
-            Stage1EvidenceBundle(
-                issue_revision=request.issue_revision,
-                base_revision=request.base_revision,
-                head_revision=request.requirements.expected_head_revision,
-                pull_request_number=request.pull_request_number,
-                implementation_artifacts=request.implementation_artifacts,
-                verification_artifacts=request.verification_artifacts,
-                outcome=PullRequestOutcome.MERGE_READY,
-                observed_at=observed_at,
-            ),
+        bundle = Stage1EvidenceBundle(
+            issue_revision=request.issue_revision,
+            base_revision=request.base_revision,
+            head_revision=request.requirements.expected_head_revision,
+            pull_request_number=request.pull_request_number,
+            implementation_artifacts=request.implementation_artifacts,
+            verification_artifacts=request.verification_artifacts,
+            outcome=PullRequestOutcome.MERGE_READY,
+            observed_at=observed_at,
         )
+        published = self.work_ledger.publish_lifecycle(
+            LifecycleProjection(
+                run_id=request.run_id,
+                external_reference=request.external_reference,
+                state=PullRequestOutcome.MERGE_READY.value,
+                evidence_digest=bundle.digest,
+            ),
+            operation_id=request.lifecycle_operation_id,
+        )
+        if published is not ReconciliationResult.FOUND_MATCHING:
+            raise ExternalConflictError("terminal lifecycle projection was not reconciled")
+        return Stage1VerificationResult(PullRequestOutcome.MERGE_READY, bundle)
 
 
 def _matches_request(
