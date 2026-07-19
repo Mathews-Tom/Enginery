@@ -133,7 +133,12 @@ def test_tick_does_not_dispatch_a_recovered_deterministic_node(
 def test_manifest_node_dispatch_rejects_agent_nodes(tmp_path: Path) -> None:
     with pytest.raises(InvalidInputError, match="non-agent"):
         WorkflowNodeDispatch(
-            replace(_request(tmp_path), node_id="implement"), issue_to_pr_manifest()
+            replace(
+                _request(tmp_path),
+                node_id="implement",
+                dependencies=(("run-1", "qualify"),),
+            ),
+            issue_to_pr_manifest(),
         )
 
 
@@ -154,3 +159,11 @@ def test_manifest_registration_renews_its_active_epoch(
     )
 
     assert second.epoch == first.epoch
+
+
+def test_manifest_node_dispatch_rejects_dependency_bypass(tmp_path: Path) -> None:
+    with pytest.raises(InvalidInputError, match="dependencies"):
+        WorkflowNodeDispatch(
+            replace(_request(tmp_path), dependencies=(("run-1", "unrelated"),)),
+            issue_to_pr_manifest(),
+        )

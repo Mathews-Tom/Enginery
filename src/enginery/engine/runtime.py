@@ -87,6 +87,7 @@ class WorkflowDispatch:
         node = self.manifest.nodes.get(NodeId(self.request.node_id))
         if node is None:
             raise InvalidInputError("workflow dispatch references an unknown manifest node")
+        _require_manifest_dependencies(self.request, node.dependencies)
         if node.actor_type is not ActorType.AGENT:
             raise InvalidInputError("workflow dispatch requires an agent-task manifest node")
 
@@ -104,6 +105,7 @@ class WorkflowNodeDispatch:
         node = self.manifest.nodes.get(NodeId(self.request.node_id))
         if node is None:
             raise InvalidInputError("workflow node dispatch references an unknown manifest node")
+        _require_manifest_dependencies(self.request, node.dependencies)
         if node.actor_type is ActorType.AGENT:
             raise InvalidInputError("workflow node dispatch requires a non-agent manifest node")
 
@@ -851,6 +853,14 @@ def _required_text(state: dict[object, object], field_name: str) -> str:
             details={"field": field_name},
         )
     return value
+
+
+def _require_manifest_dependencies(
+    request: FixtureDispatch, dependencies: tuple[NodeId, ...]
+) -> None:
+    expected = tuple((request.run_id, str(dependency)) for dependency in dependencies)
+    if request.dependencies != expected:
+        raise InvalidInputError("workflow dispatch dependencies do not match its manifest node")
 
 
 def _runtime_state(ledger: LedgerService, request: FixtureDispatch) -> dict[str, object]:
