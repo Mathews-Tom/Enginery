@@ -161,6 +161,24 @@ def test_manifest_registration_renews_its_active_epoch(
     assert second.epoch == first.epoch
 
 
+def test_manifest_registration_requires_completed_dependencies(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(
+        replace(
+            _request(tmp_path),
+            node_id="validate",
+            dependencies=(("run-1", "implement"),),
+        ),
+        issue_to_pr_manifest(),
+    )
+
+    with pytest.raises(ExternalConflictError, match="dependencies"):
+        runtime.register_node(dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60))
+
+
 def test_manifest_node_dispatch_rejects_dependency_bypass(tmp_path: Path) -> None:
     with pytest.raises(InvalidInputError, match="dependencies"):
         WorkflowNodeDispatch(
