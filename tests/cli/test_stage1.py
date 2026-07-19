@@ -48,6 +48,19 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     assert evidence["source_revision"] == "issue-revision-1"
 
 
+def test_stage1_advance_requires_provider_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(_request(tmp_path).initial_state()), encoding="utf-8")
+
+    assert _start(database, request_path) == 0
+    capsys.readouterr()
+    assert _lifecycle(database, "watch", "--run-id", "run-stage1", "--advance") != 0
+    assert "--github-repository" in capsys.readouterr().err
+
+
 def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
