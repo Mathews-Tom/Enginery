@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from enginery.adapters.omp import OmpHarness
@@ -70,6 +70,7 @@ class Stage1RunRequest:
     validation_commands: tuple[tuple[str, ...], ...]
     required_checks: tuple[str, ...]
     repair_limit: int
+    implementation: Stage1ImplementationRequest
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -130,6 +131,18 @@ class Stage1RunRequest:
             "validation_commands": [list(command) for command in self.validation_commands],
             "required_checks": list(self.required_checks),
             "repair_limit": self.repair_limit,
+            "implementation": {
+                "attempt_id": self.implementation.attempt_id,
+                "operation_id": str(self.implementation.operation_id),
+                "time_budget_seconds": self.implementation.time_budget_seconds,
+                "cost_budget": (
+                    None
+                    if self.implementation.cost_budget is None
+                    else str(self.implementation.cost_budget)
+                ),
+                "permitted_capabilities": list(self.implementation.permitted_capabilities),
+                "evidence_requirements": list(self.implementation.evidence_requirements),
+            },
         }
 
 
@@ -158,8 +171,12 @@ class Stage1ImplementationRequest:
             raise InvalidInputError("Stage 1 implementation IDs must be non-blank")
         if self.time_budget_seconds < 1:
             raise InvalidInputError("Stage 1 implementation time budget must be positive")
-        if self.cost_budget is not None and self.cost_budget < 0:
-            raise InvalidInputError("Stage 1 implementation cost budget cannot be negative")
+        if self.cost_budget is not None and (
+            not self.cost_budget.is_finite() or self.cost_budget < 0
+        ):
+            raise InvalidInputError(
+                "Stage 1 implementation cost budget must be finite and non-negative"
+            )
         if any(not value.strip() for value in self.permitted_capabilities):
             raise InvalidInputError("Stage 1 permitted capabilities must be non-blank")
         if any(not value.strip() for value in self.evidence_requirements):
@@ -245,7 +262,6 @@ class Stage1RunService:
     def dispatch_implementation(
         self,
         request: Stage1RunRequest,
-        execution: Stage1ImplementationRequest,
         *,
         now: datetime,
         heartbeat_window: timedelta,
@@ -253,6 +269,7 @@ class Stage1RunService:
         limits: SchedulingLimits,
     ) -> Stage1ImplementationDispatch:
         """Launch one OMP attempt only after durable successful qualification."""
+        execution = request.implementation
         self._require_passed_node(request.run.id, "qualify")
         task = HarnessTask(
             run_id=request.run.id,
@@ -479,9 +496,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         isinstance(check, str) for check in required_checks_value
     ):
         raise InvalidInputError("Stage 1 required_checks must be a list of strings")
-    repair_limit = state.get("repair_limit")
-    if not isinstance(repair_limit, int):
-        raise InvalidInputError("Stage 1 repair_limit must be an integer")
+    implementation = _implementation_from_state(_mapping(state, "implementation"))
     status = RunState(_string(state, "status"))
     request = Stage1RunRequest(
         run=run,
@@ -497,7 +512,8 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
             for command in commands_value
         ),
         required_checks=tuple(required_checks_value),
-        repair_limit=repair_limit,
+        repair_limit=_integer(state, "repair_limit"),
+        implementation=implementation,
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")
@@ -527,6 +543,44 @@ def _string_from_list(value: object, field_name: str) -> str:
         raise InvalidInputError(
             f"Stage 1 run projection {field_name} must contain non-blank strings"
         )
+    return value
+
+
+def _implementation_from_state(state: dict[str, object]) -> Stage1ImplementationRequest:
+    cost_budget_raw = state.get("cost_budget")
+    if cost_budget_raw is None:
+        cost_budget = None
+    elif isinstance(cost_budget_raw, str):
+        try:
+            cost_budget = Decimal(cost_budget_raw)
+        except (InvalidOperation, ValueError) as error:
+            raise InvalidInputError(
+                "Stage 1 implementation cost_budget must be a decimal"
+            ) from error
+    else:
+        raise InvalidInputError("Stage 1 implementation cost_budget must be a string or null")
+    capabilities = state.get("permitted_capabilities")
+    evidence_requirements = state.get("evidence_requirements")
+    if not isinstance(capabilities, list) or not isinstance(evidence_requirements, list):
+        raise InvalidInputError("Stage 1 implementation capabilities and evidence must be lists")
+    return Stage1ImplementationRequest(
+        attempt_id=_string(state, "attempt_id"),
+        operation_id=OperationId(_string(state, "operation_id")),
+        time_budget_seconds=_integer(state, "time_budget_seconds"),
+        cost_budget=cost_budget,
+        permitted_capabilities=tuple(
+            _string_from_list(value, "permitted_capabilities") for value in capabilities
+        ),
+        evidence_requirements=tuple(
+            _string_from_list(value, "evidence_requirements") for value in evidence_requirements
+        ),
+    )
+
+
+def _integer(state: dict[str, object], field_name: str) -> int:
+    value = state.get(field_name)
+    if not isinstance(value, int):
+        raise InvalidInputError(f"Stage 1 run projection {field_name} must be an integer")
     return value
 
 
