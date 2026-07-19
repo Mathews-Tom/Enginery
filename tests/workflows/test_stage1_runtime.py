@@ -616,13 +616,14 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             lease_window=timedelta(seconds=30),
             limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
         )
-    qualification = service.qualify(
-        request,
-        external_reference="issue:1",
-        applicable_criteria=(True,),
+    progression = service.advance(
+        request.run.id,
         now=now + timedelta(seconds=1),
         heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
     )
+    assert progression.action.value == "implement"
     assert service.next_action(request.run.id).action.value == "implement"
     implementation = service.dispatch_implementation(
         request,
@@ -688,12 +689,12 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     assert first.request == request
     assert second.request == request
     assert second.aggregate_version == 1
-    assert qualification.readiness is IssueReadiness.READY
     qualification_node = ledger_service.read_projection(
         aggregate_type="runtime_node", aggregate_id="run-stage1:qualify"
     )
     assert qualification_node is not None
     assert qualification_node.state["status"] == "passed"
+    assert qualification_node.state["readiness"] == IssueReadiness.READY.value
     projection = ledger_service.read_projection(aggregate_type="run", aggregate_id="run-stage1")
     assert projection is not None
     assert projection.state["request_digest"] == str(request.digest)

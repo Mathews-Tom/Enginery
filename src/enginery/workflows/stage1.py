@@ -287,6 +287,40 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
         return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
+    def advance(
+        self,
+        run_id: RunId,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+        lease_window: timedelta,
+        limits: SchedulingLimits,
+    ) -> Stage1Progression:
+        """Perform at most one externally observable action selected from durable state."""
+        progression = self.next_action(run_id)
+        request = progression.run.request
+        if progression.action is Stage1ProgressionAction.QUALIFY:
+            self.qualify(
+                request,
+                external_reference=request.work_snapshot.work_item.external_reference,
+                applicable_criteria=request.applicable_criteria,
+                now=now,
+                heartbeat_window=heartbeat_window,
+            )
+        elif progression.action is Stage1ProgressionAction.IMPLEMENT:
+            self.dispatch_implementation(
+                request,
+                now=now,
+                heartbeat_window=heartbeat_window,
+                lease_window=lease_window,
+                limits=limits,
+            )
+        elif progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
+            self.collect_implementation(request, now=now)
+        elif progression.action is Stage1ProgressionAction.VALIDATE:
+            self.validate_implementation(request, now=now, heartbeat_window=heartbeat_window)
+        return self.next_action(run_id)
+
     def qualify(
         self,
         request: Stage1RunRequest,
