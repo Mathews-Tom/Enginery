@@ -10,6 +10,7 @@ import pytest
 
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli.main import main
+from enginery.cli.stage1 import _lease_window
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
@@ -47,6 +48,12 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     evidence = json.loads(capsys.readouterr().out)
     assert evidence["request_digest"] == str(_request(tmp_path).digest)
     assert evidence["source_revision"] == "issue-revision-1"
+
+
+def test_stage1_cli_lease_window_exceeds_the_omp_time_budget(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+
+    assert _lease_window(request) == timedelta(seconds=120)
 
 
 def test_stage1_restart_is_idempotent_and_rejects_changed_intent(

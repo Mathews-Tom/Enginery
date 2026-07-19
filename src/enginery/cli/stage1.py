@@ -30,6 +30,13 @@ from enginery.workflows.stage1 import (
 _HEARTBEAT_WINDOW = timedelta(seconds=60)
 
 
+def _lease_window(request: Stage1RunRequest) -> timedelta:
+    """Cover one OMP time budget plus collection after the process exits."""
+    return timedelta(
+        seconds=request.implementation.time_budget_seconds + int(_HEARTBEAT_WINDOW.total_seconds())
+    )
+
+
 def run_stage1(args: argparse.Namespace) -> int:
     """Run one Stage 1 lifecycle operation and emit a machine-readable result."""
     command = args.stage1_command
@@ -84,7 +91,7 @@ def _watch(args: argparse.Namespace) -> None:
                 RunId(args.run_id),
                 now=_now(),
                 heartbeat_window=_HEARTBEAT_WINDOW,
-                lease_window=timedelta(seconds=30),
+                lease_window=_lease_window(previous.run.request),
                 limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
             )
         else:
