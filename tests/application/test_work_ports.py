@@ -11,6 +11,8 @@ from enginery.application.work_ports import (
     HarnessSession,
     HarnessTask,
     LifecycleProjection,
+    PullRequestRequest,
+    PullRequestSnapshot,
     SourceBranch,
     SourceRevision,
     WorkLedgerSnapshot,
@@ -236,3 +238,27 @@ def test_source_revision_rejects_blank_revision() -> None:
 def test_source_branch_rejects_blank_name() -> None:
     with pytest.raises(ValueError, match="non-blank"):
         SourceBranch(" ", SourceRevision("deadbeef", Digest.of_bytes(b"tree")))
+
+
+def test_pull_request_request_rejects_same_head_and_base() -> None:
+    with pytest.raises(ValueError, match="differ"):
+        PullRequestRequest(
+            head_branch="main",
+            base_branch="main",
+            title="Update provider",
+            body="Make a safe update.",
+            operation_id=OperationId("pr-create-1"),
+        )
+
+
+def test_pull_request_snapshot_rejects_blank_revisions() -> None:
+    with pytest.raises(ValueError, match="non-blank"):
+        PullRequestSnapshot(
+            number=1,
+            url="https://github.com/example/repository/pull/1",
+            state="open",
+            head_branch="feature",
+            head_revision=" ",
+            base_branch="main",
+            base_revision="b" * 40,
+        )
