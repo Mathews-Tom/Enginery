@@ -282,6 +282,23 @@ class CoordinatorRuntime:
         )
         return epoch
 
+    def retry_workflow_node(
+        self,
+        *,
+        dispatch: WorkflowNodeDispatch,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> CoordinatorEpoch:
+        """Replace a terminal manifest node with its next fenced attempt."""
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+        self.retry_node(
+            request=dispatch.request,
+            actor_type=dispatch.actor_type,
+            epoch=epoch.epoch,
+            now=now,
+        )
+        return epoch
+
     def complete_node(
         self,
         *,

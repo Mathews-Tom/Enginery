@@ -45,8 +45,11 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor
 from enginery.workflows.issue_to_pr import IssueQualification
+from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1_runtime import (
     Stage1QualificationExecutor,
+    Stage1ReviewExecutor,
+    Stage1ReviewResult,
     Stage1ValidationExecutor,
     Stage1ValidationResult,
 )
@@ -364,6 +367,44 @@ class Stage1RunService:
                 request.manifest,
             ),
             commands=request.validation_commands,
+            now=now,
+            heartbeat_window=heartbeat_window,
+        )
+
+    def review_implementation(
+        self,
+        request: Stage1RunRequest,
+        report: ReviewReport,
+        *,
+        repair_attempt: int,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> Stage1ReviewResult:
+        """Record an independent review only after passed validation."""
+        self._require_passed_node(request.run.id, "validate")
+        return Stage1ReviewExecutor(self.runtime).review(
+            dispatch=WorkflowNodeDispatch(
+                _fixture_dispatch(
+                    request,
+                    node_id="review",
+                    attempt_id=f"review-{repair_attempt}",
+                    operation_id=str(
+                        OperationId.derive(
+                            run_id=request.run.id,
+                            node_id=NodeId("review"),
+                            side_effect_kind="review",
+                            target_scope=request.repository_id,
+                            ordinal=repair_attempt,
+                        )
+                    ),
+                    command=("review",),
+                    dependencies=((str(request.run.id), "validate"),),
+                ),
+                request.manifest,
+            ),
+            report=report,
+            repair_attempt=repair_attempt,
+            repair_limit=request.repair_limit,
             now=now,
             heartbeat_window=heartbeat_window,
         )

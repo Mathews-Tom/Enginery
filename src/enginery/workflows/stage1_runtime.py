@@ -16,6 +16,7 @@ from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
 from enginery.workflows.issue_to_pr import IssueQualification, IssueReadiness, qualify_issue
+from enginery.workflows.review import ReviewOutcome, ReviewReport, route_review
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,63 @@ class Stage1ValidationExecutor:
         return Stage1ValidationResult(passed=passed, artifact_digest=artifact_digest)
 
 
+@dataclass(frozen=True, slots=True)
+class Stage1ReviewResult:
+    """Durable routing decision from one independent review report."""
+
+    outcome: ReviewOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class Stage1ReviewExecutor:
+    """Persist independent review decisions through the shared runtime."""
+
+    runtime: CoordinatorRuntime
+
+    def review(
+        self,
+        *,
+        dispatch: WorkflowNodeDispatch,
+        report: ReviewReport,
+        repair_attempt: int,
+        repair_limit: int,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> Stage1ReviewResult:
+        """Record a review decision after its human-owned node is durable."""
+        outcome = route_review(report, repair_attempt=repair_attempt, repair_limit=repair_limit)
+        epoch = (
+            self.runtime.register_node(
+                dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+            )
+            if repair_attempt == 0
+            else self.runtime.retry_workflow_node(
+                dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+            )
+        )
+        self.runtime.await_human_node(
+            run_id=dispatch.request.run_id,
+            node_id=dispatch.request.node_id,
+            epoch=epoch.epoch,
+            now=now,
+            reason="independent review required",
+        )
+        self.runtime.resolve_human_wait(
+            run_id=dispatch.request.run_id,
+            node_id=dispatch.request.node_id,
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed",
+            extra={
+                "review_outcome": outcome.value,
+                "reviewer": report.reviewer,
+                "producer": report.producer,
+                "finding_ids": [finding.finding_id for finding in report.findings],
+            },
+        )
+        return Stage1ReviewResult(outcome=outcome)
+
+
 def _redacted_validation_report(
     commands: tuple[tuple[str, ...], ...],
     results: tuple[subprocess.CompletedProcess[str], ...],
@@ -157,6 +215,8 @@ def _qualification_details(
 
 __all__ = [
     "Stage1QualificationExecutor",
+    "Stage1ReviewExecutor",
+    "Stage1ReviewResult",
     "Stage1ValidationExecutor",
     "Stage1ValidationResult",
 ]
