@@ -13,6 +13,7 @@ from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.ids import WorkItemId
 from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
@@ -202,4 +203,166 @@ def test_raw_worker_dispatch_cannot_replace_a_manifest_node(
             lease_window=timedelta(seconds=30),
             limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
             requests=(dispatch.request,),
+        )
+
+
+def test_human_wait_resolution_requires_prior_qualification(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(
+        dispatch=qualification, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
+    approval = WorkflowNodeDispatch(
+        replace(
+            qualification.request,
+            node_id="plan_approval",
+            attempt_id="attempt-approval",
+            operation_id="operation-approval",
+            dependencies=(("run-1", "qualify"),),
+        ),
+        issue_to_pr_manifest(),
+    )
+
+    runtime.register_node(dispatch=approval, now=now, heartbeat_window=timedelta(seconds=60))
+    runtime.await_human_node(
+        run_id="run-1",
+        node_id="plan_approval",
+        epoch=epoch.epoch,
+        now=now,
+        reason="approval required",
+    )
+    runtime.resolve_human_wait(
+        run_id="run-1",
+        node_id="plan_approval",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="passed",
+        extra={"decision": "approved"},
+    )
+
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:plan_approval"
+    )
+    assert projection is not None
+    assert projection.state["status"] == "passed"
+    assert projection.state["decision"] == "approved"
+
+
+def test_terminal_node_retry_requires_new_fenced_identity(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
+    retry = replace(
+        initial.request,
+        attempt_id="attempt-2",
+        operation_id="operation-2",
+    )
+
+    runtime.retry_node(
+        request=retry,
+        actor_type=ActorType.DETERMINISTIC,
+        epoch=epoch.epoch,
+        now=now,
+    )
+
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+    )
+    assert projection is not None
+    assert projection.state["status"] == "queued"
+    assert projection.state["attempt_id"] == "attempt-2"
+
+
+def test_human_wait_resolution_rejects_nonwaiting_node(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(
+        dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+
+    with pytest.raises(ExternalConflictError, match="human-waiting"):
+        runtime.resolve_human_wait(
+            run_id="run-1",
+            node_id="qualify",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed",
+        )
+
+
+def test_terminal_node_retry_rejects_reused_or_redefined_request(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
+
+    with pytest.raises(InvalidInputError, match="fresh attempt"):
+        runtime.retry_node(
+            request=replace(initial.request, operation_id="operation-2"),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(InvalidInputError, match="fresh attempt"):
+        runtime.retry_node(
+            request=replace(initial.request, attempt_id="attempt-2"),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(ExternalConflictError, match="actor type"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+            ),
+            actor_type=ActorType.HUMAN,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(ExternalConflictError, match="immutable"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+                base_revision="different-base",
+            ),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
+
+
+def test_retry_rejects_nonterminal_node(ledger_service: LedgerService, tmp_path: Path) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
+
+    with pytest.raises(ExternalConflictError, match="terminal"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+            ),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
         )
