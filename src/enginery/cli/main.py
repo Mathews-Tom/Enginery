@@ -89,7 +89,16 @@ def _build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("request", type=Path)
     stage1_parser = subparsers.add_parser("stage1", help="Run the Stage 1 issue-to-PR lifecycle.")
     stage1_subparsers = stage1_parser.add_subparsers(dest="stage1_command")
-    for command in ("start", "watch", "approve", "reject", "cancel", "resume", "evidence"):
+    for command in (
+        "start",
+        "watch",
+        "review",
+        "approve",
+        "reject",
+        "cancel",
+        "resume",
+        "evidence",
+    ):
         lifecycle_parser = stage1_subparsers.add_parser(command)
         lifecycle_parser.add_argument("--database", required=True, type=Path)
         lifecycle_parser.add_argument("--owner", required=True)
@@ -99,6 +108,9 @@ def _build_parser() -> argparse.ArgumentParser:
             lifecycle_parser.add_argument("--run-id", required=True)
         if command == "watch":
             lifecycle_parser.add_argument("--advance", action="store_true")
+        if command == "review":
+            lifecycle_parser.add_argument("--report", required=True, type=Path)
+            lifecycle_parser.add_argument("--repair-attempt", required=True, type=int)
         if command in {"approve", "reject", "cancel", "resume"}:
             lifecycle_parser.add_argument("--node-id", required=True)
         if command in {"approve", "reject"}:
