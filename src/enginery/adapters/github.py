@@ -19,7 +19,10 @@ from enginery.application.adapter_types import (
 )
 from enginery.application.work_ports import (
     LifecycleProjection,
+    PullRequestCheck,
+    PullRequestEvidence,
     PullRequestRequest,
+    PullRequestReview,
     PullRequestSnapshot,
     WorkLedgerSnapshot,
 )
@@ -30,6 +33,7 @@ from enginery.domain.errors import (
     ExternalConflictError,
     InvalidInputError,
     RateLimitError,
+    StaleEvidenceError,
     TransientProviderFailureError,
 )
 from enginery.domain.ids import OperationId, WorkItemId
@@ -333,6 +337,38 @@ class GitHubPullRequests:
             self._request_object("GET", f"repos/{self.config.repository}/pulls/{number}")
         )
 
+    def evidence(self, number: int) -> PullRequestEvidence:
+        payload = self._request_object("GET", f"repos/{self.config.repository}/pulls/{number}")
+        snapshot = _pull_request_snapshot(payload)
+        mergeable_raw = payload.get("mergeable")
+        if mergeable_raw is not None and not isinstance(mergeable_raw, bool):
+            raise TransientProviderFailureError(
+                "GitHub pull request mergeability must be boolean or null"
+            )
+        reviews = tuple(
+            PullRequestReview(
+                reviewer=_required_string(_required_object(review, "user"), "login"),
+                state=_required_string(review, "state"),
+            )
+            for review in self._paginate_array(
+                f"repos/{self.config.repository}/pulls/{snapshot.number}/reviews"
+            )
+            if isinstance(review, Mapping)
+        )
+        checks = self._checks(snapshot)
+        latest = self.get(snapshot.number)
+        if (
+            latest.head_revision != snapshot.head_revision
+            or latest.base_revision != snapshot.base_revision
+        ):
+            raise StaleEvidenceError("GitHub pull request changed while evidence was collected")
+        return PullRequestEvidence(
+            pull_request=snapshot,
+            reviews=reviews,
+            checks=checks,
+            mergeable=mergeable_raw,
+        )
+
     def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
         candidates = self._matching_pull_requests(operation_id, None, None)
         if len(candidates) == 1:
@@ -343,6 +379,60 @@ class GitHubPullRequests:
             result = self._outcomes.get(str(operation_id), ReconciliationResult.NOT_FOUND)
         self._outcomes[str(operation_id)] = result
         return result
+
+    def _checks(self, snapshot: PullRequestSnapshot) -> tuple[PullRequestCheck, ...]:
+        page = 1
+        checks: list[PullRequestCheck] = []
+        while True:
+            payload = self._request_object(
+                "GET",
+                (
+                    f"repos/{self.config.repository}/commits/{snapshot.head_revision}/check-runs"
+                    f"?per_page={_PAGE_SIZE}&page={page}"
+                ),
+            )
+            runs = payload.get("check_runs")
+            if not isinstance(runs, list):
+                raise TransientProviderFailureError(
+                    "GitHub check-runs response must contain an array"
+                )
+            for run in runs:
+                if not isinstance(run, Mapping):
+                    raise TransientProviderFailureError("GitHub check-run record must be an object")
+                head_revision = _required_string(run, "head_sha")
+                if head_revision != snapshot.head_revision:
+                    raise StaleEvidenceError("GitHub check run is bound to a stale head revision")
+                conclusion = run.get("conclusion")
+                if conclusion is not None and not isinstance(conclusion, str):
+                    raise TransientProviderFailureError(
+                        "GitHub check-run conclusion must be a string or null"
+                    )
+                checks.append(
+                    PullRequestCheck(
+                        name=_required_string(run, "name"),
+                        status=_required_string(run, "status"),
+                        conclusion=conclusion,
+                        head_revision=head_revision,
+                    )
+                )
+            if len(runs) < _PAGE_SIZE:
+                break
+            page += 1
+        return tuple(checks)
+
+    def _paginate_array(self, endpoint: str) -> tuple[object, ...]:
+        page = 1
+        records: list[object] = []
+        separator = "&" if "?" in endpoint else "?"
+        while True:
+            payload = self._request_array(
+                "GET", f"{endpoint}{separator}per_page={_PAGE_SIZE}&page={page}"
+            )
+            records.extend(payload)
+            if len(payload) < _PAGE_SIZE:
+                break
+            page += 1
+        return tuple(records)
 
     def _matching_pull_requests(
         self, operation_id: OperationId, head_branch: str | None, base_branch: str | None
@@ -425,6 +515,15 @@ def _run(
 def _is_repository_name(value: str) -> bool:
     owner, separator, repository = value.partition("/")
     return bool(separator and owner and repository and "/" not in repository)
+
+
+def _required_object(payload: Mapping[str, object], field_name: str) -> Mapping[str, object]:
+    value = payload.get(field_name)
+    if not isinstance(value, Mapping):
+        raise TransientProviderFailureError(
+            f"GitHub response field {field_name!r} must be a JSON object"
+        )
+    return value
 
 
 def _required_string(payload: Mapping[str, object], field_name: str) -> str:

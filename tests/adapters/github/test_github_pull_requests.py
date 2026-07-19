@@ -8,7 +8,11 @@ import pytest
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests
 from enginery.application.work_ports import PullRequestRequest
-from enginery.domain.errors import AmbiguousExternalSideEffectError, TransientProviderFailureError
+from enginery.domain.errors import (
+    AmbiguousExternalSideEffectError,
+    StaleEvidenceError,
+    TransientProviderFailureError,
+)
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 
@@ -141,3 +145,43 @@ def test_get_binds_head_and_base_revisions() -> None:
     assert snapshot.head_revision == "a" * 40
     assert snapshot.base_revision == "b" * 40
     assert calls[0][-1] == "repos/Mathews-Tom/enginery-provider-smoke/pulls/11"
+
+
+def test_evidence_binds_checks_and_reviews_to_current_head() -> None:
+    marker = "<!-- enginery:pull-request:pull-request-1 -->"
+    pull = _pull(marker=marker)
+    pull["mergeable"] = True
+    check = {
+        "name": "CI",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "a" * 40,
+    }
+    review = {"user": {"login": "reviewer"}, "state": "APPROVED"}
+    responses: list[object] = [pull, [review], {"check_runs": [check]}, pull]
+    calls: list[tuple[str, ...]] = []
+    adapter = GitHubPullRequests(_config(), command_runner=_runner(responses, calls))
+
+    evidence = adapter.evidence(11)
+
+    assert evidence.mergeable is True
+    assert evidence.reviews[0].reviewer == "reviewer"
+    assert evidence.checks[0].head_revision == evidence.pull_request.head_revision
+    assert calls[2][-1].endswith("/check-runs?per_page=100&page=1")
+
+
+def test_evidence_rejects_stale_check_head() -> None:
+    marker = "<!-- enginery:pull-request:pull-request-1 -->"
+    pull = _pull(marker=marker)
+    stale_check = {
+        "name": "CI",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "c" * 40,
+    }
+    responses: list[object] = [pull, [], {"check_runs": [stale_check]}]
+    calls: list[tuple[str, ...]] = []
+    adapter = GitHubPullRequests(_config(), command_runner=_runner(responses, calls))
+
+    with pytest.raises(StaleEvidenceError, match="stale"):
+        adapter.evidence(11)
