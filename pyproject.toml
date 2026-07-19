@@ -69,3 +69,6 @@ warn_unused_ignores = true
 addopts = "-ra"
 testpaths = ["tests"]
 pythonpath = [".", "scripts"]
+markers = [
+    "provider_smoke: opt-in mutation of the allowlisted external provider fixture",
+]
