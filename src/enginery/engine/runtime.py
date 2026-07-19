@@ -195,6 +195,73 @@ class CoordinatorRuntime:
     def coordinator(self) -> Coordinator:
         return self._coordinator
 
+    def register_node(
+        self,
+        *,
+        request: FixtureDispatch,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> CoordinatorEpoch:
+        """Persist a manifest node before a deterministic workflow action."""
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+        self._register(request=request, epoch=epoch.epoch, now=now)
+        return epoch
+
+    def complete_node(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        outcome: str = "passed",
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Persist the outcome of a non-worker manifest node."""
+        if outcome not in {"passed", "failed", "cancelled", "blocked"}:
+            raise InvalidInputError("runtime node outcome is unsupported")
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        if state.get("status") != "queued":
+            raise ExternalConflictError("only a queued deterministic node can complete")
+        self._set_status(
+            request=request,
+            status=outcome,
+            event_type="runtime_node.deterministic_completed",
+            epoch=epoch,
+            now=now,
+            extra=extra,
+        )
+
+    def await_human_node(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        reason: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Persist a deterministic workflow node that requires a human decision."""
+        if not reason.strip():
+            raise InvalidInputError("human-wait reason must be non-blank")
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        if state.get("status") != "queued":
+            raise ExternalConflictError("only a queued deterministic node can await human input")
+        details: dict[str, object] = {"human_wait_reason": reason}
+        if extra is not None:
+            details.update(extra)
+        self._set_status(
+            request=request,
+            status="awaiting_human",
+            event_type="runtime_node.deterministic_human_wait",
+            epoch=epoch,
+            now=now,
+            extra=details,
+        )
+
     def tick(
         self,
         *,
