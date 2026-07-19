@@ -123,9 +123,21 @@ def test_source_values_retain_revision_and_tree_identity() -> None:
     assert branch.head.tree_digest == Digest.of_bytes(b"tree")
 
 
-def test_lifecycle_projection_rejects_blank_state() -> None:
-    with pytest.raises(ValueError, match="non-blank"):
-        LifecycleProjection(run_id=RunId("run-1"), state=" ", evidence_digest=None)
+def test_lifecycle_projection_rejects_blank_identity() -> None:
+    with pytest.raises(ValueError, match="external_reference"):
+        LifecycleProjection(
+            run_id=RunId("run-1"),
+            external_reference=" ",
+            state="active",
+            evidence_digest=None,
+        )
+    with pytest.raises(ValueError, match="state"):
+        LifecycleProjection(
+            run_id=RunId("run-1"),
+            external_reference="org/repository#1",
+            state=" ",
+            evidence_digest=None,
+        )
 
 
 @pytest.mark.parametrize(
