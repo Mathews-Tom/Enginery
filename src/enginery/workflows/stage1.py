@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 
 from enginery.adapters.omp import OmpHarness
@@ -183,6 +184,25 @@ class Stage1ImplementationRequest:
             raise InvalidInputError("Stage 1 evidence requirements must be non-blank")
 
 
+class Stage1ProgressionAction(StrEnum):
+    """One safe next action derived from durable Stage 1 projections."""
+
+    QUALIFY = "qualify"
+    IMPLEMENT = "implement"
+    COLLECT_IMPLEMENTATION = "collect_implementation"
+    VALIDATE = "validate"
+    AWAIT_HUMAN_REVIEW = "await_human_review"
+    WAIT = "wait"
+
+
+@dataclass(frozen=True, slots=True)
+class Stage1Progression:
+    """The next Stage 1 action and the durable run it was derived from."""
+
+    action: Stage1ProgressionAction
+    run: Stage1Run
+
+
 @dataclass(frozen=True, slots=True)
 class Stage1ImplementationDispatch:
     """One supervised OMP attempt launched by the coordinator runtime."""
@@ -227,6 +247,39 @@ class Stage1RunService:
                 "Stage 1 run projection is missing", details={"run_id": str(run_id)}
             )
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
+
+    def next_action(self, run_id: RunId) -> Stage1Progression:
+        """Derive at most one safe action from the durable run and node projections."""
+        run = self.read(run_id)
+        qualification_status = self._node_status(run_id, "qualify")
+        if qualification_status is None:
+            return Stage1Progression(Stage1ProgressionAction.QUALIFY, run)
+        if qualification_status != "passed":
+            action = (
+                Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+                if qualification_status in {"failed", "cancelled", "blocked"}
+                else Stage1ProgressionAction.WAIT
+            )
+            return Stage1Progression(action, run)
+
+        implementation_status = self._node_status(run_id, "implement")
+        if implementation_status is None:
+            return Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
+        if implementation_status in {"failed", "cancelled", "blocked"}:
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        if implementation_status != "passed":
+            result_path = _implementation_result_path(run.request)
+            action = (
+                Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+                if result_path.is_file()
+                else Stage1ProgressionAction.WAIT
+            )
+            return Stage1Progression(action, run)
+
+        validation_status = self._node_status(run_id, "validate")
+        if validation_status is None:
+            return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
+        return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
     def qualify(
         self,
@@ -410,6 +463,21 @@ class Stage1RunService:
             now=now,
             heartbeat_window=heartbeat_window,
         )
+
+    def _node_status(self, run_id: RunId, node_id: str) -> str | None:
+        projection = self.ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:{node_id}",
+        )
+        if projection is None:
+            return None
+        status = projection.state.get("status")
+        if not isinstance(status, str):
+            raise InternalInvariantViolationError(
+                "Stage 1 runtime node projection has an invalid status",
+                details={"run_id": str(run_id), "node_id": node_id},
+            )
+        return status
 
     def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
         projection = self.ledger.read_projection(

@@ -58,14 +58,17 @@ def _start(args: argparse.Namespace) -> None:
 def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        run = Stage1RunService(
+        service = Stage1RunService(
             runtime=CoordinatorRuntime(ledger, owner=args.owner), ledger=ledger
-        ).read(RunId(args.run_id))
+        )
+        progression = service.next_action(RunId(args.run_id))
+        run = progression.run
         _print(
             {
                 "run_id": str(run.request.run.id),
                 "status": run.status.value,
                 "aggregate_version": run.aggregate_version,
+                "next_action": progression.action.value,
                 "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
             }
         )
