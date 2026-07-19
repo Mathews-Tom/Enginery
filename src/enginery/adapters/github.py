@@ -359,6 +359,7 @@ class GitHubPullRequests:
             PullRequestReview(
                 reviewer=_required_string(_required_object(review, "user"), "login"),
                 state=_required_string(review, "state"),
+                head_revision=_required_string(review, "commit_id"),
             )
             for review in self._paginate_array(
                 f"repos/{self.config.repository}/pulls/{snapshot.number}/reviews"

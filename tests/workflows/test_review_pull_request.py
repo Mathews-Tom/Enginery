@@ -43,7 +43,7 @@ def test_pr_evaluation_rejects_stale_head_evidence() -> None:
     )
     evidence = PullRequestEvidence(
         pull_request=snapshot,
-        reviews=(PullRequestReview("reviewer", "APPROVED"),),
+        reviews=(PullRequestReview("reviewer", "APPROVED", "current-head"),),
         checks=(PullRequestCheck("CI", "completed", "success", "current-head"),),
         mergeable=True,
     )
@@ -66,7 +66,7 @@ def test_pr_evaluation_requires_exact_head_ci_and_review() -> None:
     )
     evidence = PullRequestEvidence(
         pull_request=snapshot,
-        reviews=(PullRequestReview("reviewer", "APPROVED"),),
+        reviews=(PullRequestReview("reviewer", "APPROVED", "head"),),
         checks=(PullRequestCheck("CI", "completed", "success", "head"),),
         mergeable=True,
     )
@@ -75,3 +75,26 @@ def test_pr_evaluation_requires_exact_head_ci_and_review() -> None:
     )
 
     assert evaluate_pull_request(evidence, requirements) is PullRequestOutcome.MERGE_READY
+
+
+def test_pr_evaluation_rejects_approval_for_a_superseded_head() -> None:
+    snapshot = PullRequestSnapshot(
+        number=1,
+        url="https://example.invalid/pull/1",
+        state="open",
+        head_branch="feature",
+        head_revision="head",
+        base_branch="main",
+        base_revision="base",
+    )
+    evidence = PullRequestEvidence(
+        pull_request=snapshot,
+        reviews=(PullRequestReview("reviewer", "APPROVED", "prior-head"),),
+        checks=(PullRequestCheck("CI", "completed", "success", "head"),),
+        mergeable=True,
+    )
+    requirements = PullRequestRequirements(
+        expected_head_revision="head", required_checks=("CI",), require_approved_review=True
+    )
+
+    assert evaluate_pull_request(evidence, requirements) is PullRequestOutcome.WAITING

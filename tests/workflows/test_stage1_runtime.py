@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
 from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import WorkItemId
 from enginery.domain.work_item import WorkItem, WorkItemState
-from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
+from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
+from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import IssueReadiness
+from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
 from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
 
 
@@ -91,7 +96,7 @@ def test_qualification_persists_manifest_node_before_provider_fetch(
     )
 
     qualification = executor.qualify(
-        request=_request(tmp_path),
+        dispatch=WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest()),
         external_reference="issue:1",
         applicable_criteria=(True,),
         now=now,
@@ -105,3 +110,28 @@ def test_qualification_persists_manifest_node_before_provider_fetch(
     assert node is not None
     assert node.state["status"] == "passed"
     assert node.state["source_revision"] == "1"
+
+
+def test_tick_does_not_dispatch_a_recovered_deterministic_node(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+
+    runtime.register_node(dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60))
+    tick = runtime.tick(
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+
+    assert tick.dispatched == ()
+
+
+def test_manifest_node_dispatch_rejects_agent_nodes(tmp_path: Path) -> None:
+    with pytest.raises(InvalidInputError, match="non-agent"):
+        WorkflowNodeDispatch(
+            replace(_request(tmp_path), node_id="implement"), issue_to_pr_manifest()
+        )

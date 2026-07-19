@@ -60,7 +60,9 @@ def evaluate_pull_request(
         ):
             return PullRequestOutcome.BLOCKED
     if requirements.require_approved_review and not any(
-        review.state.upper() == "APPROVED" for review in evidence.reviews
+        review.state.upper() == "APPROVED"
+        and review.head_revision == requirements.expected_head_revision
+        for review in evidence.reviews
     ):
         return PullRequestOutcome.WAITING
     if evidence.mergeable is None:

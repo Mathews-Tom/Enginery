@@ -289,13 +289,14 @@ class PullRequestSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class PullRequestReview:
-    """One normalized review state observed for a pull request."""
+    """One normalized review state bound to the reviewed pull-request head."""
 
     reviewer: str
     state: str
+    head_revision: str
 
     def __post_init__(self) -> None:
-        if not self.reviewer.strip() or not self.state.strip():
+        if any(not value.strip() for value in (self.reviewer, self.state, self.head_revision)):
             raise ValueError("pull request review fields must be non-blank")
 
 
