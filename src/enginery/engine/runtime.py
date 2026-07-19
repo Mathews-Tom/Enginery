@@ -858,8 +858,8 @@ def _required_text(state: dict[object, object], field_name: str) -> str:
 def _require_manifest_dependencies(
     request: FixtureDispatch, dependencies: tuple[NodeId, ...]
 ) -> None:
-    expected = tuple((request.run_id, str(dependency)) for dependency in dependencies)
-    if request.dependencies != expected:
+    expected = {(request.run_id, str(dependency)) for dependency in dependencies}
+    if len(request.dependencies) != len(expected) or set(request.dependencies) != expected:
         raise InvalidInputError("workflow dispatch dependencies do not match its manifest node")
 
 
