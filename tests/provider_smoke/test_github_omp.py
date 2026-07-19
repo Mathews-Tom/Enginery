@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -125,6 +126,24 @@ def test_github_and_omp_provider_smoke(tmp_path: Path) -> None:
         pull_number = matching.number
         evidence = pull_requests.evidence(pull_number)
         assert evidence.pull_request.head_revision == matching.head_revision
+        deadline = time.monotonic() + 120
+        while True:
+            evidence = pull_requests.evidence(pull_number)
+            assert evidence.pull_request.head_revision == matching.head_revision
+            ci_checks = tuple(check for check in evidence.checks if check.name == "CI")
+            if len(ci_checks) == 1 and ci_checks[0].status == "completed":
+                assert ci_checks[0].conclusion == "success"
+                break
+            assert time.monotonic() < deadline, (
+                "exact-head CI did not complete successfully: "
+                + repr(
+                    tuple(
+                        (check.name, check.status, check.conclusion, check.head_revision)
+                        for check in evidence.checks
+                    )
+                )
+            )
+            time.sleep(2)
 
         harness = OmpHarness(
             OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
