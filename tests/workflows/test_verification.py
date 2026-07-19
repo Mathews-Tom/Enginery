@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
+import pytest
+
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -16,6 +18,7 @@ from enginery.application.work_ports import (
 )
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.errors import ExternalConflictError
 from enginery.domain.ids import OperationId, RunId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -65,15 +68,20 @@ def _evidence(base: str = "base", head: str = "head") -> PullRequestEvidence:
 
 
 class SequenceWorkLedger:
-    def __init__(self, snapshots: tuple[WorkLedgerSnapshot, ...]) -> None:
+    def __init__(
+        self,
+        snapshots: tuple[WorkLedgerSnapshot, ...],
+        lifecycle_outcome: ReconciliationResult = ReconciliationResult.FOUND_MATCHING,
+    ) -> None:
         self._snapshots = iter(snapshots)
+        self._lifecycle_outcome = lifecycle_outcome
 
     def publish_lifecycle(
         self, projection: LifecycleProjection, *, operation_id: OperationId
     ) -> ReconciliationResult:
         assert operation_id == OperationId("lifecycle-1")
         assert projection.state == PullRequestOutcome.MERGE_READY.value
-        return ReconciliationResult.FOUND_MATCHING
+        return self._lifecycle_outcome
 
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
         assert external_reference == "issue:1"
@@ -174,3 +182,22 @@ def test_terminal_verification_rejects_head_change_between_reads() -> None:
 
     assert result.outcome is PullRequestOutcome.SUPERSEDED
     assert result.evidence is None
+
+
+def test_terminal_verification_rejects_unreconciled_lifecycle_projection() -> None:
+    snapshot = _snapshot()
+    executor = Stage1VerificationExecutor(
+        cast(
+            WorkLedgerPort,
+            SequenceWorkLedger(
+                (snapshot, snapshot),
+                lifecycle_outcome=ReconciliationResult.INDETERMINATE,
+            ),
+        ),
+        cast(PullRequestPort, SequencePullRequests((_evidence(), _evidence()))),
+    )
+
+    with pytest.raises(ExternalConflictError, match="not reconciled"):
+        executor.verify(
+            request=_request(snapshot), observed_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+        )
