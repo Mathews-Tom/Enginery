@@ -188,6 +188,16 @@ class FixtureRuntime:
         )
         return DispatchedFixture(lease=lease, identity=identity, workspace=reservation)
 
+    def recover_dispatched(
+        self, *, lease: FencedNodeLease, workspace: WorkspaceReservation
+    ) -> DispatchedFixture:
+        """Reconstruct a dispatched fixture from durable worker and workspace state."""
+        return DispatchedFixture(
+            lease=lease,
+            identity=self._supervisor.identity_for(lease=lease),
+            workspace=workspace,
+        )
+
     def _fault(self, point: str) -> None:
         if self._fault_hook is not None:
             self._fault_hook(point)
@@ -228,6 +238,14 @@ class CoordinatorRuntime:
     def read_node_request(self, *, run_id: str, node_id: str) -> FixtureDispatch:
         """Return the current durable request for one runtime node."""
         return self._request_for(run_id, node_id)
+
+    def recover_dispatched(self, *, run_id: str, node_id: str) -> DispatchedFixture:
+        """Reconstruct one dispatched fixture after coordinator replacement."""
+        request = self._request_for(run_id, node_id)
+        return self._fixture_runtime.recover_dispatched(
+            lease=self._active_lease(request),
+            workspace=self._require_workspace(request),
+        )
 
     def register_run(
         self,

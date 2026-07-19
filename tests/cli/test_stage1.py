@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,18 @@ from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.ids import RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.errors import InvalidInputError
+from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
-from enginery.workflows.stage1 import Stage1RunRequest
+from enginery.workflows.stage1 import (
+    Stage1ImplementationRequest,
+    Stage1RunRequest,
+    stage1_request_from_state,
+)
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -64,6 +70,19 @@ def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
     )
     assert _start(database, request_path) != 0
     assert "different immutable request" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("cost_budget", ("not-a-decimal", "NaN", "Infinity"))
+def test_stage1_rejects_invalid_persisted_implementation_budget(
+    tmp_path: Path, cost_budget: str
+) -> None:
+    state = _request(tmp_path).initial_state()
+    implementation = state["implementation"]
+    assert isinstance(implementation, dict)
+    implementation["cost_budget"] = cost_budget
+
+    with pytest.raises(InvalidInputError, match="cost"):
+        stage1_request_from_state(state)
 
 
 def test_stage1_approve_resume_and_cancel_route_through_runtime(
@@ -330,4 +349,12 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         validation_commands=(("uv", "run", "pytest", "-q"),),
         required_checks=("CI",),
         repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-stage1"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
     )

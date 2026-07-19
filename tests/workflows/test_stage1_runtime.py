@@ -567,6 +567,14 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         validation_commands=(("uv", "run", "pytest", "-q"),),
         required_checks=("CI",),
         repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-stage1"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
     )
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     service = Stage1RunService(
@@ -592,18 +600,9 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
-    execution_request = Stage1ImplementationRequest(
-        attempt_id="implement-0",
-        operation_id=OperationId("implement:run-stage1"),
-        time_budget_seconds=60,
-        cost_budget=Decimal("1.0"),
-        permitted_capabilities=("git",),
-        evidence_requirements=("redacted harness transcript",),
-    )
     with pytest.raises(MissingPrerequisiteError, match="successful node 'qualify'"):
         service.dispatch_implementation(
             request,
-            execution_request,
             now=now,
             heartbeat_window=timedelta(seconds=60),
             lease_window=timedelta(seconds=30),
@@ -618,7 +617,6 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     implementation = service.dispatch_implementation(
         request,
-        execution_request,
         now=now + timedelta(seconds=2),
         heartbeat_window=timedelta(seconds=60),
         lease_window=timedelta(seconds=30),
