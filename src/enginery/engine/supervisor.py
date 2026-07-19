@@ -182,6 +182,17 @@ class WorkerSupervisor:
             expected_state_version=requested_result.process_manager_states[1].state_version,
         )
 
+    def cancel_persisted(self, *, lease: FencedNodeLease, now: datetime) -> None:
+        """Terminate the current worker using only its durable supervisor record."""
+        record = self._require_supervisor_record(lease)
+        if record.state.get("status") != "running":
+            raise ExternalConflictError("only a running worker can be cancelled")
+        self.cancel(
+            lease=lease,
+            identity=_identity_from_state(record),
+            now=now,
+        )
+
     def enforce_heartbeat(
         self, *, lease: FencedNodeLease, identity: ProcessIdentity, now: datetime
     ) -> bool:

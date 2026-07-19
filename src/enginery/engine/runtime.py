@@ -283,6 +283,85 @@ class CoordinatorRuntime:
             )
         self._workspaces.cleanup(reservation, epoch=envelope.epoch, now=now)
 
+    def cancel_node(self, *, run_id: str, node_id: str, epoch: int, now: datetime) -> None:
+        """Cancel a queued, running, or human-waiting node through durable state."""
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        status = state.get("status")
+        transition_epoch = epoch
+        if status == "running":
+            lease = self._active_lease(request)
+            if epoch != lease.epoch:
+                raise ExternalConflictError(
+                    "cancellation epoch does not match the current node lease"
+                )
+            transition_epoch = lease.epoch
+            WorkerSupervisor(
+                self._ledger, self._coordinator, fault_hook=self._fault
+            ).cancel_persisted(lease=lease, now=now)
+            reservation = self._require_workspace(request)
+            assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+                lease=lease,
+                workspace_path=reservation.workspace_path,
+                epoch=transition_epoch,
+                now=now,
+            )
+            attempt = self._ledger.read_projection(
+                aggregate_type="node_attempt", aggregate_id=request.attempt_id
+            )
+            if attempt is None:
+                raise InternalInvariantViolationError("cancellation has no durable node attempt")
+            self._leases.ingest_result(
+                envelope=WorkerResultEnvelope(
+                    run_id=run_id,
+                    node_id=node_id,
+                    attempt_id=request.attempt_id,
+                    epoch=lease.epoch,
+                    fencing_token=lease.fencing_token,
+                    operation_id=request.operation_id,
+                    terminal_result="cancelled",
+                    artifact_references=(),
+                    result={"cancellation": "operator_requested"},
+                ),
+                now=now,
+                expected_attempt_version=attempt.aggregate_version,
+                allow_expired_cancellation=True,
+            )
+            if not assessment.ready_to_release:
+                self._set_status(
+                    request=request,
+                    status="awaiting_human",
+                    event_type="runtime_node.cancellation_cleanup_pending",
+                    epoch=transition_epoch,
+                    now=now,
+                    extra={"cancellation_cleanup_reason": assessment.reason},
+                )
+                self._fault("node_cancellation_cleanup_pending")
+                return
+            self._workspaces.cleanup(reservation, epoch=transition_epoch, now=now)
+        elif status == "awaiting_human":
+            lease = self._active_lease(request)
+            if epoch != lease.epoch:
+                raise ExternalConflictError(
+                    "cancellation epoch does not match the current node lease"
+                )
+            transition_epoch = lease.epoch
+            self._workspaces.cleanup(
+                self._require_workspace(request), epoch=transition_epoch, now=now
+            )
+        elif status != "queued":
+            raise ExternalConflictError(
+                "only queued, running, or human-waiting nodes can be cancelled"
+            )
+        self._set_status(
+            request=request,
+            status="cancelled",
+            event_type="runtime_node.cancelled",
+            epoch=transition_epoch,
+            now=now,
+        )
+        self._fault("node_cancelled")
+
     def enter_human_wait(
         self,
         *,
@@ -486,6 +565,33 @@ class CoordinatorRuntime:
             request = _request_from_state(projection.state)
             requests[NodeKey(request.run_id, request.node_id)] = request
         return requests
+
+    def _active_lease(self, request: FixtureDispatch) -> FencedNodeLease:
+        record = self._ledger.read_lease(run_id=request.run_id, node_id=request.node_id)
+        if record is None or record.expires_at is None:
+            raise InternalInvariantViolationError("runtime node has no durable active lease")
+        try:
+            expires_at = datetime.fromisoformat(record.expires_at)
+        except ValueError as error:
+            raise InternalInvariantViolationError("runtime node lease expiry is invalid") from error
+        return FencedNodeLease(
+            run_id=record.run_id,
+            node_id=record.node_id,
+            attempt_id=record.attempt_id,
+            epoch=record.epoch,
+            fencing_token=record.fencing_token,
+            operation_id=request.operation_id,
+            owner=record.owner,
+            expires_at=expires_at,
+        )
+
+    def _require_workspace(self, request: FixtureDispatch) -> WorkspaceReservation:
+        reservation = self._workspaces.read_reservation(request.repository_id)
+        if reservation is None or reservation.run_id != request.run_id:
+            raise InternalInvariantViolationError(
+                "runtime node has no matching workspace reservation"
+            )
+        return reservation
 
     def _lease_for_envelope(self, envelope: WorkerResultEnvelope) -> FencedNodeLease:
         record = self._ledger.read_lease(run_id=envelope.run_id, node_id=envelope.node_id)
