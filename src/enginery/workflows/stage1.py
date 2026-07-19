@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -48,6 +49,11 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor
 from enginery.workflows.issue_to_pr import IssueQualification
+from enginery.workflows.pull_request import (
+    PullRequestOutcome,
+    PullRequestRequirements,
+    evaluate_pull_request,
+)
 from enginery.workflows.review import ReviewOutcome, ReviewReport
 from enginery.workflows.stage1_runtime import (
     Stage1QualificationExecutor,
@@ -238,6 +244,7 @@ class Stage1ProgressionAction(StrEnum):
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
     OPEN_PR = "open_pr"
+    WAIT_FOR_CI = "wait_for_ci"
     WAIT = "wait"
 
 
@@ -339,6 +346,12 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
         if open_pr_status != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+
+        wait_for_ci_status = self._node_status(run_id, "wait_for_ci")
+        if wait_for_ci_status in {None, "queued"}:
+            return Stage1Progression(Stage1ProgressionAction.WAIT_FOR_CI, run)
+        if wait_for_ci_status != "passed":
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         return Stage1Progression(Stage1ProgressionAction.WAIT, run)
 
     def advance(
@@ -375,6 +388,8 @@ class Stage1RunService:
             self.validate_implementation(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.OPEN_PR:
             self.open_pull_request(request, now=now, heartbeat_window=heartbeat_window)
+        elif progression.action is Stage1ProgressionAction.WAIT_FOR_CI:
+            self.wait_for_ci(request, now=now, heartbeat_window=heartbeat_window)
         return self.next_action(run_id)
 
     def qualify(
@@ -632,6 +647,72 @@ class Stage1RunService:
             )
         return status
 
+    def _node_state(self, run_id: RunId, node_id: str) -> Mapping[str, object]:
+        projection = self.ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:{node_id}",
+        )
+        if projection is None:
+            raise MissingPrerequisiteError(
+                f"Stage 1 requires runtime node {node_id!r}",
+                details={"run_id": str(run_id), "node_id": node_id},
+            )
+        return projection.state
+
+    def wait_for_ci(
+        self,
+        request: Stage1RunRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> PullRequestOutcome:
+        """Observe exact-head CI until it passes or produces a terminal failure."""
+        self._require_passed_node(request.run.id, "open_pr")
+        open_pr = self._node_state(request.run.id, "open_pr")
+        pull_request_number = _integer(open_pr, "pull_request_number")
+        expected_head_revision = _string(open_pr, "head_revision")
+        requirements = PullRequestRequirements(
+            expected_head_revision=expected_head_revision,
+            required_checks=request.required_checks,
+            require_approved_review=False,
+        )
+        dispatch = WorkflowNodeDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="wait_for_ci",
+                attempt_id="wait-for-ci-0",
+                operation_id=str(
+                    OperationId.derive(
+                        run_id=request.run.id,
+                        node_id=NodeId("wait_for_ci"),
+                        side_effect_kind="ci_observation",
+                        target_scope=request.repository_id,
+                        ordinal=0,
+                    )
+                ),
+                command=("wait_for_ci",),
+                dependencies=((str(request.run.id), "open_pr"),),
+            ),
+            request.manifest,
+        )
+        epoch = self.runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+        )
+        outcome = evaluate_pull_request(
+            self._require_pull_requests().evidence(pull_request_number), requirements
+        )
+        if outcome is PullRequestOutcome.WAITING:
+            return outcome
+        self.runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id="wait_for_ci",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed" if outcome is PullRequestOutcome.MERGE_READY else "failed",
+            extra={"pull_request_outcome": outcome.value},
+        )
+        return outcome
+
     def _review_outcome(self, run_id: RunId) -> ReviewOutcome | None:
         projection = self.ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
@@ -792,14 +873,14 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     return Stage1Run(request=request, status=status, aggregate_version=aggregate_version)
 
 
-def _mapping(state: dict[str, object], field_name: str) -> dict[str, object]:
+def _mapping(state: Mapping[str, object], field_name: str) -> dict[str, object]:
     value = state.get(field_name)
     if not isinstance(value, dict):
         raise InvalidInputError(f"Stage 1 run projection {field_name} must be a mapping")
     return value
 
 
-def _string(state: dict[str, object], field_name: str) -> str:
+def _string(state: Mapping[str, object], field_name: str) -> str:
     value = state.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise InvalidInputError(f"Stage 1 run projection {field_name} must be a non-blank string")
@@ -858,7 +939,7 @@ def _execution_configuration_from_state(
     )
 
 
-def _integer(state: dict[str, object], field_name: str) -> int:
+def _integer(state: Mapping[str, object], field_name: str) -> int:
     value = state.get(field_name)
     if not isinstance(value, int):
         raise InvalidInputError(f"Stage 1 run projection {field_name} must be an integer")

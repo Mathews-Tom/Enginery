@@ -12,6 +12,7 @@ import pytest
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import (
+    PullRequestCheck,
     PullRequestEvidence,
     PullRequestPort,
     PullRequestRequest,
@@ -722,8 +723,22 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     assert projection.aggregate_version == 1
 
 
-def test_stage1_opens_one_pr_only_after_approved_review(
-    ledger_service: LedgerService, tmp_path: Path
+@pytest.mark.parametrize(
+    ("final_check_status", "final_check_conclusion", "head_revision", "outcome", "next_action"),
+    (
+        ("completed", "success", "head-revision", "merge_ready", "wait"),
+        ("completed", "failure", "head-revision", "blocked", "await_human_review"),
+        ("completed", "success", "superseding-head", "superseded", "await_human_review"),
+    ),
+)
+def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    final_check_status: str,
+    final_check_conclusion: str,
+    head_revision: str,
+    outcome: str,
+    next_action: str,
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     repository = tmp_path / "repository"
@@ -842,8 +857,22 @@ def test_stage1_opens_one_pr_only_after_approved_review(
     assert service.next_action(request.run.id).action.value == "open_pr"
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
 
-    assert [value.head_branch for value in pull_requests.requests] == ["enginery/run-pr"]
-    assert service.next_action(request.run.id).action.value == "wait"
+    assert service.next_action(request.run.id).action.value == "wait_for_ci"
+    pull_requests.check_status = "in_progress"
+    pull_requests.check_conclusion = None
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "waiting"
+    )
+    assert service.next_action(request.run.id).action.value == "wait_for_ci"
+    pull_requests.check_status = final_check_status
+    pull_requests.check_conclusion = final_check_conclusion
+    pull_requests.head_revision = head_revision
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == outcome
+    )
+    assert service.next_action(request.run.id).action.value == next_action
 
 
 class RecordingPullRequests:
@@ -852,6 +881,9 @@ class RecordingPullRequests:
     def __init__(self) -> None:
         self.requests: list[PullRequestRequest] = []
         self.failures_remaining = 0
+        self.check_status = "completed"
+        self.check_conclusion: str | None = "success"
+        self.head_revision = "head-revision"
 
     def probe(self) -> object:
         raise AssertionError("not used by this test")
@@ -872,10 +904,36 @@ class RecordingPullRequests:
         )
 
     def get(self, number: int) -> PullRequestSnapshot:
-        raise AssertionError("not used by this test")
+        if number != 17 or not self.requests:
+            raise AssertionError("unexpected pull request lookup")
+        request = self.requests[-1]
+        return PullRequestSnapshot(
+            number=17,
+            url="https://example.test/pull/17",
+            state="open",
+            head_branch=request.head_branch,
+            head_revision=self.head_revision,
+            base_branch=request.base_branch,
+            base_revision="base-revision",
+        )
 
     def evidence(self, number: int) -> PullRequestEvidence:
-        raise AssertionError("not used by this test")
+        if number != 17:
+            raise AssertionError("unexpected pull request number")
+        snapshot = self.get(number)
+        return PullRequestEvidence(
+            pull_request=snapshot,
+            reviews=(),
+            checks=(
+                PullRequestCheck(
+                    name="CI",
+                    status=self.check_status,
+                    conclusion=self.check_conclusion,
+                    head_revision=snapshot.head_revision,
+                ),
+            ),
+            mergeable=True,
+        )
 
     def reconcile(self, *, operation_id: OperationId) -> object:
         raise AssertionError("not used by this test")
