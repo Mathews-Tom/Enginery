@@ -220,6 +220,14 @@ class CoordinatorRuntime:
     def coordinator(self) -> Coordinator:
         return self._coordinator
 
+    def claim_epoch(self, *, now: datetime, heartbeat_window: timedelta) -> CoordinatorEpoch:
+        """Acquire or renew the coordinator epoch for an operator lifecycle command."""
+        return self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+
+    def read_node_request(self, *, run_id: str, node_id: str) -> FixtureDispatch:
+        """Return the current durable request for one runtime node."""
+        return self._request_for(run_id, node_id)
+
     def register_run(
         self,
         *,
@@ -566,6 +574,8 @@ class CoordinatorRuntime:
                 return
             self._workspaces.cleanup(reservation, epoch=transition_epoch, now=now)
         elif status == "awaiting_human":
+            if _actor_type_from_state(state) is not ActorType.AGENT:
+                raise ExternalConflictError("cannot cancel a human-waiting non-agent node")
             lease = self._active_lease(request)
             if epoch != lease.epoch:
                 raise ExternalConflictError(
@@ -660,12 +670,13 @@ class CoordinatorRuntime:
             raise ExternalConflictError("only a human-waiting node can be resumed")
         if request.attempt_id == prior.attempt_id or request.operation_id == prior.operation_id:
             raise InvalidInputError("human-wait resume requires a fresh attempt and operation ID")
-        reservation = self._workspaces.read_reservation(request.repository_id)
-        if reservation is None or reservation.run_id != request.run_id:
-            raise InternalInvariantViolationError(
-                "human-wait resume has no matching workspace reservation"
-            )
-        self._workspaces.resume(reservation, epoch=epoch, now=now)
+        if _actor_type_from_state(state) is ActorType.AGENT:
+            reservation = self._workspaces.read_reservation(request.repository_id)
+            if reservation is None or reservation.run_id != request.run_id:
+                raise InternalInvariantViolationError(
+                    "human-wait resume has no matching workspace reservation"
+                )
+            self._workspaces.resume(reservation, epoch=epoch, now=now)
         self._replace_request(
             request=request,
             epoch=epoch,
