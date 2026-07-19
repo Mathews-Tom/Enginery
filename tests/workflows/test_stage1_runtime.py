@@ -683,6 +683,10 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         lease_window=timedelta(seconds=30),
         limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
     )
+    assert implementation.task.constraints[-1] == (
+        "Create and work only on branch 'enginery/stage1' from "
+        f"{base_revision!r}; commit and push the completed change to origin."
+    )
     assert service.next_action(request.run.id).action.value == "wait"
     deadline = time.monotonic() + 5
     while not implementation.result_path.is_file():

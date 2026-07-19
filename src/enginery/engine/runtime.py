@@ -539,6 +539,12 @@ class CoordinatorRuntime:
         else:
             self._workspaces.cleanup(reservation, epoch=envelope.epoch, now=now)
 
+    def verify_implementation_branch(self, *, run_id: str, head_branch: str) -> str:
+        """Verify the retained implementation workspace is ready for its configured PR branch."""
+        request = self._request_for(run_id, "implement")
+        reservation = self._require_workspace(request)
+        return self._workspaces.verify_implementation_branch(reservation, head_branch=head_branch)
+
     def release_workspace(
         self,
         *,
