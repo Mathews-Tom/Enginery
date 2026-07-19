@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
-from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
+from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
 from enginery.workflows.issue_to_pr import IssueQualification, IssueReadiness, qualify_issue
 
 
@@ -20,7 +20,7 @@ class Stage1QualificationExecutor:
     def qualify(
         self,
         *,
-        request: FixtureDispatch,
+        dispatch: WorkflowNodeDispatch,
         external_reference: str,
         applicable_criteria: tuple[bool, ...],
         now: datetime,
@@ -28,23 +28,23 @@ class Stage1QualificationExecutor:
     ) -> IssueQualification:
         """Fetch and qualify an issue after recording its manifest node durably."""
         epoch = self.runtime.register_node(
-            request=request, now=now, heartbeat_window=heartbeat_window
+            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
         snapshot = self.work_ledger.fetch(external_reference)
         qualification = qualify_issue(snapshot, applicable_criteria=applicable_criteria)
         details = _qualification_details(snapshot, qualification)
         if qualification.readiness is IssueReadiness.READY:
             self.runtime.complete_node(
-                run_id=request.run_id,
-                node_id=request.node_id,
+                run_id=dispatch.request.run_id,
+                node_id=dispatch.request.node_id,
                 epoch=epoch.epoch,
                 now=now,
                 extra=details,
             )
         else:
             self.runtime.await_human_node(
-                run_id=request.run_id,
-                node_id=request.node_id,
+                run_id=dispatch.request.run_id,
+                node_id=dispatch.request.node_id,
                 epoch=epoch.epoch,
                 now=now,
                 reason=qualification.reason,
