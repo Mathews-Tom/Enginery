@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -95,6 +96,30 @@ def test_omp_harness_normalizes_events_and_redacts_artifact_output(tmp_path: Pat
     assert "--mode=json" in commands[0]
     assert "--no-session" in commands[0]
     assert "--api-key" not in commands[0]
+
+
+def test_omp_harness_builds_a_supervised_worker_command(tmp_path: Path) -> None:
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+    )
+
+    command = harness.supervised_command(
+        _task(tmp_path),
+        result_path=tmp_path / "worker-result.json",
+    )
+
+    assert command[:7] == (
+        sys.executable,
+        "-m",
+        "enginery.engine.omp_worker",
+        "--operation-id",
+        "omp-start-1",
+        "--output",
+        str(tmp_path / "worker-result.json"),
+    )
+    assert command[7] == "--"
+    assert command[8] == "omp"
 
 
 def test_omp_harness_rejects_malformed_or_incomplete_events(tmp_path: Path) -> None:
