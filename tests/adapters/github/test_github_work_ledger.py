@@ -213,3 +213,15 @@ def test_probe_reports_unavailable_for_empty_cli_version() -> None:
 
     assert status.availability.value == "unavailable"
     assert status.fingerprint is None
+
+
+def test_smoke_repository_must_match_static_allowlist() -> None:
+    allowed = _config()
+    allowed.require_smoke_repository()
+    disallowed = GitHubAdapterConfig(
+        repository="Mathews-Tom/Enginery",
+        credential_reference="github-keyring:default",
+    )
+
+    with pytest.raises(InvalidInputError, match="allowlisted"):
+        disallowed.require_smoke_repository()

@@ -54,6 +54,7 @@ class GitHubAdapterConfig:
     credential_reference: str
     executable: str = "gh"
     api_version: str = _GITHUB_API_VERSION
+    smoke_repository_allowlist: frozenset[str] = frozenset({"Mathews-Tom/enginery-provider-smoke"})
 
     def __post_init__(self) -> None:
         if not _is_repository_name(self.repository):
@@ -64,6 +65,15 @@ class GitHubAdapterConfig:
             raise InvalidInputError("GitHub CLI executable must be non-blank")
         if not self.api_version.strip():
             raise InvalidInputError("GitHub API version must be non-blank")
+        if any(
+            not _is_repository_name(repository) for repository in self.smoke_repository_allowlist
+        ):
+            raise InvalidInputError("GitHub smoke repository allowlist contains an invalid name")
+
+    def require_smoke_repository(self) -> None:
+        """Refuse a live fixture mutation outside the reviewed repository allowlist."""
+        if self.repository not in self.smoke_repository_allowlist:
+            raise InvalidInputError("GitHub repository is not allowlisted for provider smoke tests")
 
 
 @dataclass(slots=True)
