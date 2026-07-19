@@ -47,6 +47,9 @@ _KNOWN_EVENT_TYPES = frozenset(
         "message_update",
         "message_end",
         "turn_end",
+        "tool_execution_start",
+        "tool_execution_update",
+        "tool_execution_end",
         "agent_end",
     }
 )

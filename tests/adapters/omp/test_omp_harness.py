@@ -53,6 +53,9 @@ def _events(*, include_terminal: bool = True, secret: bool = False) -> str:
         {"type": "session", "version": 3},
         {"type": "agent_start"},
         {"type": "message_update", "assistantMessageEvent": {"type": "text_delta"}},
+        {"type": "tool_execution_start", "toolName": "git"},
+        {"type": "tool_execution_update", "toolName": "git"},
+        {"type": "tool_execution_end", "toolName": "git"},
     ]
     if secret:
         records.append(
@@ -85,6 +88,9 @@ def test_omp_harness_normalizes_events_and_redacts_artifact_output(tmp_path: Pat
     assert [event.kind.value for event in events] == [
         "progress",
         "started",
+        "progress",
+        "progress",
+        "progress",
         "progress",
         "progress",
         "terminal",
@@ -188,11 +194,21 @@ def test_omp_harness_rejects_unsupported_supervised_result_schema(tmp_path: Path
         harness.collect_supervised(_task(tmp_path), result_path=result_path)
 
 
-def test_omp_harness_rejects_malformed_or_incomplete_events(tmp_path: Path) -> None:
-    malformed = RecordedProcess("not-json")
+@pytest.mark.parametrize(
+    ("output", "match"),
+    (
+        ("not-json", "malformed"),
+        (json.dumps({"type": "future_event"}) + "\n" + _events(), "unsupported"),
+        (_events(include_terminal=False), "agent_end"),
+    ),
+)
+def test_omp_harness_rejects_malformed_unknown_or_incomplete_events(
+    tmp_path: Path, output: str, match: str
+) -> None:
+    process = RecordedProcess(output)
 
     def start(arguments: tuple[str, ...], workspace: Path) -> RecordedProcess:
-        return malformed
+        return process
 
     harness = OmpHarness(
         OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
@@ -201,7 +217,7 @@ def test_omp_harness_rejects_malformed_or_incomplete_events(tmp_path: Path) -> N
     )
     session = harness.start(_task(tmp_path))
 
-    with pytest.raises(WorkerFailureError, match="malformed"):
+    with pytest.raises(WorkerFailureError, match=match):
         tuple(harness.events(session))
 
 
