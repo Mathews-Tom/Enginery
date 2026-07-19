@@ -31,7 +31,7 @@ from enginery.engine.workspace import GitWorktreeBackend, WorkspaceReservation
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 
-_RUNTIME_NODE = "runtime_node"
+RUNTIME_NODE_AGGREGATE_TYPE = "runtime_node"
 RUN_AGGREGATE_TYPE = "run"
 
 
@@ -660,7 +660,7 @@ class CoordinatorRuntime:
     def _require_completed_dependencies(self, request: FixtureDispatch) -> None:
         for run_id, node_id in request.dependencies:
             projection = self._ledger.read_projection(
-                aggregate_type=_RUNTIME_NODE, aggregate_id=f"{run_id}:{node_id}"
+                aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{node_id}"
             )
             if projection is None or projection.state.get("status") != "passed":
                 raise ExternalConflictError(
@@ -689,7 +689,7 @@ class CoordinatorRuntime:
         now: datetime,
     ) -> None:
         projection = self._ledger.read_projection(
-            aggregate_type=_RUNTIME_NODE, aggregate_id=_node_id(request)
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
         )
         if projection is not None:
             if _actor_type_from_state(projection.state) is not actor_type:
@@ -706,7 +706,7 @@ class CoordinatorRuntime:
                 correlation_id=f"runtime-node-register:{_node_id(request)}",
                 events=(
                     EventWrite(
-                        aggregate_type=_RUNTIME_NODE,
+                        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
                         aggregate_id=_node_id(request),
                         expected_version=0,
                         event_type="runtime_node.queued",
@@ -722,7 +722,7 @@ class CoordinatorRuntime:
         self, *, request: FixtureDispatch, epoch: int, now: datetime, event_type: str
     ) -> None:
         projection = self._ledger.read_projection(
-            aggregate_type=_RUNTIME_NODE, aggregate_id=_node_id(request)
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
         )
         if projection is None:
             raise InternalInvariantViolationError("cannot replace an unknown runtime node")
@@ -736,7 +736,7 @@ class CoordinatorRuntime:
                 correlation_id=f"{event_type}:{_node_id(request)}:{request.attempt_id}",
                 events=(
                     EventWrite(
-                        aggregate_type=_RUNTIME_NODE,
+                        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
                         aggregate_id=_node_id(request),
                         expected_version=projection.aggregate_version,
                         event_type=event_type,
@@ -759,7 +759,7 @@ class CoordinatorRuntime:
         extra: dict[str, object] | None = None,
     ) -> None:
         projection = self._ledger.read_projection(
-            aggregate_type=_RUNTIME_NODE, aggregate_id=_node_id(request)
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
         )
         if projection is None:
             raise InternalInvariantViolationError("runtime node state is missing")
@@ -772,7 +772,7 @@ class CoordinatorRuntime:
                 correlation_id=f"{event_type}:{_node_id(request)}:{projection.aggregate_version}",
                 events=(
                     EventWrite(
-                        aggregate_type=_RUNTIME_NODE,
+                        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
                         aggregate_id=_node_id(request),
                         expected_version=projection.aggregate_version,
                         event_type=event_type,
@@ -786,7 +786,7 @@ class CoordinatorRuntime:
 
     def _request_for(self, run_id: str, node_id: str) -> FixtureDispatch:
         projection = self._ledger.read_projection(
-            aggregate_type=_RUNTIME_NODE, aggregate_id=f"{run_id}:{node_id}"
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{node_id}"
         )
         if projection is None:
             raise ExternalConflictError("worker result references an unknown runtime node")
@@ -794,7 +794,7 @@ class CoordinatorRuntime:
 
     def _requests_from_ledger(self) -> dict[NodeKey, FixtureDispatch]:
         requests: dict[NodeKey, FixtureDispatch] = {}
-        for projection in self._ledger.list_projections(aggregate_type=_RUNTIME_NODE):
+        for projection in self._ledger.list_projections(aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE):
             request = _request_from_state(projection.state)
             requests[NodeKey(request.run_id, request.node_id)] = request
         return requests
@@ -985,7 +985,7 @@ def _require_manifest_dependencies(
 
 def _runtime_state(ledger: LedgerService, request: FixtureDispatch) -> dict[str, object]:
     projection = ledger.read_projection(
-        aggregate_type=_RUNTIME_NODE,
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
         aggregate_id=_node_id(request),
     )
     if projection is None:
@@ -1020,6 +1020,7 @@ def _schedulable(request: FixtureDispatch, *, state: dict[str, object]) -> Sched
 
 
 __all__ = [
+    "RUNTIME_NODE_AGGREGATE_TYPE",
     "RUN_AGGREGATE_TYPE",
     "CoordinatorRuntime",
     "DispatchedFixture",
