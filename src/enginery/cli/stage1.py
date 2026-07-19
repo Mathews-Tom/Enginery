@@ -8,7 +8,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.github import (
+    GitHubAdapterConfig,
+    GitHubPullRequests,
+    GitHubWorkLedger,
+)
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId
@@ -120,6 +124,7 @@ def _advancing_service(
         runtime=runtime,
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
+        pull_requests=GitHubPullRequests(github),
         omp_harness=harness,
     )
 

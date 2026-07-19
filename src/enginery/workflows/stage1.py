@@ -12,6 +12,8 @@ from enginery.adapters.omp import OmpHarness
 from enginery.application.work_ports import (
     HarnessResult,
     HarnessTask,
+    PullRequestPort,
+    PullRequestRequest,
     WorkLedgerPort,
     WorkLedgerSnapshot,
 )
@@ -46,7 +48,7 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor
 from enginery.workflows.issue_to_pr import IssueQualification
-from enginery.workflows.review import ReviewReport
+from enginery.workflows.review import ReviewOutcome, ReviewReport
 from enginery.workflows.stage1_runtime import (
     Stage1QualificationExecutor,
     Stage1ReviewExecutor,
@@ -235,6 +237,7 @@ class Stage1ProgressionAction(StrEnum):
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
+    OPEN_PR = "open_pr"
     WAIT = "wait"
 
 
@@ -262,6 +265,7 @@ class Stage1RunService:
     runtime: CoordinatorRuntime
     ledger: LedgerService
     work_ledger: WorkLedgerPort | None = None
+    pull_requests: PullRequestPort | None = None
     omp_harness: OmpHarness | None = None
 
     def start(
@@ -322,7 +326,20 @@ class Stage1RunService:
         validation_status = self._node_status(run_id, "validate")
         if validation_status is None:
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
-        return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        if validation_status != "passed":
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+
+        review_status = self._node_status(run_id, "review")
+        if review_status != "passed":
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        if self._review_outcome(run_id) is not ReviewOutcome.APPROVED:
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        open_pr_status = self._node_status(run_id, "open_pr")
+        if open_pr_status in {None, "queued"}:
+            return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
+        if open_pr_status != "passed":
+            return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        return Stage1Progression(Stage1ProgressionAction.WAIT, run)
 
     def advance(
         self,
@@ -356,6 +373,8 @@ class Stage1RunService:
             self.collect_implementation(request, now=now)
         elif progression.action is Stage1ProgressionAction.VALIDATE:
             self.validate_implementation(request, now=now, heartbeat_window=heartbeat_window)
+        elif progression.action is Stage1ProgressionAction.OPEN_PR:
+            self.open_pull_request(request, now=now, heartbeat_window=heartbeat_window)
         return self.next_action(run_id)
 
     def qualify(
@@ -541,6 +560,63 @@ class Stage1RunService:
             heartbeat_window=heartbeat_window,
         )
 
+    def open_pull_request(
+        self,
+        request: Stage1RunRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> None:
+        """Persist a PR intent, then create or reconcile exactly one source-host PR."""
+        self._require_passed_node(request.run.id, "review")
+        if self._review_outcome(request.run.id) is not ReviewOutcome.APPROVED:
+            raise MissingPrerequisiteError("Stage 1 requires an approved independent review")
+        operation_id = OperationId.derive(
+            run_id=request.run.id,
+            node_id=NodeId("open_pr"),
+            side_effect_kind="pull_request",
+            target_scope=request.repository_id,
+            ordinal=0,
+        )
+        dispatch = WorkflowNodeDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="open_pr",
+                attempt_id="open-pr-0",
+                operation_id=str(operation_id),
+                command=("open_pr",),
+                dependencies=((str(request.run.id), "review"),),
+            ),
+            request.manifest,
+        )
+        epoch = self.runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+        )
+        pull_request = self._require_pull_requests().create_or_update(
+            PullRequestRequest(
+                head_branch=request.head_branch,
+                base_branch=request.base_branch,
+                title=request.work_snapshot.work_item.objective,
+                body=(
+                    f"Implements {request.work_snapshot.work_item.external_reference}.\n\n"
+                    f"Enginery run: {request.run.id}"
+                ),
+                operation_id=operation_id,
+            )
+        )
+        self.runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id="open_pr",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed",
+            extra={
+                "pull_request_number": pull_request.number,
+                "head_revision": pull_request.head_revision,
+                "base_revision": pull_request.base_revision,
+            },
+        )
+
     def _node_status(self, run_id: RunId, node_id: str) -> str | None:
         projection = self.ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
@@ -555,6 +631,29 @@ class Stage1RunService:
                 details={"run_id": str(run_id), "node_id": node_id},
             )
         return status
+
+    def _review_outcome(self, run_id: RunId) -> ReviewOutcome | None:
+        projection = self.ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:review",
+        )
+        if projection is None:
+            return None
+        value = projection.state.get("review_outcome")
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise InternalInvariantViolationError(
+                "Stage 1 review outcome has an invalid type",
+                details={"run_id": str(run_id)},
+            )
+        try:
+            return ReviewOutcome(value)
+        except ValueError as error:
+            raise InternalInvariantViolationError(
+                "Stage 1 review outcome is invalid",
+                details={"run_id": str(run_id), "review_outcome": value},
+            ) from error
 
     def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
         projection = self.ledger.read_projection(
@@ -571,6 +670,11 @@ class Stage1RunService:
         if self.work_ledger is None:
             raise MissingPrerequisiteError("Stage 1 source-work ledger is not configured")
         return self.work_ledger
+
+    def _require_pull_requests(self) -> PullRequestPort:
+        if self.pull_requests is None:
+            raise MissingPrerequisiteError("Stage 1 pull-request provider is not configured")
+        return self.pull_requests
 
     def _require_omp_harness(self) -> OmpHarness:
         if self.omp_harness is None:
