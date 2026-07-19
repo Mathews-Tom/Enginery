@@ -293,6 +293,58 @@ class CoordinatorRuntime:
             extra=details,
         )
 
+    def resolve_human_wait(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        outcome: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Record an authenticated terminal decision for a human-waiting node."""
+        if outcome not in {"passed", "failed", "cancelled", "blocked"}:
+            raise InvalidInputError("runtime node outcome is unsupported")
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        _require_non_agent_node(state)
+        if state.get("status") != "awaiting_human":
+            raise ExternalConflictError("only a human-waiting node can be resolved")
+        self._set_status(
+            request=request,
+            status=outcome,
+            event_type="runtime_node.human_wait_resolved",
+            epoch=epoch,
+            now=now,
+            extra=extra,
+        )
+
+    def retry_node(
+        self,
+        *,
+        request: FixtureDispatch,
+        actor_type: ActorType,
+        epoch: int,
+        now: datetime,
+    ) -> None:
+        """Replace a terminal manifest node with a fresh fenced attempt."""
+        prior = self._request_for(request.run_id, request.node_id)
+        state = _runtime_state(self._ledger, prior)
+        if _actor_type_from_state(state) is not actor_type:
+            raise ExternalConflictError("runtime node retry changes its actor type")
+        if state.get("status") not in {"passed", "failed", "cancelled", "blocked"}:
+            raise ExternalConflictError("only a terminal runtime node can be retried")
+        if request.attempt_id == prior.attempt_id or request.operation_id == prior.operation_id:
+            raise InvalidInputError("runtime node retry requires a fresh attempt and operation ID")
+        self._require_completed_dependencies(request)
+        self._replace_request(
+            request=request,
+            epoch=epoch,
+            now=now,
+            event_type="runtime_node.retried",
+        )
+
     def tick(
         self,
         *,
