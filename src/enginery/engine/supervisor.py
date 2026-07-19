@@ -111,6 +111,10 @@ class WorkerSupervisor:
         self._fault("worker_identity_persisted")
         return identity
 
+    def identity_for(self, *, lease: FencedNodeLease) -> ProcessIdentity:
+        """Read the persisted identity for a worker being reconciled."""
+        return _identity_from_state(self._require_supervisor_record(lease))
+
     def _record_running(
         self,
         *,

@@ -120,7 +120,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
         ),
         task,
     )
-    tick = runtime.tick(
+    runtime.tick(
         now=now,
         heartbeat_window=timedelta(seconds=60),
         lease_window=timedelta(seconds=30),
@@ -128,12 +128,27 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
         requests=(dispatch,),
     )
     result_path = workspace / ".enginery" / "omp-results" / "operation-1.json"
+    recovered_runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    recovered_executor = Stage1ImplementationExecutor(
+        recovered_runtime,
+        OmpHarness(
+            OmpAdapterConfig(
+                credential_reference="omp-auth-profile:default",
+                executable=str(_omp_executable(tmp_path)),
+            ),
+            ArtifactStore(tmp_path / "recovered-artifacts"),
+        ),
+        _manifest(),
+    )
     deadline = time.monotonic() + 5
     while True:
         if result_path.is_file():
             try:
-                result = executor.collect(
-                    dispatched=tick.dispatched[0],
+                result = recovered_executor.collect(
+                    dispatched=recovered_runtime.recover_dispatched(
+                        run_id="run-1",
+                        node_id="implement",
+                    ),
                     task=task,
                     now=now + timedelta(seconds=1),
                 )
