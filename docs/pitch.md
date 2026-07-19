@@ -103,6 +103,12 @@ A merge-ready PR requires evidence bound to the current base and head, current C
 
 Every external side effect has an operation ID that remains stable across attempts. If a provider call times out after possibly succeeding, the engine reconciles first: adopt a matching result, safely retry only when nothing exists, or require a human when the result conflicts or remains ambiguous.
 
+### Observed interruption-and-recovery record
+
+On 2026-07-19, an allowlisted GitHub issue for a single worktree verification test ran through the Stage 1 workflow. The coordinator was deliberately stopped after its supervised OMP worker had started. A replacement coordinator read the durable `implement-0` attempt, returned `wait` rather than launching another worker, and later collected the original worker's single pushed commit. Focused validation passed; an independent human review recorded no findings; PR #86 reached current-head CI success on macOS and Ubuntu. The terminal verifier published `merge_ready` evidence digest `sha256:2104d50b4df157d47f1e897c9d8b25b048a60b6fae0b02bcde161c20f105bee0` without merging the PR.
+
+This is one recovery demonstration, not a completed pilot or a productivity claim. Its reusable fault-injection sequence is: record the active operation and worker identity, interrupt only the coordinator, recover against the durable attempt, reject a second launch while the original worker remains live, collect the original result, then rebind final evidence to the current source, base, head, and CI subjects.
+
 ### Action-scoped policy, not global autonomy
 
 Unknown actions deny. An implementation task, a credential request, a pull-request action, a release publication, and a factory promotion are distinct policy decisions. Human approvals bind the exact input digest. A later source, configuration, workflow, or evidence change supersedes the old approval.
