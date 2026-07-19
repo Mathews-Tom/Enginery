@@ -347,3 +347,22 @@ def test_terminal_node_retry_rejects_reused_or_redefined_request(
             epoch=epoch.epoch,
             now=now,
         )
+
+
+def test_retry_rejects_nonterminal_node(ledger_service: LedgerService, tmp_path: Path) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
+
+    with pytest.raises(ExternalConflictError, match="terminal"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+            ),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
