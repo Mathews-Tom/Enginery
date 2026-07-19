@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowDispatch
 from enginery.engine.scheduler import SchedulingLimits
@@ -228,3 +228,243 @@ def test_workflow_dispatch_rejects_non_agent_manifest_node(
 
     with pytest.raises(InvalidInputError, match="agent-task"):
         WorkflowDispatch(request=request, manifest=_manifest(agent_node=False))
+
+
+def test_cancel_node_terminates_a_running_worker(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    repository, revision = _repository(tmp_path)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    tick = runtime.tick(
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        requests=(
+            _request(
+                repository=repository,
+                revision=revision,
+                workspace=tmp_path / "workspace",
+                attempt_id="attempt-1",
+                operation_id="operation-1",
+            ),
+        ),
+    )
+
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=1),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:node-1"
+    )
+    assert node is not None
+    assert node.state["status"] == "cancelled"
+    supervisor = ledger_service.read_process_manager_state(
+        process_manager_name="worker-supervisor", state_key="run-1:node-1"
+    )
+    attempt = ledger_service.read_projection(
+        aggregate_type="node_attempt", aggregate_id="attempt-1"
+    )
+    reservation = ledger_service.read_process_manager_state(
+        process_manager_name="workspace-reservations", state_key="repository-1"
+    )
+    assert supervisor is not None
+    assert supervisor.state["status"] == "exit_reconciled"
+    assert attempt is not None
+    assert attempt.state["terminal_result"] == "cancelled"
+    assert reservation is not None
+    assert reservation.state["status"] == "cleaned"
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_cancel_node_cleans_retained_human_wait_workspace(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    repository, revision = _repository(tmp_path)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    tick = runtime.tick(
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        requests=(
+            _request(
+                repository=repository,
+                revision=revision,
+                workspace=tmp_path / "workspace",
+                attempt_id="attempt-1",
+                operation_id="operation-1",
+            ),
+        ),
+    )
+    runtime.enter_human_wait(
+        dispatched=tick.dispatched[0],
+        reason="approval required",
+        now=now + timedelta(seconds=1),
+    )
+
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=2),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:node-1"
+    )
+    assert node is not None
+    assert node.state["status"] == "cancelled"
+    reservation = ledger_service.read_process_manager_state(
+        process_manager_name="workspace-reservations", state_key="repository-1"
+    )
+    assert reservation is not None
+    assert reservation.state["status"] == "cleaned"
+    assert not (tmp_path / "workspace").exists()
+
+
+def test_cancel_node_accepts_an_expired_current_lease(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    repository, revision = _repository(tmp_path)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    tick = runtime.tick(
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        requests=(
+            _request(
+                repository=repository,
+                revision=revision,
+                workspace=tmp_path / "workspace",
+                attempt_id="attempt-1",
+                operation_id="operation-1",
+            ),
+        ),
+    )
+
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=31),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:node-1"
+    )
+    assert node is not None
+    assert node.state["status"] == "cancelled"
+
+
+def test_cancel_node_retains_an_unquiescent_workspace_for_human_cleanup(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    repository, revision = _repository(tmp_path)
+    workspace = tmp_path / "workspace"
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    tick = runtime.tick(
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        requests=(
+            _request(
+                repository=repository,
+                revision=revision,
+                workspace=workspace,
+                attempt_id="attempt-1",
+                operation_id="operation-1",
+            ),
+        ),
+    )
+    git_file = workspace / ".git"
+    git_dir = Path(git_file.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    lock = git_dir / "index.lock"
+    lock.write_text("", encoding="utf-8")
+
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=1),
+    )
+
+    waiting = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:node-1"
+    )
+    reservation = ledger_service.read_process_manager_state(
+        process_manager_name="workspace-reservations", state_key="repository-1"
+    )
+    assert waiting is not None
+    assert waiting.state["status"] == "awaiting_human"
+    assert waiting.state["cancellation_cleanup_reason"] == "workspace_git_lock_present"
+    assert reservation is not None
+    assert reservation.state["status"] == "materialized"
+    assert workspace.exists()
+
+    lock.unlink()
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=2),
+    )
+
+    completed = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:node-1"
+    )
+    assert completed is not None
+    assert completed.state["status"] == "cancelled"
+
+
+def test_cancel_node_rejects_a_mismatched_epoch_before_terminating(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    repository, revision = _repository(tmp_path)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    tick = runtime.tick(
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        requests=(
+            _request(
+                repository=repository,
+                revision=revision,
+                workspace=tmp_path / "workspace",
+                attempt_id="attempt-1",
+                operation_id="operation-1",
+            ),
+        ),
+    )
+
+    with pytest.raises(ExternalConflictError, match="cancellation epoch"):
+        runtime.cancel_node(
+            run_id="run-1",
+            node_id="node-1",
+            epoch=tick.epoch.epoch + 1,
+            now=now + timedelta(seconds=1),
+        )
+
+    supervisor = ledger_service.read_process_manager_state(
+        process_manager_name="worker-supervisor", state_key="run-1:node-1"
+    )
+    assert supervisor is not None
+    assert supervisor.state["status"] == "running"
+    runtime.cancel_node(
+        run_id="run-1",
+        node_id="node-1",
+        epoch=tick.epoch.epoch,
+        now=now + timedelta(seconds=2),
+    )
