@@ -224,8 +224,7 @@ class CoordinatorRuntime:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> CoordinatorEpoch:
-        """Persist a manifest node before a deterministic workflow action."""
-        epoch = self._coordinator.acquire(now=now, heartbeat_window=heartbeat_window)
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
         self._register(
             request=dispatch.request,
             actor_type=dispatch.actor_type,
@@ -824,6 +823,8 @@ def _actor_type_from_state(state: object) -> ActorType:
     if not isinstance(state, dict):
         raise InternalInvariantViolationError("runtime node state is invalid")
     actor_type = state.get("actor_type")
+    if actor_type is None:
+        return ActorType.AGENT
     if not isinstance(actor_type, str):
         raise InternalInvariantViolationError("runtime node actor type is invalid")
     try:

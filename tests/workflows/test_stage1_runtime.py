@@ -135,3 +135,22 @@ def test_manifest_node_dispatch_rejects_agent_nodes(tmp_path: Path) -> None:
         WorkflowNodeDispatch(
             replace(_request(tmp_path), node_id="implement"), issue_to_pr_manifest()
         )
+
+
+def test_manifest_registration_renews_its_active_epoch(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+
+    first = runtime.register_node(
+        dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    second = runtime.register_node(
+        dispatch=dispatch,
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    assert second.epoch == first.epoch
