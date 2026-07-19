@@ -204,7 +204,7 @@ def test_harness_result_rejects_blank_terminal_identity(
     session_id: str, terminal_status: str
 ) -> None:
     with pytest.raises(ValueError, match="non-blank"):
-        HarnessResult(session_id=session_id, terminal_status=terminal_status, output_digests=())
+        HarnessResult(session_id=session_id, terminal_status=terminal_status, outputs=())
 
 
 def test_harness_session_rejects_blank_identity() -> None:

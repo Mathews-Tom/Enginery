@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from enginery.application.adapter_types import AdapterStatus, NormalizedAdapterEvent
+from enginery.domain.artifact import RedactionClassification
 from enginery.domain.digests import Digest
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -106,12 +107,20 @@ class HarnessSession:
 
 
 @dataclass(frozen=True, slots=True)
+class HarnessOutput:
+    """One redacted, sensitivity-classified harness output artifact."""
+
+    digest: Digest
+    redaction: RedactionClassification
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessResult:
-    """A terminal harness outcome with artifact-backed evidence."""
+    """A terminal harness outcome with redacted artifact-backed evidence."""
 
     session_id: str
     terminal_status: str
-    output_digests: tuple[Digest, ...]
+    outputs: tuple[HarnessOutput, ...]
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.terminal_status.strip():
@@ -360,6 +369,7 @@ class SourceControlPort(Protocol):
 
 __all__ = [
     "ChangeSet",
+    "HarnessOutput",
     "HarnessPort",
     "HarnessResult",
     "HarnessSession",

@@ -29,6 +29,7 @@ from enginery.application.delivery_ports import (
 )
 from enginery.application.work_ports import (
     ChangeSet,
+    HarnessOutput,
     HarnessResult,
     HarnessSession,
     HarnessTask,
@@ -100,7 +101,7 @@ class ScriptedHarness:
 
     emitted_events: tuple[NormalizedAdapterEvent, ...]
     terminal_status: str = "succeeded"
-    output_digests: tuple[Digest, ...] = ()
+    outputs: tuple[HarnessOutput, ...] = ()
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _results: dict[str, HarnessResult] = field(default_factory=dict, init=False)
@@ -116,7 +117,7 @@ class ScriptedHarness:
         self._results[session.session_id] = HarnessResult(
             session_id=session.session_id,
             terminal_status=self.terminal_status,
-            output_digests=self.output_digests,
+            outputs=self.outputs,
         )
         _record(self._outcomes, task.operation_id)
         return session
@@ -136,7 +137,7 @@ class ScriptedHarness:
         self._results[session.session_id] = HarnessResult(
             session_id=session.session_id,
             terminal_status="cancelled",
-            output_digests=prior.output_digests,
+            outputs=prior.outputs,
         )
         return ReconciliationResult.FOUND_MATCHING
 
