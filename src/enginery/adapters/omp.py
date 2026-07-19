@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -144,7 +145,7 @@ class OmpHarness:
         )
         if session.session_id in self._sessions:
             raise WorkerFailureError("OMP harness session already exists")
-        process = self.process_factory(self._command(task), task.workspace_path)
+        process = self.process_factory(self.command_for(task), task.workspace_path)
         self._sessions[session.session_id] = session
         self._processes[session.session_id] = process
         self._outcomes[str(task.operation_id)] = ReconciliationResult.FOUND_MATCHING
@@ -195,7 +196,7 @@ class OmpHarness:
         self._collected[session.session_id] = collected
         return collected
 
-    def _command(self, task: HarnessTask) -> tuple[str, ...]:
+    def command_for(self, task: HarnessTask) -> tuple[str, ...]:
         return (
             self.config.executable,
             "--mode=json",
@@ -206,6 +207,22 @@ class OmpHarness:
             str(task.time_budget_seconds),
             "-p",
             _render_task(task),
+        )
+
+    def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
+        """Return a worker command whose parent is the coordinator supervisor."""
+        if not result_path.is_absolute():
+            raise InvalidInputError("OMP worker result path must be absolute")
+        return (
+            sys.executable,
+            "-m",
+            "enginery.engine.omp_worker",
+            "--operation-id",
+            str(task.operation_id),
+            "--output",
+            str(result_path),
+            "--",
+            *self.command_for(task),
         )
 
     def _require_session(self, session: HarnessSession) -> None:
