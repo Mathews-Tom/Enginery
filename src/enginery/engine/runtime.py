@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +32,7 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 
 _RUNTIME_NODE = "runtime_node"
+RUN_AGGREGATE_TYPE = "run"
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +219,51 @@ class CoordinatorRuntime:
     @property
     def coordinator(self) -> Coordinator:
         return self._coordinator
+
+    def register_run(
+        self,
+        *,
+        run_id: str,
+        initial_state: Mapping[str, object],
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> CoordinatorEpoch:
+        """Persist an immutable workflow-run intent under coordinator fencing."""
+        if not run_id.strip():
+            raise InvalidInputError("run_id must be non-blank")
+        state = dict(initial_state)
+        if state.get("run_id") != run_id:
+            raise InvalidInputError("initial run state must bind its run_id")
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+        projection = self._ledger.read_projection(
+            aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=run_id
+        )
+        if projection is None:
+            self._ledger.append(
+                AppendCommand(
+                    correlation_id=f"run-register:{run_id}",
+                    events=(
+                        EventWrite(
+                            aggregate_type=RUN_AGGREGATE_TYPE,
+                            aggregate_id=run_id,
+                            expected_version=0,
+                            event_type="run.created",
+                            schema_version=1,
+                            payload=state,
+                        ),
+                    ),
+                    process_manager_updates=(
+                        self._coordinator.epoch_guard(epoch=epoch.epoch, now=now),
+                    ),
+                )
+            )
+            return epoch
+        if dict(projection.state) != state:
+            raise ExternalConflictError(
+                "run already exists with a different immutable request",
+                details={"run_id": run_id},
+            )
+        return epoch
 
     def register_node(
         self,
@@ -974,6 +1020,7 @@ def _schedulable(request: FixtureDispatch, *, state: dict[str, object]) -> Sched
 
 
 __all__ = [
+    "RUN_AGGREGATE_TYPE",
     "CoordinatorRuntime",
     "DispatchedFixture",
     "FixtureDispatch",

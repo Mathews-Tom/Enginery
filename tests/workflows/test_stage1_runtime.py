@@ -9,15 +9,18 @@ from typing import cast
 import pytest
 
 from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
+from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
-from enginery.domain.ids import WorkItemId
+from enginery.domain.ids import RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
+from enginery.workflows.stage1 import Stage1RunRequest, Stage1RunService
 from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
 
 
@@ -366,3 +369,70 @@ def test_retry_rejects_nonterminal_node(ledger_service: LedgerService, tmp_path:
             epoch=epoch.epoch,
             now=now,
         )
+
+
+def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    manifest = issue_to_pr_manifest()
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-stage1"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-1",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=tmp_path / "repository",
+        workspace_path=tmp_path / "workspace",
+        base_branch="main",
+        head_branch="enginery/stage1",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        required_checks=("CI",),
+        repair_limit=1,
+    )
+    service = Stage1RunService(
+        runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
+        ledger=ledger_service,
+    )
+
+    first = service.start(
+        request,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    second = service.start(
+        request,
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+    )
+    conflicting_request = replace(request, head_branch="enginery/other-stage1")
+    with pytest.raises(ExternalConflictError, match="different immutable request"):
+        service.start(
+            conflicting_request,
+            now=now + timedelta(seconds=2),
+            heartbeat_window=timedelta(seconds=60),
+        )
+
+    assert first.request == request
+    assert second.request == request
+    assert second.aggregate_version == 1
+    projection = ledger_service.read_projection(aggregate_type="run", aggregate_id="run-stage1")
+    assert projection is not None
+    assert projection.state["request_digest"] == str(request.digest)
+    assert projection.state["status"] == "created"
+    assert projection.aggregate_version == 1
