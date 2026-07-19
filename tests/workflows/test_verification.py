@@ -145,3 +145,21 @@ def test_terminal_verification_rejects_base_advance_between_reads() -> None:
 
     assert result.outcome is PullRequestOutcome.SUPERSEDED
     assert result.evidence is None
+
+
+def test_terminal_verification_rejects_head_change_between_reads() -> None:
+    snapshot = _snapshot()
+    executor = Stage1VerificationExecutor(
+        cast(WorkLedgerPort, SequenceWorkLedger((snapshot, snapshot))),
+        cast(
+            PullRequestPort,
+            SequencePullRequests((_evidence(), _evidence(head="advanced-head"))),
+        ),
+    )
+
+    result = executor.verify(
+        request=_request(snapshot), observed_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    )
+
+    assert result.outcome is PullRequestOutcome.SUPERSEDED
+    assert result.evidence is None
