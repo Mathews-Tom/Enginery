@@ -137,6 +137,85 @@ class GitWorktreeBackend:
         self._fault("workspace_materialized")
         return materialized
 
+    def verify_implementation_branch(
+        self, reservation: WorkspaceReservation, *, head_branch: str
+    ) -> str:
+        """Verify one implemented, pushed branch remains bound to this workspace base."""
+        if reservation.status not in {"materialized", "retained"}:
+            raise InvalidInputError("only a materialized workspace can verify its branch")
+        _require_text(head_branch, "head_branch")
+        branch = self._run_git(
+            reservation.workspace_path, "symbolic-ref", "--quiet", "--short", "HEAD"
+        )
+        if branch != head_branch:
+            raise ExternalConflictError(
+                "workspace branch differs from the requested pull-request branch",
+                details={"expected_branch": head_branch, "actual_branch": branch},
+            )
+        head_revision = self._run_git(reservation.workspace_path, "rev-parse", "HEAD")
+        ancestor = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(reservation.workspace_path),
+                "merge-base",
+                "--is-ancestor",
+                reservation.base_revision,
+                head_revision,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if ancestor.returncode != 0:
+            raise ExternalConflictError(
+                "workspace branch does not descend from its reserved base revision",
+                details={
+                    "base_revision": reservation.base_revision,
+                    "head_revision": head_revision,
+                },
+            )
+        changed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(reservation.workspace_path),
+                "diff",
+                "--quiet",
+                f"{reservation.base_revision}..{head_revision}",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if changed.returncode == 0:
+            raise ExternalConflictError(
+                "workspace branch contains no implementation change",
+                details={"head_revision": head_revision},
+            )
+        if changed.returncode != 1:
+            raise ExternalConflictError(
+                "workspace change verification failed",
+                details={"stderr": changed.stderr.strip()},
+            )
+        remote = self._run_git(
+            reservation.workspace_path,
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            f"refs/heads/{head_branch}",
+        )
+        remote_revision = remote.partition("\t")[0]
+        if remote_revision != head_revision:
+            raise ExternalConflictError(
+                "origin branch differs from the verified workspace revision",
+                details={
+                    "expected_head_revision": head_revision,
+                    "remote_head_revision": remote_revision,
+                },
+            )
+        return head_revision
+
     def cleanup(
         self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
     ) -> WorkspaceReservation:
@@ -240,6 +319,21 @@ class GitWorktreeBackend:
         if record is None:
             return None
         return _reservation_from_state(record.state, record.state_version)
+
+    @staticmethod
+    def _run_git(path: Path, *arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise ExternalConflictError(
+                "git branch verification failed",
+                details={"arguments": arguments, "stderr": completed.stderr.strip()},
+            )
+        return completed.stdout.strip()
 
     def _fault(self, point: str) -> None:
         if self._fault_hook is not None:

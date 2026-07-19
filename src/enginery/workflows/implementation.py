@@ -8,7 +8,7 @@ from pathlib import Path
 
 from enginery.adapters.omp import OmpHarness
 from enginery.application.work_ports import HarnessResult, HarnessTask
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.runtime import (
@@ -26,6 +26,7 @@ class Stage1ImplementationExecutor:
     runtime: CoordinatorRuntime
     harness: OmpHarness
     manifest: WorkflowManifest
+    head_branch: str | None = None
 
     def dispatch(self, request: FixtureDispatch, task: HarnessTask) -> WorkflowDispatch:
         """Bind one OMP task to the existing fenced runtime dispatch path."""
@@ -46,6 +47,15 @@ class Stage1ImplementationExecutor:
         path = _result_path(task) if result_path is None else result_path
         _, result = self.harness.collect_supervised(task, result_path=path)
         terminal_result = "passed" if result.terminal_status == "succeeded" else "failed"
+        result_details: dict[str, str] = {"harness_status": result.terminal_status}
+        if terminal_result == "passed" and self.head_branch is not None:
+            try:
+                result_details["head_revision"] = self.runtime.verify_implementation_branch(
+                    run_id=dispatched.lease.run_id, head_branch=self.head_branch
+                )
+            except ExternalConflictError as error:
+                terminal_result = "failed"
+                result_details["branch_verification_error"] = str(error)
         self.runtime.ingest_result(
             envelope=WorkerResultEnvelope(
                 run_id=dispatched.lease.run_id,
@@ -56,7 +66,7 @@ class Stage1ImplementationExecutor:
                 operation_id=dispatched.lease.operation_id,
                 terminal_result=terminal_result,
                 artifact_references=tuple(str(output.digest) for output in result.outputs),
-                result={"harness_status": result.terminal_status},
+                result=result_details,
             ),
             now=now,
         )

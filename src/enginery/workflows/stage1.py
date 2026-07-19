@@ -503,6 +503,7 @@ class Stage1RunService:
             runtime=self.runtime,
             harness=self._require_omp_harness(),
             manifest=request.manifest,
+            head_branch=request.head_branch,
         ).collect(
             dispatched=self.runtime.recover_dispatched(
                 run_id=str(request.run.id),
@@ -858,6 +859,10 @@ class Stage1RunService:
 
 def _implementation_task(request: Stage1RunRequest) -> HarnessTask:
     execution = request.implementation
+    branch_constraint = (
+        f"Create and work only on branch {request.head_branch!r} from "
+        f"{request.run.base_revision!r}; commit and push the completed change to origin."
+    )
     return HarnessTask(
         run_id=request.run.id,
         node_id=NodeId("implement"),
@@ -866,7 +871,7 @@ def _implementation_task(request: Stage1RunRequest) -> HarnessTask:
         workspace_path=request.workspace_path,
         objective=request.work_snapshot.work_item.objective,
         acceptance_criteria=request.work_snapshot.work_item.acceptance_criteria,
-        constraints=request.work_snapshot.work_item.constraints,
+        constraints=(*request.work_snapshot.work_item.constraints, branch_constraint),
         permitted_capabilities=execution.permitted_capabilities,
         evidence_requirements=execution.evidence_requirements,
         time_budget_seconds=execution.time_budget_seconds,

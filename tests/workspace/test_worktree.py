@@ -12,8 +12,10 @@ from enginery.engine.workspace import GitWorktreeBackend
 from enginery.ledger.service import LedgerService
 
 
-def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -62,3 +64,37 @@ def test_reservation_prevents_workspace_collision_and_cleans_worktree(
     cleaned = backend.cleanup(materialized, epoch=epoch.epoch, now=now)
     assert cleaned.status == "cleaned"
     assert not cleaned.workspace_path.exists()
+
+
+def test_verifies_implemented_branch_is_current_and_pushed(
+    ledger_service: LedgerService, repository: Path, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 14, 0, tzinfo=UTC)
+    origin = tmp_path / "origin.git"
+    _git("init", "--bare", str(origin), cwd=tmp_path)
+    _git("remote", "add", "origin", str(origin), cwd=repository)
+    base_revision = _git("rev-parse", "HEAD", cwd=repository)
+    coordinator = Coordinator(ledger_service, owner="coordinator-a")
+    epoch = coordinator.acquire(now=now, heartbeat_window=timedelta(seconds=60))
+    backend = GitWorktreeBackend(ledger_service, coordinator)
+    reservation = backend.reserve(
+        repository_id="repo-1",
+        run_id="run-1",
+        repository_path=repository,
+        workspace_path=tmp_path / "workspace-1",
+        base_revision=base_revision,
+        epoch=epoch.epoch,
+        now=now,
+    )
+    materialized = backend.materialize(reservation, epoch=epoch.epoch, now=now)
+    _git("switch", "-c", "enginery/run-1", cwd=materialized.workspace_path)
+    (materialized.workspace_path / "README").write_text("implemented\n", encoding="utf-8")
+    _git("add", "README", cwd=materialized.workspace_path)
+    _git("commit", "-m", "implement", cwd=materialized.workspace_path)
+    with pytest.raises(ExternalConflictError, match="git branch verification failed"):
+        backend.verify_implementation_branch(materialized, head_branch="enginery/run-1")
+    _git("push", "--set-upstream", "origin", "enginery/run-1", cwd=materialized.workspace_path)
+
+    assert backend.verify_implementation_branch(materialized, head_branch="enginery/run-1") == _git(
+        "rev-parse", "HEAD", cwd=materialized.workspace_path
+    )

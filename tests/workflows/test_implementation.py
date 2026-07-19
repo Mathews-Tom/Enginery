@@ -73,9 +73,21 @@ def _omp_executable(path: Path) -> Path:
     return executable
 
 
-@pytest.mark.parametrize(("retain_workspace", "workspace_exists"), [(False, False), (True, True)])
+@pytest.mark.parametrize(
+    ("retain_workspace", "workspace_exists", "head_branch", "node_status"),
+    [
+        (False, False, None, "passed"),
+        (True, True, None, "passed"),
+        (True, True, "enginery/run-1", "failed"),
+    ],
+)
 def test_stage1_implementation_records_the_declared_workspace_lifecycle(
-    ledger_service: LedgerService, tmp_path: Path, retain_workspace: bool, workspace_exists: bool
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    retain_workspace: bool,
+    workspace_exists: bool,
+    head_branch: str | None,
+    node_status: str,
 ) -> None:
     now = datetime(2026, 7, 19, 11, 0, tzinfo=UTC)
     repository, revision = _repository(tmp_path)
@@ -139,6 +151,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
             ArtifactStore(tmp_path / "recovered-artifacts"),
         ),
         _manifest(),
+        head_branch=head_branch,
     )
     deadline = time.monotonic() + 5
     while True:
@@ -168,7 +181,15 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
     )
     assert result.terminal_status == "succeeded"
     assert node is not None
-    assert node.state["status"] == "passed"
+    assert node.state["status"] == node_status
+    if head_branch is not None:
+        attempt = ledger_service.read_projection(
+            aggregate_type="node_attempt", aggregate_id="attempt-1"
+        )
+        assert attempt is not None
+        result_details = attempt.state["result"]
+        assert isinstance(result_details, dict)
+        assert isinstance(result_details.get("branch_verification_error"), str)
     assert workspace.exists() is workspace_exists
     if retain_workspace:
         epoch = runtime.claim_epoch(
