@@ -39,10 +39,12 @@ class Stage1ImplementationExecutor:
         dispatched: DispatchedFixture,
         task: HarnessTask,
         now: datetime,
+        result_path: Path | None = None,
     ) -> HarnessResult:
         """Ingest a completed supervised OMP result through the coordinator."""
         _require_matching_dispatch(dispatched, task)
-        _, result = self.harness.collect_supervised(task, result_path=_result_path(task))
+        path = _result_path(task) if result_path is None else result_path
+        _, result = self.harness.collect_supervised(task, result_path=path)
         terminal_result = "passed" if result.terminal_status == "succeeded" else "failed"
         self.runtime.ingest_result(
             envelope=WorkerResultEnvelope(
