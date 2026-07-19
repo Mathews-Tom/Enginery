@@ -16,6 +16,7 @@ from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRunt
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
+from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.stage1 import (
     Stage1RunRequest,
     Stage1RunService,
@@ -34,6 +35,8 @@ def run_stage1(args: argparse.Namespace) -> int:
         _start(args)
     elif command == "watch":
         _watch(args)
+    elif command == "review":
+        _review(args)
     elif command in {"approve", "reject"}:
         _resolve_human_wait(args, approved=command == "approve")
     elif command == "cancel":
@@ -146,6 +149,63 @@ def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
         )
     finally:
         ledger.close()
+
+
+def _review(args: argparse.Namespace) -> None:
+    report = _review_report_from_state(_read_json(args.report))
+    ledger = LedgerService.open(args.database)
+    try:
+        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        service = Stage1RunService(runtime=runtime, ledger=ledger)
+        run = service.read(RunId(args.run_id))
+        result = service.review_implementation(
+            run.request,
+            report,
+            repair_attempt=args.repair_attempt,
+            now=_now(),
+            heartbeat_window=_HEARTBEAT_WINDOW,
+        )
+        _print(
+            {
+                "run_id": str(run.request.run.id),
+                "review_outcome": result.outcome.value,
+            }
+        )
+    finally:
+        ledger.close()
+
+
+def _review_report_from_state(state: object) -> ReviewReport:
+    if not isinstance(state, dict):
+        raise InvalidInputError("Stage 1 review report must be a mapping")
+    producer = _required_string(state, "producer")
+    reviewer = _required_string(state, "reviewer")
+    findings_value = state.get("findings")
+    if not isinstance(findings_value, list):
+        raise InvalidInputError("Stage 1 review findings must be a list")
+    findings = tuple(_review_finding_from_state(value) for value in findings_value)
+    return ReviewReport(producer=producer, reviewer=reviewer, findings=findings)
+
+
+def _review_finding_from_state(value: object) -> ReviewFinding:
+    if not isinstance(value, dict):
+        raise InvalidInputError("Stage 1 review finding must be a mapping")
+    actionable = value.get("actionable")
+    blocking = value.get("blocking")
+    if not isinstance(actionable, bool) or not isinstance(blocking, bool):
+        raise InvalidInputError("Stage 1 review finding flags must be booleans")
+    return ReviewFinding(
+        finding_id=_required_string(value, "finding_id"),
+        actionable=actionable,
+        blocking=blocking,
+    )
+
+
+def _required_string(state: dict[str, object], field_name: str) -> str:
+    value = state.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(f"Stage 1 review {field_name} must be non-blank")
+    return value
 
 
 def _cancel(args: argparse.Namespace) -> None:
