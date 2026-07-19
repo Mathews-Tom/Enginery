@@ -69,6 +69,7 @@ class Stage1RunRequest:
     base_branch: str
     head_branch: str
     validation_commands: tuple[tuple[str, ...], ...]
+    applicable_criteria: tuple[bool, ...]
     required_checks: tuple[str, ...]
     repair_limit: int
     implementation: Stage1ImplementationRequest
@@ -100,6 +101,10 @@ class Stage1RunRequest:
         )
         if invalid_validation_command:
             raise InvalidInputError("Stage 1 validation commands must contain non-blank arguments")
+        if len(self.applicable_criteria) != len(self.work_snapshot.work_item.acceptance_criteria):
+            raise InvalidInputError(
+                "Stage 1 applicability must classify every acceptance criterion"
+            )
         if not self.required_checks or any(not check.strip() for check in self.required_checks):
             raise InvalidInputError("Stage 1 requires non-blank exact-head checks")
         if self.repair_limit < 0:
@@ -130,6 +135,7 @@ class Stage1RunRequest:
             "base_branch": self.base_branch,
             "head_branch": self.head_branch,
             "validation_commands": [list(command) for command in self.validation_commands],
+            "applicable_criteria": list(self.applicable_criteria),
             "required_checks": list(self.required_checks),
             "repair_limit": self.repair_limit,
             "implementation": {
@@ -568,6 +574,11 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         isinstance(command, list) for command in commands_value
     ):
         raise InvalidInputError("Stage 1 validation_commands must be a list of lists")
+    applicable_criteria_value = state.get("applicable_criteria")
+    if not isinstance(applicable_criteria_value, list) or not all(
+        isinstance(value, bool) for value in applicable_criteria_value
+    ):
+        raise InvalidInputError("Stage 1 applicable_criteria must be a list of booleans")
     required_checks_value = state.get("required_checks")
     if not isinstance(required_checks_value, list) or not all(
         isinstance(check, str) for check in required_checks_value
@@ -588,6 +599,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
             tuple(_string_from_list(argument, "validation_commands") for argument in command)
             for command in commands_value
         ),
+        applicable_criteria=tuple(applicable_criteria_value),
         required_checks=tuple(required_checks_value),
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,

@@ -348,6 +348,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         base_branch="main",
         head_branch="enginery/stage1",
         validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
         required_checks=("CI",),
         repair_limit=1,
         implementation=Stage1ImplementationRequest(

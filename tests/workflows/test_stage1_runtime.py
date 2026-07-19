@@ -571,6 +571,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         base_branch="main",
         head_branch="enginery/stage1",
         validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
         required_checks=("CI",),
         repair_limit=1,
         implementation=Stage1ImplementationRequest(
