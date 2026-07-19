@@ -41,6 +41,31 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     assert evidence["source_revision"] == "issue-revision-1"
 
 
+def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    request = _request(tmp_path)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+
+    assert _start(database, request_path) == 0
+    capsys.readouterr()
+    assert _start(database, request_path) == 0
+    assert json.loads(capsys.readouterr().out) == {"run_id": "run-stage1", "status": "created"}
+
+    changed_request = replace(
+        request,
+        validation_commands=(("uv", "run", "pytest", "tests/cli/test_stage1.py", "-q"),),
+    )
+    request_path.write_text(
+        json.dumps(changed_request.initial_state()),
+        encoding="utf-8",
+    )
+    assert _start(database, request_path) != 0
+    assert "different immutable request" in capsys.readouterr().err
+
+
 def test_stage1_approve_resume_and_cancel_route_through_runtime(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
