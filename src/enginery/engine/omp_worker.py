@@ -32,6 +32,8 @@ class OmpWorkerResult:
             raise InvalidInputError("OMP worker operation id must be non-blank")
         if self.terminal_status not in {"succeeded", "failed"}:
             raise InvalidInputError("OMP worker terminal status is unsupported")
+        if self.schema_version != _RESULT_SCHEMA_VERSION:
+            raise InvalidInputError("OMP worker result schema version is unsupported")
 
 
 def run_omp_worker(

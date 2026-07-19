@@ -12,6 +12,7 @@ from enginery.application.work_ports import HarnessTask
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.errors import WorkerFailureError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
+from enginery.engine.omp_worker import run_omp_worker
 from enginery.ledger.artifact_store import ArtifactStore
 
 
@@ -120,6 +121,71 @@ def test_omp_harness_builds_a_supervised_worker_command(tmp_path: Path) -> None:
     )
     assert command[7] == "--"
     assert command[8] == "omp"
+
+
+def test_omp_harness_collects_a_supervised_worker_result(tmp_path: Path) -> None:
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+    )
+    task = _task(tmp_path)
+    result_path = tmp_path / "worker-result.json"
+    exit_code = run_omp_worker(
+        operation_id=str(task.operation_id),
+        command=(sys.executable, "-c", f"print({json.dumps(_events())})"),
+        output_path=result_path,
+    )
+
+    events, result = harness.collect_supervised(task, result_path=result_path)
+
+    assert exit_code == 0
+    assert events[-1].kind.value == "terminal"
+    assert result.terminal_status == "succeeded"
+    assert harness.artifact_store.read_bytes(result.outputs[0].digest) == _events().encode() + b"\n"
+
+
+def test_omp_harness_rejects_supervised_result_for_another_operation(tmp_path: Path) -> None:
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+    )
+    result_path = tmp_path / "worker-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "operation_id": "other-operation",
+                "output": _events(),
+                "schema_version": 1,
+                "terminal_status": "succeeded",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerFailureError, match="operation"):
+        harness.collect_supervised(_task(tmp_path), result_path=result_path)
+
+
+def test_omp_harness_rejects_unsupported_supervised_result_schema(tmp_path: Path) -> None:
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+    )
+    result_path = tmp_path / "worker-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "operation_id": "omp-operation-1",
+                "output": _events(),
+                "schema_version": 2,
+                "terminal_status": "succeeded",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkerFailureError, match="schema version"):
+        harness.collect_supervised(_task(tmp_path), result_path=result_path)
 
 
 def test_omp_harness_rejects_malformed_or_incomplete_events(tmp_path: Path) -> None:
