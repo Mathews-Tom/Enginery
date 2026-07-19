@@ -226,6 +226,7 @@ class CoordinatorRuntime:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> CoordinatorEpoch:
+        self._require_completed_dependencies(dispatch.request)
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
         self._register(
             request=dispatch.request,
@@ -547,6 +548,17 @@ class CoordinatorRuntime:
             event_type="runtime_node.human_wait_resumed",
         )
         self._fault("human_wait_resumed")
+
+    def _require_completed_dependencies(self, request: FixtureDispatch) -> None:
+        for run_id, node_id in request.dependencies:
+            projection = self._ledger.read_projection(
+                aggregate_type=_RUNTIME_NODE, aggregate_id=f"{run_id}:{node_id}"
+            )
+            if projection is None or projection.state.get("status") != "passed":
+                raise ExternalConflictError(
+                    "workflow node dependencies are not completed",
+                    details={"run_id": run_id, "node_id": node_id},
+                )
 
     def _acquire_or_renew(self, *, now: datetime, heartbeat_window: timedelta) -> CoordinatorEpoch:
         current = self._coordinator.current_epoch()
