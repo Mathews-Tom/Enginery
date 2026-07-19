@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
-from enginery.application.work_ports import WorkLedgerSnapshot
+from enginery.adapters.omp import OmpHarness
+from enginery.application.work_ports import HarnessTask, WorkLedgerPort, WorkLedgerSnapshot
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InternalInvariantViolationError, InvalidInputError
-from enginery.domain.ids import RunId
+from enginery.domain.errors import (
+    InternalInvariantViolationError,
+    InvalidInputError,
+    MissingPrerequisiteError,
+)
+from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.run import Run, RunState
 from enginery.domain.serialization import (
     run_from_dict,
@@ -20,8 +26,19 @@ from enginery.domain.serialization import (
     workflow_manifest_to_dict,
 )
 from enginery.domain.workflow.manifest import WorkflowManifest
-from enginery.engine.runtime import RUN_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.engine.runtime import (
+    RUN_AGGREGATE_TYPE,
+    RUNTIME_NODE_AGGREGATE_TYPE,
+    CoordinatorRuntime,
+    DispatchedFixture,
+    FixtureDispatch,
+    WorkflowDispatch,
+    WorkflowNodeDispatch,
+)
+from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
+from enginery.workflows.issue_to_pr import IssueQualification
+from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +129,46 @@ class Stage1Run:
 
 
 @dataclass(frozen=True, slots=True)
+class Stage1ImplementationRequest:
+    """Bound OMP attempt configuration for the manifest's implementation node."""
+
+    attempt_id: str
+    operation_id: OperationId
+    time_budget_seconds: int
+    cost_budget: Decimal | None
+    permitted_capabilities: tuple[str, ...]
+    evidence_requirements: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.attempt_id.strip() or not str(self.operation_id).strip():
+            raise InvalidInputError("Stage 1 implementation IDs must be non-blank")
+        if self.time_budget_seconds < 1:
+            raise InvalidInputError("Stage 1 implementation time budget must be positive")
+        if self.cost_budget is not None and self.cost_budget < 0:
+            raise InvalidInputError("Stage 1 implementation cost budget cannot be negative")
+        if any(not value.strip() for value in self.permitted_capabilities):
+            raise InvalidInputError("Stage 1 permitted capabilities must be non-blank")
+        if any(not value.strip() for value in self.evidence_requirements):
+            raise InvalidInputError("Stage 1 evidence requirements must be non-blank")
+
+
+@dataclass(frozen=True, slots=True)
+class Stage1ImplementationDispatch:
+    """One supervised OMP attempt launched by the coordinator runtime."""
+
+    task: HarnessTask
+    fixture: DispatchedFixture
+    result_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class Stage1RunService:
     """Create and read Stage 1 runs through the sole coordinator runtime."""
 
     runtime: CoordinatorRuntime
     ledger: LedgerService
+    work_ledger: WorkLedgerPort | None = None
+    omp_harness: OmpHarness | None = None
 
     def start(
         self,
@@ -144,6 +196,139 @@ class Stage1RunService:
                 "Stage 1 run projection is missing", details={"run_id": str(run_id)}
             )
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
+
+    def qualify(
+        self,
+        request: Stage1RunRequest,
+        *,
+        external_reference: str,
+        applicable_criteria: tuple[bool, ...],
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> IssueQualification:
+        """Persist intent, then source-bind and classify the issue through the runtime."""
+        self.start(request, now=now, heartbeat_window=heartbeat_window)
+        dispatch = WorkflowNodeDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="qualify",
+                attempt_id="qualification-0",
+                operation_id=f"qualify:{request.run.id}",
+                command=request.validation_commands[0],
+            ),
+            request.manifest,
+        )
+        return Stage1QualificationExecutor(
+            runtime=self.runtime, work_ledger=self._require_work_ledger()
+        ).qualify(
+            dispatch=dispatch,
+            external_reference=external_reference,
+            applicable_criteria=applicable_criteria,
+            now=now,
+            heartbeat_window=heartbeat_window,
+        )
+
+    def dispatch_implementation(
+        self,
+        request: Stage1RunRequest,
+        execution: Stage1ImplementationRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+        lease_window: timedelta,
+        limits: SchedulingLimits,
+    ) -> Stage1ImplementationDispatch:
+        """Launch one OMP attempt only after durable successful qualification."""
+        self._require_passed_node(request.run.id, "qualify")
+        task = HarnessTask(
+            run_id=request.run.id,
+            node_id=NodeId("implement"),
+            attempt_id=NodeAttemptId(execution.attempt_id),
+            operation_id=execution.operation_id,
+            workspace_path=request.workspace_path,
+            objective=request.work_snapshot.work_item.objective,
+            acceptance_criteria=request.work_snapshot.work_item.acceptance_criteria,
+            constraints=request.work_snapshot.work_item.constraints,
+            permitted_capabilities=execution.permitted_capabilities,
+            evidence_requirements=execution.evidence_requirements,
+            time_budget_seconds=execution.time_budget_seconds,
+            cost_budget=execution.cost_budget,
+        )
+        result_path = request.workspace_path / f".enginery-omp-{execution.operation_id}.json"
+        dispatch = WorkflowDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="implement",
+                attempt_id=execution.attempt_id,
+                operation_id=str(execution.operation_id),
+                command=self._require_omp_harness().supervised_command(
+                    task, result_path=result_path
+                ),
+                dependencies=((str(request.run.id), "qualify"),),
+            ),
+            request.manifest,
+        )
+        tick = self.runtime.tick(
+            now=now,
+            heartbeat_window=heartbeat_window,
+            lease_window=lease_window,
+            limits=limits,
+            requests=(dispatch,),
+        )
+        if len(tick.dispatched) != 1:
+            raise InternalInvariantViolationError(
+                "qualified implementation was not dispatched",
+                details={"run_id": str(request.run.id)},
+            )
+        return Stage1ImplementationDispatch(
+            task=task, fixture=tick.dispatched[0], result_path=result_path
+        )
+
+    def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
+        projection = self.ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:{node_id}",
+        )
+        if projection is None or projection.state.get("status") != "passed":
+            raise MissingPrerequisiteError(
+                "Stage 1 implementation requires successful qualification",
+                details={"run_id": str(run_id), "node_id": node_id},
+            )
+
+    def _require_work_ledger(self) -> WorkLedgerPort:
+        if self.work_ledger is None:
+            raise MissingPrerequisiteError("Stage 1 source-work ledger is not configured")
+        return self.work_ledger
+
+    def _require_omp_harness(self) -> OmpHarness:
+        if self.omp_harness is None:
+            raise MissingPrerequisiteError("Stage 1 OMP harness is not configured")
+        return self.omp_harness
+
+
+def _fixture_dispatch(
+    request: Stage1RunRequest,
+    *,
+    node_id: str,
+    attempt_id: str,
+    operation_id: str,
+    command: tuple[str, ...],
+    dependencies: tuple[tuple[str, str], ...] = (),
+) -> FixtureDispatch:
+    return FixtureDispatch(
+        run_id=str(request.run.id),
+        node_id=node_id,
+        attempt_id=attempt_id,
+        repository_id=request.repository_id,
+        repository_path=request.repository_path,
+        workspace_path=request.workspace_path,
+        base_revision=request.run.base_revision,
+        command=command,
+        expected_attempt_version=0,
+        operation_id=operation_id,
+        dependencies=dependencies,
+        workflow_definition_id=request.manifest.id.value,
+    )
 
 
 def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
@@ -214,4 +399,10 @@ def _string_from_list(value: object, field_name: str) -> str:
     return value
 
 
-__all__ = ["Stage1Run", "Stage1RunRequest", "Stage1RunService"]
+__all__ = [
+    "Stage1ImplementationDispatch",
+    "Stage1ImplementationRequest",
+    "Stage1Run",
+    "Stage1RunRequest",
+    "Stage1RunService",
+]

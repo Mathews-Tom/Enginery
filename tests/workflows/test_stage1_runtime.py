@@ -3,24 +3,37 @@ from __future__ import annotations
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import ExternalConflictError, InvalidInputError
-from enginery.domain.ids import RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.errors import (
+    ExternalConflictError,
+    InvalidInputError,
+    MissingPrerequisiteError,
+)
+from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.supervisor import WorkerSupervisor
+from enginery.engine.workspace import GitWorktreeBackend
+from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
-from enginery.workflows.stage1 import Stage1RunRequest, Stage1RunService
+from enginery.workflows.stage1 import (
+    Stage1ImplementationRequest,
+    Stage1RunRequest,
+    Stage1RunService,
+)
 from enginery.workflows.stage1_runtime import Stage1QualificationExecutor
 
 
@@ -76,13 +89,28 @@ def _snapshot() -> WorkLedgerSnapshot:
 
 
 class RecordingWorkLedger:
-    def __init__(self, ledger: LedgerService, snapshot: WorkLedgerSnapshot) -> None:
+    def __init__(
+        self,
+        ledger: LedgerService,
+        snapshot: WorkLedgerSnapshot,
+        *,
+        expected_run_id: str = "run-1",
+        require_registered_run: bool = False,
+    ) -> None:
         self.ledger = ledger
         self.snapshot = snapshot
+        self.expected_run_id = expected_run_id
+        self.require_registered_run = require_registered_run
 
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
+        if self.require_registered_run:
+            run = self.ledger.read_projection(
+                aggregate_type="run", aggregate_id=self.expected_run_id
+            )
+            assert run is not None
+            assert run.state["status"] == "created"
         node = self.ledger.read_projection(
-            aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+            aggregate_type="runtime_node", aggregate_id=f"{self.expected_run_id}:qualify"
         )
         assert external_reference == "issue:1"
         assert node is not None
@@ -371,10 +399,22 @@ def test_retry_rejects_nonterminal_node(ledger_service: LedgerService, tmp_path:
         )
 
 
-def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
+def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git("init", cwd=repository)
+    _git("config", "user.email", "enginery@example.test", cwd=repository)
+    _git("config", "user.name", "Enginery Test", cwd=repository)
+    (repository / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _git("add", "tracked.txt", cwd=repository)
+    _git("commit", "-m", "baseline", cwd=repository)
+    base_revision = _git("rev-parse", "HEAD", cwd=repository)
+    fake_omp = tmp_path / "fake-omp"
+    fake_omp.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    fake_omp.chmod(0o755)
     manifest = issue_to_pr_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
@@ -385,7 +425,7 @@ def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
             workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
             workflow_definition_digest=manifest.content_digest,
             repository="repository-1",
-            base_revision="base-1",
+            base_revision=base_revision,
             policy_set_version="policy-v1",
             adapter_versions={},
             adapter_fingerprints={},
@@ -397,7 +437,7 @@ def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
         work_snapshot=snapshot,
         manifest=manifest,
         repository_id="repository-1",
-        repository_path=tmp_path / "repository",
+        repository_path=repository,
         workspace_path=tmp_path / "workspace",
         base_branch="main",
         head_branch="enginery/stage1",
@@ -405,9 +445,23 @@ def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
         required_checks=("CI",),
         repair_limit=1,
     )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     service = Stage1RunService(
-        runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
+        runtime=runtime,
         ledger=ledger_service,
+        work_ledger=cast(
+            WorkLedgerPort,
+            RecordingWorkLedger(
+                ledger_service,
+                snapshot,
+                expected_run_id="run-stage1",
+                require_registered_run=True,
+            ),
+        ),
+        omp_harness=OmpHarness(
+            OmpAdapterConfig(credential_reference="test-keyring", executable=str(fake_omp)),
+            ArtifactStore(tmp_path / "artifacts"),
+        ),
     )
 
     first = service.start(
@@ -415,22 +469,75 @@ def test_stage1_run_start_persists_complete_immutable_intent_idempotently(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    execution_request = Stage1ImplementationRequest(
+        attempt_id="implement-0",
+        operation_id=OperationId("implement:run-stage1"),
+        time_budget_seconds=60,
+        cost_budget=Decimal("1.0"),
+        permitted_capabilities=("git",),
+        evidence_requirements=("redacted harness transcript",),
+    )
+    with pytest.raises(MissingPrerequisiteError, match="successful qualification"):
+        service.dispatch_implementation(
+            request,
+            execution_request,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+    qualification = service.qualify(
+        request,
+        external_reference="issue:1",
+        applicable_criteria=(True,),
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+    )
+    implementation = service.dispatch_implementation(
+        request,
+        execution_request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
     second = service.start(
         request,
-        now=now + timedelta(seconds=1),
+        now=now + timedelta(seconds=3),
         heartbeat_window=timedelta(seconds=60),
     )
     conflicting_request = replace(request, head_branch="enginery/other-stage1")
     with pytest.raises(ExternalConflictError, match="different immutable request"):
         service.start(
             conflicting_request,
-            now=now + timedelta(seconds=2),
+            now=now + timedelta(seconds=4),
             heartbeat_window=timedelta(seconds=60),
         )
+    implementation_node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-stage1:implement"
+    )
+    assert implementation_node is not None
+    assert implementation_node.state["status"] == "running"
+    WorkerSupervisor(ledger_service, runtime.coordinator).cancel(
+        lease=implementation.fixture.lease,
+        identity=implementation.fixture.identity,
+        now=now + timedelta(seconds=5),
+    )
+    GitWorktreeBackend(ledger_service, runtime.coordinator).cleanup(
+        implementation.fixture.workspace,
+        epoch=implementation.fixture.lease.epoch,
+        now=now + timedelta(seconds=6),
+    )
 
     assert first.request == request
     assert second.request == request
     assert second.aggregate_version == 1
+    assert qualification.readiness is IssueReadiness.READY
+    qualification_node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-stage1:qualify"
+    )
+    assert qualification_node is not None
+    assert qualification_node.state["status"] == "passed"
     projection = ledger_service.read_projection(aggregate_type="run", aggregate_id="run-stage1")
     assert projection is not None
     assert projection.state["request_digest"] == str(request.digest)
