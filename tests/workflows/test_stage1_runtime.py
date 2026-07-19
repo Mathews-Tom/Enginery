@@ -21,6 +21,7 @@ from enginery.domain.errors import (
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
@@ -29,6 +30,7 @@ from enginery.engine.workspace import GitWorktreeBackend
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
+from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ImplementationRequest,
     Stage1RunRequest,
@@ -36,6 +38,7 @@ from enginery.workflows.stage1 import (
 )
 from enginery.workflows.stage1_runtime import (
     Stage1QualificationExecutor,
+    Stage1ReviewExecutor,
     Stage1ValidationExecutor,
 )
 
@@ -88,6 +91,28 @@ def _snapshot() -> WorkLedgerSnapshot:
             state=WorkItemState.QUALIFYING,
         ),
         source_revision="1",
+    )
+
+
+def _review_manifest() -> WorkflowManifest:
+    return WorkflowManifest.from_mapping(
+        {
+            "id": "issue-to-pr-v1",
+            "name": "review fixture",
+            "schema_version": 1,
+            "nodes": {
+                "review": {
+                    "kind": "request_human_decision",
+                    "input_schema": {},
+                    "output_schema": {},
+                    "actor_type": "human",
+                    "side_effect_class": "none",
+                    "idempotency_behavior": "not_applicable",
+                }
+            },
+            "terminal_states": ["complete"],
+            "terminal_state_mapping": {"review": "complete"},
+        }
     )
 
 
@@ -186,6 +211,60 @@ def test_validation_persists_node_before_running_commands(
     assert node.state["status"] == "passed"
     assert node.state["validation_artifact_digest"] == str(result.artifact_digest)
     assert b"0123456789abcdef" not in artifact_store.read_bytes(result.artifact_digest)
+
+
+def test_review_persists_human_wait_and_independent_decision(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    manifest = _review_manifest()
+    first_dispatch = WorkflowNodeDispatch(
+        replace(
+            _request(tmp_path),
+            node_id="review",
+            attempt_id="review-0",
+            operation_id="review-operation-0",
+        ),
+        manifest,
+    )
+    report = ReviewReport(
+        producer="omp",
+        reviewer="human-operator",
+        findings=(ReviewFinding("format", actionable=True, blocking=False),),
+    )
+    first = Stage1ReviewExecutor(runtime).review(
+        dispatch=first_dispatch,
+        report=report,
+        repair_attempt=0,
+        repair_limit=1,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    second = Stage1ReviewExecutor(runtime).review(
+        dispatch=WorkflowNodeDispatch(
+            replace(
+                first_dispatch.request,
+                attempt_id="review-1",
+                operation_id="review-operation-1",
+            ),
+            manifest,
+        ),
+        report=report,
+        repair_attempt=1,
+        repair_limit=1,
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:review"
+    )
+    assert first.outcome is ReviewOutcome.REPAIR_REQUESTED
+    assert second.outcome is ReviewOutcome.REPAIR_EXHAUSTED
+    assert node is not None
+    assert node.state["status"] == "passed"
+    assert node.state["review_outcome"] == ReviewOutcome.REPAIR_EXHAUSTED.value
 
 
 def test_tick_does_not_dispatch_a_recovered_deterministic_node(
