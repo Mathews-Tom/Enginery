@@ -157,7 +157,7 @@ def test_evidence_binds_checks_and_reviews_to_current_head() -> None:
         "conclusion": "success",
         "head_sha": "a" * 40,
     }
-    review = {"user": {"login": "reviewer"}, "state": "APPROVED"}
+    review = {"user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": "a" * 40}
     responses: list[object] = [pull, [review], {"check_runs": [check]}, pull]
     calls: list[tuple[str, ...]] = []
     adapter = GitHubPullRequests(_config(), command_runner=_runner(responses, calls))
@@ -166,6 +166,7 @@ def test_evidence_binds_checks_and_reviews_to_current_head() -> None:
 
     assert evidence.mergeable is True
     assert evidence.reviews[0].reviewer == "reviewer"
+    assert evidence.reviews[0].head_revision == evidence.pull_request.head_revision
     assert evidence.checks[0].head_revision == evidence.pull_request.head_revision
     assert calls[2][-1].endswith("/check-runs?per_page=100&page=1")
 

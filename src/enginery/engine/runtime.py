@@ -14,7 +14,7 @@ from enginery.domain.errors import (
 )
 from enginery.domain.ids import NodeId
 from enginery.domain.workflow.manifest import WorkflowManifest
-from enginery.domain.workflow.node import NodeKind
+from enginery.domain.workflow.node import ActorType
 from enginery.engine.coordinator import CommandConsumption, Coordinator, CoordinatorEpoch
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.recovery import RecoveryCoordinator
@@ -87,8 +87,32 @@ class WorkflowDispatch:
         node = self.manifest.nodes.get(NodeId(self.request.node_id))
         if node is None:
             raise InvalidInputError("workflow dispatch references an unknown manifest node")
-        if node.kind is not NodeKind.EXECUTE_AGENT_TASK:
+        _require_manifest_dependencies(self.request, node.dependencies)
+        if node.actor_type is not ActorType.AGENT:
             raise InvalidInputError("workflow dispatch requires an agent-task manifest node")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowNodeDispatch:
+    """One manifest-bound deterministic or human node owned by the runtime."""
+
+    request: FixtureDispatch
+    manifest: WorkflowManifest
+
+    def __post_init__(self) -> None:
+        if self.request.workflow_definition_id != self.manifest.id.value:
+            raise InvalidInputError("workflow node request must bind its manifest identity")
+        node = self.manifest.nodes.get(NodeId(self.request.node_id))
+        if node is None:
+            raise InvalidInputError("workflow node dispatch references an unknown manifest node")
+        _require_manifest_dependencies(self.request, node.dependencies)
+        if node.actor_type is ActorType.AGENT:
+            raise InvalidInputError("workflow node dispatch requires a non-agent manifest node")
+
+    @property
+    def actor_type(self) -> ActorType:
+        """Return the manifest-declared owner of this node."""
+        return self.manifest.nodes[NodeId(self.request.node_id)].actor_type
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +219,79 @@ class CoordinatorRuntime:
     def coordinator(self) -> Coordinator:
         return self._coordinator
 
+    def register_node(
+        self,
+        *,
+        dispatch: WorkflowNodeDispatch,
+        now: datetime,
+        heartbeat_window: timedelta,
+    ) -> CoordinatorEpoch:
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+        self._register(
+            request=dispatch.request,
+            actor_type=dispatch.actor_type,
+            epoch=epoch.epoch,
+            now=now,
+        )
+        return epoch
+
+    def complete_node(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        outcome: str = "passed",
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Persist the outcome of a non-worker manifest node."""
+        if outcome not in {"passed", "failed", "cancelled", "blocked"}:
+            raise InvalidInputError("runtime node outcome is unsupported")
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        _require_non_agent_node(state)
+        if state.get("status") != "queued":
+            raise ExternalConflictError("only a queued deterministic node can complete")
+        self._set_status(
+            request=request,
+            status=outcome,
+            event_type="runtime_node.deterministic_completed",
+            epoch=epoch,
+            now=now,
+            extra=extra,
+        )
+
+    def await_human_node(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        reason: str,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Persist a deterministic workflow node that requires a human decision."""
+        if not reason.strip():
+            raise InvalidInputError("human-wait reason must be non-blank")
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        _require_non_agent_node(state)
+        if state.get("status") != "queued":
+            raise ExternalConflictError("only a queued deterministic node can await human input")
+        details: dict[str, object] = {"human_wait_reason": reason}
+        if extra is not None:
+            details.update(extra)
+        self._set_status(
+            request=request,
+            status="awaiting_human",
+            event_type="runtime_node.deterministic_human_wait",
+            epoch=epoch,
+            now=now,
+            extra=details,
+        )
+
     def tick(
         self,
         *,
@@ -213,8 +310,10 @@ class CoordinatorRuntime:
             heartbeat_window=heartbeat_window,
         )
         for dispatch in requests:
+            request = _fixture_request(dispatch)
             self._register(
-                request=_fixture_request(dispatch),
+                request=request,
+                actor_type=_actor_type(dispatch),
                 epoch=epoch.epoch,
                 now=now,
             )
@@ -251,6 +350,7 @@ class CoordinatorRuntime:
     def ingest_result(self, *, envelope: WorkerResultEnvelope, now: datetime) -> None:
         """Validate and ingest an exact current-lease worker result, then clean up."""
         request = self._request_for(envelope.run_id, envelope.node_id)
+        _require_agent_node(_runtime_state(self._ledger, request))
         if request.attempt_id != envelope.attempt_id:
             raise ExternalConflictError("worker result attempt does not match durable runtime node")
         attempt = self._ledger.read_projection(
@@ -460,18 +560,27 @@ class CoordinatorRuntime:
             heartbeat_window=heartbeat_window,
         )
 
-    def _register(self, *, request: FixtureDispatch, epoch: int, now: datetime) -> None:
+    def _register(
+        self,
+        *,
+        request: FixtureDispatch,
+        actor_type: ActorType,
+        epoch: int,
+        now: datetime,
+    ) -> None:
         projection = self._ledger.read_projection(
             aggregate_type=_RUNTIME_NODE, aggregate_id=_node_id(request)
         )
         if projection is not None:
+            if _actor_type_from_state(projection.state) is not actor_type:
+                raise ExternalConflictError("runtime node already exists with different actor type")
             current = _request_from_state(projection.state)
             if current != request:
                 raise ExternalConflictError(
                     "runtime node already exists with different immutable request"
                 )
             return
-        state = _request_state(request, status="queued")
+        state = _request_state(request, status="queued", actor_type=actor_type)
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"runtime-node-register:{_node_id(request)}",
@@ -497,7 +606,11 @@ class CoordinatorRuntime:
         )
         if projection is None:
             raise InternalInvariantViolationError("cannot replace an unknown runtime node")
-        state = _request_state(request, status="queued")
+        state = _request_state(
+            request,
+            status="queued",
+            actor_type=_actor_type_from_state(projection.state),
+        )
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"runtime-node-resume:{_node_id(request)}:{request.attempt_id}",
@@ -617,6 +730,11 @@ class CoordinatorRuntime:
             self._fault_hook(point)
 
 
+def _actor_type(dispatch: FixtureDispatch | WorkflowDispatch) -> ActorType:
+    del dispatch
+    return ActorType.AGENT
+
+
 def _fixture_request(dispatch: FixtureDispatch | WorkflowDispatch) -> FixtureDispatch:
     if isinstance(dispatch, WorkflowDispatch):
         return dispatch.request
@@ -627,7 +745,9 @@ def _node_id(request: FixtureDispatch) -> str:
     return f"{request.run_id}:{request.node_id}"
 
 
-def _request_state(request: FixtureDispatch, *, status: str) -> dict[str, object]:
+def _request_state(
+    request: FixtureDispatch, *, status: str, actor_type: ActorType
+) -> dict[str, object]:
     return {
         "run_id": request.run_id,
         "node_id": request.node_id,
@@ -641,6 +761,7 @@ def _request_state(request: FixtureDispatch, *, status: str) -> dict[str, object
         "operation_id": request.operation_id,
         "dependencies": [[run_id, node_id] for run_id, node_id in request.dependencies],
         "workflow_definition_id": request.workflow_definition_id,
+        "actor_type": actor_type.value,
         "status": status,
     }
 
@@ -700,6 +821,30 @@ def _request_from_state(state: object) -> FixtureDispatch:
     )
 
 
+def _actor_type_from_state(state: object) -> ActorType:
+    if not isinstance(state, dict):
+        raise InternalInvariantViolationError("runtime node state is invalid")
+    actor_type = state.get("actor_type")
+    if actor_type is None:
+        return ActorType.AGENT
+    if not isinstance(actor_type, str):
+        raise InternalInvariantViolationError("runtime node actor type is invalid")
+    try:
+        return ActorType(actor_type)
+    except ValueError as error:
+        raise InternalInvariantViolationError("runtime node actor type is invalid") from error
+
+
+def _require_agent_node(state: object) -> None:
+    if _actor_type_from_state(state) is not ActorType.AGENT:
+        raise ExternalConflictError("worker operation requires an agent-owned runtime node")
+
+
+def _require_non_agent_node(state: object) -> None:
+    if _actor_type_from_state(state) is ActorType.AGENT:
+        raise ExternalConflictError("deterministic operation requires a non-agent runtime node")
+
+
 def _required_text(state: dict[object, object], field_name: str) -> str:
     value = state.get(field_name)
     if not isinstance(value, str) or not value.strip():
@@ -708,6 +853,14 @@ def _required_text(state: dict[object, object], field_name: str) -> str:
             details={"field": field_name},
         )
     return value
+
+
+def _require_manifest_dependencies(
+    request: FixtureDispatch, dependencies: tuple[NodeId, ...]
+) -> None:
+    expected = {(request.run_id, str(dependency)) for dependency in dependencies}
+    if len(request.dependencies) != len(expected) or set(request.dependencies) != expected:
+        raise InvalidInputError("workflow dispatch dependencies do not match its manifest node")
 
 
 def _runtime_state(ledger: LedgerService, request: FixtureDispatch) -> dict[str, object]:
@@ -724,6 +877,9 @@ def _schedulable(request: FixtureDispatch, *, state: dict[str, object]) -> Sched
     status = state.get("status")
     if not isinstance(status, str):
         raise InternalInvariantViolationError("runtime node status is invalid")
+    actor_type = _actor_type_from_state(state)
+    if actor_type is not ActorType.AGENT and status == "queued":
+        status = "blocked"
     states = {
         "queued": SchedulableState.QUEUED,
         "running": SchedulableState.RUNNING,
