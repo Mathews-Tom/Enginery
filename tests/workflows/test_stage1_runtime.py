@@ -11,7 +11,14 @@ from typing import cast
 import pytest
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
-from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
+from enginery.application.work_ports import (
+    PullRequestEvidence,
+    PullRequestPort,
+    PullRequestRequest,
+    PullRequestSnapshot,
+    WorkLedgerPort,
+    WorkLedgerSnapshot,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import (
@@ -19,12 +26,16 @@ from enginery.domain.errors import (
     InvalidInputError,
     MissingPrerequisiteError,
 )
-from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
-from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
+from enginery.engine.runtime import (
+    CoordinatorRuntime,
+    FixtureDispatch,
+    WorkflowNodeDispatch,
+)
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
@@ -709,3 +720,162 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     assert projection.state["request_digest"] == str(request.digest)
     assert projection.state["status"] == "created"
     assert projection.aggregate_version == 1
+
+
+def test_stage1_opens_one_pr_only_after_approved_review(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    template_manifest = issue_to_pr_manifest()
+    manifest = replace(
+        template_manifest,
+        nodes={
+            **template_manifest.nodes,
+            NodeId("implement"): replace(
+                template_manifest.nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-pr"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-pr",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-pr"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            omp_credential_reference="test-omp-keyring",
+            omp_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        pull_requests=cast(PullRequestPort, pull_requests),
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    for node_id in ("qualify", "implement", "validate"):
+        dispatch = WorkflowNodeDispatch(
+            FixtureDispatch(
+                run_id=str(request.run.id),
+                node_id=node_id,
+                attempt_id=f"{node_id}-0",
+                repository_id=request.repository_id,
+                repository_path=request.repository_path,
+                workspace_path=request.workspace_path,
+                base_revision="base-revision",
+                command=(node_id,),
+                expected_attempt_version=0,
+                operation_id=f"{node_id}:run-pr",
+                dependencies=(
+                    ()
+                    if node_id == "qualify"
+                    else (
+                        (str(request.run.id), "qualify" if node_id == "implement" else "implement"),
+                    )
+                ),
+                workflow_definition_id=manifest.id.value,
+            ),
+            manifest,
+        )
+        epoch = runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+        )
+        runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=now,
+        )
+
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    pull_requests.failures_remaining = 1
+    with pytest.raises(ExternalConflictError, match="simulated provider interruption"):
+        service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert service.next_action(request.run.id).action.value == "open_pr"
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    assert [value.head_branch for value in pull_requests.requests] == ["enginery/run-pr"]
+    assert service.next_action(request.run.id).action.value == "wait"
+
+
+class RecordingPullRequests:
+    """Capture the idempotent Stage 1 pull-request request."""
+
+    def __init__(self) -> None:
+        self.requests: list[PullRequestRequest] = []
+        self.failures_remaining = 0
+
+    def probe(self) -> object:
+        raise AssertionError("not used by this test")
+
+    def create_or_update(self, request: PullRequestRequest) -> PullRequestSnapshot:
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise ExternalConflictError("simulated provider interruption")
+        self.requests.append(request)
+        return PullRequestSnapshot(
+            number=17,
+            url="https://example.test/pull/17",
+            state="open",
+            head_branch=request.head_branch,
+            head_revision="head-revision",
+            base_branch=request.base_branch,
+            base_revision="base-revision",
+        )
+
+    def get(self, number: int) -> PullRequestSnapshot:
+        raise AssertionError("not used by this test")
+
+    def evidence(self, number: int) -> PullRequestEvidence:
+        raise AssertionError("not used by this test")
+
+    def reconcile(self, *, operation_id: OperationId) -> object:
+        raise AssertionError("not used by this test")
