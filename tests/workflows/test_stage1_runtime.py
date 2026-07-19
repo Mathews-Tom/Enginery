@@ -704,7 +704,11 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     while True:
         try:
-            result = recovered.collect_implementation(request, now=now + timedelta(seconds=3))
+            result = recovered.collect_implementation(
+                request,
+                now=now + timedelta(seconds=3),
+                heartbeat_window=timedelta(seconds=60),
+            )
         except ExternalConflictError:
             if time.monotonic() >= deadline:
                 raise

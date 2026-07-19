@@ -119,6 +119,7 @@ class FencedNodeLeases:
         self,
         *,
         envelope: WorkerResultEnvelope,
+        coordinator_epoch: int,
         now: datetime,
         expected_attempt_version: int,
         allow_expired_cancellation: bool = False,
@@ -209,7 +210,7 @@ class FencedNodeLeases:
                     ),
                 ),
                 process_manager_updates=(
-                    self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
+                    self._coordinator.epoch_guard(epoch=coordinator_epoch, now=now),
                 ),
                 lease_updates=(
                     LeaseWrite(

@@ -71,6 +71,7 @@ def test_result_ingestion_accepts_only_the_current_fenced_envelope(
 
     leases.ingest_result(
         envelope=envelope,
+        coordinator_epoch=lease.epoch,
         now=now + timedelta(seconds=1),
         expected_attempt_version=1,
     )
@@ -78,6 +79,7 @@ def test_result_ingestion_accepts_only_the_current_fenced_envelope(
     with pytest.raises(ExternalConflictError, match="current active node lease"):
         leases.ingest_result(
             envelope=envelope,
+            coordinator_epoch=lease.epoch,
             now=now + timedelta(seconds=2),
             expected_attempt_version=2,
         )
@@ -102,6 +104,7 @@ def test_result_rejects_mismatched_durable_operation(
     with pytest.raises(ExternalConflictError, match="operation does not match"):
         FencedNodeLeases(ledger_service, coordinator).ingest_result(
             envelope=envelope,
+            coordinator_epoch=lease.epoch,
             now=now + timedelta(seconds=1),
             expected_attempt_version=1,
         )

@@ -394,7 +394,11 @@ class Stage1RunService:
                 limits=limits,
             )
         elif progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
-            self.collect_implementation(request, now=now)
+            self.collect_implementation(
+                request,
+                now=now,
+                heartbeat_window=heartbeat_window,
+            )
         elif progression.action is Stage1ProgressionAction.VALIDATE:
             self.validate_implementation(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.OPEN_PR:
@@ -497,8 +501,10 @@ class Stage1RunService:
         request: Stage1RunRequest,
         *,
         now: datetime,
+        heartbeat_window: timedelta,
     ) -> HarnessResult:
-        """Ingest a completed supervised OMP result from durable runtime state."""
+        """Claim the current epoch, then ingest a completed supervised OMP result."""
+        self.runtime.claim_epoch(now=now, heartbeat_window=heartbeat_window)
         return Stage1ImplementationExecutor(
             runtime=self.runtime,
             harness=self._require_omp_harness(),

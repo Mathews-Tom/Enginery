@@ -74,11 +74,18 @@ def _omp_executable(path: Path) -> Path:
 
 
 @pytest.mark.parametrize(
-    ("retain_workspace", "workspace_exists", "head_branch", "node_status"),
+    (
+        "retain_workspace",
+        "workspace_exists",
+        "head_branch",
+        "node_status",
+        "recover_after_expiry",
+    ),
     [
-        (False, False, None, "passed"),
-        (True, True, None, "passed"),
-        (True, True, "enginery/run-1", "failed"),
+        (False, False, None, "passed", False),
+        (True, True, None, "passed", False),
+        (True, True, "enginery/run-1", "failed", False),
+        (False, False, None, "passed", True),
     ],
 )
 def test_stage1_implementation_records_the_declared_workspace_lifecycle(
@@ -88,6 +95,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
     workspace_exists: bool,
     head_branch: str | None,
     node_status: str,
+    recover_after_expiry: bool,
 ) -> None:
     now = datetime(2026, 7, 19, 11, 0, tzinfo=UTC)
     repository, revision = _repository(tmp_path)
@@ -135,12 +143,22 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
     runtime.tick(
         now=now,
         heartbeat_window=timedelta(seconds=60),
-        lease_window=timedelta(seconds=30),
+        lease_window=timedelta(seconds=120) if recover_after_expiry else timedelta(seconds=30),
         limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
         requests=(dispatch,),
     )
     result_path = workspace / ".enginery" / "omp-results" / "operation-1.json"
-    recovered_runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    collection_now = now + timedelta(seconds=1)
+    recovered_runtime = CoordinatorRuntime(
+        ledger_service,
+        owner="replacement" if recover_after_expiry else "coordinator",
+    )
+    if recover_after_expiry:
+        collection_now = now + timedelta(seconds=62)
+        recovered_runtime.claim_epoch(
+            now=collection_now - timedelta(seconds=1),
+            heartbeat_window=timedelta(seconds=60),
+        )
     recovered_executor = Stage1ImplementationExecutor(
         recovered_runtime,
         OmpHarness(
@@ -163,7 +181,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
                         node_id="implement",
                     ),
                     task=task,
-                    now=now + timedelta(seconds=1),
+                    now=collection_now,
                 )
             except ExternalConflictError:
                 if time.monotonic() >= deadline:
@@ -191,26 +209,25 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
         assert isinstance(result_details, dict)
         assert isinstance(result_details.get("branch_verification_error"), str)
     assert workspace.exists() is workspace_exists
+    lifecycle_now = collection_now + timedelta(seconds=1)
+    lifecycle_epoch = recovered_runtime.claim_epoch(
+        now=lifecycle_now,
+        heartbeat_window=timedelta(seconds=60),
+    )
     if retain_workspace:
-        epoch = runtime.claim_epoch(
-            now=now + timedelta(seconds=2), heartbeat_window=timedelta(seconds=60)
-        )
-        cleaned = runtime.release_workspace(
+        cleaned = recovered_runtime.release_workspace(
             run_id="run-1",
             repository_id="repository-1",
-            epoch=epoch.epoch,
-            now=now + timedelta(seconds=2),
+            epoch=lifecycle_epoch.epoch,
+            now=lifecycle_now,
         )
         assert cleaned.status == "cleaned"
         assert not workspace.exists()
     else:
-        epoch = runtime.claim_epoch(
-            now=now + timedelta(seconds=2), heartbeat_window=timedelta(seconds=60)
-        )
         with pytest.raises(ExternalConflictError, match="workspace release requires a retained"):
-            runtime.release_workspace(
+            recovered_runtime.release_workspace(
                 run_id="run-1",
                 repository_id="repository-1",
-                epoch=epoch.epoch,
-                now=now + timedelta(seconds=2),
+                epoch=lifecycle_epoch.epoch,
+                now=lifecycle_now,
             )

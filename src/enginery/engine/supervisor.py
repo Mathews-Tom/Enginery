@@ -180,6 +180,7 @@ class WorkerSupervisor:
         self._fault("process_exit_observed")
         self._record_exit(
             lease=lease,
+            coordinator_epoch=lease.epoch,
             identity=identity,
             now=now,
             event_type="worker.cancelled",
@@ -226,7 +227,9 @@ class WorkerSupervisor:
         )
         return True
 
-    def observe_exit(self, *, lease: FencedNodeLease, now: datetime) -> None:
+    def observe_exit(
+        self, *, lease: FencedNodeLease, coordinator_epoch: int, now: datetime
+    ) -> None:
         """Record a naturally exited worker after exact identity re-probing."""
         record = self._require_supervisor_record(lease)
         if record.state.get("status") == "exit_observed":
@@ -240,6 +243,7 @@ class WorkerSupervisor:
             self._fault("process_exit_observed")
             self._record_exit(
                 lease=lease,
+                coordinator_epoch=coordinator_epoch,
                 identity=identity,
                 now=now,
                 event_type="worker.process_exit_observed",
@@ -258,6 +262,7 @@ class WorkerSupervisor:
         self._fault("process_exit_observed")
         self._record_exit(
             lease=lease,
+            coordinator_epoch=coordinator_epoch,
             identity=identity,
             now=now,
             event_type="worker.process_exit_observed",
@@ -268,6 +273,7 @@ class WorkerSupervisor:
         self,
         *,
         lease: FencedNodeLease,
+        coordinator_epoch: int,
         identity: ProcessIdentity,
         now: datetime,
         event_type: str,
@@ -279,7 +285,7 @@ class WorkerSupervisor:
                 correlation_id=f"{event_type}:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
                 events=(_event(self._ledger, lease, event_type, state),),
                 process_manager_updates=(
-                    self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
+                    self._coordinator.epoch_guard(epoch=coordinator_epoch, now=now),
                     ProcessManagerStateWrite(_MANAGER, _key(lease), expected_state_version, state),
                 ),
             )
