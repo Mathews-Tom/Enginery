@@ -46,6 +46,7 @@ class FixtureDispatch:
     expected_attempt_version: int
     operation_id: str
     dependencies: tuple[tuple[str, str], ...] = ()
+    workflow_definition_id: str | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -66,6 +67,8 @@ class FixtureDispatch:
             raise InvalidInputError("expected_attempt_version cannot be negative")
         if any(not run_id.strip() or not node_id.strip() for run_id, node_id in self.dependencies):
             raise InvalidInputError("fixture dispatch dependencies must be non-blank node keys")
+        if self.workflow_definition_id is not None and not self.workflow_definition_id.strip():
+            raise InvalidInputError("workflow definition id must be non-blank when present")
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +504,7 @@ def _request_state(request: FixtureDispatch, *, status: str) -> dict[str, object
         "expected_attempt_version": request.expected_attempt_version,
         "operation_id": request.operation_id,
         "dependencies": [[run_id, node_id] for run_id, node_id in request.dependencies],
+        "workflow_definition_id": request.workflow_definition_id,
         "status": status,
     }
 
@@ -519,6 +523,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
     command = state.get("command")
     expected_attempt_version = state.get("expected_attempt_version")
     dependencies = state.get("dependencies")
+    workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
         or not all(isinstance(value, str) and value for value in command)
@@ -527,6 +532,10 @@ def _request_from_state(state: object) -> FixtureDispatch:
         or not isinstance(dependencies, list)
     ):
         raise InternalInvariantViolationError("runtime node state has invalid execution data")
+    if workflow_definition_id is not None and (
+        not isinstance(workflow_definition_id, str) or not workflow_definition_id.strip()
+    ):
+        raise InternalInvariantViolationError("runtime node state has invalid workflow definition")
     parsed_dependencies: list[tuple[str, str]] = []
     for dependency in dependencies:
         if (
@@ -551,6 +560,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
         expected_attempt_version=expected_attempt_version,
         operation_id=operation_id,
         dependencies=tuple(parsed_dependencies),
+        workflow_definition_id=workflow_definition_id,
     )
 
 

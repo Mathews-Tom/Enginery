@@ -29,7 +29,13 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _request(
-    *, repository: Path, revision: str, workspace: Path, attempt_id: str, operation_id: str
+    *,
+    repository: Path,
+    revision: str,
+    workspace: Path,
+    attempt_id: str,
+    operation_id: str,
+    workflow_definition_id: str | None = None,
 ) -> FixtureDispatch:
     return FixtureDispatch(
         run_id="run-1",
@@ -42,6 +48,7 @@ def _request(
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         expected_attempt_version=0,
         operation_id=operation_id,
+        workflow_definition_id=workflow_definition_id,
     )
 
 
@@ -57,6 +64,7 @@ def test_tick_persists_human_wait_and_resumes_with_fresh_attempt(
         workspace=tmp_path / "workspace",
         attempt_id="attempt-1",
         operation_id="operation-1",
+        workflow_definition_id="issue-to-pr-v1",
     )
     limits = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
 
@@ -80,6 +88,7 @@ def test_tick_persists_human_wait_and_resumes_with_fresh_attempt(
     )
     assert waiting is not None
     assert waiting.state["status"] == "awaiting_human"
+    assert waiting.state["workflow_definition_id"] == "issue-to-pr-v1"
     waiting_lease = ledger_service.read_lease(run_id="run-1", node_id="node-1")
     assert waiting_lease is not None
     assert waiting_lease.expires_at == (now + timedelta(seconds=1)).isoformat()
