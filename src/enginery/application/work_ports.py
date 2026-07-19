@@ -229,6 +229,67 @@ class SourceBranch:
             raise ValueError("source branch name must be non-blank")
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequestRequest:
+    """A policy-approved idempotent request to create or update one pull request."""
+
+    head_branch: str
+    base_branch: str
+    title: str
+    body: str
+    operation_id: OperationId
+
+    def __post_init__(self) -> None:
+        if any(
+            not value.strip()
+            for value in (self.head_branch, self.base_branch, self.title, self.body)
+        ):
+            raise ValueError("pull request request fields must be non-blank")
+        if self.head_branch == self.base_branch:
+            raise ValueError("pull request head and base branches must differ")
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestSnapshot:
+    """Normalized source-host pull-request metadata bound to exact revisions."""
+
+    number: int
+    url: str
+    state: str
+    head_branch: str
+    head_revision: str
+    base_branch: str
+    base_revision: str
+
+    def __post_init__(self) -> None:
+        if self.number < 1:
+            raise ValueError("pull request number must be positive")
+        if any(
+            not value.strip()
+            for value in (
+                self.url,
+                self.state,
+                self.head_branch,
+                self.head_revision,
+                self.base_branch,
+                self.base_revision,
+            )
+        ):
+            raise ValueError("pull request snapshot fields must be non-blank")
+
+
+class PullRequestPort(Protocol):
+    """Create, inspect, and reconcile normalized pull requests."""
+
+    def probe(self) -> AdapterStatus: ...
+
+    def create_or_update(self, request: PullRequestRequest) -> PullRequestSnapshot: ...
+
+    def get(self, number: int) -> PullRequestSnapshot: ...
+
+    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult: ...
+
+
 class SourceControlPort(Protocol):
     """Resolve source state and perform policy-approved Git mutations."""
 
@@ -260,6 +321,9 @@ __all__ = [
     "HarnessSession",
     "HarnessTask",
     "LifecycleProjection",
+    "PullRequestPort",
+    "PullRequestRequest",
+    "PullRequestSnapshot",
     "SourceBranch",
     "SourceControlPort",
     "SourceRevision",
