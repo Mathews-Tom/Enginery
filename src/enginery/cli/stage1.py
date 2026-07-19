@@ -8,9 +8,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.engine.scheduler import SchedulingLimits
+from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
 
@@ -58,22 +62,71 @@ def _start(args: argparse.Namespace) -> None:
 def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        service = Stage1RunService(
-            runtime=CoordinatorRuntime(ledger, owner=args.owner), ledger=ledger
-        )
-        progression = service.next_action(RunId(args.run_id))
+        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        service = Stage1RunService(runtime=runtime, ledger=ledger)
+        previous = service.next_action(RunId(args.run_id))
+        if args.advance:
+            service = _advancing_service(args, runtime=runtime, ledger=ledger)
+            progression = service.advance(
+                RunId(args.run_id),
+                now=_now(),
+                heartbeat_window=_HEARTBEAT_WINDOW,
+                lease_window=timedelta(seconds=30),
+                limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+            )
+        else:
+            progression = previous
         run = progression.run
         _print(
             {
                 "run_id": str(run.request.run.id),
                 "status": run.status.value,
                 "aggregate_version": run.aggregate_version,
+                "action_taken": previous.action.value if args.advance else None,
                 "next_action": progression.action.value,
                 "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
             }
         )
     finally:
         ledger.close()
+
+
+def _advancing_service(
+    args: argparse.Namespace, *, runtime: CoordinatorRuntime, ledger: LedgerService
+) -> Stage1RunService:
+    github_repository = _required_option(args.github_repository, "--github-repository")
+    github_credential_reference = _required_option(
+        args.github_credential_reference, "--github-credential-reference"
+    )
+    omp_credential_reference = _required_option(
+        args.omp_credential_reference, "--omp-credential-reference"
+    )
+    if args.artifact_root is None:
+        raise InvalidInputError("stage1 watch --advance requires --artifact-root")
+    github = GitHubAdapterConfig(
+        repository=github_repository,
+        credential_reference=github_credential_reference,
+        executable=args.github_executable,
+    )
+    harness = OmpHarness(
+        OmpAdapterConfig(
+            credential_reference=omp_credential_reference,
+            executable=args.omp_executable,
+        ),
+        ArtifactStore(args.artifact_root),
+    )
+    return Stage1RunService(
+        runtime=runtime,
+        ledger=ledger,
+        work_ledger=GitHubWorkLedger(github),
+        omp_harness=harness,
+    )
+
+
+def _required_option(value: object, option: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(f"stage1 watch --advance requires {option}")
+    return value
 
 
 def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
