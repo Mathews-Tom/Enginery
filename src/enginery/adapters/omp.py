@@ -33,6 +33,7 @@ from enginery.domain.artifact import RedactionClassification
 from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.engine.omp_worker import OmpWorkerResult
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
 
@@ -223,6 +224,67 @@ class OmpHarness:
             str(result_path),
             "--",
             *self.command_for(task),
+        )
+
+    def collect_supervised(
+        self, task: HarnessTask, *, result_path: Path
+    ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]:
+        """Read a supervised worker handoff after its process exit is observed."""
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkerFailureError(
+                "OMP supervised worker did not retain a valid result"
+            ) from error
+        if not isinstance(payload, dict) or set(payload) != {
+            "operation_id",
+            "output",
+            "schema_version",
+            "terminal_status",
+        }:
+            raise WorkerFailureError("OMP supervised worker result has an invalid shape")
+        operation_id = payload["operation_id"]
+        output = payload["output"]
+        schema_version = payload["schema_version"]
+        terminal_status = payload["terminal_status"]
+        if (
+            not isinstance(operation_id, str)
+            or not isinstance(output, str)
+            or not isinstance(schema_version, int)
+            or not isinstance(terminal_status, str)
+        ):
+            raise WorkerFailureError("OMP supervised worker result has invalid field types")
+        if schema_version != 1:
+            raise WorkerFailureError("OMP supervised worker result schema version is unsupported")
+        result = OmpWorkerResult(
+            operation_id=operation_id,
+            terminal_status=terminal_status,
+            output=output,
+            schema_version=schema_version,
+        )
+        if result.operation_id != str(task.operation_id):
+            raise WorkerFailureError("OMP supervised worker result operation does not match task")
+        digest = self.artifact_store.publish_bytes(
+            result.output.encode("utf-8"),
+            media_type="application/json",
+        )
+        events = (
+            _normalize_events(result.output, task.operation_id)
+            if result.terminal_status == "succeeded"
+            else ()
+        )
+        return (
+            events,
+            HarnessResult(
+                session_id=f"omp-{task.operation_id}",
+                terminal_status=result.terminal_status,
+                outputs=(
+                    HarnessOutput(
+                        digest=digest,
+                        redaction=RedactionClassification.SENSITIVE,
+                    ),
+                ),
+            ),
         )
 
     def _require_session(self, session: HarnessSession) -> None:

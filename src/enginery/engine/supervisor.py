@@ -228,6 +228,20 @@ class WorkerSupervisor:
         if record.state.get("status") == "exit_observed":
             return
         identity = _identity_from_state(record)
+        try:
+            reaped_pid, _ = os.waitpid(identity.pid, os.WNOHANG)
+        except ChildProcessError:
+            reaped_pid = 0
+        if reaped_pid == identity.pid:
+            self._fault("process_exit_observed")
+            self._record_exit(
+                lease=lease,
+                identity=identity,
+                now=now,
+                event_type="worker.process_exit_observed",
+                expected_state_version=record.state_version,
+            )
+            return
         observed = probe_process(identity.pid)
         if observed is not None:
             if observed != identity:
