@@ -31,6 +31,7 @@ from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
 from enginery.workflows.stage1 import (
+    Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
     Stage1RunService,
@@ -567,6 +568,14 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         manifest=manifest,
         repository_id="repository-1",
         repository_path=repository,
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/Enginery",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            omp_credential_reference="test-omp-keyring",
+            omp_executable=str(fake_omp),
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
         workspace_path=tmp_path / "workspace",
         base_branch="main",
         head_branch="enginery/stage1",

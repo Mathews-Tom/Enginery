@@ -73,6 +73,7 @@ class Stage1RunRequest:
     required_checks: tuple[str, ...]
     repair_limit: int
     implementation: Stage1ImplementationRequest
+    execution_configuration: Stage1ExecutionConfiguration
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -123,6 +124,7 @@ class Stage1RunRequest:
         return state
 
     def _state(self) -> dict[str, object]:
+        execution = self.execution_configuration
         return {
             "run_id": str(self.run.id),
             "run": run_to_dict(self.run),
@@ -150,7 +152,42 @@ class Stage1RunRequest:
                 "permitted_capabilities": list(self.implementation.permitted_capabilities),
                 "evidence_requirements": list(self.implementation.evidence_requirements),
             },
+            "execution_configuration": {
+                "github_repository": execution.github_repository,
+                "github_credential_reference": execution.github_credential_reference,
+                "github_executable": execution.github_executable,
+                "omp_credential_reference": execution.omp_credential_reference,
+                "omp_executable": execution.omp_executable,
+                "artifact_root": str(execution.artifact_root),
+            },
         }
+
+
+@dataclass(frozen=True, slots=True)
+class Stage1ExecutionConfiguration:
+    """Opaque provider configuration persisted before any Stage 1 effect."""
+
+    github_repository: str
+    github_credential_reference: str
+    github_executable: str
+    omp_credential_reference: str
+    omp_executable: str
+    artifact_root: Path
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip()
+            for value in (
+                self.github_repository,
+                self.github_credential_reference,
+                self.github_executable,
+                self.omp_credential_reference,
+                self.omp_executable,
+            )
+        ):
+            raise InvalidInputError("Stage 1 provider configuration must be non-blank")
+        if not self.artifact_root.is_absolute():
+            raise InvalidInputError("Stage 1 artifact root must be absolute")
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,6 +656,9 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     ):
         raise InvalidInputError("Stage 1 required_checks must be a list of strings")
     implementation = _implementation_from_state(_mapping(state, "implementation"))
+    execution_configuration = _execution_configuration_from_state(
+        _mapping(state, "execution_configuration")
+    )
     status = RunState(_string(state, "status"))
     request = Stage1RunRequest(
         run=run,
@@ -634,6 +674,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
             for command in commands_value
         ),
         applicable_criteria=tuple(applicable_criteria_value),
+        execution_configuration=execution_configuration,
         required_checks=tuple(required_checks_value),
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,
@@ -697,6 +738,19 @@ def _implementation_from_state(state: dict[str, object]) -> Stage1Implementation
         evidence_requirements=tuple(
             _string_from_list(value, "evidence_requirements") for value in evidence_requirements
         ),
+    )
+
+
+def _execution_configuration_from_state(
+    state: dict[str, object],
+) -> Stage1ExecutionConfiguration:
+    return Stage1ExecutionConfiguration(
+        github_repository=_string(state, "github_repository"),
+        github_credential_reference=_string(state, "github_credential_reference"),
+        github_executable=_string(state, "github_executable"),
+        omp_credential_reference=_string(state, "omp_credential_reference"),
+        omp_executable=_string(state, "omp_executable"),
+        artifact_root=Path(_string(state, "artifact_root")),
     )
 
 

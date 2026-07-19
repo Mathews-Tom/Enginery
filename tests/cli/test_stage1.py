@@ -20,6 +20,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, Workflo
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
 from enginery.workflows.stage1 import (
+    Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
     stage1_request_from_state,
@@ -46,19 +47,6 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     evidence = json.loads(capsys.readouterr().out)
     assert evidence["request_digest"] == str(_request(tmp_path).digest)
     assert evidence["source_revision"] == "issue-revision-1"
-
-
-def test_stage1_advance_requires_provider_configuration(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    database = tmp_path / "ledger.db"
-    request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(_request(tmp_path).initial_state()), encoding="utf-8")
-
-    assert _start(database, request_path) == 0
-    capsys.readouterr()
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1", "--advance") != 0
-    assert "--github-repository" in capsys.readouterr().err
 
 
 def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
@@ -358,6 +346,14 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         repository_id="Mathews-Tom/Enginery",
         repository_path=tmp_path.resolve(),
         workspace_path=(tmp_path / "workspace").resolve(),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/Enginery",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            omp_credential_reference="test-omp-keyring",
+            omp_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
         base_branch="main",
         head_branch="enginery/stage1",
         validation_commands=(("uv", "run", "pytest", "-q"),),
