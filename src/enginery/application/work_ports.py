@@ -278,6 +278,48 @@ class PullRequestSnapshot:
             raise ValueError("pull request snapshot fields must be non-blank")
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequestReview:
+    """One normalized review state observed for a pull request."""
+
+    reviewer: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if not self.reviewer.strip() or not self.state.strip():
+            raise ValueError("pull request review fields must be non-blank")
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestCheck:
+    """One hosted check bound to the pull-request head revision."""
+
+    name: str
+    status: str
+    conclusion: str | None
+    head_revision: str
+
+    def __post_init__(self) -> None:
+        if any(not value.strip() for value in (self.name, self.status, self.head_revision)):
+            raise ValueError("pull request check identity fields must be non-blank")
+        if self.conclusion is not None and not self.conclusion.strip():
+            raise ValueError("pull request check conclusion must be non-blank when present")
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestEvidence:
+    """Current source-host evidence for one exact pull-request head."""
+
+    pull_request: PullRequestSnapshot
+    reviews: tuple[PullRequestReview, ...]
+    checks: tuple[PullRequestCheck, ...]
+    mergeable: bool | None
+
+    def __post_init__(self) -> None:
+        if any(check.head_revision != self.pull_request.head_revision for check in self.checks):
+            raise ValueError("pull request checks must bind the current pull-request head")
+
+
 class PullRequestPort(Protocol):
     """Create, inspect, and reconcile normalized pull requests."""
 
@@ -286,6 +328,8 @@ class PullRequestPort(Protocol):
     def create_or_update(self, request: PullRequestRequest) -> PullRequestSnapshot: ...
 
     def get(self, number: int) -> PullRequestSnapshot: ...
+
+    def evidence(self, number: int) -> PullRequestEvidence: ...
 
     def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult: ...
 
@@ -321,8 +365,11 @@ __all__ = [
     "HarnessSession",
     "HarnessTask",
     "LifecycleProjection",
+    "PullRequestCheck",
+    "PullRequestEvidence",
     "PullRequestPort",
     "PullRequestRequest",
+    "PullRequestReview",
     "PullRequestSnapshot",
     "SourceBranch",
     "SourceControlPort",
