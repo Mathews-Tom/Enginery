@@ -453,6 +453,7 @@ def _fixture_dispatch(
         operation_id=operation_id,
         dependencies=dependencies,
         workflow_definition_id=request.manifest.id.value,
+        retain_workspace=node_id == "implement",
     )
 
 

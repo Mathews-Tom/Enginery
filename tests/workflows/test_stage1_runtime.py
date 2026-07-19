@@ -641,6 +641,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     assert implementation_node is not None
     assert implementation_node.state["status"] == "running"
+    assert implementation_node.state["retain_workspace"] is True
     WorkerSupervisor(ledger_service, runtime.coordinator).cancel(
         lease=implementation.fixture.lease,
         identity=implementation.fixture.identity,

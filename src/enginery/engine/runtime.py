@@ -51,6 +51,7 @@ class FixtureDispatch:
     operation_id: str
     dependencies: tuple[tuple[str, str], ...] = ()
     workflow_definition_id: str | None = None
+    retain_workspace: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -482,7 +483,7 @@ class CoordinatorRuntime:
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
     def ingest_result(self, *, envelope: WorkerResultEnvelope, now: datetime) -> None:
-        """Validate and ingest an exact current-lease worker result, then clean up."""
+        """Validate and ingest an exact current-lease worker result."""
         request = self._request_for(envelope.run_id, envelope.node_id)
         _require_agent_node(_runtime_state(self._ledger, request))
         if request.attempt_id != envelope.attempt_id:
@@ -515,7 +516,28 @@ class CoordinatorRuntime:
             raise InternalInvariantViolationError(
                 "worker result has no matching workspace reservation"
             )
-        self._workspaces.cleanup(reservation, epoch=envelope.epoch, now=now)
+        if request.retain_workspace:
+            self._workspaces.retain(reservation, epoch=envelope.epoch, now=now)
+        else:
+            self._workspaces.cleanup(reservation, epoch=envelope.epoch, now=now)
+
+    def release_workspace(
+        self,
+        *,
+        run_id: str,
+        repository_id: str,
+        epoch: int,
+        now: datetime,
+    ) -> WorkspaceReservation:
+        """Release one retained run workspace through the current coordinator epoch."""
+        reservation = self._workspaces.read_reservation(repository_id)
+        if reservation is None or reservation.run_id != run_id:
+            raise InternalInvariantViolationError(
+                "workspace release has no matching workspace reservation"
+            )
+        if reservation.status != "retained":
+            raise ExternalConflictError("workspace release requires a retained workspace")
+        return self._workspaces.cleanup(reservation, epoch=epoch, now=now)
 
     def cancel_node(self, *, run_id: str, node_id: str, epoch: int, now: datetime) -> None:
         """Cancel a queued, running, or human-waiting node through durable state."""
@@ -909,6 +931,7 @@ def _request_state(
         "operation_id": request.operation_id,
         "dependencies": [[run_id, node_id] for run_id, node_id in request.dependencies],
         "workflow_definition_id": request.workflow_definition_id,
+        "retain_workspace": request.retain_workspace,
         "actor_type": actor_type.value,
         "status": status,
     }
@@ -928,6 +951,9 @@ def _request_from_state(state: object) -> FixtureDispatch:
     command = state.get("command")
     expected_attempt_version = state.get("expected_attempt_version")
     dependencies = state.get("dependencies")
+    retain_workspace = state.get("retain_workspace", False)
+    if not isinstance(retain_workspace, bool):
+        raise InternalInvariantViolationError("runtime node state has invalid workspace retention")
     workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
@@ -966,6 +992,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
         operation_id=operation_id,
         dependencies=tuple(parsed_dependencies),
         workflow_definition_id=workflow_definition_id,
+        retain_workspace=retain_workspace,
     )
 
 

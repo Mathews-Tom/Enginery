@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
@@ -74,8 +73,9 @@ def _omp_executable(path: Path) -> Path:
     return executable
 
 
-def test_stage1_implementation_runs_through_coordinator_runtime(
-    ledger_service: LedgerService, tmp_path: Path
+@pytest.mark.parametrize(("retain_workspace", "workspace_exists"), [(False, False), (True, True)])
+def test_stage1_implementation_records_the_declared_workspace_lifecycle(
+    ledger_service: LedgerService, tmp_path: Path, retain_workspace: bool, workspace_exists: bool
 ) -> None:
     now = datetime(2026, 7, 19, 11, 0, tzinfo=UTC)
     repository, revision = _repository(tmp_path)
@@ -116,6 +116,7 @@ def test_stage1_implementation_runs_through_coordinator_runtime(
             expected_attempt_version=0,
             operation_id="operation-1",
             workflow_definition_id="issue-to-pr-v1",
+            retain_workspace=retain_workspace,
         ),
         task,
     )
@@ -153,4 +154,27 @@ def test_stage1_implementation_runs_through_coordinator_runtime(
     assert result.terminal_status == "succeeded"
     assert node is not None
     assert node.state["status"] == "passed"
-    assert not os.path.exists(workspace)
+    assert workspace.exists() is workspace_exists
+    if retain_workspace:
+        epoch = runtime.claim_epoch(
+            now=now + timedelta(seconds=2), heartbeat_window=timedelta(seconds=60)
+        )
+        cleaned = runtime.release_workspace(
+            run_id="run-1",
+            repository_id="repository-1",
+            epoch=epoch.epoch,
+            now=now + timedelta(seconds=2),
+        )
+        assert cleaned.status == "cleaned"
+        assert not workspace.exists()
+    else:
+        epoch = runtime.claim_epoch(
+            now=now + timedelta(seconds=2), heartbeat_window=timedelta(seconds=60)
+        )
+        with pytest.raises(ExternalConflictError, match="workspace release requires a retained"):
+            runtime.release_workspace(
+                run_id="run-1",
+                repository_id="repository-1",
+                epoch=epoch.epoch,
+                now=now + timedelta(seconds=2),
+            )
