@@ -269,25 +269,10 @@ class Stage1RunService:
         limits: SchedulingLimits,
     ) -> Stage1ImplementationDispatch:
         """Launch one OMP attempt only after durable successful qualification."""
-        execution = request.implementation
         self._require_passed_node(request.run.id, "qualify")
-        task = HarnessTask(
-            run_id=request.run.id,
-            node_id=NodeId("implement"),
-            attempt_id=NodeAttemptId(execution.attempt_id),
-            operation_id=execution.operation_id,
-            workspace_path=request.workspace_path,
-            objective=request.work_snapshot.work_item.objective,
-            acceptance_criteria=request.work_snapshot.work_item.acceptance_criteria,
-            constraints=request.work_snapshot.work_item.constraints,
-            permitted_capabilities=execution.permitted_capabilities,
-            evidence_requirements=execution.evidence_requirements,
-            time_budget_seconds=execution.time_budget_seconds,
-            cost_budget=execution.cost_budget,
-        )
-        result_path = request.workspace_path / (
-            f".enginery-omp-{Digest.of_bytes(str(execution.operation_id).encode())}.json"
-        )
+        execution = request.implementation
+        task = _implementation_task(request)
+        result_path = _implementation_result_path(request)
         dispatch = WorkflowDispatch(
             _fixture_dispatch(
                 request,
@@ -333,22 +318,22 @@ class Stage1RunService:
     def collect_implementation(
         self,
         request: Stage1RunRequest,
-        dispatch: Stage1ImplementationDispatch,
         *,
         now: datetime,
     ) -> HarnessResult:
-        """Ingest the exact supervised OMP result through the coordinator."""
-        if dispatch.task.run_id != request.run.id:
-            raise InvalidInputError("OMP dispatch does not belong to the Stage 1 run")
+        """Ingest a completed supervised OMP result from durable runtime state."""
         return Stage1ImplementationExecutor(
             runtime=self.runtime,
             harness=self._require_omp_harness(),
             manifest=request.manifest,
         ).collect(
-            dispatched=dispatch.fixture,
-            task=dispatch.task,
+            dispatched=self.runtime.recover_dispatched(
+                run_id=str(request.run.id),
+                node_id="implement",
+            ),
+            task=_implementation_task(request),
             now=now,
-            result_path=dispatch.result_path,
+            result_path=_implementation_result_path(request),
         )
 
     def validate_implementation(
@@ -446,6 +431,30 @@ class Stage1RunService:
         if self.omp_harness is None:
             raise MissingPrerequisiteError("Stage 1 OMP harness is not configured")
         return self.omp_harness
+
+
+def _implementation_task(request: Stage1RunRequest) -> HarnessTask:
+    execution = request.implementation
+    return HarnessTask(
+        run_id=request.run.id,
+        node_id=NodeId("implement"),
+        attempt_id=NodeAttemptId(execution.attempt_id),
+        operation_id=execution.operation_id,
+        workspace_path=request.workspace_path,
+        objective=request.work_snapshot.work_item.objective,
+        acceptance_criteria=request.work_snapshot.work_item.acceptance_criteria,
+        constraints=request.work_snapshot.work_item.constraints,
+        permitted_capabilities=execution.permitted_capabilities,
+        evidence_requirements=execution.evidence_requirements,
+        time_budget_seconds=execution.time_budget_seconds,
+        cost_budget=execution.cost_budget,
+    )
+
+
+def _implementation_result_path(request: Stage1RunRequest) -> Path:
+    return request.workspace_path / (
+        f".enginery-omp-{Digest.of_bytes(str(request.implementation.operation_id).encode())}.json"
+    )
 
 
 def _fixture_dispatch(
