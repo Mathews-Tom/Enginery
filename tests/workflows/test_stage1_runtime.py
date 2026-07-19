@@ -10,7 +10,7 @@ import pytest
 
 from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.ids import WorkItemId
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
@@ -166,4 +166,22 @@ def test_manifest_node_dispatch_rejects_dependency_bypass(tmp_path: Path) -> Non
         WorkflowNodeDispatch(
             replace(_request(tmp_path), dependencies=(("run-1", "unrelated"),)),
             issue_to_pr_manifest(),
+        )
+
+
+def test_raw_worker_dispatch_cannot_replace_a_manifest_node(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    runtime.register_node(dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60))
+
+    with pytest.raises(ExternalConflictError, match="actor type"):
+        runtime.tick(
+            now=now + timedelta(seconds=1),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+            requests=(dispatch.request,),
         )
