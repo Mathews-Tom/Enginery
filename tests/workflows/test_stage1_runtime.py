@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -25,8 +26,6 @@ from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.supervisor import WorkerSupervisor
-from enginery.engine.workspace import GitWorktreeBackend
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
@@ -536,7 +535,13 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     _git("commit", "-m", "baseline", cwd=repository)
     base_revision = _git("rev-parse", "HEAD", cwd=repository)
     fake_omp = tmp_path / "fake-omp"
-    fake_omp.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    fake_omp.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "for event in ('session', 'agent_start', 'agent_end'):\n"
+        "    print(json.dumps({'type': event}))\n",
+        encoding="utf-8",
+    )
     fake_omp.chmod(0o755)
     manifest = issue_to_pr_manifest()
     snapshot = _snapshot()
@@ -622,6 +627,28 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         lease_window=timedelta(seconds=30),
         limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
     )
+    deadline = time.monotonic() + 5
+    while not implementation.result_path.is_file():
+        if time.monotonic() >= deadline:
+            pytest.fail("supervised OMP worker did not retain a result")
+        time.sleep(0.01)
+    recovered = Stage1RunService(
+        runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
+        ledger=ledger_service,
+        omp_harness=OmpHarness(
+            OmpAdapterConfig(credential_reference="test-keyring", executable=str(fake_omp)),
+            ArtifactStore(tmp_path / "recovered-artifacts"),
+        ),
+    )
+    while True:
+        try:
+            result = recovered.collect_implementation(request, now=now + timedelta(seconds=3))
+        except ExternalConflictError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+        else:
+            break
     second = service.start(
         request,
         now=now + timedelta(seconds=3),
@@ -638,16 +665,16 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         aggregate_type="runtime_node", aggregate_id="run-stage1:implement"
     )
     assert implementation_node is not None
-    assert implementation_node.state["status"] == "running"
+    assert implementation_node.state["status"] == "passed"
     assert implementation_node.state["retain_workspace"] is True
-    WorkerSupervisor(ledger_service, runtime.coordinator).cancel(
-        lease=implementation.fixture.lease,
-        identity=implementation.fixture.identity,
-        now=now + timedelta(seconds=5),
+    assert result.terminal_status == "succeeded"
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
     )
-    GitWorktreeBackend(ledger_service, runtime.coordinator).cleanup(
-        implementation.fixture.workspace,
-        epoch=implementation.fixture.lease.epoch,
+    runtime.release_workspace(
+        run_id="run-stage1",
+        repository_id="repository-1",
+        epoch=epoch.epoch,
         now=now + timedelta(seconds=6),
     )
 
