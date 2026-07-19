@@ -279,3 +279,71 @@ def test_terminal_node_retry_requires_new_fenced_identity(
     assert projection is not None
     assert projection.state["status"] == "queued"
     assert projection.state["attempt_id"] == "attempt-2"
+
+
+def test_human_wait_resolution_rejects_nonwaiting_node(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(
+        dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+
+    with pytest.raises(ExternalConflictError, match="human-waiting"):
+        runtime.resolve_human_wait(
+            run_id="run-1",
+            node_id="qualify",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed",
+        )
+
+
+def test_terminal_node_retry_rejects_reused_or_redefined_request(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
+
+    with pytest.raises(InvalidInputError, match="fresh attempt"):
+        runtime.retry_node(
+            request=replace(initial.request, operation_id="operation-2"),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(InvalidInputError, match="fresh attempt"):
+        runtime.retry_node(
+            request=replace(initial.request, attempt_id="attempt-2"),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(ExternalConflictError, match="actor type"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+            ),
+            actor_type=ActorType.HUMAN,
+            epoch=epoch.epoch,
+            now=now,
+        )
+    with pytest.raises(ExternalConflictError, match="immutable"):
+        runtime.retry_node(
+            request=replace(
+                initial.request,
+                attempt_id="attempt-2",
+                operation_id="operation-2",
+                base_revision="different-base",
+            ),
+            actor_type=ActorType.DETERMINISTIC,
+            epoch=epoch.epoch,
+            now=now,
+        )

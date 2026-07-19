@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -337,6 +337,15 @@ class CoordinatorRuntime:
             raise ExternalConflictError("only a terminal runtime node can be retried")
         if request.attempt_id == prior.attempt_id or request.operation_id == prior.operation_id:
             raise InvalidInputError("runtime node retry requires a fresh attempt and operation ID")
+        if (
+            replace(
+                request,
+                attempt_id=prior.attempt_id,
+                operation_id=prior.operation_id,
+            )
+            != prior
+        ):
+            raise ExternalConflictError("runtime node retry changes immutable request fields")
         self._require_completed_dependencies(request)
         self._replace_request(
             request=request,
@@ -344,6 +353,7 @@ class CoordinatorRuntime:
             now=now,
             event_type="runtime_node.retried",
         )
+        self._fault("node_retried")
 
     def tick(
         self,
@@ -677,7 +687,7 @@ class CoordinatorRuntime:
         )
         self._ledger.append(
             AppendCommand(
-                correlation_id=f"runtime-node-resume:{_node_id(request)}:{request.attempt_id}",
+                correlation_id=f"{event_type}:{_node_id(request)}:{request.attempt_id}",
                 events=(
                     EventWrite(
                         aggregate_type=_RUNTIME_NODE,
