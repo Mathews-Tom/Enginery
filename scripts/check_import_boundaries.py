@@ -53,6 +53,7 @@ LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
             "evaluation",
             "adapters",
             "cli",
+            "workflows",
         }
     ),
 }

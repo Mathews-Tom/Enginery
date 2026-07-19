@@ -456,6 +456,11 @@ def _fixture_dispatch(
     )
 
 
+def stage1_request_from_state(state: object) -> Stage1RunRequest:
+    """Decode a complete persisted-start request from its JSON-compatible state."""
+    return _run_from_state(state, aggregate_version=0).request
+
+
 def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     if not isinstance(state, dict):
         raise InvalidInputError("Stage 1 run projection must be a mapping")
@@ -530,4 +535,5 @@ __all__ = [
     "Stage1Run",
     "Stage1RunRequest",
     "Stage1RunService",
+    "stage1_request_from_state",
 ]
