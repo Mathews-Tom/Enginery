@@ -269,6 +269,7 @@ class PullRequestSnapshot:
     head_revision: str
     base_branch: str
     base_revision: str
+    merged: bool = False
 
     def __post_init__(self) -> None:
         if self.number < 1:
@@ -340,6 +341,15 @@ class PullRequestPort(Protocol):
     def get(self, number: int) -> PullRequestSnapshot: ...
 
     def evidence(self, number: int) -> PullRequestEvidence: ...
+
+    def merge(
+        self,
+        number: int,
+        *,
+        expected_head_revision: str,
+        operation_id: OperationId,
+        merge_method: str = "merge",
+    ) -> PullRequestSnapshot: ...
 
     def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult: ...
 
