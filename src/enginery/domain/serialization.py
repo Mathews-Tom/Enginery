@@ -40,6 +40,7 @@ from enginery.domain.node_attempt import (
     ReconciliationResult,
 )
 from enginery.domain.outcome import Outcome, OutcomeKind
+from enginery.domain.plan_execution import PlanExecution
 from enginery.domain.policy_decision import PolicyAction, PolicyDecision, PolicyResult
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -54,6 +55,7 @@ INTERVENTION_SCHEMA_VERSION = 1
 OUTCOME_SCHEMA_VERSION = 1
 FACTORY_CHANGE_SCHEMA_VERSION = 1
 WORKFLOW_MANIFEST_SCHEMA_VERSION = 1
+PLAN_EXECUTION_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +589,22 @@ def workflow_manifest_from_dict(raw: Mapping[str, object]) -> WorkflowManifest:
 
 
 # ---------------------------------------------------------------------------
+# PlanExecution
+# ---------------------------------------------------------------------------
+
+
+def plan_execution_to_dict(plan_execution: PlanExecution) -> dict[str, object]:
+    return _envelope(PLAN_EXECUTION_SCHEMA_VERSION, plan_execution.to_mapping())
+
+
+def plan_execution_from_dict(raw: Mapping[str, object]) -> PlanExecution:
+    data = _unwrap_envelope(
+        raw, expected_schema_version=PLAN_EXECUTION_SCHEMA_VERSION, type_name="PlanExecution"
+    )
+    return PlanExecution.from_mapping(data)
+
+
+# ---------------------------------------------------------------------------
 # field-level helpers
 # ---------------------------------------------------------------------------
 
@@ -640,6 +658,7 @@ __all__: list[str] = [
     "INTERVENTION_SCHEMA_VERSION",
     "NODE_ATTEMPT_SCHEMA_VERSION",
     "OUTCOME_SCHEMA_VERSION",
+    "PLAN_EXECUTION_SCHEMA_VERSION",
     "POLICY_DECISION_SCHEMA_VERSION",
     "RUN_SCHEMA_VERSION",
     "WORKFLOW_MANIFEST_SCHEMA_VERSION",
@@ -654,6 +673,8 @@ __all__: list[str] = [
     "node_attempt_to_dict",
     "outcome_from_dict",
     "outcome_to_dict",
+    "plan_execution_from_dict",
+    "plan_execution_to_dict",
     "policy_decision_from_dict",
     "policy_decision_to_dict",
     "run_from_dict",
