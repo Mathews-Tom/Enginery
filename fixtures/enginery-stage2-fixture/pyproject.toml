@@ -1,6 +1,6 @@
 [project]
 name = "enginery-stage2-fixture"
-version = "0.0.0"
+version = "0.1.0"
 description = "Disposable Stage 2 release-provider proof fixture for Enginery. Exists solely to exercise the real GitHub Release and PyPI publication path end to end; not a usable library."
 readme = "README.md"
 license = "Apache-2.0"
