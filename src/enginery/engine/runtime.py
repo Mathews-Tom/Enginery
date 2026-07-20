@@ -782,10 +782,45 @@ class CoordinatorRuntime:
             if _actor_type_from_state(projection.state) is not actor_type:
                 raise ExternalConflictError("runtime node already exists with different actor type")
             current = _request_from_state(projection.state)
-            if current != request:
+            if current == request:
+                return
+            status = projection.state.get("status")
+            same_attempt = request.attempt_id == current.attempt_id
+            same_operation = request.operation_id == current.operation_id
+            if status not in {"passed", "failed", "cancelled", "blocked"} or (
+                same_attempt and same_operation
+            ):
                 raise ExternalConflictError(
                     "runtime node already exists with different immutable request"
                 )
+            self._require_completed_dependencies(request)
+            if actor_type is ActorType.AGENT:
+                assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+                    lease=self._active_lease(current),
+                    workspace_path=request.workspace_path,
+                    epoch=epoch,
+                    now=now,
+                )
+                if not assessment.ready_to_release:
+                    raise ExternalConflictError(
+                        "runtime node retry requires a reconciled prior worker",
+                        details={
+                            "run_id": request.run_id,
+                            "node_id": request.node_id,
+                            "reason": assessment.reason,
+                        },
+                    )
+                reservation = self._workspaces.read_reservation(request.repository_id)
+                if (
+                    reservation is not None
+                    and reservation.run_id == request.run_id
+                    and reservation.status == "retained"
+                ):
+                    self._workspaces.resume(reservation, epoch=epoch, now=now)
+            self._replace_request(
+                request=request, epoch=epoch, now=now, event_type="runtime_node.retried"
+            )
+            self._fault("node_retried")
             return
         state = _request_state(request, status="queued", actor_type=actor_type)
         self._ledger.append(
