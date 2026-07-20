@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from enginery.application.delivery_ports import CapabilityDescriptor, CapabilitySourcePort
 from enginery.capabilities.errors import (
     CapabilityDigestMismatchError,
+    CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
     CapabilityNotFoundError,
 )
@@ -42,10 +43,17 @@ def _no_signatures(descriptor: CapabilityDescriptor) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityRequest:
-    """One requested capability name/version pair."""
+    """One requested capability name/version pair.
+
+    ``expected_license`` is an optional caller-declared constraint: when
+    set, a resolved capability whose descriptor reports a different
+    license is rejected rather than silently locked under an unexpected
+    license.
+    """
 
     name: str
     version: str
+    expected_license: str | None = None
 
 
 class CapabilityResolver:
@@ -92,6 +100,7 @@ class CapabilityResolver:
     ) -> LockedCapability:
         descriptor, source = self._discover(request)
         self._verify_content(descriptor, source)
+        self._enforce_license(request, descriptor)
         self._enforce_no_drift(request, descriptor, previous_lock=previous_lock)
         introduced_by_run = (request.name, request.version) not in self._reviewed_base
         provenance = self._classify_provenance(descriptor, introduced_by_run=introduced_by_run)
@@ -103,6 +112,22 @@ class CapabilityResolver:
             license=descriptor.license,
             introduced_by_run=introduced_by_run,
         )
+
+    def _enforce_license(
+        self, request: CapabilityRequest, descriptor: CapabilityDescriptor
+    ) -> None:
+        if request.expected_license is None:
+            return
+        if descriptor.license != request.expected_license:
+            raise CapabilityLicenseMismatchError(
+                "resolved capability license does not match the expected license",
+                details={
+                    "name": request.name,
+                    "version": request.version,
+                    "expected_license": request.expected_license,
+                    "actual_license": descriptor.license,
+                },
+            )
 
     def _discover(
         self, request: CapabilityRequest

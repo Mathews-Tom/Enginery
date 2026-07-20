@@ -17,6 +17,7 @@ from pathlib import Path
 
 from enginery.adapters.local import local_provider_statuses
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
+from enginery.cli.capability import check_lock
 from enginery.cli.doctor import run_doctor
 from enginery.cli.ledger import (
     run_backup,
@@ -119,6 +120,22 @@ def _build_parser() -> argparse.ArgumentParser:
             lifecycle_parser.add_argument("--attempt-id", required=True)
             lifecycle_parser.add_argument("--operation-id", required=True)
 
+    capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
+    capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
+    capability_lock_parser = capability_subparsers.add_parser(
+        "lock", help="Inspect or verify a capability lock."
+    )
+    capability_lock_parser.add_argument(
+        "--check", action="store_true", help="Verify the materialized store against the lockfile."
+    )
+    capability_lock_parser.add_argument(
+        "--lockfile", type=Path, default=Path(".enginery/capabilities.lock.json")
+    )
+    capability_lock_parser.add_argument(
+        "--capabilities-root", type=Path, default=Path(".enginery/capabilities")
+    )
+    capability_lock_parser.add_argument("--json", action="store_true")
+
     explain_parser.add_argument("--json", action="store_true")
 
     return parser
@@ -219,6 +236,47 @@ def _run_ledger(args: argparse.Namespace) -> int:
     raise AssertionError(f"unhandled ledger command: {args.ledger_command}")  # pragma: no cover
 
 
+def _run_capability_lock(args: argparse.Namespace) -> int:
+    if not args.check:
+        raise InvalidInputError("`enginery capability lock` currently requires --check")
+    report = check_lock(lockfile=args.lockfile, capabilities_root=args.capabilities_root)
+    if report.lockfile is None:
+        detail = f"no capability lock at {args.lockfile}; nothing to check"
+        if args.json:
+            print(json.dumps({"lockfile": None, "ok": True, "detail": detail}, sort_keys=True))
+        else:
+            print(detail)
+        return SUCCESS
+    if args.json:
+        payload = {
+            "lockfile": str(report.lockfile),
+            "ok": report.ok,
+            "findings": [
+                {"name": f.name, "version": f.version, "ok": f.ok, "detail": f.detail}
+                for f in report.findings
+            ],
+        }
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        for finding in report.findings:
+            status = "OK" if finding.ok else "DRIFT"
+            print(f"{status} {finding.name}@{finding.version}: {finding.detail}")
+        print("no drift" if report.ok else "drift detected")
+    return SUCCESS if report.ok else exit_code_for(FailureClass.VALIDATION_FAILURE)
+
+
+def _run_capability(args: argparse.Namespace) -> int:
+    if args.capability_command is None:
+        raise InvalidInputError(
+            "a capability subcommand is required", details={"command": "capability"}
+        )
+    if args.capability_command == "lock":
+        return _run_capability_lock(args)
+    raise AssertionError(  # pragma: no cover
+        f"unhandled capability command: {args.capability_command}"
+    )
+
+
 def _run_policy(args: argparse.Namespace) -> int:
     if args.policy_command is None:
         raise InvalidInputError("a policy subcommand is required", details={"command": "policy"})
@@ -271,6 +329,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_ledger(args)
         if args.command == "policy":
             return _run_policy(args)
+        if args.command == "capability":
+            return _run_capability(args)
         if args.command == "stage1":
             return run_stage1(args)
         if args.command == "adapter":

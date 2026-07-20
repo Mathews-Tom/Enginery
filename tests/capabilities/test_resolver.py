@@ -4,7 +4,11 @@ import pytest
 
 from enginery.application.adapter_types import AdapterStatus
 from enginery.application.delivery_ports import CapabilityDescriptor
-from enginery.capabilities.errors import CapabilityDigestMismatchError, CapabilityLockDriftError
+from enginery.capabilities.errors import (
+    CapabilityDigestMismatchError,
+    CapabilityLicenseMismatchError,
+    CapabilityLockDriftError,
+)
 from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
 from enginery.capabilities.resolver import (
     CapabilityNotFoundError,
@@ -99,6 +103,25 @@ def test_unknown_capability_raises_not_found() -> None:
 
     with pytest.raises(CapabilityNotFoundError):
         resolver.resolve([CapabilityRequest(name="missing", version="1")])
+
+
+def test_license_mismatch_is_rejected_before_lock_construction() -> None:
+    """A caller-declared expected license that disagrees with what the source
+    reports must fail closed rather than silently lock under a different
+    license."""
+
+    descriptor = CapabilityDescriptor(
+        name="skill-a",
+        version="1",
+        digest=Digest.of_bytes(b"payload-a"),
+        provenance="repository-local",
+        license="GPL-3.0",
+    )
+    source = _FakeSource({("skill-a", "1"): descriptor}, {"skill-a:1": b"payload-a"})
+    resolver = CapabilityResolver([source])
+
+    with pytest.raises(CapabilityLicenseMismatchError):
+        resolver.resolve([CapabilityRequest(name="skill-a", version="1", expected_license="MIT")])
 
 
 def test_digest_swap_is_rejected_before_lock_construction() -> None:

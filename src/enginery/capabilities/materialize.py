@@ -21,12 +21,14 @@ from enginery.capabilities.lock import CapabilityLock, LockedCapability
 from enginery.domain.digests import Digest
 
 
-def _digest_path(root: Path, digest: Digest) -> Path:
+def digest_path(root: Path, digest: Digest) -> Path:
+    """The immutable, content-addressed path a digest resolves to under ``root``."""
+
     return root / digest.algorithm / digest.hex_value[:2] / digest.hex_value
 
 
 def _publish_bytes(root: Path, data: bytes, digest: Digest) -> Path:
-    target = _digest_path(root, digest)
+    target = digest_path(root, digest)
     if target.exists():
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -94,4 +96,4 @@ def materialize_lock(
     return materialized
 
 
-__all__ = ["materialize_capability", "materialize_lock"]
+__all__ = ["digest_path", "materialize_capability", "materialize_lock"]
