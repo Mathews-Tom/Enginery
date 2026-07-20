@@ -1,0 +1,31 @@
+id = "plan-cycle-with-entry"
+source_provider = "fixture"
+external_reference = "cycle-with-entry-1"
+source_snapshot_reference = "sha:cycle-with-entry-0001"
+
+[[milestones]]
+id = "m1"
+title = "Milestone 1"
+objective = "A valid entry milestone with no dependencies."
+acceptance_criteria = ["m1 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = []
+
+[[milestones]]
+id = "m2"
+title = "Milestone 2"
+objective = "Depends on m3, which depends on m2 -- unreachable from m1."
+acceptance_criteria = ["m2 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = ["m3"]
+
+[[milestones]]
+id = "m3"
+title = "Milestone 3"
+objective = "Depends on m2, which depends on m3 -- unreachable from m1."
+acceptance_criteria = ["m3 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = ["m2"]

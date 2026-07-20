@@ -30,6 +30,7 @@ LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         {"domain", "application", "engine", "ledger", "policy", "evidence", "capabilities"}
     ),
     "ledger": frozenset({"domain", "application", "ledger"}),
+    "plans": frozenset({"domain", "plans"}),
     "policy": frozenset({"domain", "application", "policy", "evidence"}),
     "evidence": frozenset({"domain", "application", "evidence"}),
     "evaluation": frozenset({"domain", "application", "evaluation", "ledger"}),

@@ -1,0 +1,31 @@
+id = "plan-parallel"
+source_provider = "fixture"
+external_reference = "parallel-1"
+source_snapshot_reference = "sha:parallel-0001"
+
+[[milestones]]
+id = "m1"
+title = "Milestone 1"
+objective = "Independent milestone in repository a."
+acceptance_criteria = ["m1 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = []
+
+[[milestones]]
+id = "m2"
+title = "Milestone 2"
+objective = "Independent milestone in repository b."
+acceptance_criteria = ["m2 completes"]
+repository = "repo-b"
+risk_class = "low"
+dependencies = []
+
+[[milestones]]
+id = "m3"
+title = "Milestone 3"
+objective = "Independent milestone in repository c."
+acceptance_criteria = ["m3 completes"]
+repository = "repo-c"
+risk_class = "low"
+dependencies = []
