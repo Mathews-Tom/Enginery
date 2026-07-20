@@ -110,6 +110,10 @@ class FactoryChangeId(_Identifier):
     """Identifies one candidate factory-asset change."""
 
 
+class StackId(_Identifier):
+    """Identifies one branch-topology stack derived from a :class:`Plan`."""
+
+
 @dataclass(frozen=True, slots=True)
 class OperationId:
     """A stable side-effect identity, reused across every retry.
@@ -167,6 +171,7 @@ __all__ = [
     "PlanMilestoneId",
     "PolicyDecisionId",
     "RunId",
+    "StackId",
     "WorkItemId",
     "WorkflowDefinitionId",
 ]
