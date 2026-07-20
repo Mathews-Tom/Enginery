@@ -21,6 +21,9 @@ classifiers = [
 ]
 dependencies = ["cryptography>=42"]
 
+[project.optional-dependencies]
+armory = ["pyyaml>=6"]
+
 [project.urls]
 Homepage = "https://github.com/Mathews-Tom/Enginery"
 Repository = "https://github.com/Mathews-Tom/Enginery"
@@ -44,6 +47,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
+    "types-PyYAML>=6",
 ]
 
 [tool.ruff]
