@@ -31,7 +31,7 @@ recognize an already-registered child as a no-op.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 
@@ -40,6 +40,13 @@ from enginery.domain.ids import PlanExecutionId, PlanMilestoneId, RunId
 from enginery.domain.plan_execution import MilestoneRunLink, MilestoneRunState, PlanExecution
 from enginery.domain.serialization import plan_execution_from_dict, plan_execution_to_dict
 from enginery.engine.runtime import CoordinatorRuntime
+from enginery.engine.scheduler import (
+    NodeKey,
+    ReadinessScheduler,
+    SchedulableNode,
+    SchedulableState,
+    SchedulingLimits,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.plans.model import Plan
@@ -146,31 +153,94 @@ class PlanExecutionCoordinator:
         has reached ``MilestoneRunState.SUCCEEDED``. Independent milestones
         (no dependency relationship between them) are registered in the
         same call, matching "independent milestones run concurrently".
+        Unlike :meth:`fan_out_within_limits`, this registers every ready
+        milestone unconditionally -- it enforces dependency safety only,
+        not concurrency budgets.
         """
         current = self._require(plan_execution_id)
-        for milestone_id in plan.topological_order():
-            link = current.link(milestone_id)
-            if link.state is not MilestoneRunState.PENDING:
-                continue
-            if not _dependencies_succeeded(plan, milestone_id, current):
-                continue
-            run_id = derive_child_run_id(plan, milestone_id)
-            state = dict(child_run_state(plan, milestone_id, run_id))
-            self._runtime.register_run(
-                run_id=str(run_id),
-                initial_state=state,
-                now=now,
-                heartbeat_window=heartbeat_window,
-            )
-            current = self._record(
+        ready = [
+            milestone_id
+            for milestone_id in plan.topological_order()
+            if current.link(milestone_id).state is MilestoneRunState.PENDING
+            and _dependencies_succeeded(plan, milestone_id, current)
+        ]
+        for milestone_id in ready:
+            current = self._register_milestone(
+                plan,
                 current,
-                current.link(milestone_id).transition_to(
-                    MilestoneRunState.REGISTERED, run_id=run_id
-                ),
+                milestone_id,
                 now=now,
                 heartbeat_window=heartbeat_window,
+                child_run_state=child_run_state,
             )
         return current
+
+    def fan_out_within_limits(
+        self,
+        plan: Plan,
+        plan_execution_id: PlanExecutionId,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+        child_run_state: ChildRunStateBuilder,
+        limits: SchedulingLimits,
+        other_active: Iterable[SchedulableNode] = (),
+    ) -> PlanExecution:
+        """Register only as many ready milestones as fit within ``limits`` this tick.
+
+        Dependency readiness and concurrency are both enforced by the same
+        ``ReadinessScheduler`` pass every other workflow node already uses:
+        each milestone becomes a ``SchedulableNode`` whose ``dependencies``
+        are its plan-level dependencies and whose ``repository_id`` is its
+        target repository, so global and per-repository concurrency apply
+        exactly as they do to node scheduling within one run.
+        ``other_active`` lets a caller fold in nodes belonging to
+        concurrently running plans or runs so this plan's fan-out shares
+        the same budget and round-robin fairness as everything else the
+        coordinator is scheduling.
+        """
+        current = self._require(plan_execution_id)
+        nodes = [*schedulable_nodes_for_plan(plan, current, plan_execution_id), *other_active]
+        selection = ReadinessScheduler().plan(nodes, limits=limits)
+        selected_here = {
+            PlanMilestoneId(key.node_id)
+            for key in selection.selected
+            if key.run_id == str(plan_execution_id)
+        }
+        for milestone_id in plan.topological_order():
+            if milestone_id not in selected_here:
+                continue
+            current = self._register_milestone(
+                plan,
+                current,
+                milestone_id,
+                now=now,
+                heartbeat_window=heartbeat_window,
+                child_run_state=child_run_state,
+            )
+        return current
+
+    def _register_milestone(
+        self,
+        plan: Plan,
+        current: PlanExecution,
+        milestone_id: PlanMilestoneId,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+        child_run_state: ChildRunStateBuilder,
+    ) -> PlanExecution:
+        run_id = derive_child_run_id(plan, milestone_id)
+        state = dict(child_run_state(plan, milestone_id, run_id))
+        self._runtime.register_run(
+            run_id=str(run_id), initial_state=state, now=now, heartbeat_window=heartbeat_window
+        )
+        return self._record(
+            current,
+            current.link(milestone_id).transition_to(MilestoneRunState.REGISTERED, run_id=run_id),
+            now=now,
+            heartbeat_window=heartbeat_window,
+        )
 
     def record_milestone_outcome(
         self,
@@ -260,6 +330,16 @@ class PlanExecutionCoordinator:
         return updated
 
 
+_MILESTONE_STATE_TO_SCHEDULABLE: dict[MilestoneRunState, SchedulableState] = {
+    MilestoneRunState.PENDING: SchedulableState.QUEUED,
+    MilestoneRunState.REGISTERED: SchedulableState.RUNNING,
+    MilestoneRunState.SUCCEEDED: SchedulableState.SUCCEEDED,
+    MilestoneRunState.BLOCKED: SchedulableState.BLOCKED,
+    MilestoneRunState.FAILED: SchedulableState.FAILED,
+    MilestoneRunState.CANCELLED: SchedulableState.CANCELLED,
+}
+
+
 def _dependencies_succeeded(
     plan: Plan, milestone_id: PlanMilestoneId, current: PlanExecution
 ) -> bool:
@@ -270,4 +350,39 @@ def _dependencies_succeeded(
     )
 
 
-__all__ = ["PLAN_EXECUTION_AGGREGATE_TYPE", "PlanExecutionCoordinator", "derive_child_run_id"]
+def schedulable_nodes_for_plan(
+    plan: Plan, execution: PlanExecution, plan_execution_id: PlanExecutionId
+) -> tuple[SchedulableNode, ...]:
+    """Project every milestone of ``plan``/``execution`` into a
+    ``SchedulableNode``, so ``ReadinessScheduler`` can enforce both
+    dependency readiness and concurrency budgets in one pass.
+
+    Every milestone is included, not only pending ones: a dependency's
+    current state (``SUCCEEDED``/``RUNNING``/etc.) must be present in the
+    same node set for ``ReadinessScheduler``'s own dependency-readiness
+    check to resolve.
+    """
+    nodes: list[SchedulableNode] = []
+    for milestone_id in plan.topological_order():
+        milestone = plan.milestone(milestone_id)
+        link = execution.link(milestone_id)
+        nodes.append(
+            SchedulableNode(
+                key=NodeKey(run_id=str(plan_execution_id), node_id=str(milestone_id)),
+                dependencies=tuple(
+                    NodeKey(run_id=str(plan_execution_id), node_id=str(dependency))
+                    for dependency in milestone.dependencies
+                ),
+                state=_MILESTONE_STATE_TO_SCHEDULABLE[link.state],
+                repository_id=milestone.repository,
+            )
+        )
+    return tuple(nodes)
+
+
+__all__ = [
+    "PLAN_EXECUTION_AGGREGATE_TYPE",
+    "PlanExecutionCoordinator",
+    "derive_child_run_id",
+    "schedulable_nodes_for_plan",
+]
