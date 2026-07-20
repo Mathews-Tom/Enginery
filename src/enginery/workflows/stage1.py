@@ -9,7 +9,6 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
-from enginery.adapters.omp import OmpHarness
 from enginery.application.work_ports import (
     HarnessResult,
     HarnessTask,
@@ -48,7 +47,7 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from enginery.workflows.implementation import Stage1ImplementationExecutor
+from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
 from enginery.workflows.issue_to_pr import IssueQualification
 from enginery.workflows.pull_request import (
     PullRequestOutcome,
@@ -170,8 +169,9 @@ class Stage1RunRequest:
                 "github_repository": execution.github_repository,
                 "github_credential_reference": execution.github_credential_reference,
                 "github_executable": execution.github_executable,
-                "omp_credential_reference": execution.omp_credential_reference,
-                "omp_executable": execution.omp_executable,
+                "harness_provider": execution.harness_provider,
+                "harness_credential_reference": execution.harness_credential_reference,
+                "harness_executable": execution.harness_executable,
                 "artifact_root": str(execution.artifact_root),
             },
         }
@@ -184,8 +184,9 @@ class Stage1ExecutionConfiguration:
     github_repository: str
     github_credential_reference: str
     github_executable: str
-    omp_credential_reference: str
-    omp_executable: str
+    harness_provider: str
+    harness_credential_reference: str
+    harness_executable: str
     artifact_root: Path
 
     def __post_init__(self) -> None:
@@ -195,8 +196,9 @@ class Stage1ExecutionConfiguration:
                 self.github_repository,
                 self.github_credential_reference,
                 self.github_executable,
-                self.omp_credential_reference,
-                self.omp_executable,
+                self.harness_provider,
+                self.harness_credential_reference,
+                self.harness_executable,
             )
         ):
             raise InvalidInputError("Stage 1 provider configuration must be non-blank")
@@ -280,7 +282,7 @@ class Stage1RunService:
     ledger: LedgerService
     work_ledger: WorkLedgerPort | None = None
     pull_requests: PullRequestPort | None = None
-    omp_harness: OmpHarness | None = None
+    harness: SupervisedHarness | None = None
 
     def start(
         self,
@@ -531,9 +533,7 @@ class Stage1RunService:
                 node_id="implement",
                 attempt_id=attempt_id,
                 operation_id=str(operation_id),
-                command=self._require_omp_harness().supervised_command(
-                    task, result_path=result_path
-                ),
+                command=self._require_harness().supervised_command(task, result_path=result_path),
                 dependencies=((str(request.run.id), "qualify"),),
             ),
             request.manifest,
@@ -585,7 +585,7 @@ class Stage1RunService:
         result_path = _implementation_result_path(request, operation_id=operation_id)
         return Stage1ImplementationExecutor(
             runtime=self.runtime,
-            harness=self._require_omp_harness(),
+            harness=self._require_harness(),
             manifest=request.manifest,
             head_branch=request.head_branch,
         ).collect(
@@ -610,7 +610,7 @@ class Stage1RunService:
         generation = self._implement_generation(request.run.id)
         return Stage1ValidationExecutor(
             runtime=self.runtime,
-            artifact_store=self._require_omp_harness().artifact_store,
+            artifact_store=self._require_harness().artifact_store,
         ).validate(
             dispatch=WorkflowNodeDispatch(
                 _fixture_dispatch(
@@ -958,10 +958,10 @@ class Stage1RunService:
             raise MissingPrerequisiteError("Stage 1 pull-request provider is not configured")
         return self.pull_requests
 
-    def _require_omp_harness(self) -> OmpHarness:
-        if self.omp_harness is None:
-            raise MissingPrerequisiteError("Stage 1 OMP harness is not configured")
-        return self.omp_harness
+    def _require_harness(self) -> SupervisedHarness:
+        if self.harness is None:
+            raise MissingPrerequisiteError("Stage 1 harness is not configured")
+        return self.harness
 
 
 def _implementation_task(
@@ -1213,8 +1213,9 @@ def _execution_configuration_from_state(
         github_repository=_string(state, "github_repository"),
         github_credential_reference=_string(state, "github_credential_reference"),
         github_executable=_string(state, "github_executable"),
-        omp_credential_reference=_string(state, "omp_credential_reference"),
-        omp_executable=_string(state, "omp_executable"),
+        harness_provider=_string(state, "harness_provider"),
+        harness_credential_reference=_string(state, "harness_credential_reference"),
+        harness_executable=_string(state, "harness_executable"),
         artifact_root=Path(_string(state, "artifact_root")),
     )
 

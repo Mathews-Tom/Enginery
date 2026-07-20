@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from enginery.adapters.claude_code import ClaudeCodeAdapterConfig, ClaudeCodeHarness
 from enginery.adapters.github import (
     GitHubAdapterConfig,
     GitHubPullRequests,
@@ -20,8 +21,10 @@ from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRunt
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
+from enginery.workflows.implementation import SupervisedHarness
 from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.stage1 import (
+    Stage1ExecutionConfiguration,
     Stage1RunRequest,
     Stage1RunService,
     stage1_request_from_state,
@@ -111,6 +114,30 @@ def _watch(args: argparse.Namespace) -> None:
         ledger.close()
 
 
+def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarness:
+    artifact_store = ArtifactStore(configuration.artifact_root)
+    if configuration.harness_provider == "omp":
+        return OmpHarness(
+            OmpAdapterConfig(
+                credential_reference=configuration.harness_credential_reference,
+                executable=configuration.harness_executable,
+            ),
+            artifact_store,
+        )
+    if configuration.harness_provider == "claude-code":
+        return ClaudeCodeHarness(
+            ClaudeCodeAdapterConfig(
+                credential_reference=configuration.harness_credential_reference,
+                executable=configuration.harness_executable,
+            ),
+            artifact_store,
+        )
+    raise InvalidInputError(
+        "Stage 1 harness_provider is not a configured harness",
+        details={"harness_provider": configuration.harness_provider},
+    )
+
+
 def _advancing_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
@@ -120,19 +147,12 @@ def _advancing_service(
         credential_reference=configuration.github_credential_reference,
         executable=configuration.github_executable,
     )
-    harness = OmpHarness(
-        OmpAdapterConfig(
-            credential_reference=configuration.omp_credential_reference,
-            executable=configuration.omp_executable,
-        ),
-        ArtifactStore(configuration.artifact_root),
-    )
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
         pull_requests=GitHubPullRequests(github),
-        omp_harness=harness,
+        harness=_harness_for(configuration),
     )
 
 

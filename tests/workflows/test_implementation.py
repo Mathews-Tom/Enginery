@@ -147,7 +147,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
         limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
         requests=(dispatch,),
     )
-    result_path = workspace / ".enginery" / "omp-results" / "operation-1.json"
+    result_path = workspace / ".enginery" / "implementation-results" / "operation-1.json"
     collection_now = now + timedelta(seconds=1)
     recovered_runtime = CoordinatorRuntime(
         ledger_service,
@@ -288,7 +288,7 @@ def test_stage1_implementation_retries_a_terminal_agent_node_with_a_fresh_attemp
             limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
             requests=(dispatch,),
         )
-        result_path = workspace / ".enginery" / "omp-results" / f"{operation_id}.json"
+        result_path = workspace / ".enginery" / "implementation-results" / f"{operation_id}.json"
         deadline = time.monotonic() + 5
         while True:
             if result_path.is_file():

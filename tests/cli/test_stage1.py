@@ -357,8 +357,9 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
             github_repository="Mathews-Tom/Enginery",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable="omp",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
         base_branch="main",
@@ -376,3 +377,30 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
             evidence_requirements=("redacted harness transcript",),
         ),
     )
+
+
+def test_harness_for_selects_the_configured_provider_without_a_fallback(tmp_path: Path) -> None:
+    from enginery.adapters.claude_code import ClaudeCodeHarness
+    from enginery.adapters.omp import OmpHarness
+    from enginery.cli.stage1 import _harness_for
+
+    omp_config = replace(_request(tmp_path).execution_configuration, harness_provider="omp")
+    claude_config = replace(
+        _request(tmp_path).execution_configuration, harness_provider="claude-code"
+    )
+
+    assert isinstance(_harness_for(omp_config), OmpHarness)
+    assert isinstance(_harness_for(claude_config), ClaudeCodeHarness)
+
+
+def test_harness_for_rejects_an_unconfigured_provider_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    from enginery.cli.stage1 import _harness_for
+
+    configuration = replace(
+        _request(tmp_path).execution_configuration, harness_provider="unknown-harness"
+    )
+
+    with pytest.raises(InvalidInputError, match="harness_provider"):
+        _harness_for(configuration)
