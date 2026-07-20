@@ -422,7 +422,7 @@ Do not add a general plugin framework before two real implementations require th
 | Port | First implementations | Contract requirements |
 |---|---|---|
 | Work ledger | Local ledger, GitHub Issues | Ingest source records/snapshots; map into `WorkItem` data; publish internal lifecycle projections; append evidence summaries; receive updates by polling or event input; reconcile external/internal versions; preserve external IDs and cursors. Must support Jira, Linear, GitLab, repository files, or custom ledgers without changing the core work-item model. |
-| Agent harness | OMP, then a second independent harness | Probe installation/capabilities; start a worker from a typed task envelope (workspace path, objective, acceptance criteria, constraints, permitted capabilities, evidence requirements, time/cost budgets, artifact return locations); stream normalized structured events and redacted opaque text output; interrupt or cancel; obtain terminal status; collect declared outputs and evidence; report actual harness/model metadata when available. |
+| Agent harness | OMP and Claude Code | Probe installation/capabilities; start a worker from a typed task envelope (workspace path, objective, acceptance criteria, constraints, permitted capabilities, evidence requirements, time/cost budgets, artifact return locations); stream normalized structured events and redacted opaque text output; interrupt or cancel; obtain terminal status; collect declared outputs and evidence; report actual harness/model metadata when available. |
 | Workspace | Git worktree with child-process policy | Create from an exact revision; assign exclusive ownership; construct a clean environment allowlist; materialize approved capabilities; grant credentials explicitly; start/cancel process groups; record declared filesystem/network policy; detect unexpected changes; snapshot outputs; clean or retain for diagnosis. |
 | Source control and PR | Local git and GitHub | Resolve revisions; calculate changed files and diff digests; create branches/commits through policy-approved actions; detect base advancement and conflicts; open or update PRs idempotently; inspect head SHA, review state, and mergeability; merge only under explicit policy; reconcile uncertain remote mutations. |
 | Validation and CI | Local commands and hosted CI | Share normalized evidence results across local and hosted providers. A CI result is valid only for the exact commit bound to the evidence contract; stale green checks cannot satisfy merge readiness. |
@@ -434,6 +434,23 @@ A run probes adapter identity, version, and capability fingerprint before each a
 Provider-native event objects never cross the agent-harness adapter boundary. The adapter maps structured fields into versioned domain events and treats process output as opaque text; credential-source fields are removed before persistence, and remaining output passes redaction and is stored as a sensitivity-classified artifact rather than as trusted structured data.
 
 Before materialization, registry capabilities require a `capability.materialize` policy decision over the exact digest and provenance. Repository-local capabilities already present in the bound, reviewed base revision may be trusted by policy; a capability added or changed by the active run requires interactive human approval before that run can execute it. Authenticated external provenance means a publisher signature verified against a pinned key or an equivalent registry signature chain — TLS or transport identity alone is insufficient and requires human approval of the exact digest. Content addressing prevents later mutation; it does not establish initial trust.
+
+### Two independent harness adapters
+
+Two harness adapters share the port above without either becoming mandatory or a fallback for the other: OMP (`OmpHarness`) and Claude Code (`ClaudeCodeHarness`, headless `claude -p --output-format stream-json`). A run's execution configuration names exactly one configured harness provider; an unconfigured or missing provider is a diagnostic failure, never a silent substitution.
+
+Both adapters:
+
+- probe by running the CLI's own version command and report `AdapterAvailability.UNAVAILABLE` (CLI absent) or `MISCONFIGURED` (unexpected output) with no fingerprint, never a fallback to the other provider;
+- normalize their own event schema into the same `NormalizedAdapterEvent` kinds (`STARTED`/`PROGRESS`/`DIAGNOSTIC`/`TERMINAL`), rejecting unknown or malformed lines as a classified failure rather than skipping them;
+- redact output before artifact publication;
+- have no CLI-level timeout flag; the coordinator's lease/heartbeat expiry calls the same cancellation entry point an operator would, so a timeout and an operator cancellation are the same code path and the same reported outcome;
+- run through the same coordinator-supervised dispatch path, sharing the provider-neutral worker-supervision entrypoint;
+- report harness/model metadata from observed output rather than a hardcoded model ID — a model identity is only ever taken from what the harness itself reports.
+
+A shared parametrized fixture exercises unavailable-harness diagnostics, malformed-output rejection, a clean run's terminal status, and cancellation identically against both adapters, and asserts that neither the shared task envelope nor the shared running-worker identity type carries a provider-named field.
+
+Claude Code is optional installation, exactly like OMP: neither is required to exist on the host. Probing is the only supported way to determine availability; there is no compile-time or configuration-time requirement that both be installed.
 
 ## 11. Credentials and trust boundaries
 
