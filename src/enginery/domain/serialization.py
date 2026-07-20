@@ -43,6 +43,7 @@ from enginery.domain.outcome import Outcome, OutcomeKind
 from enginery.domain.plan_execution import PlanExecution
 from enginery.domain.policy_decision import PolicyAction, PolicyDecision, PolicyResult
 from enginery.domain.run import Run, RunState
+from enginery.domain.stack import Stack
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.manifest import WorkflowManifest
 
@@ -56,6 +57,7 @@ OUTCOME_SCHEMA_VERSION = 1
 FACTORY_CHANGE_SCHEMA_VERSION = 1
 WORKFLOW_MANIFEST_SCHEMA_VERSION = 1
 PLAN_EXECUTION_SCHEMA_VERSION = 1
+STACK_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +607,20 @@ def plan_execution_from_dict(raw: Mapping[str, object]) -> PlanExecution:
 
 
 # ---------------------------------------------------------------------------
+# Stack
+# ---------------------------------------------------------------------------
+
+
+def stack_to_dict(stack: Stack) -> dict[str, object]:
+    return _envelope(STACK_SCHEMA_VERSION, stack.to_mapping())
+
+
+def stack_from_dict(raw: Mapping[str, object]) -> Stack:
+    data = _unwrap_envelope(raw, expected_schema_version=STACK_SCHEMA_VERSION, type_name="Stack")
+    return Stack.from_mapping(data)
+
+
+# ---------------------------------------------------------------------------
 # field-level helpers
 # ---------------------------------------------------------------------------
 
@@ -661,6 +677,7 @@ __all__: list[str] = [
     "PLAN_EXECUTION_SCHEMA_VERSION",
     "POLICY_DECISION_SCHEMA_VERSION",
     "RUN_SCHEMA_VERSION",
+    "STACK_SCHEMA_VERSION",
     "WORKFLOW_MANIFEST_SCHEMA_VERSION",
     "WORK_ITEM_SCHEMA_VERSION",
     "artifact_from_dict",
@@ -679,6 +696,8 @@ __all__: list[str] = [
     "policy_decision_to_dict",
     "run_from_dict",
     "run_to_dict",
+    "stack_from_dict",
+    "stack_to_dict",
     "work_item_from_dict",
     "work_item_to_dict",
     "workflow_manifest_from_dict",
