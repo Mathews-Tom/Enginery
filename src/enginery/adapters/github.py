@@ -44,6 +44,7 @@ _GITHUB_API_VERSION = "2026-03-10"
 _PAGE_SIZE = 100
 _LIFECYCLE_MARKER_PREFIX = "<!-- enginery:lifecycle:"
 _PULL_REQUEST_MARKER_PREFIX = "<!-- enginery:pull-request:"
+_MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +292,7 @@ class GitHubPullRequests:
                     AdapterCapability("pull_request_create_or_update", 1),
                     AdapterCapability("pull_request_reconciliation", 1),
                     AdapterCapability("pull_request_head_metadata", 1),
+                    AdapterCapability("pull_request_merge", 1),
                 ),
             ),
             detail="GitHub pull-request adapter is available",
@@ -379,6 +381,69 @@ class GitHubPullRequests:
             checks=checks,
             mergeable=mergeable_raw,
         )
+
+    def merge(
+        self,
+        number: int,
+        *,
+        expected_head_revision: str,
+        operation_id: OperationId,
+        merge_method: str = "merge",
+    ) -> PullRequestSnapshot:
+        """Merge one pull request, bound atomically to its exact expected head.
+
+        Idempotent by construction rather than by the marker/``reconcile``
+        pattern the other mutations use: a retry after a lost response
+        first re-reads current state (read one), then relies on GitHub's
+        own ``sha`` precondition on the merge call itself to bind the
+        mutation atomically to ``expected_head_revision`` (read two,
+        enforced provider-side -- a later external head change is
+        rejected with a conflict rather than silently merging the wrong
+        commit). If a retry observes the PR already merged at the exact
+        expected head, it returns that snapshot unchanged rather than
+        attempting a second mutation; merged at any other head is a
+        conflict, never silently adopted.
+        """
+        if number < 1:
+            raise InvalidInputError("GitHub pull request number must be positive")
+        if not expected_head_revision.strip():
+            raise InvalidInputError("expected_head_revision must be non-blank")
+        if merge_method not in _MERGE_METHODS:
+            raise InvalidInputError("merge_method must be one of merge, squash, rebase")
+        current = self.get(number)
+        if current.merged:
+            if current.head_revision != expected_head_revision:
+                raise ExternalConflictError(
+                    "GitHub pull request was already merged at a different head revision"
+                )
+            self._outcomes[str(operation_id)] = ReconciliationResult.FOUND_MATCHING
+            return current
+        if current.head_revision != expected_head_revision:
+            raise StaleEvidenceError(
+                "GitHub pull request head changed since the caller's expected revision"
+            )
+        payload = self._request_object(
+            "PUT",
+            f"repos/{self.config.repository}/pulls/{number}/merge",
+            "--raw-field",
+            f"sha={expected_head_revision}",
+            "--raw-field",
+            f"merge_method={merge_method}",
+        )
+        merged_flag = payload.get("merged")
+        if not isinstance(merged_flag, bool):
+            raise TransientProviderFailureError(
+                "GitHub merge response must report 'merged' as boolean"
+            )
+        if not merged_flag:
+            raise ExternalConflictError("GitHub reported the merge did not succeed")
+        merged_snapshot = self.get(number)
+        if not merged_snapshot.merged or merged_snapshot.head_revision != expected_head_revision:
+            raise ExternalConflictError(
+                "GitHub pull request state after merge does not match the expected head revision"
+            )
+        self._outcomes[str(operation_id)] = ReconciliationResult.FOUND_MATCHING
+        return merged_snapshot
 
     def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
         candidates = self._matching_pull_requests(operation_id, None, None)
@@ -563,6 +628,18 @@ def _pull_request_snapshot(payload: Mapping[str, object]) -> PullRequestSnapshot
     base = payload.get("base")
     if not isinstance(head, Mapping) or not isinstance(base, Mapping):
         raise TransientProviderFailureError("GitHub pull request lacks head or base metadata")
+    merged_raw = payload.get("merged")
+    if merged_raw is not None and not isinstance(merged_raw, bool):
+        raise TransientProviderFailureError("GitHub pull request 'merged' must be boolean")
+    merged_at = payload.get("merged_at")
+    if merged_at is not None and not isinstance(merged_at, str):
+        raise TransientProviderFailureError("GitHub pull request 'merged_at' must be a string")
+    # The list endpoint's "Pull Request Simple" schema omits `merged` and only
+    # carries `merged_at`; the single-PR and merge-response schemas carry
+    # `merged` directly. Treating either signal as authoritative keeps
+    # `PullRequestSnapshot.merged` correct regardless of which endpoint
+    # produced this payload.
+    merged = bool(merged_raw) or merged_at is not None
     return PullRequestSnapshot(
         number=_required_positive_int(payload, "number"),
         url=_required_string(payload, "html_url"),
@@ -571,6 +648,7 @@ def _pull_request_snapshot(payload: Mapping[str, object]) -> PullRequestSnapshot
         head_revision=_required_string(head, "sha"),
         base_branch=_required_string(base, "ref"),
         base_revision=_required_string(base, "sha"),
+        merged=merged,
     )
 
 
@@ -588,7 +666,7 @@ def _raise_github_failure(stderr: str) -> None:
         raise AuthenticationFailureError("GitHub authentication failed")
     if "rate limit" in detail or "http 429" in detail:
         raise RateLimitError("GitHub rate limit exceeded")
-    if "http 409" in detail or "http 422" in detail:
+    if "http 405" in detail or "http 409" in detail or "http 422" in detail:
         raise ExternalConflictError("GitHub rejected the requested mutation")
     raise TransientProviderFailureError("GitHub API request failed")
 
