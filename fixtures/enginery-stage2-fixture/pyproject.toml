@@ -1,0 +1,29 @@
+[project]
+name = "enginery-stage2-fixture"
+version = "0.0.0"
+description = "Disposable Stage 2 release-provider proof fixture for Enginery. Exists solely to exercise the real GitHub Release and PyPI publication path end to end; not a usable library."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Mathews-Tom" }]
+keywords = ["enginery", "release-fixture"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Repository = "https://github.com/Mathews-Tom/Enginery"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/enginery_stage2_fixture"]
