@@ -41,6 +41,7 @@ from enginery.application.work_ports import (
     WorkspaceRequest,
 )
 from enginery.domain.digests import Digest
+from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.ledger.redaction import redact_credential_shaped_text
@@ -378,6 +379,7 @@ class LocalCapabilitySource:
     """An explicit repository-local capability inventory; no runtime discovery mechanism."""
 
     capabilities: tuple[CapabilityDescriptor, ...]
+    content_by_key: Mapping[tuple[str, str], bytes] = field(default_factory=dict)
 
     def probe(self) -> AdapterStatus:
         return _status(
@@ -392,6 +394,15 @@ class LocalCapabilitySource:
             (item for item in self.capabilities if item.name == name and item.version == version),
             None,
         )
+
+    def fetch(self, name: str, version: str) -> bytes:
+        content = self.content_by_key.get((name, version))
+        if content is None:
+            raise MissingPrerequisiteError(
+                "no local content registered for this capability",
+                details={"name": name, "version": version},
+            )
+        return content
 
 
 def local_provider_statuses() -> tuple[AdapterStatus, ...]:
