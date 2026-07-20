@@ -226,6 +226,28 @@ Use at least three comparable low- or medium-risk issues, each with explicit acc
 4. Where would local-first operation help or hinder data-governance and compliance obligations?
 5. What bounded pilot would be safe enough to authorize, and what result would make you stop investing?
 
+## Pilot results (2026-07-20)
+
+Ran the documented comparison protocol against three comparable low-risk work-item classes in the dedicated allowlisted fixture repository (`Mathews-Tom/enginery-provider-smoke`): a numeric pure function, a sequence pure function, and a string pure function. Each class produced one manually coordinated baseline PR and one separate, comparable Enginery-run PR — six real GitHub issues and PRs in total. One Enginery run additionally injected a coordinator interruption; a second injected an ambiguous external-operation result (a pre-existing, unrelated pull request pushed to the same head branch). Enginery `0.0.0.dev0` at commit `60dd6fc7`, OMP `17.0.5`, GitHub CLI `2.96.0`. Every PR was left open and unmerged, matching Stage 1's stop-before-merge contract.
+
+**Manual baseline** (operator working directly against the repository, no Enginery orchestration): `clamp()` in 56s (PR #35), `dedupe_preserve_order()` in 24s (PR #36), `title_case_words()` in 21s (PR #37) — average 34s. Zero interventions, zero recovery steps, CI green on first push for all three.
+
+**Enginery path** (`stage1 start` / `watch --advance` through the coordinator-owned run service, OMP as the harness): `round_to_nearest()` in 166s (PR #39), `chunk_list()` in 191s including the injected ambiguous-PR resolution (PR #41), `slugify()` in 159s (PR #42) — average 172s, roughly 5x the manual baseline, dominated by CI wait and the mandatory human-review step rather than implementation time.
+
+**Coordinator interruption.** After Enginery dispatched the OMP worker for `round_to_nearest()` (a real, independently-sessioned OS process, confirmed by PID), the operator withheld any further `watch` call for 20 seconds. A later, separate CLI invocation — the closest analog to a "replacement coordinator" this single-shot CLI has, since no process persists in memory between calls — correctly returned `wait` without launching a second worker, then collected the original worker's result once it was available. No duplicate implementation attempt occurred.
+
+**Ambiguous external-operation result.** Before Enginery's own `open_pr` node ran for `chunk_list()`, the operator manually opened an unrelated pull request against the same head branch, simulating a prior operation whose result was lost. Enginery's `open_pr` node refused to adopt the unrelated PR and refused to create a duplicate — the mutation failed closed ("GitHub rejected the requested mutation") on every retry until the operator closed the injected PR. Once resolved, the run created exactly one PR and reached merge-ready evidence. No duplicate PR was created at any point.
+
+**Stale-evidence rejection (unplanned).** A pilot-harness construction defect on the first Enginery attempt (a hand-built source-revision string that did not match the GitHub issue's freshly fetched value) caused the terminal verifier to return `superseded` rather than certifying merge-ready. The system correctly refused to fabricate merge-ready evidence against mismatched source state, even though the mismatch originated in the test harness rather than a real source change (abandoned as PR #38). Incidental, but additional evidence for the same property the injected cases were designed to test.
+
+**Evidence bundles.** All three completed Enginery runs published a `merge_ready` evidence digest bound to the exact PR head and current-head CI success, readable from the run's evidence output and the GitHub issue's lifecycle comment: `sha256:6e3a62ae...` (PR #39), `sha256:7838f362...` (PR #41), `sha256:c3546e0e...` (PR #42).
+
+**Operator burden.** Every recovery and cleanup step used real, supported library operations (`stage1 cancel`, `CoordinatorRuntime.release_workspace`) — never manual database edits or forced deletes. But standing up a repeatable multi-run pilot exposed real CLI gaps: no `stage1` command constructs a run request (the operator must call the Python library directly); no command releases or inspects a stuck workspace reservation after an aborted run; and a node that reaches `queued` but is not selected within its registering tick has no automatic retry path, only an explicit `stage1 cancel`. None of these produced an unsafe or duplicated external effect, and the friction was concentrated in a rapid multi-run test pattern the real one-issue-at-a-time Stage 1 workflow does not exercise — but they are real, named gaps an operator would hit under repeated or automated use, and are exactly the kind of Stage-1 usage friction later harness-contract and workflow milestones should be freed against.
+
+**Decision.** Applying the rule above: every stale-evidence case observed was rejected, including the unplanned one; no duplicate external effect occurred across six real GitHub PRs plus one injected-conflict PR; the interrupted run resumed only after reconciliation, without launching a second worker; the evidence bundle plus the GitHub PR, CI, and issue-comment trail let an independent reader explain why each result is merge-ready; and the operator accepts the additional installation and maintenance burden, conditioned on closing the three named CLI gaps before wider or automated use.
+
+**Result: `go`.** Combined with the Stage 1 gate evidence recorded above, this satisfies gate G1 in full. The `v0.2.0` train (M9–M12) may proceed.
+
 
 ## Supporting material
 
