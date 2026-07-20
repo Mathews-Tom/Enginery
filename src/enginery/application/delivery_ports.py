@@ -167,10 +167,13 @@ class CapabilityDescriptor:
     version: str
     digest: Digest
     provenance: str
+    license: str | None = None
 
     def __post_init__(self) -> None:
         if any(not value.strip() for value in (self.name, self.version, self.provenance)):
             raise ValueError("capability name, version, and provenance must be non-blank")
+        if self.license is not None and not self.license.strip():
+            raise ValueError("capability license, when present, must be non-blank")
 
 
 class CapabilitySourcePort(Protocol):
@@ -181,6 +184,8 @@ class CapabilitySourcePort(Protocol):
     def discover(self) -> tuple[CapabilityDescriptor, ...]: ...
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None: ...
+
+    def fetch(self, name: str, version: str) -> bytes: ...
 
 
 __all__ = [

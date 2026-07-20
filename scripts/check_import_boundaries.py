@@ -25,7 +25,10 @@ PACKAGE = "enginery"
 LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain"}),
     "application": frozenset({"domain", "application"}),
-    "engine": frozenset({"domain", "application", "engine", "ledger", "policy", "evidence"}),
+    "capabilities": frozenset({"domain", "application", "capabilities"}),
+    "engine": frozenset(
+        {"domain", "application", "engine", "ledger", "policy", "evidence", "capabilities"}
+    ),
     "ledger": frozenset({"domain", "application", "ledger"}),
     "policy": frozenset({"domain", "application", "policy", "evidence"}),
     "evidence": frozenset({"domain", "application", "evidence"}),
@@ -40,6 +43,7 @@ LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
             "evidence",
             "evaluation",
             "adapters",
+            "capabilities",
         }
     ),
     "cli": frozenset(
@@ -54,6 +58,7 @@ LAYER_ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
             "adapters",
             "cli",
             "workflows",
+            "capabilities",
         }
     ),
 }
