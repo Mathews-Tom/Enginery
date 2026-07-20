@@ -17,6 +17,7 @@ from enginery.application.adapter_types import (
     AdapterStatus,
     ProviderKind,
 )
+from enginery.application.delivery_ports import PublicationReceipt, PublicationRequest
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -26,6 +27,7 @@ from enginery.application.work_ports import (
     PullRequestSnapshot,
     WorkLedgerSnapshot,
 )
+from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import (
     AmbiguousExternalSideEffectError,
@@ -548,6 +550,209 @@ class GitHubPullRequests:
         return cast(Sequence[object], payload)
 
 
+@dataclass(frozen=True, slots=True)
+class GitHubReleaseRequest:
+    """Release-specific fields the generic ``ReleasePort`` contract does not carry.
+
+    Staged against an artifact digest before ``publish()`` runs, since
+    ``PublicationRequest`` (shared across every ``ReleasePort``
+    implementation) has no notion of a tag, target commit, or release
+    notes body.
+    """
+
+    tag_name: str
+    target_commitish: str
+    name: str
+    body: str
+    prerelease: bool = False
+
+    def __post_init__(self) -> None:
+        if any(not value.strip() for value in (self.tag_name, self.target_commitish, self.name)):
+            raise InvalidInputError(
+                "GitHub release tag_name, target_commitish, and name must be non-blank"
+            )
+        if not self.body.strip():
+            raise InvalidInputError("GitHub release body must be non-blank")
+
+
+@dataclass(slots=True)
+class GitHubReleaseAdapter:
+    """Create and verify one tagged GitHub Release, bound atomically to its exact commit.
+
+    Does not upload the published artifact as a binary release asset:
+    PyPI is the installable-artifact destination for a Python package,
+    and this adapter's release body embeds the artifact's digest as
+    verifiable evidence text instead, keeping exactly one canonical
+    artifact host per publication. Idempotent by construction, mirroring
+    ``GitHubPullRequests.merge()``: a retry after a lost response first
+    checks for an existing release at the expected tag before attempting
+    to create one, and only ever adopts it when the target commit
+    matches; a tag reused against a different commit is a conflict,
+    never silently adopted.
+    """
+
+    config: GitHubAdapterConfig
+    command_runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] = field(
+        default=lambda arguments: subprocess.run(
+            arguments, check=False, capture_output=True, text=True
+        )
+    )
+    _staged: dict[str, GitHubReleaseRequest] = field(default_factory=dict, init=False)
+    _operation_tags: dict[str, str] = field(default_factory=dict, init=False)
+    _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
+
+    def probe(self) -> AdapterStatus:
+        result = _run(self.command_runner, (self.config.executable, "--version"))
+        if result.returncode != 0:
+            return AdapterStatus(
+                kind=ProviderKind.RELEASE,
+                availability=AdapterAvailability.UNAVAILABLE,
+                fingerprint=None,
+                detail="GitHub CLI is not available",
+            )
+        return AdapterStatus(
+            kind=ProviderKind.RELEASE,
+            availability=AdapterAvailability.AVAILABLE,
+            fingerprint=AdapterFingerprint(
+                provider_id="github-release",
+                provider_version=result.stdout.strip() or "unknown",
+                api_version=ADAPTER_API_VERSION,
+                capabilities=(AdapterCapability("release_create_and_verify", 1),),
+            ),
+            detail="GitHub release adapter is available",
+        )
+
+    def stage(self, digest: Digest, request: GitHubReleaseRequest) -> None:
+        """Record the release fields to publish for a given artifact digest."""
+        self._staged[str(digest)] = request
+
+    def publish(self, request: PublicationRequest) -> PublicationReceipt:
+        staged = self._staged.get(str(request.artifact.digest))
+        if staged is None:
+            raise InvalidInputError(
+                "no staged release request matches this artifact's digest; call stage() first"
+            )
+        self._operation_tags[str(request.operation_id)] = staged.tag_name
+        existing = self._find_by_tag(staged.tag_name)
+        if existing is not None:
+            existing_commitish = _required_string(existing, "target_commitish")
+            if existing_commitish != staged.target_commitish:
+                raise ExternalConflictError(
+                    "a GitHub release already exists for this tag at a different commit",
+                    details={"tag_name": staged.tag_name, "existing": existing_commitish},
+                )
+            self._outcomes[str(request.operation_id)] = ReconciliationResult.FOUND_MATCHING
+            return PublicationReceipt(
+                destination=request.destination,
+                version=request.artifact.version,
+                artifact_digest=request.artifact.digest,
+            )
+        digest_evidence = f"\n\n<!-- enginery:artifact-digest:{request.artifact.digest} -->"
+        payload = self._request_object(
+            "POST",
+            f"repos/{self.config.repository}/releases",
+            "--raw-field",
+            f"tag_name={staged.tag_name}",
+            "--raw-field",
+            f"target_commitish={staged.target_commitish}",
+            "--raw-field",
+            f"name={staged.name}",
+            "--raw-field",
+            f"body={staged.body}{digest_evidence}",
+            "--field",
+            f"prerelease={'true' if staged.prerelease else 'false'}",
+        )
+        created_commitish = _required_string(payload, "target_commitish")
+        if created_commitish != staged.target_commitish:
+            raise ExternalConflictError(
+                "GitHub created the release against an unexpected commit",
+                details={"expected": staged.target_commitish, "observed": created_commitish},
+            )
+        self._outcomes[str(request.operation_id)] = ReconciliationResult.FOUND_MATCHING
+        return PublicationReceipt(
+            destination=request.destination,
+            version=request.artifact.version,
+            artifact_digest=request.artifact.digest,
+        )
+
+    def verify(self, receipt: PublicationReceipt) -> PublicationReceipt:
+        for digest_str, candidate in self._staged.items():
+            if digest_str != str(receipt.artifact_digest):
+                continue
+            release = self._find_by_tag(candidate.tag_name)
+            if release is None:
+                raise ExternalConflictError(
+                    "GitHub does not report a release for the published tag",
+                    details={"tag_name": candidate.tag_name},
+                )
+            observed_commitish = _required_string(release, "target_commitish")
+            if observed_commitish != candidate.target_commitish:
+                raise ExternalConflictError(
+                    "GitHub release target commit does not match the expected commit",
+                    details={
+                        "expected": candidate.target_commitish,
+                        "observed": observed_commitish,
+                    },
+                )
+            digest_evidence = f"<!-- enginery:artifact-digest:{receipt.artifact_digest} -->"
+            if digest_evidence not in _optional_string(release, "body"):
+                raise ExternalConflictError(
+                    "GitHub release body does not carry the expected artifact-digest evidence"
+                )
+            return receipt
+        raise InvalidInputError(
+            "no staged release request matches this receipt's artifact digest; call stage() first"
+        )
+
+    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
+        tag_name = self._operation_tags.get(str(operation_id))
+        if tag_name is None:
+            result = self._outcomes.get(str(operation_id), ReconciliationResult.NOT_FOUND)
+            self._outcomes[str(operation_id)] = result
+            return result
+        existing = self._find_by_tag(tag_name)
+        result = (
+            ReconciliationResult.FOUND_MATCHING
+            if existing is not None
+            else ReconciliationResult.NOT_FOUND
+        )
+        self._outcomes[str(operation_id)] = result
+        return result
+
+    def _find_by_tag(self, tag_name: str) -> Mapping[str, object] | None:
+        result = _run(
+            self.command_runner,
+            (
+                self.config.executable,
+                "api",
+                "--method",
+                "GET",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                f"X-GitHub-Api-Version: {self.config.api_version}",
+                f"repos/{self.config.repository}/releases/tags/{quote(tag_name, safe='')}",
+            ),
+        )
+        if result.returncode != 0:
+            if "http 404" in result.stderr.lower():
+                return None
+            _raise_github_failure(result.stderr)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise TransientProviderFailureError("GitHub API returned invalid JSON") from error
+        if not isinstance(payload, Mapping):
+            raise TransientProviderFailureError("GitHub API response must be a JSON object")
+        return payload
+
+    def _request_object(self, method: str, endpoint: str, *fields: str) -> Mapping[str, object]:
+        payload = _request(self.config, self.command_runner, method, endpoint, *fields)
+        if not isinstance(payload, Mapping):
+            raise TransientProviderFailureError("GitHub API response must be a JSON object")
+        return payload
+
+
 def _request(
     config: GitHubAdapterConfig,
     command_runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]],
@@ -671,4 +876,10 @@ def _raise_github_failure(stderr: str) -> None:
     raise TransientProviderFailureError("GitHub API request failed")
 
 
-__all__ = ["GitHubAdapterConfig", "GitHubPullRequests", "GitHubWorkLedger"]
+__all__ = [
+    "GitHubAdapterConfig",
+    "GitHubPullRequests",
+    "GitHubReleaseAdapter",
+    "GitHubReleaseRequest",
+    "GitHubWorkLedger",
+]
