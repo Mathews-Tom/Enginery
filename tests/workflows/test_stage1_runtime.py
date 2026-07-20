@@ -617,8 +617,9 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             github_repository="Mathews-Tom/Enginery",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable=str(fake_omp),
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable=str(fake_omp),
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
         workspace_path=tmp_path / "workspace",
@@ -650,7 +651,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
                 require_registered_run=True,
             ),
         ),
-        omp_harness=OmpHarness(
+        harness=OmpHarness(
             OmpAdapterConfig(credential_reference="test-keyring", executable=str(fake_omp)),
             ArtifactStore(tmp_path / "artifacts"),
         ),
@@ -700,7 +701,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     recovered = Stage1RunService(
         runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
         ledger=ledger_service,
-        omp_harness=OmpHarness(
+        harness=OmpHarness(
             OmpAdapterConfig(credential_reference="test-keyring", executable=str(fake_omp)),
             ArtifactStore(tmp_path / "recovered-artifacts"),
         ),
@@ -886,8 +887,9 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable="omp",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
@@ -1086,8 +1088,9 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable="omp",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
@@ -1226,8 +1229,9 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable="omp",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
@@ -1421,8 +1425,9 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
             github_executable="gh",
-            omp_credential_reference="test-omp-keyring",
-            omp_executable=str(_fake_omp(tmp_path)),
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable=str(_fake_omp(tmp_path)),
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
@@ -1434,7 +1439,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
-        omp_harness=OmpHarness(
+        harness=OmpHarness(
             OmpAdapterConfig(
                 credential_reference="test-keyring", executable=str(_fake_omp(tmp_path))
             ),

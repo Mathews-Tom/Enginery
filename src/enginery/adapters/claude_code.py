@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -223,6 +224,82 @@ class ClaudeCodeHarness:
     def _require_session(self, session: HarnessSession) -> None:
         if self._sessions.get(session.session_id) != session:
             raise CancellationError("unknown Claude Code harness session")
+
+    def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
+        """Return a worker command whose parent is the coordinator supervisor.
+
+        Reuses the existing generic supervised-worker entrypoint: it only
+        runs the given command and redacts/records its exit, independent of
+        which harness CLI is being wrapped.
+        """
+        if not result_path.is_absolute():
+            raise InvalidInputError("Claude Code worker result path must be absolute")
+        return (
+            sys.executable,
+            "-m",
+            "enginery.engine.omp_worker",
+            "--operation-id",
+            str(task.operation_id),
+            "--output",
+            str(result_path),
+            "--",
+            *self.command_for(task),
+        )
+
+    def collect_supervised(
+        self, task: HarnessTask, *, result_path: Path
+    ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]:
+        """Read a supervised worker handoff after its process exit is observed."""
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkerFailureError(
+                "Claude Code supervised worker did not retain a valid result"
+            ) from error
+        if not isinstance(payload, dict) or set(payload) != {
+            "operation_id",
+            "output",
+            "schema_version",
+            "terminal_status",
+        }:
+            raise WorkerFailureError("Claude Code supervised worker result has an invalid shape")
+        operation_id = payload["operation_id"]
+        output = payload["output"]
+        schema_version = payload["schema_version"]
+        terminal_status = payload["terminal_status"]
+        if (
+            not isinstance(operation_id, str)
+            or not isinstance(output, str)
+            or not isinstance(schema_version, int)
+            or not isinstance(terminal_status, str)
+        ):
+            raise WorkerFailureError("Claude Code supervised worker result has invalid field types")
+        if schema_version != 1:
+            raise WorkerFailureError(
+                "Claude Code supervised worker result schema version is unsupported"
+            )
+        if operation_id != str(task.operation_id):
+            raise WorkerFailureError(
+                "Claude Code supervised worker result operation does not match task"
+            )
+        digest = self.artifact_store.publish_bytes(
+            output.encode("utf-8"), media_type="application/json"
+        )
+        events = (
+            _normalize_events(output, task.operation_id)[0]
+            if terminal_status == "succeeded"
+            else ()
+        )
+        return (
+            events,
+            HarnessResult(
+                session_id=f"claude-code-{task.operation_id}",
+                terminal_status=terminal_status,
+                outputs=(
+                    HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),
+                ),
+            ),
+        )
 
 
 def _render_task(task: HarnessTask) -> str:

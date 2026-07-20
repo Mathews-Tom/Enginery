@@ -1,12 +1,13 @@
-"""Manifest-bound OMP execution composed through ``CoordinatorRuntime``."""
+"""Manifest-bound supervised-harness execution composed through ``CoordinatorRuntime``."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
-from enginery.adapters.omp import OmpHarness
+from enginery.application.adapter_types import NormalizedAdapterEvent
 from enginery.application.work_ports import HarnessResult, HarnessTask
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.workflow.manifest import WorkflowManifest
@@ -17,19 +18,36 @@ from enginery.engine.runtime import (
     FixtureDispatch,
     WorkflowDispatch,
 )
+from enginery.ledger.artifact_store import ArtifactStore
+
+
+class SupervisedHarness(Protocol):
+    """A harness adapter capable of coordinator-supervised execution.
+
+    Structural, not a named provider: any adapter exposing these three
+    members satisfies this without a provider-specific import here.
+    """
+
+    artifact_store: ArtifactStore
+
+    def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]: ...
+
+    def collect_supervised(
+        self, task: HarnessTask, *, result_path: Path
+    ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class Stage1ImplementationExecutor:
-    """Prepare and collect one OMP node without owning scheduling or processes."""
+    """Prepare and collect one supervised implementation node, without owning scheduling."""
 
     runtime: CoordinatorRuntime
-    harness: OmpHarness
+    harness: SupervisedHarness
     manifest: WorkflowManifest
     head_branch: str | None = None
 
     def dispatch(self, request: FixtureDispatch, task: HarnessTask) -> WorkflowDispatch:
-        """Bind one OMP task to the existing fenced runtime dispatch path."""
+        """Bind one implementation task to the existing fenced runtime dispatch path."""
         _require_matching_request(request, task)
         command = self.harness.supervised_command(task, result_path=_result_path(task))
         return WorkflowDispatch(request=replace(request, command=command), manifest=self.manifest)
@@ -42,7 +60,7 @@ class Stage1ImplementationExecutor:
         now: datetime,
         result_path: Path | None = None,
     ) -> HarnessResult:
-        """Ingest a completed supervised OMP result through the coordinator."""
+        """Ingest a completed supervised implementation result through the coordinator."""
         _require_matching_dispatch(dispatched, task)
         path = _result_path(task) if result_path is None else result_path
         _, result = self.harness.collect_supervised(task, result_path=path)
@@ -74,7 +92,9 @@ class Stage1ImplementationExecutor:
 
 
 def _result_path(task: HarnessTask) -> Path:
-    return task.workspace_path / ".enginery" / "omp-results" / f"{task.operation_id}.json"
+    return (
+        task.workspace_path / ".enginery" / "implementation-results" / f"{task.operation_id}.json"
+    )
 
 
 def _require_matching_request(request: FixtureDispatch, task: HarnessTask) -> None:
@@ -85,7 +105,7 @@ def _require_matching_request(request: FixtureDispatch, task: HarnessTask) -> No
         or request.operation_id != str(task.operation_id)
         or request.workspace_path != task.workspace_path
     ):
-        raise InvalidInputError("OMP task does not match the runtime dispatch identity")
+        raise InvalidInputError("implementation task does not match the runtime dispatch identity")
 
 
 def _require_matching_dispatch(dispatched: DispatchedFixture, task: HarnessTask) -> None:
@@ -96,7 +116,9 @@ def _require_matching_dispatch(dispatched: DispatchedFixture, task: HarnessTask)
         or dispatched.lease.operation_id != str(task.operation_id)
         or dispatched.workspace.workspace_path != task.workspace_path
     ):
-        raise InvalidInputError("OMP task does not match the dispatched runtime identity")
+        raise InvalidInputError(
+            "implementation task does not match the dispatched runtime identity"
+        )
 
 
 __all__ = ["Stage1ImplementationExecutor"]
