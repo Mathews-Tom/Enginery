@@ -26,6 +26,7 @@ from enginery.cli.ledger import (
     run_verify,
 )
 from enginery.cli.stage1 import run_stage1
+from enginery.cli.stage2 import run_stage2
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
 from enginery.domain.policy_decision import PolicyResult
 from enginery.policy.evaluator import PolicyEvaluator
@@ -119,6 +120,17 @@ def _build_parser() -> argparse.ArgumentParser:
         if command == "resume":
             lifecycle_parser.add_argument("--attempt-id", required=True)
             lifecycle_parser.add_argument("--operation-id", required=True)
+
+    stage2_parser = subparsers.add_parser(
+        "stage2", help="Inspect Stage 2 plan-to-release stack state."
+    )
+    stage2_subparsers = stage2_parser.add_subparsers(dest="stage2_command")
+    stage2_status_parser = stage2_subparsers.add_parser(
+        "status", help="Report one stack's slice states and merge readiness."
+    )
+    stage2_status_parser.add_argument("--database", required=True, type=Path)
+    stage2_status_parser.add_argument("--owner", required=True)
+    stage2_status_parser.add_argument("--stack-id", required=True)
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
@@ -333,6 +345,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_capability(args)
         if args.command == "stage1":
             return run_stage1(args)
+        if args.command == "stage2":
+            return run_stage2(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
                 return _run_adapter_doctor(as_json=args.json)
