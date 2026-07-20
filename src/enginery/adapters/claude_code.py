@@ -2,25 +2,42 @@
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 import subprocess
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
     AdapterCapability,
+    AdapterEventKind,
     AdapterFingerprint,
     AdapterStatus,
+    NormalizedAdapterEvent,
     ProviderKind,
 )
-from enginery.application.work_ports import HarnessSession, HarnessTask
-from enginery.domain.errors import InvalidInputError, WorkerFailureError
+from enginery.application.work_ports import (
+    HarnessOutput,
+    HarnessResult,
+    HarnessSession,
+    HarnessTask,
+)
+from enginery.domain.artifact import RedactionClassification
+from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
+from enginery.domain.ids import OperationId
+from enginery.domain.node_attempt import ReconciliationResult
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.redaction import redact_credential_shaped_text
 
 _CLAUDE_CODE_EVENT_SCHEMA_VERSION = 1
+_KNOWN_EVENT_TYPES = frozenset({"system", "assistant", "user", "rate_limit_event", "result"})
 
 
 class _ClaudeCodeProcess(Protocol):
@@ -67,6 +84,7 @@ class ClaudeCodeHarness:
     """
 
     config: ClaudeCodeAdapterConfig
+    artifact_store: ArtifactStore
     command_runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] = field(
         default=lambda arguments: subprocess.run(
             arguments, check=False, capture_output=True, text=True
@@ -83,8 +101,14 @@ class ClaudeCodeHarness:
             start_new_session=True,
         )
     )
+    terminator: Callable[[int], None] = field(default=lambda pid: os.killpg(pid, signal.SIGTERM))
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _processes: dict[str, _ClaudeCodeProcess] = field(default_factory=dict, init=False)
+    _collected: dict[str, tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]] = field(
+        default_factory=dict, init=False
+    )
+    _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
+    _cancelled: set[str] = field(default_factory=set, init=False)
 
     def probe(self) -> AdapterStatus:
         try:
@@ -132,7 +156,48 @@ class ClaudeCodeHarness:
         process = self.process_factory(self.command_for(task), task.workspace_path)
         self._sessions[session.session_id] = session
         self._processes[session.session_id] = process
+        self._outcomes[str(task.operation_id)] = ReconciliationResult.FOUND_MATCHING
         return session
+
+    def events(self, session: HarnessSession) -> Iterator[NormalizedAdapterEvent]:
+        return iter(self._collect(session)[0])
+
+    def result(self, session: HarnessSession) -> HarnessResult:
+        return self._collect(session)[1]
+
+    def cancel(self, session: HarnessSession, *, operation_id: OperationId) -> ReconciliationResult:
+        self._require_session(session)
+        process = self._processes[session.session_id]
+        if process.poll() is None:
+            self.terminator(process.pid)
+            self._cancelled.add(session.session_id)
+        self._outcomes[str(operation_id)] = ReconciliationResult.FOUND_MATCHING
+        return ReconciliationResult.FOUND_MATCHING
+
+    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
+        return self._outcomes.get(str(operation_id), ReconciliationResult.NOT_FOUND)
+
+    def _collect(
+        self, session: HarnessSession
+    ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]:
+        self._require_session(session)
+        cached = self._collected.get(session.session_id)
+        if cached is not None:
+            return cached
+        process = self._processes[session.session_id]
+        output, _ = process.communicate()
+        redacted = redact_credential_shaped_text(output)
+        digest = self.artifact_store.publish_bytes(redacted.encode(), media_type="application/json")
+        events, terminal_status = _normalize_events(redacted, session.operation_id)
+        status = "cancelled" if session.session_id in self._cancelled else terminal_status
+        result = HarnessResult(
+            session_id=session.session_id,
+            terminal_status=status,
+            outputs=(HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),),
+        )
+        collected = (events, result)
+        self._collected[session.session_id] = collected
+        return collected
 
     def command_for(self, task: HarnessTask) -> tuple[str, ...]:
         arguments: list[str] = [
@@ -155,6 +220,10 @@ class ClaudeCodeHarness:
             arguments += ["--model", self.config.model]
         return tuple(arguments)
 
+    def _require_session(self, session: HarnessSession) -> None:
+        if self._sessions.get(session.session_id) != session:
+            raise CancellationError("unknown Claude Code harness session")
+
 
 def _render_task(task: HarnessTask) -> str:
     sections = (
@@ -168,6 +237,58 @@ def _render_task(task: HarnessTask) -> str:
         f"{heading}:\n" + "\n".join(f"- {value}" for value in values)
         for heading, values in sections
     )
+
+
+def _normalize_events(
+    output: str, operation_id: OperationId
+) -> tuple[tuple[NormalizedAdapterEvent, ...], str]:
+    events: list[NormalizedAdapterEvent] = []
+    terminal_status: str | None = None
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = cast(dict[str, object], json.loads(line))
+        except json.JSONDecodeError as error:
+            raise WorkerFailureError("Claude Code emitted malformed JSON event") from error
+        event_type = payload.get("type")
+        if not isinstance(event_type, str) or event_type not in _KNOWN_EVENT_TYPES:
+            raise WorkerFailureError("Claude Code emitted an unsupported JSON event")
+        attributes = {"event_schema_version": str(_CLAUDE_CODE_EVENT_SCHEMA_VERSION)}
+        if event_type == "system" and payload.get("subtype") == "init":
+            kind = AdapterEventKind.STARTED
+        elif event_type == "result":
+            kind = AdapterEventKind.TERMINAL
+            terminal_status = "failed" if payload.get("is_error") else "succeeded"
+        elif event_type == "rate_limit_event":
+            kind = AdapterEventKind.DIAGNOSTIC
+        else:
+            kind = AdapterEventKind.PROGRESS
+            model = _assistant_model(payload)
+            if model is not None:
+                attributes["model"] = model
+        events.append(
+            NormalizedAdapterEvent(
+                kind=kind,
+                occurred_at=datetime.now(UTC),
+                operation_id=operation_id,
+                summary=f"Claude Code {event_type}",
+                attributes=attributes,
+            )
+        )
+    if terminal_status is None:
+        raise WorkerFailureError("Claude Code output ended without a result event")
+    return tuple(events), terminal_status
+
+
+def _assistant_model(payload: dict[str, object]) -> str | None:
+    if payload.get("type") != "assistant":
+        return None
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return None
+    model = message.get("model")
+    return model if isinstance(model, str) and model.strip() else None
 
 
 __all__ = ["ClaudeCodeAdapterConfig", "ClaudeCodeHarness"]
