@@ -47,10 +47,17 @@ class CapabilityApprovalRequiredError(HumanActionRequiredError):
     needs interactive, exact-digest human approval before it can execute."""
 
 
+class CapabilityLicenseMismatchError(ValidationFailureError):
+    """Raised when a resolved capability's license does not match what the
+    caller declared it expected, so an unexpected license never silently
+    enters a lock."""
+
+
 __all__ = [
     "CapabilityApprovalRequiredError",
     "CapabilityDigestMismatchError",
     "CapabilityIntegrityError",
+    "CapabilityLicenseMismatchError",
     "CapabilityLockDriftError",
     "CapabilityNotFoundError",
 ]
