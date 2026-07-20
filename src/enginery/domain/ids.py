@@ -70,6 +70,10 @@ class PlanId(_Identifier):
     """Identifies a :class:`enginery.plans.model.Plan` aggregate."""
 
 
+class PlanExecutionId(_Identifier):
+    """Identifies one running instance of a :class:`Plan` (a fan-out/join process)."""
+
+
 class PlanMilestoneId(_Identifier):
     """Identifies one milestone declared within a single :class:`Plan`."""
 
@@ -158,6 +162,7 @@ __all__ = [
     "NodeId",
     "OperationId",
     "OutcomeId",
+    "PlanExecutionId",
     "PlanId",
     "PlanMilestoneId",
     "PolicyDecisionId",
