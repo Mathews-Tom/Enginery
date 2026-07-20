@@ -20,6 +20,13 @@ _HUMAN_REQUIRED_ACTIONS = frozenset(
         PolicyAction.REVIEW_FINDING_WAIVE,
         PolicyAction.FACTORY_CHANGE_CANARY,
         PolicyAction.FACTORY_CHANGE_PROMOTE,
+        # Publication is irreversible for at least one real destination
+        # (PyPI versions cannot be deleted or reused); design.md's
+        # "medium- and high-risk work requires human final review"
+        # applies here via the same interactive-approval machinery
+        # already built for the actions above, not a plain allow/deny
+        # PolicyRule row.
+        PolicyAction.RELEASE_PUBLISH,
     }
 )
 _DUAL_HUMAN_ACTIONS = frozenset(
