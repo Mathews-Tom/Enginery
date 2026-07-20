@@ -161,19 +161,33 @@ class DeploymentPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CapabilityDescriptor:
-    """A content-addressed capability exposed by a configured source."""
+    """A content-addressed capability exposed by a configured source.
+
+    ``signature`` and ``signer_key_id`` carry a source's own claimed
+    detached signature over ``digest``, when it supplies one. They are
+    unverified claims by construction; only
+    ``enginery.capabilities.signature.PinnedKeyring`` can turn a claim
+    into authenticated provenance, and only against a key the operator
+    pinned explicitly.
+    """
 
     name: str
     version: str
     digest: Digest
     provenance: str
     license: str | None = None
+    signature: bytes | None = None
+    signer_key_id: str | None = None
 
     def __post_init__(self) -> None:
         if any(not value.strip() for value in (self.name, self.version, self.provenance)):
             raise ValueError("capability name, version, and provenance must be non-blank")
         if self.license is not None and not self.license.strip():
             raise ValueError("capability license, when present, must be non-blank")
+        if (self.signature is None) != (self.signer_key_id is None):
+            raise ValueError("signature and signer_key_id must both be present or both absent")
+        if self.signer_key_id is not None and not self.signer_key_id.strip():
+            raise ValueError("capability signer_key_id, when present, must be non-blank")
 
 
 class CapabilitySourcePort(Protocol):

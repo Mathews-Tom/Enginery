@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Build Tools",
 ]
-dependencies = []
+dependencies = ["cryptography>=42"]
 
 [project.urls]
 Homepage = "https://github.com/Mathews-Tom/Enginery"
