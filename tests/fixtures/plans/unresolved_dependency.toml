@@ -1,0 +1,13 @@
+id = "plan-unresolved"
+source_provider = "fixture"
+external_reference = "unresolved-1"
+source_snapshot_reference = "sha:unresolved-0001"
+
+[[milestones]]
+id = "m1"
+title = "Milestone 1"
+objective = "Depends on a milestone the plan never declares."
+acceptance_criteria = ["m1 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = ["missing"]

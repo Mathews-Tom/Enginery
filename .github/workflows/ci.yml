@@ -50,6 +50,6 @@ jobs:
 
       - name: Check import boundaries
         run: |
-          for layer in domain application engine ledger policy evidence evaluation adapters cli; do
+          for layer in domain application engine ledger plans policy evidence evaluation adapters cli; do
             uv run python scripts/check_import_boundaries.py "$layer"
           done

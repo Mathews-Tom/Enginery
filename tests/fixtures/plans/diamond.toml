@@ -1,0 +1,40 @@
+id = "plan-diamond"
+source_provider = "fixture"
+external_reference = "diamond-1"
+source_snapshot_reference = "sha:diamond-0001"
+
+[[milestones]]
+id = "m1"
+title = "Milestone 1"
+objective = "Root milestone with no dependencies."
+acceptance_criteria = ["m1 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = []
+
+[[milestones]]
+id = "m2a"
+title = "Milestone 2a"
+objective = "One of two parallel branches from m1."
+acceptance_criteria = ["m2a completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = ["m1"]
+
+[[milestones]]
+id = "m2b"
+title = "Milestone 2b"
+objective = "The other of two parallel branches from m1."
+acceptance_criteria = ["m2b completes"]
+repository = "repo-b"
+risk_class = "low"
+dependencies = ["m1"]
+
+[[milestones]]
+id = "m3"
+title = "Milestone 3"
+objective = "Joins m2a and m2b."
+acceptance_criteria = ["m3 completes"]
+repository = "repo-a"
+risk_class = "low"
+dependencies = ["m2a", "m2b"]

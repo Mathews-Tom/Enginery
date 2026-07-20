@@ -66,6 +66,14 @@ class WorkflowDefinitionId(_Identifier):
     """Identifies an immutable, versioned workflow manifest."""
 
 
+class PlanId(_Identifier):
+    """Identifies a :class:`enginery.plans.model.Plan` aggregate."""
+
+
+class PlanMilestoneId(_Identifier):
+    """Identifies one milestone declared within a single :class:`Plan`."""
+
+
 class RunId(_Identifier):
     """Identifies one workflow-instance aggregate."""
 
@@ -150,6 +158,8 @@ __all__ = [
     "NodeId",
     "OperationId",
     "OutcomeId",
+    "PlanId",
+    "PlanMilestoneId",
     "PolicyDecisionId",
     "RunId",
     "WorkItemId",
