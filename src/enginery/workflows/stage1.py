@@ -13,6 +13,7 @@ from enginery.adapters.omp import OmpHarness
 from enginery.application.work_ports import (
     HarnessResult,
     HarnessTask,
+    PullRequestEvidence,
     PullRequestPort,
     PullRequestRequest,
     WorkLedgerPort,
@@ -322,46 +323,80 @@ class Stage1RunService:
             )
             return Stage1Progression(action, run)
 
-        implementation_status = self._node_status(run_id, "implement")
-        if implementation_status is None:
+        implement_state = self._node_state_optional(run_id, "implement")
+        if implement_state is None:
             return Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
+        implementation_status = implement_state.get("status")
         if implementation_status in {"failed", "cancelled", "blocked"}:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if implementation_status != "passed":
-            result_path = _implementation_result_path(run.request)
+            result_path = _implementation_result_path(
+                run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
+            )
             action = (
                 Stage1ProgressionAction.COLLECT_IMPLEMENTATION
                 if result_path.is_file()
                 else Stage1ProgressionAction.WAIT
             )
             return Stage1Progression(action, run)
+        generation = _generation(_string(implement_state, "attempt_id"))
 
-        validation_status = self._node_status(run_id, "validate")
-        if validation_status is None:
+        validate_state = self._node_state_optional(run_id, "validate")
+        if (
+            validate_state is None
+            or _generation(_string(validate_state, "attempt_id")) != generation
+        ):
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
-        if validation_status != "passed":
+        if validate_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
-        review_status = self._node_status(run_id, "review")
-        if review_status != "passed":
+        review_state = self._node_state_optional(run_id, "review")
+        if review_state is None or _generation(_string(review_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if self._review_outcome(run_id) is not ReviewOutcome.APPROVED:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
-        open_pr_status = self._node_status(run_id, "open_pr")
-        if open_pr_status in {None, "queued"}:
+
+        open_pr_state = self._node_state_optional(run_id, "open_pr")
+        if open_pr_state is None or _generation(_string(open_pr_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
-        if open_pr_status != "passed":
+        if open_pr_state.get("status") == "queued":
+            return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
+        if open_pr_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
-        wait_for_ci_status = self._node_status(run_id, "wait_for_ci")
-        if wait_for_ci_status in {None, "queued"}:
+        wait_for_ci_state = self._node_state_optional(run_id, "wait_for_ci")
+        if (
+            wait_for_ci_state is None
+            or _generation(_string(wait_for_ci_state, "attempt_id")) != generation
+        ):
             return Stage1Progression(Stage1ProgressionAction.WAIT_FOR_CI, run)
-        if wait_for_ci_status != "passed":
+        if wait_for_ci_state.get("status") == "queued":
+            return Stage1Progression(Stage1ProgressionAction.WAIT_FOR_CI, run)
+        if (
+            wait_for_ci_state.get("status") == "failed"
+            and wait_for_ci_state.get("pull_request_outcome") == PullRequestOutcome.BLOCKED.value
+        ):
+            # A genuine required-check failure on our own pushed head takes the same
+            # bounded repair edge as an actionable review finding: a fresh implementation
+            # generation when budget remains, otherwise escalation with the failure
+            # attached. A superseded or otherwise ambiguous outcome still escalates
+            # unconditionally, since the divergent subject was not necessarily caused by
+            # this run's own implementation.
+            action = (
+                Stage1ProgressionAction.IMPLEMENT
+                if generation < run.request.repair_limit
+                else Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+            )
+            return Stage1Progression(action, run)
+        if wait_for_ci_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
-        verify_status = self._node_status(run_id, "verify")
-        if verify_status in {None, "queued"}:
+
+        verify_state = self._node_state_optional(run_id, "verify")
+        if verify_state is None or _generation(_string(verify_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
-        if verify_status != "passed":
+        if verify_state.get("status") == "queued":
+            return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
+        if verify_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         return Stage1Progression(Stage1ProgressionAction.WAIT, run)
 
@@ -451,15 +486,51 @@ class Stage1RunService:
     ) -> Stage1ImplementationDispatch:
         """Launch one OMP attempt only after durable successful qualification."""
         self._require_passed_node(request.run.id, "qualify")
-        execution = request.implementation
-        task = _implementation_task(request)
-        result_path = _implementation_result_path(request)
+        existing = self._node_state_optional(request.run.id, "implement")
+        if existing is None:
+            attempt_id = request.implementation.attempt_id
+            operation_id = request.implementation.operation_id
+            repair_context = None
+        else:
+            if existing.get("status") not in {"passed", "failed", "cancelled", "blocked"}:
+                raise ExternalConflictError(
+                    "Stage 1 implementation repair requires a terminal prior attempt"
+                )
+            wait_state = self._node_state(request.run.id, "wait_for_ci")
+            if (
+                wait_state.get("status") != "failed"
+                or wait_state.get("pull_request_outcome") != PullRequestOutcome.BLOCKED.value
+            ):
+                raise ExternalConflictError(
+                    "Stage 1 implementation repair requires a blocked CI observation"
+                )
+            generation = _generation(_string(existing, "attempt_id")) + 1
+            if generation > request.repair_limit:
+                raise ExternalConflictError(
+                    "Stage 1 implementation repair exceeds the configured repair limit"
+                )
+            attempt_id = f"implement-{generation}"
+            operation_id = OperationId.derive(
+                run_id=request.run.id,
+                node_id=NodeId("implement"),
+                side_effect_kind="repair_implementation",
+                target_scope=request.repository_id,
+                ordinal=generation,
+            )
+            repair_context = _repair_context(wait_state)
+        task = _implementation_task(
+            request,
+            attempt_id=attempt_id,
+            operation_id=operation_id,
+            repair_context=repair_context,
+        )
+        result_path = _implementation_result_path(request, operation_id=operation_id)
         dispatch = WorkflowDispatch(
             _fixture_dispatch(
                 request,
                 node_id="implement",
-                attempt_id=execution.attempt_id,
-                operation_id=str(execution.operation_id),
+                attempt_id=attempt_id,
+                operation_id=str(operation_id),
                 command=self._require_omp_harness().supervised_command(
                     task, result_path=result_path
                 ),
@@ -479,8 +550,8 @@ class Stage1RunService:
             for fixture in tick.dispatched
             if fixture.lease.run_id == str(request.run.id)
             and fixture.lease.node_id == "implement"
-            and fixture.lease.attempt_id == execution.attempt_id
-            and fixture.lease.operation_id == str(execution.operation_id)
+            and fixture.lease.attempt_id == attempt_id
+            and fixture.lease.operation_id == str(operation_id)
         )
         if len(matching) != 1:
             raise ExternalConflictError(
@@ -505,6 +576,13 @@ class Stage1RunService:
     ) -> HarnessResult:
         """Claim the current epoch, then ingest a completed supervised OMP result."""
         self.runtime.claim_epoch(now=now, heartbeat_window=heartbeat_window)
+        implement_state = self._node_state(request.run.id, "implement")
+        attempt_id = _string(implement_state, "attempt_id")
+        operation_id = OperationId(_string(implement_state, "operation_id"))
+        task = _implementation_task(
+            request, attempt_id=attempt_id, operation_id=operation_id, repair_context=None
+        )
+        result_path = _implementation_result_path(request, operation_id=operation_id)
         return Stage1ImplementationExecutor(
             runtime=self.runtime,
             harness=self._require_omp_harness(),
@@ -515,9 +593,9 @@ class Stage1RunService:
                 run_id=str(request.run.id),
                 node_id="implement",
             ),
-            task=_implementation_task(request),
+            task=task,
             now=now,
-            result_path=_implementation_result_path(request),
+            result_path=result_path,
         )
 
     def validate_implementation(
@@ -529,6 +607,7 @@ class Stage1RunService:
     ) -> Stage1ValidationResult:
         """Run configured focused validation after the OMP result is durable."""
         self._require_passed_node(request.run.id, "implement")
+        generation = self._implement_generation(request.run.id)
         return Stage1ValidationExecutor(
             runtime=self.runtime,
             artifact_store=self._require_omp_harness().artifact_store,
@@ -537,14 +616,14 @@ class Stage1RunService:
                 _fixture_dispatch(
                     request,
                     node_id="validate",
-                    attempt_id="validate-0",
+                    attempt_id=f"validate-{generation}",
                     operation_id=str(
                         OperationId.derive(
                             run_id=request.run.id,
                             node_id=NodeId("validate"),
                             side_effect_kind="validation",
                             target_scope=request.repository_id,
-                            ordinal=0,
+                            ordinal=generation,
                         )
                     ),
                     command=request.validation_commands[0],
@@ -606,6 +685,10 @@ class Stage1RunService:
         self._require_passed_node(request.run.id, "review")
         if self._review_outcome(request.run.id) is not ReviewOutcome.APPROVED:
             raise MissingPrerequisiteError("Stage 1 requires an approved independent review")
+        generation = self._implement_generation(request.run.id)
+        # The pull-request operation id is one logical side effect for the whole run:
+        # it stays constant across repair generations so a repaired implementation
+        # reconciles the same pull request instead of ambiguously creating a new one.
         operation_id = OperationId.derive(
             run_id=request.run.id,
             node_id=NodeId("open_pr"),
@@ -617,7 +700,7 @@ class Stage1RunService:
             _fixture_dispatch(
                 request,
                 node_id="open_pr",
-                attempt_id="open-pr-0",
+                attempt_id=f"open-pr-{generation}",
                 operation_id=str(operation_id),
                 command=("open_pr",),
                 dependencies=((str(request.run.id), "review"),),
@@ -679,6 +762,17 @@ class Stage1RunService:
             )
         return projection.state
 
+    def _node_state_optional(self, run_id: RunId, node_id: str) -> Mapping[str, object] | None:
+        projection = self.ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:{node_id}",
+        )
+        return None if projection is None else projection.state
+
+    def _implement_generation(self, run_id: RunId) -> int:
+        """Return the repair generation of the current durable implementation attempt."""
+        return _generation(_string(self._node_state(run_id, "implement"), "attempt_id"))
+
     def _require_attempt_state(self, attempt_id: str) -> Mapping[str, object]:
         projection = self.ledger.read_projection(
             aggregate_type="node_attempt", aggregate_id=attempt_id
@@ -700,6 +794,7 @@ class Stage1RunService:
         """Observe exact-head CI until it passes or produces a terminal failure."""
         self._require_passed_node(request.run.id, "open_pr")
         open_pr = self._node_state(request.run.id, "open_pr")
+        generation = self._implement_generation(request.run.id)
         pull_request_number = _integer(open_pr, "pull_request_number")
         expected_head_revision = _string(open_pr, "head_revision")
         requirements = PullRequestRequirements(
@@ -711,14 +806,14 @@ class Stage1RunService:
             _fixture_dispatch(
                 request,
                 node_id="wait_for_ci",
-                attempt_id="wait-for-ci-0",
+                attempt_id=f"wait-for-ci-{generation}",
                 operation_id=str(
                     OperationId.derive(
                         run_id=request.run.id,
                         node_id=NodeId("wait_for_ci"),
                         side_effect_kind="ci_observation",
                         target_scope=request.repository_id,
-                        ordinal=0,
+                        ordinal=generation,
                     )
                 ),
                 command=("wait_for_ci",),
@@ -729,18 +824,21 @@ class Stage1RunService:
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        outcome = evaluate_pull_request(
-            self._require_pull_requests().evidence(pull_request_number), requirements
-        )
+        evidence = self._require_pull_requests().evidence(pull_request_number)
+        outcome = evaluate_pull_request(evidence, requirements)
         if outcome is PullRequestOutcome.WAITING:
             return outcome
+        extra: dict[str, object] = {"pull_request_outcome": outcome.value}
+        failed_checks = _failed_checks(evidence, request.required_checks)
+        if failed_checks:
+            extra["failed_checks"] = list(failed_checks)
         self.runtime.complete_node(
             run_id=str(request.run.id),
             node_id="wait_for_ci",
             epoch=epoch.epoch,
             now=now,
             outcome="passed" if outcome is PullRequestOutcome.MERGE_READY else "failed",
-            extra={"pull_request_outcome": outcome.value},
+            extra=extra,
         )
         return outcome
 
@@ -754,7 +852,10 @@ class Stage1RunService:
         """Double-read current subjects before recording a merge-ready evidence bundle."""
         self._require_passed_node(request.run.id, "wait_for_ci")
         open_pr = self._node_state(request.run.id, "open_pr")
-        implementation = self._require_attempt_state(request.implementation.attempt_id)
+        generation = self._implement_generation(request.run.id)
+        implementation = self._require_attempt_state(
+            _string(self._node_state(request.run.id, "implement"), "attempt_id")
+        )
         validation = self._node_state(request.run.id, "validate")
         verification_request = Stage1VerificationRequest(
             run_id=request.run.id,
@@ -763,7 +864,7 @@ class Stage1RunService:
                 node_id=NodeId("verify"),
                 side_effect_kind="publish_merge_ready",
                 target_scope=request.work_snapshot.work_item.external_reference,
-                ordinal=0,
+                ordinal=generation,
             ),
             external_reference=request.work_snapshot.work_item.external_reference,
             issue_revision=request.work_snapshot.source_revision,
@@ -784,7 +885,7 @@ class Stage1RunService:
             _fixture_dispatch(
                 request,
                 node_id="verify",
-                attempt_id="verify-0",
+                attempt_id=f"verify-{generation}",
                 operation_id=str(verification_request.lifecycle_operation_id),
                 command=("verify_merge_ready",),
                 dependencies=((str(request.run.id), "wait_for_ci"),),
@@ -863,17 +964,29 @@ class Stage1RunService:
         return self.omp_harness
 
 
-def _implementation_task(request: Stage1RunRequest) -> HarnessTask:
+def _implementation_task(
+    request: Stage1RunRequest,
+    *,
+    attempt_id: str,
+    operation_id: OperationId,
+    repair_context: str | None,
+) -> HarnessTask:
     execution = request.implementation
-    branch_constraint = (
-        f"Create and work only on branch {request.head_branch!r} from "
-        f"{request.run.base_revision!r}; commit and push the completed change to origin."
-    )
+    if repair_context is None:
+        branch_constraint = (
+            f"Create and work only on branch {request.head_branch!r} from "
+            f"{request.run.base_revision!r}; commit and push the completed change to origin."
+        )
+    else:
+        branch_constraint = (
+            f"Continue only on the existing branch {request.head_branch!r}; do not create "
+            f"a new branch. {repair_context} Commit and push the corrected change to origin."
+        )
     return HarnessTask(
         run_id=request.run.id,
         node_id=NodeId("implement"),
-        attempt_id=NodeAttemptId(execution.attempt_id),
-        operation_id=execution.operation_id,
+        attempt_id=NodeAttemptId(attempt_id),
+        operation_id=operation_id,
         workspace_path=request.workspace_path,
         objective=request.work_snapshot.work_item.objective,
         acceptance_criteria=request.work_snapshot.work_item.acceptance_criteria,
@@ -885,10 +998,51 @@ def _implementation_task(request: Stage1RunRequest) -> HarnessTask:
     )
 
 
-def _implementation_result_path(request: Stage1RunRequest) -> Path:
+def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
     return request.workspace_path / (
-        f".enginery-omp-{Digest.of_bytes(str(request.implementation.operation_id).encode())}.json"
+        f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     )
+
+
+def _generation(attempt_id: str) -> int:
+    """Parse the trailing repair generation encoded in a runtime node attempt id."""
+    suffix = attempt_id.rsplit("-", 1)[-1]
+    if not suffix.isdigit():
+        raise InternalInvariantViolationError(
+            "Stage 1 runtime node attempt id has an invalid generation suffix",
+            details={"attempt_id": attempt_id},
+        )
+    return int(suffix)
+
+
+def _failed_checks(
+    evidence: PullRequestEvidence, required_checks: tuple[str, ...]
+) -> tuple[dict[str, str | None], ...]:
+    entries: list[dict[str, str | None]] = []
+    for check in evidence.checks:
+        if check.name not in required_checks:
+            continue
+        if check.status.lower() != "completed" or (
+            check.conclusion is None or check.conclusion.lower() != "success"
+        ):
+            entries.append(
+                {"name": check.name, "status": check.status, "conclusion": check.conclusion}
+            )
+    return tuple(entries)
+
+
+def _repair_context(wait_state: Mapping[str, object]) -> str:
+    failed_checks = wait_state.get("failed_checks")
+    if isinstance(failed_checks, list) and failed_checks:
+        details = "; ".join(
+            f"{entry.get('name')}: {entry.get('conclusion') or entry.get('status')}"
+            for entry in failed_checks
+            if isinstance(entry, dict)
+        )
+    else:
+        outcome = wait_state.get("pull_request_outcome", "blocked")
+        details = f"pull request outcome was {outcome!r}"
+    return f"The previous attempt's pull request failed exact-head CI ({details})."
 
 
 def _fixture_dispatch(

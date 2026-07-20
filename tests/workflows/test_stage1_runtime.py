@@ -782,7 +782,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             False,
             False,
             "blocked",
-            "await_human_review",
+            "implement",
         ),
         (
             "completed",
@@ -1019,6 +1019,340 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             assert work_ledger.published[0].evidence_digest == result.evidence.digest
         else:
             assert not work_ledger.published
+
+
+@pytest.mark.parametrize("repair_limit,next_action", [(1, "implement"), (0, "await_human_review")])
+def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    repair_limit: int,
+    next_action: str,
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    template_manifest = issue_to_pr_manifest()
+    manifest = replace(
+        template_manifest,
+        nodes={
+            **template_manifest.nodes,
+            NodeId("implement"): replace(
+                template_manifest.nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-repair-gate"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-repair-gate",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=repair_limit,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-repair-gate"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            omp_credential_reference="test-omp-keyring",
+            omp_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    work_ledger = TerminalWorkLedger(snapshot)
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        work_ledger=cast(WorkLedgerPort, work_ledger),
+        pull_requests=cast(PullRequestPort, pull_requests),
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    for node_id in ("qualify", "implement", "validate"):
+        dispatch = WorkflowNodeDispatch(
+            FixtureDispatch(
+                run_id=str(request.run.id),
+                node_id=node_id,
+                attempt_id=f"{node_id}-0",
+                repository_id=request.repository_id,
+                repository_path=request.repository_path,
+                workspace_path=request.workspace_path,
+                base_revision="base-revision",
+                command=(node_id,),
+                expected_attempt_version=0,
+                operation_id=f"{node_id}:run-repair-gate",
+                dependencies=(
+                    ()
+                    if node_id == "qualify"
+                    else (
+                        (
+                            str(request.run.id),
+                            "qualify" if node_id == "implement" else "implement",
+                        ),
+                    )
+                ),
+                workflow_definition_id=manifest.id.value,
+            ),
+            manifest,
+        )
+        epoch = runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+        )
+        runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=now,
+            extra=(
+                {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+                if node_id == "validate"
+                else None
+            ),
+        )
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    pull_requests.check_status = "completed"
+    pull_requests.check_conclusion = "failure"
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "blocked"
+    )
+
+    assert service.next_action(request.run.id).action.value == next_action
+    wait_node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:wait_for_ci"
+    )
+    assert wait_node is not None
+    assert wait_node.state["failed_checks"] == [
+        {"name": "CI", "status": "completed", "conclusion": "failure"}
+    ]
+
+
+def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    template_manifest = issue_to_pr_manifest()
+    manifest = replace(
+        template_manifest,
+        nodes={
+            **template_manifest.nodes,
+            NodeId("implement"): replace(
+                template_manifest.nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-repair"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-repair",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-repair"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            omp_credential_reference="test-omp-keyring",
+            omp_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    work_ledger = TerminalWorkLedger(snapshot)
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        work_ledger=cast(WorkLedgerPort, work_ledger),
+        pull_requests=cast(PullRequestPort, pull_requests),
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    def _drive_generation(generation: int) -> None:
+        for node_id in (
+            ("qualify", "implement", "validate")
+            if generation == 0
+            else (
+                "implement",
+                "validate",
+            )
+        ):
+            dispatch = WorkflowNodeDispatch(
+                FixtureDispatch(
+                    run_id=str(request.run.id),
+                    node_id=node_id,
+                    attempt_id=(
+                        f"{node_id}-0" if node_id == "qualify" else f"{node_id}-{generation}"
+                    ),
+                    repository_id=request.repository_id,
+                    repository_path=request.repository_path,
+                    workspace_path=request.workspace_path,
+                    base_revision="base-revision",
+                    command=(node_id,),
+                    expected_attempt_version=0,
+                    operation_id=f"{node_id}:run-repair:{generation}",
+                    dependencies=(
+                        ()
+                        if node_id == "qualify"
+                        else (
+                            (
+                                str(request.run.id),
+                                "qualify" if node_id == "implement" else "implement",
+                            ),
+                        )
+                    ),
+                    workflow_definition_id=manifest.id.value,
+                ),
+                manifest,
+            )
+            epoch = runtime.register_node(
+                dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+            )
+            runtime.complete_node(
+                run_id=str(request.run.id),
+                node_id=node_id,
+                epoch=epoch.epoch,
+                now=now,
+                extra=(
+                    {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+                    if node_id == "validate"
+                    else None
+                ),
+            )
+        ledger_service.append(
+            AppendCommand(
+                correlation_id=f"implementation-artifacts-{generation}",
+                events=(
+                    EventWrite(
+                        aggregate_type="node_attempt",
+                        aggregate_id=f"implement-{generation}",
+                        expected_version=0,
+                        event_type="node_attempt.result_ingested",
+                        schema_version=1,
+                        payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    ),
+                ),
+            )
+        )
+
+    _drive_generation(0)
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    pull_requests.check_status = "completed"
+    pull_requests.check_conclusion = "failure"
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "blocked"
+    )
+    assert service.next_action(request.run.id).action.value == "implement"
+
+    _drive_generation(1)
+    implement_node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:implement"
+    )
+    assert implement_node is not None
+    assert implement_node.state["attempt_id"] == "implement-1"
+    assert service.next_action(request.run.id).action.value == "await_human_review"
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=1,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    assert service.next_action(request.run.id).action.value == "open_pr"
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert len(pull_requests.requests) == 2
+    assert pull_requests.requests[0].operation_id == pull_requests.requests[1].operation_id
+    assert service.next_action(request.run.id).action.value == "wait_for_ci"
+    pull_requests.check_conclusion = "success"
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "merge_ready"
+    )
+    assert service.next_action(request.run.id).action.value == "verify"
+    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert result.outcome.value == "merge_ready"
+    assert result.evidence is not None
+    assert work_ledger.published[0].evidence_digest == result.evidence.digest
+    assert service.next_action(request.run.id).action.value == "wait"
 
 
 class RecordingPullRequests:
