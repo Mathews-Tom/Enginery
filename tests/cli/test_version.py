@@ -19,4 +19,4 @@ def test_version_flag_exits_zero_and_prints_installed_version(
 
 
 def test_installed_version_matches_the_canonical_release() -> None:
-    assert metadata.version("enginery") == "0.1.0"
+    assert metadata.version("enginery") == "0.2.0"

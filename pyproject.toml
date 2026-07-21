@@ -1,6 +1,6 @@
 [project]
 name = "enginery"
-version = "0.1.0"
+version = "0.2.0"
 description = "Engineer the system that engineers software."
 readme = "README.md"
 license = "Apache-2.0"

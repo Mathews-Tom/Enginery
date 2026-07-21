@@ -4,6 +4,58 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.2.0] - 2026-07-21
+
+Second public release. Layered on `v0.1.0`'s Stage 1 capability, this
+release ships Stage 2 (plan to verified released version) plus two
+cross-cutting additions the Stage 2 train depended on: harness
+neutrality proved against a second coding-agent harness, and
+capability locking with provenance verification.
+
+### Added
+
+- A second coding-agent harness adapter (Claude Code), proving the
+  harness port contract is not shaped around any one provider: the
+  same normalized task, event, cancellation, artifact, and evidence
+  fixture passes against both OMP and Claude Code.
+- Capability locking and provenance verification: a capability
+  lockfile, a pinned-key signature-verification primitive, an optional
+  Armory capability-registry adapter (disabled by default), and a hard
+  rule requiring interactive human exact-digest approval before a
+  run-introduced or changed capability executes.
+- Development-plan ingestion, dependency-safe child-run scheduling,
+  and stacked-branch topology tracking: a plan schema, milestone
+  dependency-graph validation, a plan-to-child-run process manager,
+  and a stack-evidence projection covering linear, parallel, diamond,
+  failed, and resumed plan shapes.
+- A complete Stage 2 (plan to verified released version) lifecycle:
+  root-to-leaf stack merging under the merge-ready contract's
+  double-read discipline, policy-gated version/changelog preparation,
+  fixed-broker wheel/sdist build, GitHub Release and PyPI publication
+  adapters, ambiguous-publication reconciliation, and destination
+  verification. Proven end to end by live-publishing a disposable
+  fixture distribution through both real destinations.
+- A cumulative Stage 1+2 restart/replay gate, extending the Stage 1
+  gate with a local, in-process, no-network proof of Stage 2's full
+  merge -> prepare -> build -> publish -> verify sequence, including
+  publish-side idempotent-replay verification after a simulated
+  coordinator restart.
+
+### Not part of this release
+
+- Stage 3 (incident to hotfix and rollback) ships in the `v0.3.0`
+  release train.
+- Stage 4 (governed factory self-improvement) is gate-deferred behind
+  a data-threshold entry gate with no committed date; it does not
+  exist in this release.
+- Self-improvement (candidate evaluation, canary rollout, and
+  promotion) does not exist in this release.
+- Windows is not supported. Process supervision, cancellation, and
+  recovery are bound to POSIX process groups and signals.
+- The worktree backend provides workspace separation, not
+  hostile-code containment.
+- There is no hosted, multi-tenant, or browser-dashboard surface.
+
 ## [0.1.0] - 2026-07-21
 
 Initial public release. This is a **Stage 1-only** release: a
