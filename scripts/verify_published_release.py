@@ -43,6 +43,21 @@ def _fetch_url(url: str) -> bytes:
     return data
 
 
+def _resolve_tag_commit(*, repository: str, tag_name: str) -> str:
+    """Resolve an annotated or lightweight tag ref to the commit sha it targets."""
+    raw = _run_gh(["api", f"repos/{repository}/git/ref/tags/{tag_name}"])
+    ref_object = json.loads(raw)["object"]
+    if ref_object["type"] == "commit":
+        return str(ref_object["sha"])
+    if ref_object["type"] == "tag":
+        tag_raw = _run_gh(["api", f"repos/{repository}/git/tags/{ref_object['sha']}"])
+        tag_object = json.loads(tag_raw)["object"]
+        if tag_object["type"] != "commit":
+            raise VerificationError(f"tag {tag_name!r} does not ultimately point to a commit")
+        return str(tag_object["sha"])
+    raise VerificationError(f"unexpected tag object type {ref_object['type']!r} for {tag_name!r}")
+
+
 def _verify_github_release(
     *, repository: str, tag_name: str, target_commitish: str, artifact_hashes: dict[str, str]
 ) -> dict[str, object]:
@@ -54,7 +69,7 @@ def _verify_github_release(
             "--repo",
             repository,
             "--json",
-            "tagName,targetCommitish,isDraft,isPrerelease,assets,url",
+            "tagName,isDraft,isPrerelease,assets,url",
         ]
     )
     release = json.loads(raw)
@@ -63,11 +78,18 @@ def _verify_github_release(
         raise VerificationError(
             f"GitHub release tagName is {release.get('tagName')!r}, expected {tag_name!r}"
         )
-    observed_commitish = release.get("targetCommitish")
-    if observed_commitish != target_commitish:
+
+    # `targetCommitish` on `gh release view` only reflects the exact commit when
+    # GitHub itself creates the tag as part of release creation; for a release
+    # built from an already-existing tag (this repository's convention: the tag
+    # is created and pushed before the release), GitHub reports the default
+    # branch name there instead. Resolve the tag ref itself -- which is
+    # immutable once pushed -- to the commit it actually targets.
+    observed_commit = _resolve_tag_commit(repository=repository, tag_name=tag_name)
+    if observed_commit != target_commitish:
         raise VerificationError(
-            "GitHub release target commit does not match the expected commit: "
-            f"expected {target_commitish!r}, observed {observed_commitish!r}"
+            "the tag does not resolve to the expected commit: "
+            f"expected {target_commitish!r}, observed {observed_commit!r}"
         )
     if release.get("isDraft"):
         raise VerificationError("GitHub release is still a draft, not published")
@@ -79,7 +101,15 @@ def _verify_github_release(
             raise VerificationError(
                 f"GitHub release has no asset named {filename!r}; found {sorted(assets)}"
             )
-        download_url = asset.get("url") or asset.get("browser_download_url")
+        reported_digest = asset.get("digest")
+        if reported_digest == f"sha256:{expected_sha256}":
+            continue
+        if reported_digest not in (None, ""):
+            raise VerificationError(
+                f"GitHub release asset {filename!r} digest mismatch: "
+                f"expected sha256:{expected_sha256}, observed {reported_digest!r}"
+            )
+        download_url = asset.get("url")
         if not download_url:
             raise VerificationError(f"GitHub release asset {filename!r} has no download URL")
         try:
