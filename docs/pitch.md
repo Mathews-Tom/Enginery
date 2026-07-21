@@ -2,7 +2,7 @@
 
 - **Conversation memo**
 - **Purpose:** Test whether this is a problem worth solving with engineers, potential collaborators, and engineering leaders.
-- **Status:** Product concept; no productivity, market-size, or security outcome is claimed without validation.
+- **Status:** `v0.3.0` published (Stage 1, 2, and 3 shipped, each with real evidence — see [Pilot results](#pilot-results-2026-07-20) below and the `v0.2.0`/`v0.3.0` release trains that followed it); Stage 4 remains gate-deferred and unclaimed. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
 
 ## The short version
 
@@ -247,6 +247,8 @@ Ran the documented comparison protocol against three comparable low-risk work-it
 **Decision.** Applying the rule above: every stale-evidence case observed was rejected, including the unplanned one; no duplicate external effect occurred across six real GitHub PRs plus one injected-conflict PR; the interrupted run resumed only after reconciliation, without launching a second worker; the evidence bundle plus the GitHub PR, CI, and issue-comment trail let an independent reader explain why each result is merge-ready; and the operator accepts the additional installation and maintenance burden, conditioned on closing the three named CLI gaps before wider or automated use.
 
 **Result: `go`.** Combined with the Stage 1 gate evidence recorded above, this satisfies gate G1 in full. The `v0.2.0` train (M9–M12) may proceed.
+
+**Status update.** The `v0.2.0` train did proceed and shipped for real: second-harness neutrality (Claude Code), capability locking and provenance, plan ingestion, and the complete Stage 2 (plan to verified release) lifecycle, published to PyPI and GitHub Releases on 2026-07-21. A `v0.3.0` train followed with Stage 3 (incident to hotfix and rollback) against a controlled local service, published the same day. Stage 4 (governed factory self-improvement) remains gate-deferred; the current corpus is single-repository, single-operator dogfooding, which fails the gate's own corpus-diversity and dual-human-principal conditions.
 
 
 ## Supporting material

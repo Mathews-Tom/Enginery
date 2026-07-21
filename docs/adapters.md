@@ -46,7 +46,7 @@ uv run python scripts/check_import_boundaries.py <layer>
 | `PullRequestPort` | `application/work_ports.py` | `GitHubPullRequests` | `probe`, `create_or_update`, `get`, `evidence`, `merge`, `reconcile` |
 | `ValidationPort` | `application/delivery_ports.py` | `LocalValidation` (`local-validation`) | `probe`, `validate`, `reconcile` |
 | `ReleasePort` | `application/delivery_ports.py` | `LocalPublication`, `GitHubReleaseAdapter`, `PyPiAdapter` | `probe`, `publish`, `verify`, `reconcile` |
-| `DeploymentPort` | `application/delivery_ports.py` | `LocalDeploymentFixture` | `probe`, `deploy`, `rollback`, `reconcile` |
+| `DeploymentPort` | `application/delivery_ports.py` | `LocalDeploymentFixture`, `LocalServiceDeploymentAdapter` | `probe`, `deploy`, `rollback`, `reconcile` |
 | `CapabilitySourcePort` | `application/delivery_ports.py` | `LocalCapabilitySource`, `ArmoryCapabilitySource` | `probe`, `discover`, `resolve`, `fetch` |
 
 Every port shares the same identity/reconciliation shape, described next.
@@ -221,6 +221,49 @@ matter operationally:
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an
 enforced acceptance property, not an aspiration.
+
+## The incident-to-hotfix-and-rollback surface
+
+Stage 3 (production incident to verified hotfix and rollback) is a
+shipped, adversarially-tested surface with no CLI command of its own:
+using it today means writing Python against `IncidentService` directly,
+the same way `scripts/run_stage3_gate.py` and the Stage 3 leg of
+`scripts/full_system_gate.py` exercise it.
+
+`IncidentService` (`src/enginery/incidents/service.py`) is a frozen
+dataclass over one `LedgerService`, an optional `DeploymentPort`, and an
+optional `PolicyEvaluator` — reconstructing it from a durable ledger
+handle after a coordinator restart is the same pattern
+`Stage1RunService`/`Stage2ReleaseWorkflow` already use. It drives one
+closed-lifecycle `Incident` aggregate through `ingest` (idempotent —
+re-ingesting the same `(source_provider, external_reference)` pair
+returns the already-recorded incident rather than duplicating it),
+`classify`, `bind_release_lineage`, `begin_reproduction` /
+`attempt_reproduction` (only records `reproducing` from a real,
+caller-supplied, executed check — never a hand-typed claim), the fixed
+hotfix workflow, `execute_deployment` / `execute_rollback` (each its own
+hard-required-human `PolicyAction` — `deployment.execute` and
+`deployment.rollback` — so a deployment approval never satisfies the
+rollback requirement), `resolve_observation`, and `record_follow_up`
+(separate `WorkItem`, never merged into the emergency PR's own scope).
+
+`enginery.incidents.hotfix` provides the fixed-broker repair path:
+`create_hotfix_worktree` (a real git worktree at the affected release
+revision), `apply_repair` (writes and commits a caller-authored
+`HotfixRepair`), `prove_non_vacuous_regression` (runs the same real
+check against the unfixed and repaired revisions — a repair is only
+accepted if it fails on the former and passes on the latter),
+`emergency_pull_request_request`, and `remove_hotfix_worktree`.
+
+`LocalServiceDeploymentAdapter` (`src/enginery/adapters/local_service.py`)
+is the real `DeploymentPort` implementation Stage 3 deploys through: it
+starts, stops, and version-swaps a genuine subprocess running a
+stdlib-only local HTTP service fixture
+(`fixtures/enginery-stage3-local-service/app.py`) and polls its real
+`/health` and `/version` endpoints — never a canned or simulated
+receipt. This is distinct from `LocalDeploymentFixture`
+(`src/enginery/adapters/local.py`), an in-memory fixture used only by
+local dev/test composition, not by the real Stage 3 workflow.
 
 ## Example workflows
 

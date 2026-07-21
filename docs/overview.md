@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** Product concept and architecture reference
+- **Status:** `v0.3.0` published (Stage 1, 2, and 3 shipped); Stage 4 gate-deferred
 - **Date:** 2026-07-14
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 
@@ -91,18 +91,21 @@ This protocol prevents blind retries; it does not make an external provider oper
 
 ## 5. Initial workflows and proof status
 
-The following are **design targets, not demonstrated product capabilities**. Enginery remains a product concept until each target has produced its stated evidence in a real, bounded environment.
+Three of the four workflow targets below have shipped and produced
+their stated evidence in a real, bounded environment; the fourth
+remains a **design target, not a demonstrated product capability**,
+and is additionally gate-deferred (see below).
 
-| Workflow target | Planned capability under test | Required proof before the terminal claim |
-|---|---|---|
-| Issue to merge-ready PR | Intake, workspaces, agent execution, validation, evidence, review, source supersession, PR/CI reconciliation | A real, non-empty PR whose final evidence is current; forced interruption yields zero duplicate side effects; no-op work ends `no_change_required` |
-| Plan to verified release | Child workflows, dependency scheduling, stacked changes, merge freshness, fixed publication broker, destination verification | A multi-milestone fixture reaches a destination-verified release; ambiguous publication reconciles without a duplicate version |
-| Incident to hotfix and rollback | Urgent routing, release-lineage selection, minimal remediation, non-vacuous regression evidence, separately authorized deployment and rollback | A controlled service is changed, observed, rolled back, and observed at the prior revision |
-| Governed factory self-improvement | Independent cohorts, replay, held-out evaluation, anti-gaming checks, human canary and promotion | A real candidate sourced from earlier runs is evaluated on locked cohorts and reaches promoted, retained, or rejected with rollback evidence |
+| Workflow target | Planned capability under test | Required proof before the terminal claim | Status |
+|---|---|---|---|
+| Issue to merge-ready PR | Intake, workspaces, agent execution, validation, evidence, review, source supersession, PR/CI reconciliation | A real, non-empty PR whose final evidence is current; forced interruption yields zero duplicate side effects; no-op work ends `no_change_required` | **Shipped, `v0.1.0`** |
+| Plan to verified release | Child workflows, dependency scheduling, stacked changes, merge freshness, fixed publication broker, destination verification | A multi-milestone fixture reaches a destination-verified release; ambiguous publication reconciles without a duplicate version | **Shipped, `v0.2.0`** |
+| Incident to hotfix and rollback | Urgent routing, release-lineage selection, minimal remediation, non-vacuous regression evidence, separately authorized deployment and rollback | A controlled service is changed, observed, rolled back, and observed at the prior revision | **Shipped, `v0.3.0`** |
+| Governed factory self-improvement | Independent cohorts, replay, held-out evaluation, anti-gaming checks, human canary and promotion | A real candidate sourced from earlier runs is evaluated on locked cohorts and reaches promoted, retained, or rejected with rollback evidence | Design target, gate-deferred |
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
 
-Release packaging (revised 2026-07-14): the first workflow target plus the outcome-capture schema constitute `v0.1.0`; the second and third follow as `v0.2` and `v0.3`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations.
+Release packaging: the first workflow target plus the outcome-capture schema shipped as `v0.1.0`; the second shipped as `v0.2.0` (also carrying second-harness neutrality and capability provenance); the third shipped as `v0.3.0`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations. That gate has not passed: the current corpus is single-repository, single-operator dogfooding, which the gate's own corpus-diversity condition explicitly disqualifies.
 
 ### Product-hypothesis decision rule
 
