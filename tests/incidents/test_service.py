@@ -263,3 +263,22 @@ class TestAttemptReproduction:
         service.attempt_reproduction(incident.id, check=check)
 
         assert calls == [True]
+
+
+class TestMarkHotfixReady:
+    def test_moves_from_remediating_to_hotfix_ready(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.begin_reproduction(incident.id)
+        service.attempt_reproduction(
+            incident.id,
+            check=lambda: ReproductionRecord(
+                outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+            ),
+        )
+
+        ready = service.mark_hotfix_ready(incident.id)
+
+        assert ready.state is IncidentState.HOTFIX_READY
+        assert service.read(incident.id) == ready
