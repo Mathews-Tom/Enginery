@@ -6,6 +6,7 @@ import pytest
 
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.ids import IncidentId
 from enginery.domain.incident import (
     IncidentSeverity,
     IncidentState,
@@ -118,7 +119,6 @@ class TestClassify:
 
     def test_classify_unknown_incident_raises(self, ledger_service: LedgerService) -> None:
         service = IncidentService(ledger=ledger_service)
-        from enginery.domain.ids import IncidentId
 
         with pytest.raises(InvalidInputError, match="no incident"):
             service.classify(IncidentId("missing"))
@@ -282,3 +282,62 @@ class TestMarkHotfixReady:
 
         assert ready.state is IncidentState.HOTFIX_READY
         assert service.read(incident.id) == ready
+
+
+def _reach_remediating(service: IncidentService, incident_id: IncidentId) -> None:
+    service.classify(incident_id)
+    service.begin_reproduction(incident_id)
+    service.attempt_reproduction(
+        incident_id,
+        check=lambda: ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+        ),
+    )
+
+
+class TestBeginDeployment:
+    def test_moves_from_remediating_to_deploying(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        _reach_remediating(service, incident.id)
+
+        deploying = service.begin_deployment(incident.id)
+
+        assert deploying.state is IncidentState.DEPLOYING
+        assert service.read(incident.id) == deploying
+
+
+class TestBeginObservation:
+    def test_moves_from_deploying_to_observing(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        _reach_remediating(service, incident.id)
+        service.begin_deployment(incident.id)
+
+        observing = service.begin_observation(incident.id)
+
+        assert observing.state is IncidentState.OBSERVING
+
+
+class TestResolveObservation:
+    def test_healthy_resolves_the_incident(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        _reach_remediating(service, incident.id)
+        service.begin_deployment(incident.id)
+        service.begin_observation(incident.id)
+
+        resolved = service.resolve_observation(incident.id, healthy=True)
+
+        assert resolved.state is IncidentState.RESOLVED
+
+    def test_unhealthy_begins_rollback(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        _reach_remediating(service, incident.id)
+        service.begin_deployment(incident.id)
+        service.begin_observation(incident.id)
+
+        rolling_back = service.resolve_observation(incident.id, healthy=False)
+
+        assert rolling_back.state is IncidentState.ROLLING_BACK
