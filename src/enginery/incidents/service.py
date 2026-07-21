@@ -21,6 +21,7 @@ import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import uuid4
 
 from enginery.application.delivery_ports import (
     DeploymentPort,
@@ -28,7 +29,7 @@ from enginery.application.delivery_ports import (
     DeploymentRequest,
     ReleaseArtifact,
 )
-from enginery.domain.enums import WorkKind
+from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import (
     HumanActionRequiredError,
     InvalidInputError,
@@ -64,6 +65,7 @@ from enginery.policy.schemas import ApprovalSchema
 INCIDENT_AGGREGATE_TYPE = "incident"
 WORK_ITEM_AGGREGATE_TYPE = "work_item"
 AUTHORITY_AGGREGATE_TYPE = "incident_deployment_authority"
+FOLLOW_UP_AGGREGATE_TYPE = "incident_follow_up"
 
 #: A falsifiable check executed against the affected release lineage.
 #: Actually run, never a hand-typed claim -- see ``attempt_reproduction``.
@@ -468,6 +470,79 @@ class IncidentService:
         all_records = tuple(_authority_record_from_dict(record.state) for record in records)
         return tuple(record for record in all_records if record.incident_id == str(incident_id))
 
+    def record_follow_up(
+        self,
+        incident_id: IncidentId,
+        *,
+        title: str,
+        objective: str,
+        acceptance_criteria: tuple[str, ...],
+        repository_targets: tuple[str, ...],
+        constraints: tuple[str, ...] = (),
+    ) -> WorkItem:
+        """Record separate follow-up work discovered during the emergency.
+
+        A new, independent ``WorkItem`` (``WorkKind.ISSUE``) linked to
+        this incident only for traceability -- it is never merged into
+        the incident's own emergency PR or scope, matching REQUIRED
+        WORK's "create separate follow-up work rather than expanding
+        emergency scope."
+        """
+        incident = self._require(incident_id)
+        follow_up_id = WorkItemId(f"incident-follow-up:{incident_id}:{uuid4()}")
+        work_item = WorkItem(
+            id=follow_up_id,
+            work_kind=WorkKind.ISSUE,
+            source_provider="incident-follow-up",
+            external_reference=str(incident_id),
+            source_snapshot_reference=str(incident.aggregate_version),
+            title=title,
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            constraints=constraints,
+            risk_class=RiskClass.LOW,
+            repository_targets=repository_targets,
+            dependencies=(),
+            state=WorkItemState.NEW,
+        )
+        self.ledger.append(
+            AppendCommand(
+                correlation_id=f"incident-follow-up:{follow_up_id}",
+                events=(
+                    EventWrite(
+                        aggregate_type=WORK_ITEM_AGGREGATE_TYPE,
+                        aggregate_id=str(follow_up_id),
+                        expected_version=0,
+                        event_type="work_item.created",
+                        schema_version=1,
+                        payload=work_item_to_dict(work_item),
+                    ),
+                    EventWrite(
+                        aggregate_type=FOLLOW_UP_AGGREGATE_TYPE,
+                        aggregate_id=str(follow_up_id),
+                        expected_version=0,
+                        event_type="incident.follow_up_recorded",
+                        schema_version=1,
+                        payload={
+                            "incident_id": str(incident_id),
+                            "work_item_id": str(follow_up_id),
+                        },
+                    ),
+                ),
+            )
+        )
+        return work_item
+
+    def list_follow_ups(self, incident_id: IncidentId) -> tuple[WorkItem, ...]:
+        records = self.ledger.list_projections(aggregate_type=FOLLOW_UP_AGGREGATE_TYPE)
+        follow_up_ids = [
+            WorkItemId(str(record.state["work_item_id"]))
+            for record in records
+            if record.state["incident_id"] == str(incident_id)
+        ]
+        work_items = (self.read_work_item(follow_up_id) for follow_up_id in follow_up_ids)
+        return tuple(work_item for work_item in work_items if work_item is not None)
+
     def _require_deployment(self) -> DeploymentPort:
         if self.deployment is None:
             raise MissingPrerequisiteError(
@@ -597,6 +672,7 @@ class IncidentService:
 
 __all__ = [
     "AUTHORITY_AGGREGATE_TYPE",
+    "FOLLOW_UP_AGGREGATE_TYPE",
     "INCIDENT_AGGREGATE_TYPE",
     "WORK_ITEM_AGGREGATE_TYPE",
     "IncidentService",

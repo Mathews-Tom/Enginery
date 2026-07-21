@@ -648,3 +648,75 @@ class TestExecuteRollback:
         assert resolved.state is IncidentState.FAILED
         records = service.list_authority_records(incident.id)
         assert any(record.outcome == "failed" for record in records)
+
+
+class TestRecordFollowUp:
+    def test_creates_a_separate_work_item_not_the_incident_kind(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+
+        follow_up = service.record_follow_up(
+            incident.id,
+            title="investigate deployment health-check flakiness",
+            objective="root-cause why v2's deploy observation flagged unhealthy",
+            acceptance_criteria=("root cause documented",),
+            repository_targets=("org/checkout",),
+        )
+
+        assert follow_up.work_kind is WorkKind.ISSUE
+        assert follow_up.id != incident.work_item_id
+        assert follow_up.external_reference == str(incident.id)
+
+    def test_does_not_mutate_the_incident_itself(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+
+        service.record_follow_up(
+            incident.id,
+            title="investigate deployment health-check flakiness",
+            objective="root-cause why v2's deploy observation flagged unhealthy",
+            acceptance_criteria=("root cause documented",),
+            repository_targets=("org/checkout",),
+        )
+
+        assert service.read(incident.id) == incident
+
+    def test_list_follow_ups_returns_only_this_incidents_follow_ups(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = IncidentService(ledger=ledger_service)
+        first = _ingest(service)
+        second = _ingest(service, external_reference="PD-1002")
+        service.record_follow_up(
+            first.id,
+            title="follow up one",
+            objective="objective one",
+            acceptance_criteria=("done",),
+            repository_targets=("org/checkout",),
+        )
+        service.record_follow_up(
+            second.id,
+            title="follow up two",
+            objective="objective two",
+            acceptance_criteria=("done",),
+            repository_targets=("org/checkout",),
+        )
+
+        first_follow_ups = service.list_follow_ups(first.id)
+
+        assert len(first_follow_ups) == 1
+        assert first_follow_ups[0].title == "follow up one"
+
+    def test_raises_for_an_unknown_incident(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+
+        with pytest.raises(InvalidInputError, match="no incident"):
+            service.record_follow_up(
+                IncidentId("missing"),
+                title="t",
+                objective="o",
+                acceptance_criteria=("a",),
+                repository_targets=("org/checkout",),
+            )
