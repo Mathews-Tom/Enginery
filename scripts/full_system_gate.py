@@ -34,7 +34,8 @@ port implemented by a deterministic in-script fixture (no live GitHub
 credentials; live-provider Stage 1 recovery was already independently
 proven and retained at issue #84 -> PR #90 in this repository).
 
-``--stages`` accepts ``1``, ``2``, or ``1,2``. The Stage 2 leg drives the
+``--stages`` accepts any combination of ``1``, ``2``, and ``3`` (for
+example ``1``, ``1,2``, or ``1,2,3``). The Stage 2 leg drives the
 real ``Stage2ReleaseWorkflow`` (``enginery.workflows.plan_to_release``)
 through its full merge -> prepare -> build -> publish -> verify sequence
 against a disposable local fixture package: the merge phase uses a real,
@@ -59,6 +60,24 @@ reconstructed between stages -- durable policy-decision persistence
 across a real restart is Stage 2's own, separately covered surface
 (``tests/policy``, ``tests/workflows/test_plan_to_release.py``), not
 re-proven here.
+
+The Stage 3 leg drives the real, ledger-backed ``IncidentService``
+(``enginery.incidents.service``) through ingest -> classify -> bind
+release lineage -> reproduce -> hotfix -> deploy -> observe -> roll
+back -> restore -> follow-up, reusing the exact same real
+``LocalServiceDeploymentAdapter`` (a real subprocess-managed local HTTP
+service, not a fake) and ``enginery.incidents.hotfix`` git-worktree
+code paths ``scripts/run_stage3_gate.py`` already exercises. Unlike
+the Stage 2 leg, no external credential, fake command runner, or
+network call is involved at all -- the controlled target is a real
+process on ``127.0.0.1``. ``restart_between_stages`` closes and
+reopens the ``IncidentService``'s ledger handle before every
+externally observable step, proving the incident's durable state
+(including its terminal ``rolled_back`` outcome and authority-record
+count) survives a coordinator restart; the deployment broker, policy
+evaluator, and approval registry are held constant across the
+restart, matching the Stage 2 leg's own documented policy-persistence
+caveat above.
 """
 
 from __future__ import annotations
@@ -66,10 +85,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import socket
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -83,7 +104,14 @@ from enginery.adapters.github import (
     GitHubReleaseAdapter,
     GitHubReleaseRequest,
 )
+from enginery.adapters.local import LocalValidation
+from enginery.adapters.local_service import (
+    LocalServiceBuild,
+    LocalServiceDeploymentAdapter,
+    build_local_service_artifact,
+)
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
+from enginery.application.delivery_ports import DeploymentRequest
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -107,6 +135,13 @@ from enginery.domain.ids import (
     WorkflowDefinitionId,
     WorkItemId,
 )
+from enginery.domain.incident import (
+    IncidentSeverity,
+    IncidentState,
+    ReleaseLineage,
+    ReproductionOutcome,
+    ReproductionRecord,
+)
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
@@ -119,6 +154,14 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, Workflo
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.stack_coordinator import StackCoordinator
 from enginery.evaluation.outcomes import OutcomeCaptureService
+from enginery.incidents.hotfix import (
+    HotfixRepair,
+    apply_repair,
+    create_hotfix_worktree,
+    prove_non_vacuous_regression,
+    remove_hotfix_worktree,
+)
+from enginery.incidents.service import IncidentService
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.policy.approval import ApprovalRegistry
@@ -127,7 +170,7 @@ from enginery.policy.schemas import ApprovalSchema
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
 from enginery.workflows.merge_policy import MergePolicyService
 from enginery.workflows.plan_to_release import Stage2ReleaseWorkflow
-from enginery.workflows.review import ReviewFinding, ReviewReport
+from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport, route_review
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
@@ -138,7 +181,7 @@ from enginery.workflows.stage1 import (
 _HEARTBEAT = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
 _NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
-_SUPPORTED_STAGES = frozenset({"1", "2"})
+_SUPPORTED_STAGES = frozenset({"1", "2", "3"})
 _STAGE2_MILESTONES = (
     (PlanMilestoneId("gate-m1"), "fixture/gate-m1"),
     (PlanMilestoneId("gate-m2"), "fixture/gate-m2"),
@@ -146,6 +189,19 @@ _STAGE2_MILESTONES = (
 _STAGE2_DISTRIBUTION_NAME = "enginery-full-system-gate-fixture"
 _STAGE2_IMPORT_MODULE = "enginery_full_system_gate_fixture"
 _STAGE2_VERSION = "0.0.1"
+_STAGE3_APP_SCRIPT = (
+    Path(__file__).resolve().parent.parent / "fixtures" / "enginery-stage3-local-service" / "app.py"
+)
+_STAGE3_BUGGY_APP = "def add(a, b):\n    return a + b + 1\n"
+_STAGE3_FIXED_APP = "def add(a, b):\n    return a + b\n"
+_STAGE3_CHECK_COMMAND = ("python3", "-c", "exec(open('app.py').read()); assert add(2, 3) == 5")
+_STAGE3_HUMAN = AuthorityPrincipal(
+    id="full-system-gate-operator",
+    principal_type=PrincipalType.HUMAN,
+    role="operator",
+    authorization_source="full-system-gate",
+)
+_STAGE3_REQUESTING_PRINCIPAL_ID = "full-system-gate-incident-workflow"
 
 
 class _TerminalPullRequests:
@@ -937,12 +993,261 @@ def _run_stage2_leg(
     }
 
 
+def _git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port: int = sock.getsockname()[1]
+    return port
+
+
+def _check_stage3_reproduction(target: str) -> ReproductionRecord:
+    body = json.dumps({"value": 2}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://{target}/increment", data=body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        observed = json.loads(response.read())["result"]
+    if observed != 3:
+        return ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED,
+            detail=f"increment(2) returned {observed}, expected 3",
+        )
+    return ReproductionRecord(
+        outcome=ReproductionOutcome.UNAVAILABLE, detail="increment(2) returned the correct result"
+    )
+
+
+def _run_stage3_leg(
+    database: Path, artifact_root: Path, *, restart_between_stages: bool
+) -> dict[str, object]:
+    """Drive the real ``IncidentService`` through ingest -> hotfix -> deploy ->
+    observe -> roll back -> restore -> follow-up.
+
+    See the module docstring for exactly what ``restart_between_stages``
+    proves for this leg (ledger-backed incident-state persistence across a
+    coordinator restart) and what it does not (policy/approval persistence,
+    already covered by the Stage 2 leg's own documented caveat).
+    """
+    repo = artifact_root / "stage3-hotfix-repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git("init", cwd=repo)
+    _git("config", "user.email", "full-system-gate@example.invalid", cwd=repo)
+    _git("config", "user.name", "Full System Gate", cwd=repo)
+    (repo / "app.py").write_text(_STAGE3_BUGGY_APP, encoding="utf-8")
+    _git("add", "app.py", cwd=repo)
+    _git("commit", "-m", "v1: buggy add()", cwd=repo)
+    base_revision = _git("rev-parse", "HEAD", cwd=repo)
+
+    adapter = LocalServiceDeploymentAdapter(
+        artifacts_root=artifact_root / "stage3-artifacts",
+        state_root=artifact_root / "stage3-state",
+        app_script=_STAGE3_APP_SCRIPT,
+        ready_attempts=50,
+        ready_interval_seconds=0.05,
+    )
+    target = f"127.0.0.1:{_free_port()}"
+    registry = ApprovalRegistry(registered_humans=(_STAGE3_HUMAN,))
+    policy = PolicyEvaluator(policy_version="full-system-gate-1.0.0", approval_registry=registry)
+
+    def reopen(owner: str) -> tuple[LedgerService, IncidentService]:
+        ledger = LedgerService.open(database)
+        return ledger, IncidentService(ledger=ledger, deployment=adapter, policy=policy)
+
+    workspace = None
+    ledger, service = reopen("full-system-gate-stage3-intake")
+    try:
+        v1_artifact = build_local_service_artifact(
+            LocalServiceBuild(version=base_revision, defect_mode="increment_off_by_one"),
+            artifacts_root=adapter.artifacts_root,
+        )
+        adapter.deploy(
+            DeploymentRequest(
+                run_id=RunId("full-system-gate-stage3"),
+                artifact=v1_artifact,
+                target=target,
+                operation_id=OperationId(value="0" * 63 + "3"),
+            )
+        )
+        incident = service.ingest(
+            source_provider="full-system-gate",
+            external_reference="stage3-leg-increment-bug",
+            source_snapshot_reference=base_revision,
+            title="checkout increment returns the wrong result",
+            objective="restore correct checkout increment behavior",
+            acceptance_criteria=("increment(2) returns 3",),
+            repository_targets=("full-system-gate/stage3-fixture",),
+            severity=IncidentSeverity.HIGH,
+            summary="checkout increment endpoint is off by one",
+        )
+        incident_id = incident.id
+        service.classify(incident_id)
+        lineage = ReleaseLineage(service=target, affected_revision=base_revision)
+        service.bind_release_lineage(incident_id, lineage)
+        service.begin_reproduction(incident_id)
+        reproduced = service.attempt_reproduction(
+            incident_id, check=lambda: _check_stage3_reproduction(target)
+        )
+        if reproduced.state is not IncidentState.REMEDIATING:
+            raise AssertionError("expected reproduction to confirm the incident")
+
+        if restart_between_stages:
+            ledger.close()
+            ledger, service = reopen("full-system-gate-stage3-hotfix-check")
+            if service.read(incident_id) is None:
+                raise AssertionError("ingested incident did not survive a coordinator restart")
+
+        worktree_root = artifact_root / "stage3-hotfix-workspace"
+        workspace = create_hotfix_worktree(
+            repository=repo,
+            base_revision=base_revision,
+            branch="hotfix/full-system-gate-increment",
+            worktree_root=worktree_root,
+        )
+        repair = HotfixRepair(
+            file_path="app.py", content=_STAGE3_FIXED_APP, commit_message="fix off-by-one in add()"
+        )
+        repaired_revision = apply_repair(workspace, repair)
+        regression_evidence = prove_non_vacuous_regression(
+            LocalValidation(),
+            run_id=RunId("full-system-gate-stage3"),
+            workspace=workspace,
+            command=_STAGE3_CHECK_COMMAND,
+            repaired_revision=repaired_revision,
+        )
+        if not regression_evidence.is_non_vacuous:
+            raise AssertionError("regression evidence is vacuous; refusing to deploy")
+        review = route_review(
+            ReviewReport(
+                producer="full-system-gate-worker", reviewer="independent-reviewer", findings=()
+            ),
+            repair_attempt=0,
+            repair_limit=1,
+        )
+        if review is not ReviewOutcome.APPROVED:
+            raise AssertionError("hotfix review did not approve")
+
+        if restart_between_stages:
+            ledger.close()
+            ledger, service = reopen("full-system-gate-stage3-deploy")
+        service.begin_deployment(incident_id)
+        v2_artifact = build_local_service_artifact(
+            LocalServiceBuild(version=repaired_revision, defect_mode="health_degraded"),
+            artifacts_root=adapter.artifacts_root,
+        )
+        registry.record_approval(
+            ApprovalSchema(
+                action=PolicyAction.DEPLOYMENT_EXECUTE,
+                risk_class=incident.risk_class,
+                target_resource=target,
+                diff_or_artifact_digest=str(v2_artifact.digest),
+                requesting_principal_id=_STAGE3_REQUESTING_PRINCIPAL_ID,
+            ),
+            (_STAGE3_HUMAN,),
+            decided_at=_NOW,
+        )
+        receipt = service.execute_deployment(
+            incident_id,
+            artifact=v2_artifact,
+            requesting_principal_id=_STAGE3_REQUESTING_PRINCIPAL_ID,
+            now=_NOW,
+        )
+        deployed = adapter.observe(target)
+        if deployed.revision != repaired_revision:
+            raise AssertionError("deployed revision does not match the hotfix revision")
+
+        if restart_between_stages:
+            ledger.close()
+            ledger, service = reopen("full-system-gate-stage3-observe")
+        service.begin_observation(incident_id)
+        observation = adapter.observe(target, attempts=5, interval_seconds=0.05)
+        if observation.healthy:
+            raise AssertionError("expected the deployed revision to be unhealthy in this run")
+        resolved = service.resolve_observation(incident_id, healthy=observation.healthy)
+        if resolved.state is not IncidentState.ROLLING_BACK:
+            raise AssertionError("unhealthy observation did not begin rollback")
+
+        if restart_between_stages:
+            ledger.close()
+            ledger, service = reopen("full-system-gate-stage3-rollback")
+        registry.record_approval(
+            ApprovalSchema(
+                action=PolicyAction.DEPLOYMENT_ROLLBACK,
+                risk_class=incident.risk_class,
+                target_resource=target,
+                diff_or_artifact_digest=str(receipt.artifact_digest),
+                requesting_principal_id=_STAGE3_REQUESTING_PRINCIPAL_ID,
+            ),
+            (_STAGE3_HUMAN,),
+            decided_at=_NOW,
+        )
+        final_incident = service.execute_rollback(
+            incident_id,
+            receipt=receipt,
+            requesting_principal_id=_STAGE3_REQUESTING_PRINCIPAL_ID,
+            now=_NOW,
+        )
+        if final_incident.state is not IncidentState.ROLLED_BACK:
+            raise AssertionError("rollback did not reach the rolled_back terminal state")
+        restored = adapter.observe(target)
+        if restored.revision != base_revision:
+            raise AssertionError("rollback did not restore the prior revision")
+        follow_up = service.record_follow_up(
+            incident_id,
+            title="investigate deployment health-check degradation on hotfix rollout",
+            objective="root-cause why the hotfix build failed its deployment health check",
+            acceptance_criteria=("root cause documented and a remediation plan filed",),
+            repository_targets=("full-system-gate/stage3-fixture",),
+        )
+        authority_count = len(service.list_authority_records(incident_id))
+
+        # Restart/idempotency proof: the terminal rolled_back state and its
+        # authority-record count must be durably re-readable, not held only
+        # in this process's local variables.
+        if restart_between_stages:
+            ledger.close()
+            ledger, service = reopen("full-system-gate-stage3-reread")
+        reread = service.read(incident_id)
+        if reread is None or reread.state is not IncidentState.ROLLED_BACK:
+            raise AssertionError("rolled_back terminal state is not durably re-readable")
+        if len(service.list_authority_records(incident_id)) != authority_count:
+            raise AssertionError("authority record count changed on re-read")
+
+        return {
+            "incident_id": str(incident_id),
+            "base_revision": base_revision,
+            "repaired_revision": repaired_revision,
+            "regression_non_vacuous": regression_evidence.is_non_vacuous,
+            "deployed_revision": repaired_revision,
+            "restored_revision": restored.revision,
+            "authority_record_count": authority_count,
+            "follow_up_work_item_id": str(follow_up.id),
+            "final_state": final_incident.state.value,
+            "restart_between_stages": restart_between_stages,
+        }
+    finally:
+        ledger.close()
+        state = adapter._read_state(target)
+        if state is not None:
+            adapter._stop(state["current"])
+            if state.get("previous") is not None:
+                adapter._stop(state["previous"])
+        if workspace is not None and workspace.root.exists():
+            remove_hotfix_worktree(repository=repo, workspace=workspace)
+
+
 @dataclass(slots=True)
 class GateReport:
     stages: str
     restart_between_stages: bool
     run_evidence: list[dict[str, object]] = field(default_factory=list)
     stage2_evidence: dict[str, object] | None = None
+    stage3_evidence: dict[str, object] | None = None
     evidence_digest: str = ""
 
 
@@ -952,8 +1257,8 @@ def run_gate(
     requested_stages = frozenset(part.strip() for part in stages.split(",") if part.strip())
     if not requested_stages or not requested_stages <= _SUPPORTED_STAGES:
         raise EngineryError(
-            "full_system_gate.py only supports --stages 1, 2, or 1,2; "
-            "Stage 3-4 cumulative gates belong to their own release trains",
+            "full_system_gate.py only supports --stages combinations of 1, 2, and 3; "
+            "Stage 4 belongs to its own gate-deferred release train once gate G4 passes",
             details={"requested_stages": stages},
         )
     if run_count < 2:
@@ -978,11 +1283,21 @@ def run_gate(
             report.stage2_evidence = _run_stage2_leg(
                 stage2_database, stage2_fixture_root, restart_between_stages=restart_between_stages
             )
+        if "3" in requested_stages:
+            stage3_database = artifact_root / "stage3-ledger.db"
+            report.stage3_evidence = _run_stage3_leg(
+                stage3_database, artifact_root, restart_between_stages=restart_between_stages
+            )
     report.evidence_digest = (
         "sha256:"
         + hashlib.sha256(
             json.dumps(
-                {"stage1": report.run_evidence, "stage2": report.stage2_evidence}, sort_keys=True
+                {
+                    "stage1": report.run_evidence,
+                    "stage2": report.stage2_evidence,
+                    "stage3": report.stage3_evidence,
+                },
+                sort_keys=True,
             ).encode()
         ).hexdigest()
     )
@@ -991,12 +1306,12 @@ def run_gate(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Cumulative Stage-1/Stage-2 restart/replay gate (local fixtures only)."
+        description="Cumulative Stage-1/Stage-2/Stage-3 restart/replay gate (local fixtures only)."
     )
     parser.add_argument(
         "--stages",
         default="1",
-        help="comma-separated stages to gate; '1', '2', or '1,2'",
+        help="comma-separated stages to gate; any combination of '1', '2', '3'",
     )
     parser.add_argument(
         "--restart-between-stages",
@@ -1021,6 +1336,7 @@ def main(argv: list[str] | None = None) -> int:
         f"stages={report.stages} restart_between_stages={report.restart_between_stages} "
         f"stage1_runs={len(report.run_evidence)} "
         f"stage2_evidence={'yes' if report.stage2_evidence is not None else 'no'} "
+        f"stage3_evidence={'yes' if report.stage3_evidence is not None else 'no'} "
         f"evidence_digest={report.evidence_digest}"
     )
     return 0
