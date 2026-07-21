@@ -15,11 +15,13 @@ from enginery.application.work_ports import (
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import ObservationId, OperationId, OutcomeId, RunId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
-from enginery.domain.observation import ObservationState
+from enginery.domain.observation import ObservationRequest, ObservationState
 from enginery.domain.outcome import OutcomeKind
 from enginery.evaluation.outcomes import (
+    CompletenessReport,
     OutcomeCaptureService,
     classify_pull_request_outcome,
+    compute_completeness,
     observation_id_for,
 )
 from enginery.ledger.service import LedgerService
@@ -344,3 +346,184 @@ class TestListing:
 
         assert len(all_observations) == 2
         assert only_pending == (pending,)
+
+
+class TestExpireOverdue:
+    def test_expires_a_pending_observation_past_its_window(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = OutcomeCaptureService(ledger=ledger_service)
+        observation = service.register_pending(
+            work_item_id=_WORK_ITEM_ID,
+            run_id=_RUN_ID,
+            kind=OutcomeKind.MERGE_RESULT,
+            subject_reference="42",
+            opened_at=_OPENED,
+        )
+
+        expired = service.expire_overdue(reference_time=_OPENED + observation.window)
+
+        assert len(expired) == 1
+        assert expired[0].state is ObservationState.INDETERMINATE
+        resolved = service.read_observation(observation.id)
+        assert resolved is not None
+        assert resolved.state is ObservationState.INDETERMINATE
+
+    def test_leaves_an_observation_inside_its_window_pending(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = OutcomeCaptureService(ledger=ledger_service)
+        service.register_pending(
+            work_item_id=_WORK_ITEM_ID,
+            run_id=_RUN_ID,
+            kind=OutcomeKind.MERGE_RESULT,
+            subject_reference="42",
+            opened_at=_OPENED,
+        )
+
+        expired = service.expire_overdue(reference_time=_OPENED + timedelta(days=1))
+
+        assert expired == ()
+        assert len(service.list_observations(state=ObservationState.PENDING)) == 1
+
+    def test_never_expires_an_already_captured_observation(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = OutcomeCaptureService(ledger=ledger_service)
+        observation = service.register_pending(
+            work_item_id=_WORK_ITEM_ID,
+            run_id=_RUN_ID,
+            kind=OutcomeKind.ESCAPED_DEFECT,
+            subject_reference="wi-2",
+            opened_at=_OPENED,
+        )
+        service.capture(
+            observation.id,
+            outcome_id=OutcomeId("outcome-1"),
+            kind=OutcomeKind.ESCAPED_DEFECT,
+            observed_at=_OPENED + timedelta(days=1),
+            linked_work_item_id=WorkItemId("wi-2"),
+        )
+
+        expired = service.expire_overdue(reference_time=_OPENED + observation.window)
+
+        assert expired == ()
+        resolved = service.read_observation(observation.id)
+        assert resolved is not None
+        assert resolved.state is ObservationState.CAPTURED
+
+
+class TestComputeCompleteness:
+    def _observation(self, **overrides: object) -> ObservationRequest:
+        defaults: dict[str, object] = {
+            "id": ObservationId("obs-1"),
+            "work_item_id": _WORK_ITEM_ID,
+            "run_id": _RUN_ID,
+            "kind": OutcomeKind.MERGE_RESULT,
+            "opened_at": _OPENED,
+            "window": timedelta(days=14),
+        }
+        defaults.update(overrides)
+        return ObservationRequest(**defaults)  # type: ignore[arg-type]
+
+    def test_reports_the_current_derivation_version(self) -> None:
+        report = compute_completeness((), reference_time=_OPENED)
+
+        assert report.derivation_version == 1
+
+    def test_full_completeness_with_no_indeterminate_observations(self) -> None:
+        captured = self._observation(
+            state=ObservationState.CAPTURED,
+            resolved_at=_OPENED + timedelta(days=1),
+            outcome_id=OutcomeId("outcome-1"),
+        )
+
+        report = compute_completeness((captured,), reference_time=_OPENED)
+
+        assert report.completeness == 1.0
+        assert report.captured == 1
+        assert report.indeterminate == 0
+
+    def test_completeness_with_no_decided_observations_defaults_to_one(self) -> None:
+        pending = self._observation()
+
+        report = compute_completeness((pending,), reference_time=_OPENED)
+
+        assert report.completeness == 1.0
+        assert report.pending == 1
+
+    def test_an_indeterminate_observation_lowers_completeness(self) -> None:
+        captured = self._observation(
+            id=ObservationId("obs-1"),
+            state=ObservationState.CAPTURED,
+            resolved_at=_OPENED + timedelta(days=1),
+            outcome_id=OutcomeId("outcome-1"),
+        )
+        indeterminate = self._observation(
+            id=ObservationId("obs-2"),
+            state=ObservationState.INDETERMINATE,
+            resolved_at=_OPENED + timedelta(days=14),
+        )
+
+        report = compute_completeness((captured, indeterminate), reference_time=_OPENED)
+
+        assert report.completeness == 0.5
+        assert report.captured == 1
+        assert report.indeterminate == 1
+
+    def test_a_pending_observation_never_inflates_completeness(self) -> None:
+        """Suppressing capture (leaving an observation pending forever)
+        must never raise completeness -- only sweeping it to
+        ``indeterminate`` after its window elapses can move the ratio,
+        and only downward."""
+        captured = self._observation(
+            id=ObservationId("obs-1"),
+            state=ObservationState.CAPTURED,
+            resolved_at=_OPENED + timedelta(days=1),
+            outcome_id=OutcomeId("outcome-1"),
+        )
+        suppressed_pending = self._observation(id=ObservationId("obs-2"))
+
+        with_pending = compute_completeness((captured, suppressed_pending), reference_time=_OPENED)
+        without_pending = compute_completeness((captured,), reference_time=_OPENED)
+
+        assert with_pending.completeness == without_pending.completeness == 1.0
+
+    def test_expiring_a_suppressed_observation_lowers_completeness(self) -> None:
+        """The end-to-end proof: a capture that never happens still shows
+        up as a completeness gap once its window elapses and is swept."""
+        captured = self._observation(
+            id=ObservationId("obs-1"),
+            state=ObservationState.CAPTURED,
+            resolved_at=_OPENED + timedelta(days=1),
+            outcome_id=OutcomeId("outcome-1"),
+        )
+        expired_from_suppression = self._observation(
+            id=ObservationId("obs-2"),
+            state=ObservationState.INDETERMINATE,
+            resolved_at=_OPENED + timedelta(days=14),
+        )
+
+        report = compute_completeness(
+            (captured, expired_from_suppression), reference_time=_OPENED + timedelta(days=15)
+        )
+
+        assert report.completeness < 1.0
+
+
+class TestServiceCompleteness:
+    def test_completeness_reads_through_the_ledger(self, ledger_service: LedgerService) -> None:
+        service = OutcomeCaptureService(ledger=ledger_service)
+        service.register_pending(
+            work_item_id=_WORK_ITEM_ID,
+            run_id=_RUN_ID,
+            kind=OutcomeKind.ESCAPED_DEFECT,
+            subject_reference="wi-2",
+            opened_at=_OPENED,
+        )
+
+        report = service.completeness(reference_time=_OPENED)
+
+        assert isinstance(report, CompletenessReport)
+        assert report.pending == 1
+        assert report.completeness == 1.0
