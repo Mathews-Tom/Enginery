@@ -10,13 +10,16 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.1.0` (Stage 1 only). Enginery ships a coordinator-owned, durable
-issue-to-merge-ready-pull-request workflow, proven end to end against a
-real GitHub repository and a real coding-agent harness, plus a versioned
-raw outcome-observation schema. Stage 2 (plan to verified release) and
-Stage 3 (incident to hotfix) ship in later release trains (`v0.2.0`,
-`v0.3.0`); Stage 4 (governed factory self-improvement) is gate-deferred
-with no committed date. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
+`v0.3.0`, published on PyPI and GitHub Releases (`v0.1.0`, `v0.2.0`,
+and `v0.3.0` are all live). Enginery ships three of its four planned
+workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
+workflow (Stage 1), a dependency-ordered plan-to-verified-release
+workflow with a second coding-agent harness and capability provenance
+(Stage 2), and a production-incident-to-hotfix-and-rollback workflow
+against a controlled local service (Stage 3) — each proven end to end
+against real GitHub/OMP/Claude Code/PyPI destinations, not simulations.
+Stage 4 (governed factory self-improvement) is gate-deferred with no
+committed date. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
 ## Installation
@@ -39,7 +42,17 @@ uv sync --all-extras --dev
 uv run enginery --version
 uv run enginery doctor
 uv run enginery adapter doctor --json
+uv run enginery ledger verify --database ledger.db
+uv run enginery policy explain request.json
+uv run enginery stage1 start --database ledger.db --owner operator --request request.json
+uv run enginery stage2 status --database ledger.db --owner operator --stack-id ID
+uv run enginery outcome completeness --database ledger.db
+uv run enginery capability lock --check
 ```
+
+See [`docs/operations.md`](docs/operations.md) for the full command
+surface and [`docs/adapters.md`](docs/adapters.md) for the adapter/port
+contracts.
 
 ## Development
 

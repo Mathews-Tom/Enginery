@@ -7,19 +7,24 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.1.0`. Only the
-Stage 1 (issue-to-merge-ready-pull-request) command surface is a
-supported, documented feature of this release. Stage 2 (plan to verified
-release) additionally has a read-only `stage2 status` inspection
-command already in the CLI (see the command table below); Stage 3
-(incident to hotfix) and Stage 4 (governed factory self-improvement)
-have no CLI surface at all. None of Stage 2's actual merge, build, or
-publish orchestration is exposed through the CLI in this release — see
+[`README.md`](../README.md#status). Enginery is `v0.3.0`. The Stage 1
+(issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
+release) command surfaces are supported, documented features of this
+release; `stage2 status` remains the only Stage 2 CLI command (a
+read-only stack inspection — Stage 2's own merge/build/publish
+orchestration runs through the release-preparation workflow, not a
+shipped `enginery` verb). Stage 3 (incident to hotfix and rollback) is
+a shipped, adversarially-tested library surface
+(`enginery.incidents`) with no CLI command of its own yet — see
+[`docs/adapters.md`](adapters.md#the-incident-to-hotfix-and-rollback-surface).
+Stage 4 (governed factory self-improvement) has no CLI surface and is
+gate-deferred — see
 [Release scope and gate-deferred work](#release-scope-and-gate-deferred-work).
 
 ## Installation
 
-`v0.1.0` is published to PyPI. Install with:
+`v0.1.0`, `v0.2.0`, and `v0.3.0` are all published to PyPI. Install the
+latest with:
 
 ```bash
 pip install enginery
@@ -49,7 +54,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.1.0 installed
+[ok] package_metadata: enginery 0.3.0 installed
 ```
 
 `enginery doctor --json` emits the same report as a machine-readable
@@ -211,26 +216,33 @@ not a compromised or malicious process from the operator's account,
 filesystem, network, or keychain. See
 [Security limits](#security-limits) below.
 
-### Cumulative Stage-1 recovery evidence
+### Cumulative restart/replay evidence
 
-`scripts/full_system_gate.py --stages 1 --restart-between-stages` drives
-two independent local work items through the full lifecycle above on one
-durable SQLite ledger, closing every in-memory coordinator/service object
-and reopening it from durable state alone before every externally
-observable step (review, PR creation, CI-evidence collection, merge-ready
-verification, outcome registration). This is this repository's established
-restart-proof convention — a freshly constructed coordinator over the same
-on-disk ledger, matching the recovery topology's coordinator-epoch model —
-not a literal new operating-system process boundary. Qualification,
+`scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages`
+drives Stage 1 (two independent local work items through the full
+lifecycle above), Stage 2 (a fixture package through merge -> prepare
+-> build -> publish -> verify, with no live GitHub/PyPI network or
+credential access), and Stage 3 (a real, ledger-backed incident through
+ingest -> hotfix -> deploy -> observe -> roll back -> restore against a
+real local HTTP service subprocess) on their own durable SQLite
+ledgers, closing every in-memory coordinator/service object and
+reopening it from durable state alone before every externally
+observable step. This is this repository's established restart-proof
+convention — a freshly constructed coordinator over the same on-disk
+ledger, matching the recovery topology's coordinator-epoch model — not
+a literal new operating-system process boundary. Qualification,
 implementation dispatch, and validation are completed through direct
-durable node-state transitions in that script rather than the real
-executors; those three nodes' own crash/fault-injection coverage already
-exists in the merged Stage 1 implementation stack. Only Stage 1 is
-supported (`--stages` accepts `1` only); Stage 2-4 cumulative gates belong
-to their own release trains. See the
-[release-readiness report](release-readiness-v0.1.0.md) for the exact
-evidence digest this gate produced and the measured local performance
-baseline from `scripts/performance_baseline.py`.
+durable node-state transitions in the Stage 1 leg rather than the real
+executors; those three nodes' own crash/fault-injection coverage
+already exists in the merged Stage 1 implementation stack. `--stages`
+accepts any combination of `1`, `2`, and `3`; Stage 4's cumulative gate
+belongs to its own gate-deferred, unversioned train once gate G4
+passes. See the
+[`v0.1.0`](release-readiness-v0.1.0.md),
+[`v0.2.0`](release-evidence-v0.2.0.md), and
+[`v0.3.0`](release-evidence-v0.3.0.md) release-evidence reports for the
+exact evidence digests each release's gate run produced and the
+measured local performance baseline from `scripts/performance_baseline.py`.
 
 ## Backup and restore
 
@@ -274,9 +286,15 @@ implemented.
   subprocess. Enginery's ledger, event stream, and artifacts never contain
   a literal credential value. The stronger *fixed broker* pattern — where
   production/publication credentials are confined to reviewed broker code
-  that never enters an agent workspace — governs Stage 2's release and
-  deployment actions; it is out of scope for this Stage-1-only release and
-  is not yet exercised by any shipped command.
+  that never enters an agent workspace — governs Stage 2's release
+  actions and Stage 3's deployment/rollback actions, both shipped in this
+  release. Neither has an `enginery` CLI verb of its own yet: Stage 2's
+  broker runs through the release-preparation workflow
+  (`Stage2ReleaseWorkflow`) and Stage 3's through the library-level
+  `IncidentService`/`LocalServiceDeploymentAdapter` pair (see
+  [`docs/adapters.md`](adapters.md#the-incident-to-hotfix-and-rollback-surface));
+  both are exercised by this repository's own release/gate tooling, not
+  by a shipped operator-facing command.
 - **Single-operator authority model.** Every consequential action is
   policy-gated to `allow`, `deny`, or `require_human`; there is no global
   autonomous mode. Producer separation (the human approving an action must
@@ -309,28 +327,29 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-This release (`v0.1.0`, M1-M8 plus M14a plus this milestone) covers Stage 1
-only: issue to merge-ready pull request, plus the raw outcome-observation
-schema and capture pipeline. Stage 2 (plan to verified release), Stage 3
-(incident to hotfix), and Stage 4 (governed factory self-improvement) are
-separate, later release trains (`v0.2.0`, `v0.3.0`, and an unversioned
-gate-deferred train respectively) with their own milestones, gates, and
-operator documentation. In particular:
+`v0.1.0`, `v0.2.0`, and `v0.3.0` are all published. Together they cover
+Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
+release, second-harness neutrality, capability provenance), and Stage 3
+(incident to hotfix and rollback), plus the raw outcome-observation
+schema and capture pipeline. Stage 4 (governed factory
+self-improvement) is the only remaining stage; it is a separate,
+unversioned, gate-deferred train with its own milestones, gate, and
+operator documentation once it starts. In particular:
 
 - Stage 4's milestones (cohorts/replay/comparison and governed
   self-improvement) may not start — including design work beyond the raw
-  outcome schema this release already ships — until a data-threshold entry
-  gate passes: sufficient completed-run and intervention volume across at
+  outcome schema already shipped — until a data-threshold entry gate
+  passes: sufficient completed-run and intervention volume across at
   least two workflow types and risk classes, an outcome-capture
   completeness floor, at least one recurring evidence-backed workflow
   deficiency, corpus diversity beyond a single repository, and the
   dual-human authority precondition described above. The gate is reviewed
   on a cadence, never assumed from elapsed time.
-- Do not run this release expecting Stage 2's merge/build/publish
-  orchestration, a Stage 3 or Stage 4 CLI surface, a hosted UI, or
-  additional harness/work-ledger providers beyond OMP, Claude Code, and
-  GitHub. None of those exist yet. `stage2 status` (read-only stack
-  inspection) is the only Stage 2+ CLI surface present in this release.
+- Do not run this release expecting a Stage 4 CLI surface, a hosted UI,
+  or additional harness/work-ledger providers beyond OMP, Claude Code,
+  and GitHub. None of those exist yet. `stage2 status` (read-only stack
+  inspection) remains the only Stage 2+ CLI surface; Stage 3 has no CLI
+  surface at all (library-level only, see above).
 
 ## See also
 

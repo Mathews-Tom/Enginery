@@ -1,6 +1,6 @@
 # Enginery Workflow Examples: Using Existing Coding Agents and Models
 
-- **Status:** Intended architecture and operating examples; Enginery is not yet implemented.
+- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped, `v0.1.0`-`v0.3.0`; the concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior.
 - **Audience:** Engineers choosing how existing coding agents and models participate in an Enginery workflow.
 
 > **Core rule:** Users choose their preferred coding agents and models. Enginery coordinates the workflow around them; it does not replace their reasoning loop or silently select a different worker.
@@ -47,7 +47,7 @@ A harness adapter normalizes agent lifecycle events, declared outputs, terminal 
 
 Whether a team calls an agent interaction “loop engineering” or uses another label, the agent remains one participant in a delivery system. The everyday work still requires a clear request, an accountable decision about risk, an implementation, independent checks, review, integration, release or rollback when applicable, and an observable outcome. Enginery does not rename those controls. It makes their inputs, decisions, and evidence durable across the handoffs where an agent session, shell command, or provider response can disappear.
 
-All Enginery contributions in this table are intended behavior, not implemented capability. Risk classification and delivery decisions remain human-owned; Enginery applies the declared workflow and policy to each run.
+Every daily-SDLC row below describes Enginery's shipped Stage 1-3 contribution unless marked otherwise; Stage 4 rows remain intended behavior, not implemented capability. Risk classification and delivery decisions remain human-owned; Enginery applies the declared workflow and policy to each run.
 
 | Daily SDLC activity | Existing accountable practice | Enginery's intended contribution | What stays outside Enginery |
 |---|---|---|---|
