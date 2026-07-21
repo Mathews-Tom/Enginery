@@ -159,6 +159,49 @@ class ReleaseLineage:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainmentAction:
+    """A deliberately smaller mitigating action, distinct from a code fix.
+
+    Containment (a feature flag, a traffic throttle, a rate limit) buys
+    time or limits blast radius without touching the affected service's
+    code -- this module never conflates it with remediation.
+    """
+
+    description: str
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not self.description.strip():
+            raise InvalidInputError("containment action description must be non-blank")
+        if not self.rationale.strip():
+            raise InvalidInputError("containment action rationale must be non-blank")
+
+
+class ReproductionOutcome(enum.Enum):
+    """The three closed outcomes of a falsifiable reproduction attempt."""
+
+    REPRODUCED = "reproduced"
+    UNAVAILABLE = "unavailable"
+    ERRORED = "errored"
+
+
+@dataclass(frozen=True, slots=True)
+class ReproductionRecord:
+    """The result of one falsifiable reproduction attempt against the
+    affected release lineage. ``detail`` must describe exactly what was
+    observed -- a bare claim of ``REPRODUCED`` with no observation is
+    exactly what design's "never labeled reproduced" acceptance forbids.
+    """
+
+    outcome: ReproductionOutcome
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not self.detail.strip():
+            raise InvalidInputError("reproduction record detail must be non-blank")
+
+
+@dataclass(frozen=True, slots=True)
 class Incident:
     """A production-style incident bound to a work item and release lineage."""
 
@@ -168,6 +211,8 @@ class Incident:
     state: IncidentState
     summary: str
     release_lineage: ReleaseLineage | None = None
+    containment: ContainmentAction | None = None
+    reproduction: ReproductionRecord | None = None
     aggregate_version: int = 0
 
     def __post_init__(self) -> None:
@@ -194,6 +239,51 @@ class Incident:
             )
         return replace(self, release_lineage=lineage, aggregate_version=self.aggregate_version + 1)
 
+    def apply_containment(self, action: ContainmentAction) -> Incident:
+        """Record a containment action and move to ``CONTAINING``.
+
+        Only valid from ``CLASSIFIED``: containment is a deliberate,
+        smaller step distinct from remediation, matching design's
+        "separates containment from remediation".
+        """
+        if self.state is not IncidentState.CLASSIFIED:
+            raise InvalidInputError(
+                "containment can only be applied while an incident is classified",
+                details={"state": self.state.value},
+            )
+        return replace(
+            self,
+            containment=action,
+            state=IncidentState.CONTAINING,
+            aggregate_version=self.aggregate_version + 1,
+        )
+
+    def record_reproduction(self, record: ReproductionRecord) -> Incident:
+        """Record a falsifiable reproduction attempt and route the outcome.
+
+        Only valid from ``REPRODUCING``. ``REPRODUCED`` proceeds to
+        remediation; ``UNAVAILABLE`` routes to ``BLOCKED`` so an
+        unreproduced incident is visible rather than silently treated as
+        confirmed; ``ERRORED`` routes to ``FAILED``.
+        """
+        if self.state is not IncidentState.REPRODUCING:
+            raise InvalidInputError(
+                "reproduction can only be recorded while reproducing",
+                details={"state": self.state.value},
+            )
+        target = {
+            ReproductionOutcome.REPRODUCED: IncidentState.REMEDIATING,
+            ReproductionOutcome.UNAVAILABLE: IncidentState.BLOCKED,
+            ReproductionOutcome.ERRORED: IncidentState.FAILED,
+        }[record.outcome]
+        INCIDENT_TRANSITIONS.require(self.state, target)
+        return replace(
+            self,
+            reproduction=record,
+            state=target,
+            aggregate_version=self.aggregate_version + 1,
+        )
+
     def reclassify(self, severity: IncidentSeverity) -> Incident:
         """Revise severity while intake or classification is still open.
 
@@ -216,9 +306,12 @@ class Incident:
 
 __all__ = [
     "INCIDENT_TRANSITIONS",
+    "ContainmentAction",
     "Incident",
     "IncidentSeverity",
     "IncidentState",
     "ReleaseLineage",
+    "ReproductionOutcome",
+    "ReproductionRecord",
     "severity_risk_class",
 ]

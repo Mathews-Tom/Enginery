@@ -6,7 +6,13 @@ import pytest
 
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.incident import IncidentSeverity, IncidentState, ReleaseLineage
+from enginery.domain.incident import (
+    IncidentSeverity,
+    IncidentState,
+    ReleaseLineage,
+    ReproductionOutcome,
+    ReproductionRecord,
+)
 from enginery.domain.work_item import WorkItemState
 from enginery.incidents.service import IncidentService, incident_id_for
 from enginery.ledger.service import LedgerService
@@ -154,3 +160,106 @@ class TestListIncidents:
         assert {incident.id for incident in classified_only} == {classified_incident.id}
         assert len(intake_only) == 1
         assert len(service.list_incidents()) == 2
+
+
+class TestContain:
+    def test_applies_containment_from_classified(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+
+        contained = service.contain(
+            incident.id, description="disable checkout", rationale="stop the bleeding"
+        )
+
+        assert contained.state is IncidentState.CONTAINING
+        assert contained.containment is not None
+        assert contained.containment.description == "disable checkout"
+        assert service.read(incident.id) == contained
+
+
+class TestResolveContainment:
+    def test_mitigated_is_terminal(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.contain(incident.id, description="disable checkout", rationale="stop bleeding")
+
+        resolved = service.resolve_containment(incident.id, mitigated=True)
+
+        assert resolved.state is IncidentState.MITIGATED
+
+    def test_not_mitigated_proceeds_to_reproducing(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.contain(incident.id, description="disable checkout", rationale="stop bleeding")
+
+        resolved = service.resolve_containment(incident.id, mitigated=False)
+
+        assert resolved.state is IncidentState.REPRODUCING
+
+
+class TestBeginReproduction:
+    def test_moves_directly_from_classified(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+
+        reproducing = service.begin_reproduction(incident.id)
+
+        assert reproducing.state is IncidentState.REPRODUCING
+
+
+class TestAttemptReproduction:
+    def test_reproduced_check_advances_to_remediating(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.begin_reproduction(incident.id)
+
+        result = service.attempt_reproduction(
+            incident.id,
+            check=lambda: ReproductionRecord(
+                outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+            ),
+        )
+
+        assert result.state is IncidentState.REMEDIATING
+        assert result.reproduction is not None
+        assert result.reproduction.outcome is ReproductionOutcome.REPRODUCED
+        assert service.read(incident.id) == result
+
+    def test_unavailable_check_is_visible_not_reproduced(
+        self, ledger_service: LedgerService
+    ) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.begin_reproduction(incident.id)
+
+        result = service.attempt_reproduction(
+            incident.id,
+            check=lambda: ReproductionRecord(
+                outcome=ReproductionOutcome.UNAVAILABLE, detail="could not reproduce against v1"
+            ),
+        )
+
+        assert result.state is IncidentState.BLOCKED
+
+    def test_check_is_actually_invoked(self, ledger_service: LedgerService) -> None:
+        service = IncidentService(ledger=ledger_service)
+        incident = _ingest(service)
+        service.classify(incident.id)
+        service.begin_reproduction(incident.id)
+        calls: list[bool] = []
+
+        def check() -> ReproductionRecord:
+            calls.append(True)
+            return ReproductionRecord(
+                outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+            )
+
+        service.attempt_reproduction(incident.id, check=check)
+
+        assert calls == [True]
