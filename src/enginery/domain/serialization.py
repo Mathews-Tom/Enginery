@@ -34,7 +34,15 @@ from enginery.domain.ids import (
     WorkflowDefinitionId,
     WorkItemId,
 )
-from enginery.domain.incident import Incident, IncidentSeverity, IncidentState, ReleaseLineage
+from enginery.domain.incident import (
+    ContainmentAction,
+    Incident,
+    IncidentSeverity,
+    IncidentState,
+    ReleaseLineage,
+    ReproductionOutcome,
+    ReproductionRecord,
+)
 from enginery.domain.intervention import Intervention, InterventionKind
 from enginery.domain.node_attempt import (
     EvidenceResult,
@@ -650,6 +658,12 @@ def incident_to_dict(incident: Incident) -> dict[str, object]:
             "release_lineage": _release_lineage_to_dict(incident.release_lineage)
             if incident.release_lineage is not None
             else None,
+            "containment": _containment_to_dict(incident.containment)
+            if incident.containment is not None
+            else None,
+            "reproduction": _reproduction_to_dict(incident.reproduction)
+            if incident.reproduction is not None
+            else None,
             "aggregate_version": incident.aggregate_version,
         },
     )
@@ -662,6 +676,12 @@ def incident_from_dict(raw: Mapping[str, object]) -> Incident:
     lineage_raw = data.get("release_lineage")
     if lineage_raw is not None and not isinstance(lineage_raw, Mapping):
         raise InvalidInputError("incident release_lineage must be a mapping or null")
+    containment_raw = data.get("containment")
+    if containment_raw is not None and not isinstance(containment_raw, Mapping):
+        raise InvalidInputError("incident containment must be a mapping or null")
+    reproduction_raw = data.get("reproduction")
+    if reproduction_raw is not None and not isinstance(reproduction_raw, Mapping):
+        raise InvalidInputError("incident reproduction must be a mapping or null")
     return Incident(
         id=IncidentId(_str(data, "id")),
         work_item_id=WorkItemId(_str(data, "work_item_id")),
@@ -670,6 +690,12 @@ def incident_from_dict(raw: Mapping[str, object]) -> Incident:
         summary=_str(data, "summary"),
         release_lineage=_release_lineage_from_dict(lineage_raw)
         if lineage_raw is not None
+        else None,
+        containment=_containment_from_dict(containment_raw)
+        if containment_raw is not None
+        else None,
+        reproduction=_reproduction_from_dict(reproduction_raw)
+        if reproduction_raw is not None
         else None,
         aggregate_version=_int(data, "aggregate_version"),
     )
@@ -688,6 +714,28 @@ def _release_lineage_from_dict(raw: Mapping[str, object]) -> ReleaseLineage:
         service=_str(raw, "service"),
         affected_revision=_str(raw, "affected_revision"),
         known_good_revision=_optional_str(raw, "known_good_revision"),
+    )
+
+
+def _containment_to_dict(action: ContainmentAction) -> dict[str, object]:
+    return {"description": action.description, "rationale": action.rationale}
+
+
+def _containment_from_dict(raw: Mapping[str, object]) -> ContainmentAction:
+    return ContainmentAction(
+        description=_str(raw, "description"),
+        rationale=_str(raw, "rationale"),
+    )
+
+
+def _reproduction_to_dict(record: ReproductionRecord) -> dict[str, object]:
+    return {"outcome": record.outcome.value, "detail": record.detail}
+
+
+def _reproduction_from_dict(raw: Mapping[str, object]) -> ReproductionRecord:
+    return ReproductionRecord(
+        outcome=ReproductionOutcome(_str(raw, "outcome")),
+        detail=_str(raw, "detail"),
     )
 
 

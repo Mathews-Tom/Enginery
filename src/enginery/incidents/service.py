@@ -18,16 +18,19 @@ already uses.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from enginery.domain.enums import WorkKind
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import IncidentId, WorkItemId
 from enginery.domain.incident import (
+    ContainmentAction,
     Incident,
     IncidentSeverity,
     IncidentState,
     ReleaseLineage,
+    ReproductionRecord,
     severity_risk_class,
 )
 from enginery.domain.serialization import (
@@ -43,6 +46,10 @@ from enginery.ledger.service import LedgerService
 
 INCIDENT_AGGREGATE_TYPE = "incident"
 WORK_ITEM_AGGREGATE_TYPE = "work_item"
+
+#: A falsifiable check executed against the affected release lineage.
+#: Actually run, never a hand-typed claim -- see ``attempt_reproduction``.
+ReproductionCheck = Callable[[], ReproductionRecord]
 
 
 def incident_id_for(source_provider: str, external_reference: str) -> IncidentId:
@@ -145,6 +152,47 @@ class IncidentService:
         self._append_incident(incident, event_type="incident.release_lineage_bound")
         return incident
 
+    def contain(self, incident_id: IncidentId, *, description: str, rationale: str) -> Incident:
+        """Apply a deliberately smaller containment action for a classified incident."""
+        incident = self._require(incident_id)
+        action = ContainmentAction(description=description, rationale=rationale)
+        incident = incident.apply_containment(action)
+        self._append_incident(incident, event_type="incident.contained")
+        return incident
+
+    def resolve_containment(self, incident_id: IncidentId, *, mitigated: bool) -> Incident:
+        """Resolve an in-progress containment: terminal ``mitigated``, or
+        continue toward reproduction and full remediation."""
+        incident = self._require(incident_id)
+        target = IncidentState.MITIGATED if mitigated else IncidentState.REPRODUCING
+        incident = incident.transition(target)
+        event_type = "incident.mitigated" if mitigated else "incident.containment_resolved"
+        self._append_incident(incident, event_type=event_type)
+        return incident
+
+    def begin_reproduction(self, incident_id: IncidentId) -> Incident:
+        """Move a classified incident directly into reproduction, without containment."""
+        incident = self._require(incident_id)
+        incident = incident.transition(IncidentState.REPRODUCING)
+        self._append_incident(incident, event_type="incident.reproduction_started")
+        return incident
+
+    def attempt_reproduction(
+        self, incident_id: IncidentId, *, check: ReproductionCheck
+    ) -> Incident:
+        """Run a falsifiable reproduction check and record its outcome.
+
+        ``check`` is caller-supplied and actually executed here -- a
+        reproduction can only be recorded from a real observation, never
+        a hand-typed claim, matching "unreproduced incidents are never
+        labeled reproduced".
+        """
+        incident = self._require(incident_id)
+        record = check()
+        incident = incident.record_reproduction(record)
+        self._append_incident(incident, event_type="incident.reproduction_recorded")
+        return incident
+
     def read(self, incident_id: IncidentId) -> Incident | None:
         projection = self.ledger.read_projection(
             aggregate_type=INCIDENT_AGGREGATE_TYPE, aggregate_id=str(incident_id)
@@ -230,5 +278,6 @@ __all__ = [
     "INCIDENT_AGGREGATE_TYPE",
     "WORK_ITEM_AGGREGATE_TYPE",
     "IncidentService",
+    "ReproductionCheck",
     "incident_id_for",
 ]

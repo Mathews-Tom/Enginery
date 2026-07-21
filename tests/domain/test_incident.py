@@ -9,10 +9,13 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import IncidentId, WorkItemId
 from enginery.domain.incident import (
     INCIDENT_TRANSITIONS,
+    ContainmentAction,
     Incident,
     IncidentSeverity,
     IncidentState,
     ReleaseLineage,
+    ReproductionOutcome,
+    ReproductionRecord,
     severity_risk_class,
 )
 from tests.domain.test_state_machine import TestEveryDomainTransitionTableHasNoDeadEnds
@@ -183,3 +186,90 @@ class TestBindReleaseLineage:
         lineage = ReleaseLineage(service="checkout", affected_revision="v1")
         with pytest.raises(InvalidInputError, match="classified"):
             incident.bind_release_lineage(lineage)
+
+
+class TestContainmentAction:
+    def test_valid_action_constructs(self) -> None:
+        action = ContainmentAction(description="disable checkout", rationale="stop the bleeding")
+        assert action.description == "disable checkout"
+
+    def test_rejects_blank_description(self) -> None:
+        with pytest.raises(InvalidInputError, match="description"):
+            ContainmentAction(description=" ", rationale="stop the bleeding")
+
+    def test_rejects_blank_rationale(self) -> None:
+        with pytest.raises(InvalidInputError, match="rationale"):
+            ContainmentAction(description="disable checkout", rationale=" ")
+
+
+class TestReproductionRecord:
+    def test_valid_record_constructs(self) -> None:
+        record = ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+        )
+        assert record.outcome is ReproductionOutcome.REPRODUCED
+
+    def test_rejects_blank_detail(self) -> None:
+        with pytest.raises(InvalidInputError, match="detail"):
+            ReproductionRecord(outcome=ReproductionOutcome.REPRODUCED, detail=" ")
+
+
+class TestApplyContainment:
+    def test_applies_while_classified(self) -> None:
+        incident = _make_incident(state=IncidentState.CLASSIFIED)
+        action = ContainmentAction(description="disable checkout", rationale="stop the bleeding")
+
+        contained = incident.apply_containment(action)
+
+        assert contained.containment == action
+        assert contained.state is IncidentState.CONTAINING
+        assert contained.aggregate_version == incident.aggregate_version + 1
+
+    def test_rejects_containment_before_classification(self) -> None:
+        incident = _make_incident(state=IncidentState.INTAKE)
+        action = ContainmentAction(description="disable checkout", rationale="stop the bleeding")
+
+        with pytest.raises(InvalidInputError, match="classified"):
+            incident.apply_containment(action)
+
+
+class TestRecordReproduction:
+    def test_reproduced_routes_to_remediating(self) -> None:
+        incident = _make_incident(state=IncidentState.REPRODUCING)
+        record = ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+        )
+
+        recorded = incident.record_reproduction(record)
+
+        assert recorded.reproduction == record
+        assert recorded.state is IncidentState.REMEDIATING
+
+    def test_unavailable_routes_to_blocked(self) -> None:
+        incident = _make_incident(state=IncidentState.REPRODUCING)
+        record = ReproductionRecord(
+            outcome=ReproductionOutcome.UNAVAILABLE, detail="could not reproduce against v1"
+        )
+
+        recorded = incident.record_reproduction(record)
+
+        assert recorded.state is IncidentState.BLOCKED
+
+    def test_errored_routes_to_failed(self) -> None:
+        incident = _make_incident(state=IncidentState.REPRODUCING)
+        record = ReproductionRecord(
+            outcome=ReproductionOutcome.ERRORED, detail="check crashed: connection refused"
+        )
+
+        recorded = incident.record_reproduction(record)
+
+        assert recorded.state is IncidentState.FAILED
+
+    def test_rejects_recording_outside_reproducing(self) -> None:
+        incident = _make_incident(state=IncidentState.CLASSIFIED)
+        record = ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+        )
+
+        with pytest.raises(InvalidInputError, match="reproducing"):
+            incident.record_reproduction(record)
