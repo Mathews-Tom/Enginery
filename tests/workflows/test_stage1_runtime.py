@@ -31,6 +31,8 @@ from enginery.domain.errors import (
 )
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.observation import ObservationState
+from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.manifest import WorkflowManifest
@@ -43,6 +45,7 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
@@ -1359,6 +1362,337 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
     assert result.outcome.value == "merge_ready"
     assert result.evidence is not None
     assert work_ledger.published[0].evidence_digest == result.evidence.digest
+    assert service.next_action(request.run.id).action.value == "wait"
+
+
+def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    """Once ``verify`` passes, the next durable action registers pending
+    merge-result and reopened-issue observations instead of going straight
+    to ``wait`` -- and only when an ``OutcomeCaptureService`` is configured."""
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    manifest = replace(
+        issue_to_pr_manifest(),
+        nodes={
+            **issue_to_pr_manifest().nodes,
+            NodeId("implement"): replace(
+                issue_to_pr_manifest().nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-outcomes"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-outcomes",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-outcomes"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    work_ledger = TerminalWorkLedger(snapshot)
+    outcomes = OutcomeCaptureService(
+        ledger=ledger_service, pull_requests=cast(PullRequestPort, pull_requests)
+    )
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        work_ledger=cast(WorkLedgerPort, work_ledger),
+        pull_requests=cast(PullRequestPort, pull_requests),
+        outcomes=outcomes,
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    for node_id in ("qualify", "implement", "validate"):
+        dispatch = WorkflowNodeDispatch(
+            FixtureDispatch(
+                run_id=str(request.run.id),
+                node_id=node_id,
+                attempt_id=f"{node_id}-0",
+                repository_id=request.repository_id,
+                repository_path=request.repository_path,
+                workspace_path=request.workspace_path,
+                base_revision="base-revision",
+                command=(node_id,),
+                expected_attempt_version=0,
+                operation_id=f"{node_id}:run-outcomes",
+                dependencies=(
+                    ()
+                    if node_id == "qualify"
+                    else ((str(request.run.id), "qualify"),)
+                    if node_id == "implement"
+                    else ((str(request.run.id), "implement"),)
+                ),
+                workflow_definition_id=manifest.id.value,
+            ),
+            manifest,
+        )
+        epoch = runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+        )
+        runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=now,
+            extra=(
+                {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+                if node_id == "validate"
+                else None
+            ),
+        )
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="implementation-artifacts-outcomes",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id="implement-0",
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                ),
+            ),
+        )
+    )
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "merge_ready"
+    )
+    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert result.outcome.value == "merge_ready"
+
+    assert service.next_action(request.run.id).action.value == "register_outcome_observation"
+    progression = service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    assert progression.action.value == "wait"
+
+    merge_observation = outcomes.read_observation(
+        observation_id_for(request.run.id, OutcomeKind.MERGE_RESULT)
+    )
+    assert merge_observation is not None
+    assert merge_observation.state is ObservationState.PENDING
+    assert merge_observation.detail["subject_reference"] == "17"
+
+    reopened_observation = outcomes.read_observation(
+        observation_id_for(request.run.id, OutcomeKind.REOPENED_ISSUE)
+    )
+    assert reopened_observation is not None
+    assert reopened_observation.state is ObservationState.PENDING
+    assert reopened_observation.detail["subject_reference"] == "issue:1"
+
+    # Re-driving the same tick is idempotent: no duplicate observations.
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    assert len(outcomes.list_observations()) == 2
+
+
+def test_stage1_never_registers_outcome_observations_without_a_configured_service(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    """The existing merge-ready flow is unchanged when no ``OutcomeCaptureService``
+    is configured: ``next_action`` goes straight from a passed ``verify`` to ``wait``."""
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    manifest = replace(
+        issue_to_pr_manifest(),
+        nodes={
+            **issue_to_pr_manifest().nodes,
+            NodeId("implement"): replace(
+                issue_to_pr_manifest().nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-no-outcomes"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-no-outcomes",
+        validation_commands=(("uv", "run", "pytest", "-q"),),
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-no-outcomes"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    work_ledger = TerminalWorkLedger(snapshot)
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        work_ledger=cast(WorkLedgerPort, work_ledger),
+        pull_requests=cast(PullRequestPort, pull_requests),
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    for node_id in ("qualify", "implement", "validate"):
+        dispatch = WorkflowNodeDispatch(
+            FixtureDispatch(
+                run_id=str(request.run.id),
+                node_id=node_id,
+                attempt_id=f"{node_id}-0",
+                repository_id=request.repository_id,
+                repository_path=request.repository_path,
+                workspace_path=request.workspace_path,
+                base_revision="base-revision",
+                command=(node_id,),
+                expected_attempt_version=0,
+                operation_id=f"{node_id}:run-no-outcomes",
+                dependencies=(
+                    ()
+                    if node_id == "qualify"
+                    else ((str(request.run.id), "qualify"),)
+                    if node_id == "implement"
+                    else ((str(request.run.id), "implement"),)
+                ),
+                workflow_definition_id=manifest.id.value,
+            ),
+            manifest,
+        )
+        epoch = runtime.register_node(
+            dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+        )
+        runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=now,
+            extra=(
+                {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+                if node_id == "validate"
+                else None
+            ),
+        )
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="implementation-artifacts-no-outcomes",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id="implement-0",
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                ),
+            ),
+        )
+    )
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert (
+        service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
+        == "merge_ready"
+    )
+    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert result.outcome.value == "merge_ready"
+
     assert service.next_action(request.run.id).action.value == "wait"
 
 

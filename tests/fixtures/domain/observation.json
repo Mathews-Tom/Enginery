@@ -1,0 +1,16 @@
+{
+  "data": {
+    "detail": {},
+    "id": "observation-golden-1",
+    "kind": "merge_result",
+    "opened_at": "2026-07-17T12:00:00+00:00",
+    "outcome_id": null,
+    "resolved_at": null,
+    "run_id": "run-golden-1",
+    "schema_version": 1,
+    "state": "pending",
+    "window_seconds": 604800.0,
+    "work_item_id": "wi-golden-1"
+  },
+  "schema_version": 1
+}
