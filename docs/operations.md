@@ -7,12 +7,15 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is pre-`v0.1.0`. Only the
-Stage 1 (issue-to-merge-ready-pull-request) command surface exists today.
-Stage 2 (plan to verified release) has a read-only `stage2 status`
-inspection command; Stage 3 (incident to hotfix) and Stage 4 (governed
-factory self-improvement) have no CLI surface yet. Stage 4 is additionally
-gate-deferred (see [Release scope and gate-deferred work](#release-scope-and-gate-deferred-work)).
+[`README.md`](../README.md#status). Enginery is `v0.1.0`. Only the
+Stage 1 (issue-to-merge-ready-pull-request) command surface is a
+supported, documented feature of this release. Stage 2 (plan to verified
+release) additionally has a read-only `stage2 status` inspection
+command already in the CLI (see the command table below); Stage 3
+(incident to hotfix) and Stage 4 (governed factory self-improvement)
+have no CLI surface at all. None of Stage 2's actual merge, build, or
+publish orchestration is exposed through the CLI in this release — see
+[Release scope and gate-deferred work](#release-scope-and-gate-deferred-work).
 
 ## Installation
 
@@ -40,7 +43,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.0.0.dev0 installed
+[ok] package_metadata: enginery 0.1.0 installed
 ```
 
 `enginery doctor --json` emits the same report as a machine-readable
@@ -317,9 +320,11 @@ operator documentation. In particular:
   deficiency, corpus diversity beyond a single repository, and the
   dual-human authority precondition described above. The gate is reviewed
   on a cadence, never assumed from elapsed time.
-- Do not run this release expecting Stage 2-4 CLI commands, a hosted UI, or
+- Do not run this release expecting Stage 2's merge/build/publish
+  orchestration, a Stage 3 or Stage 4 CLI surface, a hosted UI, or
   additional harness/work-ledger providers beyond OMP, Claude Code, and
-  GitHub. None exist yet.
+  GitHub. None of those exist yet. `stage2 status` (read-only stack
+  inspection) is the only Stage 2+ CLI surface present in this release.
 
 ## See also
 
