@@ -153,6 +153,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "completeness", help="Report the versioned outcome-capture completeness derivation."
     )
     outcome_completeness_parser.add_argument("--database", required=True, type=Path)
+    outcome_interventions_parser = outcome_subparsers.add_parser(
+        "interventions", help="List recorded human decisions for one run."
+    )
+    outcome_interventions_parser.add_argument("--database", required=True, type=Path)
+    outcome_interventions_parser.add_argument("--run-id", required=True)
+    outcome_failures_parser = outcome_subparsers.add_parser(
+        "failures", help="List failed runtime nodes for one run."
+    )
+    outcome_failures_parser.add_argument("--database", required=True, type=Path)
+    outcome_failures_parser.add_argument("--run-id", required=True)
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")

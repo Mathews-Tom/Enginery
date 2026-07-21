@@ -19,6 +19,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import SupervisedHarness
@@ -147,12 +148,14 @@ def _advancing_service(
         credential_reference=configuration.github_credential_reference,
         executable=configuration.github_executable,
     )
+    pull_requests = GitHubPullRequests(github)
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
-        pull_requests=GitHubPullRequests(github),
+        pull_requests=pull_requests,
         harness=_harness_for(configuration),
+        outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
     )
 
 
