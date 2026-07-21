@@ -237,12 +237,12 @@ executors; those three nodes' own crash/fault-injection coverage
 already exists in the merged Stage 1 implementation stack. `--stages`
 accepts any combination of `1`, `2`, and `3`; Stage 4's cumulative gate
 belongs to its own gate-deferred, unversioned train once gate G4
-passes. See the
-[`v0.1.0`](release-readiness-v0.1.0.md),
-[`v0.2.0`](release-evidence-v0.2.0.md), and
-[`v0.3.0`](release-evidence-v0.3.0.md) release-evidence reports for the
-exact evidence digests each release's gate run produced and the
-measured local performance baseline from `scripts/performance_baseline.py`.
+passes. See [`docs/RELEASE_EVIDENCE.md`](RELEASE_EVIDENCE.md) (`v0.3.0`
+first, `v0.2.0` and `v0.1.0` below it) for the exact evidence digests
+each release's gate run produced, and
+[`docs/release-readiness-v0.1.0.md`](release-readiness-v0.1.0.md) for
+the measured local performance baseline from
+`scripts/performance_baseline.py`.
 
 ## Backup and restore
 

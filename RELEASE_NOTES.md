@@ -135,7 +135,8 @@ Requires Python 3.12+. Supports macOS and Linux.
 ## Links
 
 - [`CHANGELOG.md`](CHANGELOG.md)
-- [`docs/dependencies-v0.3.0.md`](docs/dependencies-v0.3.0.md) — dependency/license manifest
+- [`docs/RELEASE_EVIDENCE.md`](docs/RELEASE_EVIDENCE.md) — post-publication evidence for every release, `v0.3.0` first
+- [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) — dependency/license manifest
 - [`docs/operations.md`](docs/operations.md) — operator guide
 - [`docs/adapters.md`](docs/adapters.md) — adapter authoring guide
 - [`docs/migration-sage-dev.md`](docs/migration-sage-dev.md) — manual migration guide
