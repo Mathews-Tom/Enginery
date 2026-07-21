@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from enginery.domain.ids import (
     InterventionId,
     NodeAttemptId,
     NodeId,
+    ObservationId,
     OutcomeId,
     PolicyDecisionId,
     RunId,
@@ -47,6 +48,7 @@ from enginery.domain.node_attempt import (
     NodeAttemptState,
     ReconciliationResult,
 )
+from enginery.domain.observation import ObservationRequest, ObservationState
 from enginery.domain.outcome import Outcome, OutcomeKind
 from enginery.domain.policy_decision import PolicyAction, PolicyDecision, PolicyResult
 from enginery.domain.run import Run, RunState
@@ -190,6 +192,22 @@ def _golden_outcome() -> Outcome:
     )
 
 
+def _golden_observation() -> ObservationRequest:
+    return ObservationRequest(
+        id=ObservationId("observation-golden-1"),
+        work_item_id=WorkItemId("wi-golden-1"),
+        run_id=RunId("run-golden-1"),
+        kind=OutcomeKind.MERGE_RESULT,
+        opened_at=_NOW,
+        window=timedelta(days=7),
+        state=ObservationState.PENDING,
+        resolved_at=None,
+        outcome_id=None,
+        detail={},
+        schema_version=1,
+    )
+
+
 def _golden_factory_change() -> FactoryChange:
     return FactoryChange(
         id=FactoryChangeId("fc-golden-1"),
@@ -227,6 +245,12 @@ _CASES: list[_Case] = [
         ser.intervention_from_dict,
     ),
     ("outcome", _golden_outcome, ser.outcome_to_dict, ser.outcome_from_dict),
+    (
+        "observation",
+        _golden_observation,
+        ser.observation_to_dict,
+        ser.observation_from_dict,
+    ),
     (
         "factory_change",
         _golden_factory_change,

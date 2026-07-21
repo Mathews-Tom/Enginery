@@ -102,6 +102,10 @@ class InterventionId(_Identifier):
     """Identifies one human intervention record."""
 
 
+class ObservationId(_Identifier):
+    """Identifies one pending, captured, or indeterminate outcome observation."""
+
+
 class OutcomeId(_Identifier):
     """Identifies one post-execution outcome observation."""
 
@@ -164,6 +168,7 @@ __all__ = [
     "InterventionId",
     "NodeAttemptId",
     "NodeId",
+    "ObservationId",
     "OperationId",
     "OutcomeId",
     "PlanExecutionId",

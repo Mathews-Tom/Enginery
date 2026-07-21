@@ -26,6 +26,7 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
+from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
 from enginery.domain.serialization import (
     run_from_dict,
@@ -46,6 +47,7 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
 from enginery.workflows.issue_to_pr import IssueQualification
@@ -254,6 +256,7 @@ class Stage1ProgressionAction(StrEnum):
     OPEN_PR = "open_pr"
     WAIT_FOR_CI = "wait_for_ci"
     VERIFY = "verify"
+    REGISTER_OUTCOME_OBSERVATION = "register_outcome_observation"
     WAIT = "wait"
 
 
@@ -283,6 +286,7 @@ class Stage1RunService:
     work_ledger: WorkLedgerPort | None = None
     pull_requests: PullRequestPort | None = None
     harness: SupervisedHarness | None = None
+    outcomes: OutcomeCaptureService | None = None
 
     def start(
         self,
@@ -400,7 +404,16 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
         if verify_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        if self.outcomes is not None and not self._outcome_observation_registered(run_id):
+            return Stage1Progression(Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION, run)
         return Stage1Progression(Stage1ProgressionAction.WAIT, run)
+
+    def _outcome_observation_registered(self, run_id: RunId) -> bool:
+        assert self.outcomes is not None
+        registered = self.outcomes.read_observation(
+            observation_id_for(run_id, OutcomeKind.MERGE_RESULT)
+        )
+        return registered is not None
 
     def advance(
         self,
@@ -444,6 +457,8 @@ class Stage1RunService:
             self.wait_for_ci(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.VERIFY:
             self.verify_merge_ready(request, now=now, heartbeat_window=heartbeat_window)
+        elif progression.action is Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION:
+            self.register_outcome_observation(request, now=now)
         return self.next_action(run_id)
 
     def qualify(
@@ -913,6 +928,38 @@ class Stage1RunService:
             extra=extra,
         )
         return result
+
+    def register_outcome_observation(self, request: Stage1RunRequest, *, now: datetime) -> None:
+        """Register the pending post-merge-ready observations this run's
+        subject still needs watched: whether its pull request eventually
+        merges or closes unmerged, and whether its issue later reopens.
+        Both stay durable and pending until a sweep or an explicit human
+        capture resolves them, or their declared window elapses."""
+        outcomes = self._require_outcomes()
+        open_pr = self._node_state(request.run.id, "open_pr")
+        work_item_id = request.run.work_item_id
+        run_id = request.run.id
+        outcomes.register_pending(
+            work_item_id=work_item_id,
+            run_id=run_id,
+            kind=OutcomeKind.MERGE_RESULT,
+            subject_reference=str(_integer(open_pr, "pull_request_number")),
+            opened_at=now,
+        )
+        outcomes.register_pending(
+            work_item_id=work_item_id,
+            run_id=run_id,
+            kind=OutcomeKind.REOPENED_ISSUE,
+            subject_reference=request.work_snapshot.work_item.external_reference,
+            opened_at=now,
+        )
+
+    def _require_outcomes(self) -> OutcomeCaptureService:
+        if self.outcomes is None:
+            raise MissingPrerequisiteError(
+                "Stage 1 outcome observation registration requires outcomes"
+            )
+        return self.outcomes
 
     def _review_outcome(self, run_id: RunId) -> ReviewOutcome | None:
         projection = self.ledger.read_projection(

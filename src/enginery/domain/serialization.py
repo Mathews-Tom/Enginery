@@ -13,7 +13,7 @@ fixture can be committed as ordinary JSON.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from enginery.domain.artifact import Artifact, ArtifactKind, RedactionClassification
 from enginery.domain.digests import Digest
@@ -26,6 +26,7 @@ from enginery.domain.ids import (
     InterventionId,
     NodeAttemptId,
     NodeId,
+    ObservationId,
     OutcomeId,
     PolicyDecisionId,
     RunId,
@@ -39,6 +40,7 @@ from enginery.domain.node_attempt import (
     NodeAttemptState,
     ReconciliationResult,
 )
+from enginery.domain.observation import ObservationRequest, ObservationState
 from enginery.domain.outcome import Outcome, OutcomeKind
 from enginery.domain.plan_execution import PlanExecution
 from enginery.domain.policy_decision import PolicyAction, PolicyDecision, PolicyResult
@@ -54,6 +56,7 @@ ARTIFACT_SCHEMA_VERSION = 1
 POLICY_DECISION_SCHEMA_VERSION = 1
 INTERVENTION_SCHEMA_VERSION = 1
 OUTCOME_SCHEMA_VERSION = 1
+OBSERVATION_SCHEMA_VERSION = 1
 FACTORY_CHANGE_SCHEMA_VERSION = 1
 WORKFLOW_MANIFEST_SCHEMA_VERSION = 1
 PLAN_EXECUTION_SCHEMA_VERSION = 1
@@ -519,6 +522,61 @@ def outcome_from_dict(raw: Mapping[str, object]) -> Outcome:
 
 
 # ---------------------------------------------------------------------------
+# ObservationRequest
+# ---------------------------------------------------------------------------
+
+
+def observation_to_dict(observation: ObservationRequest) -> dict[str, object]:
+    return _envelope(
+        OBSERVATION_SCHEMA_VERSION,
+        {
+            "id": str(observation.id),
+            "work_item_id": str(observation.work_item_id),
+            "run_id": str(observation.run_id),
+            "kind": observation.kind.value,
+            "opened_at": _encode_datetime(observation.opened_at),
+            "window_seconds": observation.window.total_seconds(),
+            "state": observation.state.value,
+            "resolved_at": _encode_datetime(observation.resolved_at)
+            if observation.resolved_at is not None
+            else None,
+            "outcome_id": str(observation.outcome_id)
+            if observation.outcome_id is not None
+            else None,
+            "detail": dict(observation.detail),
+            "schema_version": observation.schema_version,
+        },
+    )
+
+
+def observation_from_dict(raw: Mapping[str, object]) -> ObservationRequest:
+    data = _unwrap_envelope(
+        raw, expected_schema_version=OBSERVATION_SCHEMA_VERSION, type_name="ObservationRequest"
+    )
+    detail_raw = data.get("detail", {})
+    if not isinstance(detail_raw, Mapping):
+        raise InvalidInputError("detail must be a mapping")
+    resolved_raw = data.get("resolved_at")
+    outcome_id_raw = data.get("outcome_id")
+    window_seconds = data.get("window_seconds")
+    if not isinstance(window_seconds, int | float):
+        raise InvalidInputError("window_seconds must be a number")
+    return ObservationRequest(
+        id=ObservationId(_str(data, "id")),
+        work_item_id=WorkItemId(_str(data, "work_item_id")),
+        run_id=RunId(_str(data, "run_id")),
+        kind=OutcomeKind(_str(data, "kind")),
+        opened_at=_decode_datetime(data.get("opened_at"), field_name="opened_at"),
+        window=timedelta(seconds=window_seconds),
+        state=ObservationState(_str(data, "state")),
+        resolved_at=_decode_optional_datetime(resolved_raw, field_name="resolved_at"),
+        outcome_id=OutcomeId(outcome_id_raw) if isinstance(outcome_id_raw, str) else None,
+        detail=dict(detail_raw),
+        schema_version=_int(data, "schema_version"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # FactoryChange
 # ---------------------------------------------------------------------------
 
@@ -673,6 +731,7 @@ __all__: list[str] = [
     "FACTORY_CHANGE_SCHEMA_VERSION",
     "INTERVENTION_SCHEMA_VERSION",
     "NODE_ATTEMPT_SCHEMA_VERSION",
+    "OBSERVATION_SCHEMA_VERSION",
     "OUTCOME_SCHEMA_VERSION",
     "PLAN_EXECUTION_SCHEMA_VERSION",
     "POLICY_DECISION_SCHEMA_VERSION",
@@ -688,6 +747,8 @@ __all__: list[str] = [
     "intervention_to_dict",
     "node_attempt_from_dict",
     "node_attempt_to_dict",
+    "observation_from_dict",
+    "observation_to_dict",
     "outcome_from_dict",
     "outcome_to_dict",
     "plan_execution_from_dict",
