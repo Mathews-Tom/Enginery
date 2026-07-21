@@ -193,6 +193,14 @@ class IncidentService:
         self._append_incident(incident, event_type="incident.reproduction_recorded")
         return incident
 
+    def mark_hotfix_ready(self, incident_id: IncidentId) -> Incident:
+        """Move a remediated incident to ``hotfix_ready``: the repair is
+        validated, reviewed, and PR-ready, but not yet deployed."""
+        incident = self._require(incident_id)
+        incident = incident.transition(IncidentState.HOTFIX_READY)
+        self._append_incident(incident, event_type="incident.hotfix_ready")
+        return incident
+
     def read(self, incident_id: IncidentId) -> Incident | None:
         projection = self.ledger.read_projection(
             aggregate_type=INCIDENT_AGGREGATE_TYPE, aggregate_id=str(incident_id)
