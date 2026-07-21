@@ -201,6 +201,34 @@ class IncidentService:
         self._append_incident(incident, event_type="incident.hotfix_ready")
         return incident
 
+    def begin_deployment(self, incident_id: IncidentId) -> Incident:
+        """Move a remediated incident into deployment against the controlled target."""
+        incident = self._require(incident_id)
+        incident = incident.transition(IncidentState.DEPLOYING)
+        self._append_incident(incident, event_type="incident.deployment_started")
+        return incident
+
+    def begin_observation(self, incident_id: IncidentId) -> Incident:
+        """Move a deployed incident into post-deployment observation."""
+        incident = self._require(incident_id)
+        incident = incident.transition(IncidentState.OBSERVING)
+        self._append_incident(incident, event_type="incident.observation_started")
+        return incident
+
+    def resolve_observation(self, incident_id: IncidentId, *, healthy: bool) -> Incident:
+        """Resolve an observation window.
+
+        A healthy result resolves the incident (terminal). An unhealthy
+        result begins rollback -- the actual rollback broker invocation
+        and its authority record are a separate, subsequent step.
+        """
+        incident = self._require(incident_id)
+        target = IncidentState.RESOLVED if healthy else IncidentState.ROLLING_BACK
+        incident = incident.transition(target)
+        event_type = "incident.resolved" if healthy else "incident.rollback_started"
+        self._append_incident(incident, event_type=event_type)
+        return incident
+
     def read(self, incident_id: IncidentId) -> Incident | None:
         projection = self.ledger.read_projection(
             aggregate_type=INCIDENT_AGGREGATE_TYPE, aggregate_id=str(incident_id)
