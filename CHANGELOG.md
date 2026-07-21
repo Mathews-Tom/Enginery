@@ -4,6 +4,56 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.3.0] - 2026-07-22
+
+Third public release. Layered on `v0.1.0`'s Stage 1 and `v0.2.0`'s
+Stage 2, this release ships Stage 3 (production incident to verified
+hotfix and rollback) against a controlled local service.
+
+### Added
+
+- A closed-lifecycle `Incident` domain aggregate (severity/authority
+  mapping, release lineage, containment, and falsifiable reproduction
+  records) and an `IncidentService` that ingests, classifies, binds
+  release lineage, attempts reproduction, deploys, observes, rolls
+  back, and records follow-up work, entirely through the durable
+  ledger.
+- A fixed-broker hotfix workflow (`enginery.incidents.hotfix`):
+  git-worktree creation at the affected revision, minimal repair
+  application, and non-vacuous regression evidence -- a repair is
+  only accepted after it is proven to fail on the unfixed revision
+  and pass on the repaired one, reusing the existing independent
+  review routing unchanged.
+- A real, stdlib-only controlled local HTTP service fixture and a
+  real `DeploymentPort` implementation
+  (`enginery.adapters.local_service.LocalServiceDeploymentAdapter`)
+  that starts, stops, and version-swaps a genuine subprocess -- never
+  a canned or simulated receipt.
+- Two independently policy-approved, short-lived deployment authority
+  grants (`deployment.execute`, `deployment.rollback`) with durable
+  authority records, so no agent or arbitrary command ever holds a
+  standing deployment credential.
+- A cumulative Stage 1+2+3 restart/replay gate
+  (`full_system_gate.py --stages 1,2,3`), extending the Stage 1+2
+  gate with a real, ledger-backed Stage 3 leg that proves the
+  incident's durable state -- including its terminal `rolled_back`
+  outcome -- survives a coordinator restart.
+
+### Not part of this release
+
+- Self-improvement (candidate evaluation, canary rollout, and
+  promotion) is not implemented. Stage 4 (governed factory
+  self-improvement) remains gate-deferred behind a data-threshold
+  entry gate with no committed date.
+- There is no hosted, multi-tenant, or browser-dashboard surface.
+- Windows is not supported. Process supervision, cancellation, and
+  recovery are bound to POSIX process groups and signals.
+- The worktree backend provides workspace separation, not
+  hostile-code containment.
+- The controlled deployment target in this release is a local
+  fixture HTTP service, never real production infrastructure or a
+  cloud destination.
+
 ## [0.2.0] - 2026-07-21
 
 Second public release. Layered on `v0.1.0`'s Stage 1 capability, this
