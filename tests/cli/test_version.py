@@ -18,5 +18,5 @@ def test_version_flag_exits_zero_and_prints_installed_version(
     assert metadata.version("enginery") in captured.out
 
 
-def test_installed_version_matches_the_canonical_prerelease() -> None:
-    assert metadata.version("enginery") == "0.0.0.dev0"
+def test_installed_version_matches_the_canonical_release() -> None:
+    assert metadata.version("enginery") == "0.1.0"
