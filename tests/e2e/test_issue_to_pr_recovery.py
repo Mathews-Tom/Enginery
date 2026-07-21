@@ -33,11 +33,11 @@ def test_stage1_cumulative_restart_and_replay_reaches_merge_ready_twice() -> Non
 
 def test_stage1_gate_rejects_unsupported_stages() -> None:
     try:
-        run_gate(stages="1,2")
+        run_gate(stages="3")
     except EngineryError as error:
-        assert "only supports --stages 1" in str(error)
+        assert "only supports --stages 1, 2, or 1,2" in str(error)
     else:
-        raise AssertionError("Stage 2-4 cumulative gates must be rejected in this milestone")
+        raise AssertionError("Stage 3-4 cumulative gates must be rejected in this milestone")
 
 
 def test_stage1_gate_without_restart_still_proves_cumulative_correctness() -> None:
