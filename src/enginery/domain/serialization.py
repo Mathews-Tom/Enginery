@@ -23,6 +23,7 @@ from enginery.domain.factory_change import FactoryChange, FactoryChangeState
 from enginery.domain.ids import (
     ArtifactId,
     FactoryChangeId,
+    IncidentId,
     InterventionId,
     NodeAttemptId,
     NodeId,
@@ -33,6 +34,7 @@ from enginery.domain.ids import (
     WorkflowDefinitionId,
     WorkItemId,
 )
+from enginery.domain.incident import Incident, IncidentSeverity, IncidentState, ReleaseLineage
 from enginery.domain.intervention import Intervention, InterventionKind
 from enginery.domain.node_attempt import (
     EvidenceResult,
@@ -58,6 +60,7 @@ INTERVENTION_SCHEMA_VERSION = 1
 OUTCOME_SCHEMA_VERSION = 1
 OBSERVATION_SCHEMA_VERSION = 1
 FACTORY_CHANGE_SCHEMA_VERSION = 1
+INCIDENT_SCHEMA_VERSION = 1
 WORKFLOW_MANIFEST_SCHEMA_VERSION = 1
 PLAN_EXECUTION_SCHEMA_VERSION = 1
 STACK_SCHEMA_VERSION = 1
@@ -631,6 +634,64 @@ def factory_change_from_dict(raw: Mapping[str, object]) -> FactoryChange:
 
 
 # ---------------------------------------------------------------------------
+# Incident
+# ---------------------------------------------------------------------------
+
+
+def incident_to_dict(incident: Incident) -> dict[str, object]:
+    return _envelope(
+        INCIDENT_SCHEMA_VERSION,
+        {
+            "id": str(incident.id),
+            "work_item_id": str(incident.work_item_id),
+            "severity": incident.severity.value,
+            "state": incident.state.value,
+            "summary": incident.summary,
+            "release_lineage": _release_lineage_to_dict(incident.release_lineage)
+            if incident.release_lineage is not None
+            else None,
+            "aggregate_version": incident.aggregate_version,
+        },
+    )
+
+
+def incident_from_dict(raw: Mapping[str, object]) -> Incident:
+    data = _unwrap_envelope(
+        raw, expected_schema_version=INCIDENT_SCHEMA_VERSION, type_name="Incident"
+    )
+    lineage_raw = data.get("release_lineage")
+    if lineage_raw is not None and not isinstance(lineage_raw, Mapping):
+        raise InvalidInputError("incident release_lineage must be a mapping or null")
+    return Incident(
+        id=IncidentId(_str(data, "id")),
+        work_item_id=WorkItemId(_str(data, "work_item_id")),
+        severity=IncidentSeverity(_str(data, "severity")),
+        state=IncidentState(_str(data, "state")),
+        summary=_str(data, "summary"),
+        release_lineage=_release_lineage_from_dict(lineage_raw)
+        if lineage_raw is not None
+        else None,
+        aggregate_version=_int(data, "aggregate_version"),
+    )
+
+
+def _release_lineage_to_dict(lineage: ReleaseLineage) -> dict[str, object]:
+    return {
+        "service": lineage.service,
+        "affected_revision": lineage.affected_revision,
+        "known_good_revision": lineage.known_good_revision,
+    }
+
+
+def _release_lineage_from_dict(raw: Mapping[str, object]) -> ReleaseLineage:
+    return ReleaseLineage(
+        service=_str(raw, "service"),
+        affected_revision=_str(raw, "affected_revision"),
+        known_good_revision=_optional_str(raw, "known_good_revision"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # WorkflowManifest
 # ---------------------------------------------------------------------------
 
@@ -727,8 +788,8 @@ def _optional_datetime_out(value: datetime | None) -> str | None:
 
 
 __all__: list[str] = [
-    "ARTIFACT_SCHEMA_VERSION",
     "FACTORY_CHANGE_SCHEMA_VERSION",
+    "INCIDENT_SCHEMA_VERSION",
     "INTERVENTION_SCHEMA_VERSION",
     "NODE_ATTEMPT_SCHEMA_VERSION",
     "OBSERVATION_SCHEMA_VERSION",
@@ -743,6 +804,8 @@ __all__: list[str] = [
     "artifact_to_dict",
     "factory_change_from_dict",
     "factory_change_to_dict",
+    "incident_from_dict",
+    "incident_to_dict",
     "intervention_from_dict",
     "intervention_to_dict",
     "node_attempt_from_dict",

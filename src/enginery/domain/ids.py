@@ -102,6 +102,10 @@ class InterventionId(_Identifier):
     """Identifies one human intervention record."""
 
 
+class IncidentId(_Identifier):
+    """Identifies an :class:`enginery.domain.incident.Incident` aggregate."""
+
+
 class ObservationId(_Identifier):
     """Identifies one pending, captured, or indeterminate outcome observation."""
 
@@ -165,6 +169,7 @@ class OperationId:
 __all__ = [
     "ArtifactId",
     "FactoryChangeId",
+    "IncidentId",
     "InterventionId",
     "NodeAttemptId",
     "NodeId",
