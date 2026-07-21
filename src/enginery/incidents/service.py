@@ -18,12 +18,24 @@ already uses.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
+from enginery.application.delivery_ports import (
+    DeploymentPort,
+    DeploymentReceipt,
+    DeploymentRequest,
+    ReleaseArtifact,
+)
 from enginery.domain.enums import WorkKind
-from enginery.domain.errors import InvalidInputError
-from enginery.domain.ids import IncidentId, WorkItemId
+from enginery.domain.errors import (
+    HumanActionRequiredError,
+    InvalidInputError,
+    MissingPrerequisiteError,
+    PolicyDenialError,
+)
+from enginery.domain.ids import IncidentId, OperationId, RunId, WorkItemId
 from enginery.domain.incident import (
     ContainmentAction,
     Incident,
@@ -33,6 +45,8 @@ from enginery.domain.incident import (
     ReproductionRecord,
     severity_risk_class,
 )
+from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.serialization import (
     incident_from_dict,
     incident_to_dict,
@@ -40,12 +54,16 @@ from enginery.domain.serialization import (
     work_item_to_dict,
 )
 from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.incidents.authority import DeploymentAuthorityRecord, DeploymentGrant, issue_grant
 from enginery.ledger.errors import ExpectedVersionConflictError
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
+from enginery.policy.evaluator import PolicyEvaluator
+from enginery.policy.schemas import ApprovalSchema
 
 INCIDENT_AGGREGATE_TYPE = "incident"
 WORK_ITEM_AGGREGATE_TYPE = "work_item"
+AUTHORITY_AGGREGATE_TYPE = "incident_deployment_authority"
 
 #: A falsifiable check executed against the affected release lineage.
 #: Actually run, never a hand-typed claim -- see ``attempt_reproduction``.
@@ -63,11 +81,64 @@ def incident_id_for(source_provider: str, external_reference: str) -> IncidentId
     return IncidentId(hashlib.sha256(payload.encode("utf-8")).hexdigest())
 
 
+def _incident_run_id(incident_id: IncidentId) -> RunId:
+    """A deterministic ``RunId`` binding for a broker call, since incidents
+    operate outside the manifest-node ``Run`` system but the delivery
+    ports require one for their own operation-identity bookkeeping."""
+    return RunId(f"incident:{incident_id}")
+
+
+def _authority_operation_id(incident_id: IncidentId, action: str, scope: str) -> OperationId:
+    payload = "\x1f".join(("incident-authority", str(incident_id), action, scope))
+    return OperationId(value=hashlib.sha256(payload.encode("utf-8")).hexdigest())
+
+
+def _authority_record_to_dict(record: DeploymentAuthorityRecord) -> dict[str, object]:
+    grant = record.grant
+    return {
+        "incident_id": record.incident_id,
+        "grant": {
+            "grant_id": grant.grant_id,
+            "action": grant.action.value,
+            "target": grant.target,
+            "principal_id": grant.principal_id,
+            "issued_at": grant.issued_at.isoformat(),
+            "expires_at": grant.expires_at.isoformat(),
+        },
+        "policy_decision_id": record.policy_decision_id,
+        "outcome": record.outcome,
+        "detail": record.detail,
+    }
+
+
+def _authority_record_from_dict(raw: Mapping[str, object]) -> DeploymentAuthorityRecord:
+    grant_raw = raw["grant"]
+    if not isinstance(grant_raw, dict):
+        raise InvalidInputError("authority record grant must be a mapping")
+    grant = DeploymentGrant(
+        grant_id=str(grant_raw["grant_id"]),
+        action=PolicyAction(grant_raw["action"]),
+        target=str(grant_raw["target"]),
+        principal_id=str(grant_raw["principal_id"]),
+        issued_at=datetime.fromisoformat(str(grant_raw["issued_at"])),
+        expires_at=datetime.fromisoformat(str(grant_raw["expires_at"])),
+    )
+    return DeploymentAuthorityRecord(
+        incident_id=str(raw["incident_id"]),
+        grant=grant,
+        policy_decision_id=str(raw["policy_decision_id"]),
+        outcome=str(raw["outcome"]),
+        detail=str(raw["detail"]),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class IncidentService:
     """Ingest, classify, and bind release lineage for one incident."""
 
     ledger: LedgerService
+    deployment: DeploymentPort | None = None
+    policy: PolicyEvaluator | None = None
 
     def ingest(
         self,
@@ -229,6 +300,220 @@ class IncidentService:
         self._append_incident(incident, event_type=event_type)
         return incident
 
+    def execute_deployment(
+        self,
+        incident_id: IncidentId,
+        *,
+        artifact: ReleaseArtifact,
+        requesting_principal_id: str,
+        now: datetime,
+        reference_time: datetime | None = None,
+    ) -> DeploymentReceipt:
+        """Authorize and execute a deployment through the fixed local-service broker.
+
+        Requires an ``ALLOW`` decision for ``deployment.execute`` -- a
+        hard-required-human action (``policy/rules.py``) -- before
+        issuing a short-lived grant and calling the broker. The
+        incident must already be ``deploying`` (see ``begin_deployment``)
+        and must already have a bound release lineage. ``reference_time``
+        (defaults to ``now``) is the instant the grant is checked for
+        expiry -- distinct from ``now`` so a caller can deterministically
+        exercise the expired-credential-reference fault: issue at ``now``
+        with a short ``ttl``, then check against a later ``reference_time``.
+        """
+        incident = self._require(incident_id)
+        if incident.state is not IncidentState.DEPLOYING:
+            raise InvalidInputError(
+                "deployment can only be executed while deploying",
+                details={"state": incident.state.value},
+            )
+        if incident.release_lineage is None:
+            raise MissingPrerequisiteError(
+                "incident has no bound release lineage", details={"incident_id": str(incident_id)}
+            )
+        target = incident.release_lineage.service
+        decision = self._require_policy().evaluate(
+            ApprovalSchema(
+                action=PolicyAction.DEPLOYMENT_EXECUTE,
+                risk_class=incident.risk_class,
+                target_resource=target,
+                diff_or_artifact_digest=str(artifact.digest),
+                requesting_principal_id=requesting_principal_id,
+            )
+        )
+        if decision.result is PolicyResult.DENY:
+            raise PolicyDenialError(
+                "policy does not permit this deployment",
+                details={"policy_rule_id": decision.policy_rule_id},
+            )
+        if decision.result is not PolicyResult.ALLOW:
+            raise HumanActionRequiredError(
+                "deployment.execute requires a current, interactive human approval "
+                "before any deployment to the controlled target",
+                details={
+                    "policy_rule_id": decision.policy_rule_id,
+                    "result": decision.result.value,
+                },
+            )
+        grant = issue_grant(
+            action=PolicyAction.DEPLOYMENT_EXECUTE,
+            target=target,
+            principal_id=requesting_principal_id,
+            issued_at=now,
+        )
+        grant.require_not_expired(reference_time=reference_time or now)
+        receipt = self._require_deployment().deploy(
+            DeploymentRequest(
+                run_id=_incident_run_id(incident_id),
+                artifact=artifact,
+                target=target,
+                operation_id=_authority_operation_id(incident_id, "deploy", str(artifact.digest)),
+            )
+        )
+        self._append_authority_record(
+            incident_id=incident_id,
+            grant=grant,
+            policy_decision_id=str(decision.id),
+            outcome="succeeded",
+            detail=f"deployed {artifact.version} to {target}",
+        )
+        return receipt
+
+    def execute_rollback(
+        self,
+        incident_id: IncidentId,
+        *,
+        receipt: DeploymentReceipt,
+        requesting_principal_id: str,
+        now: datetime,
+        reference_time: datetime | None = None,
+    ) -> Incident:
+        """Authorize and execute rollback through the fixed local-service broker.
+
+        Requires an independent ``ALLOW`` decision for
+        ``deployment.rollback`` -- a deployment approval never satisfies
+        this, since ``ApprovalRegistry`` keys every approval on its
+        exact action-bound schema digest. On a matching broker result,
+        transitions the incident to its terminal ``rolled_back`` state;
+        any other broker outcome transitions to ``failed`` with the
+        conflict recorded as evidence rather than silently retried or
+        reported as success. ``reference_time`` (defaults to ``now``) is
+        the instant the grant is checked for expiry -- see
+        ``execute_deployment`` for the expired-credential-reference fault
+        this decoupling exists to exercise.
+        """
+        incident = self._require(incident_id)
+        if incident.state is not IncidentState.ROLLING_BACK:
+            raise InvalidInputError(
+                "rollback can only be executed while rolling back",
+                details={"state": incident.state.value},
+            )
+        target = receipt.target
+        decision = self._require_policy().evaluate(
+            ApprovalSchema(
+                action=PolicyAction.DEPLOYMENT_ROLLBACK,
+                risk_class=incident.risk_class,
+                target_resource=target,
+                diff_or_artifact_digest=str(receipt.artifact_digest),
+                requesting_principal_id=requesting_principal_id,
+            )
+        )
+        if decision.result is PolicyResult.DENY:
+            raise PolicyDenialError(
+                "policy does not permit this rollback",
+                details={"policy_rule_id": decision.policy_rule_id},
+            )
+        if decision.result is not PolicyResult.ALLOW:
+            raise HumanActionRequiredError(
+                "deployment.rollback requires a current, interactive human approval "
+                "before any rollback of the controlled target",
+                details={
+                    "policy_rule_id": decision.policy_rule_id,
+                    "result": decision.result.value,
+                },
+            )
+        grant = issue_grant(
+            action=PolicyAction.DEPLOYMENT_ROLLBACK,
+            target=target,
+            principal_id=requesting_principal_id,
+            issued_at=now,
+        )
+        grant.require_not_expired(reference_time=reference_time or now)
+        operation_id = _authority_operation_id(
+            incident_id, "rollback", str(receipt.artifact_digest)
+        )
+        result = self._require_deployment().rollback(receipt, operation_id=operation_id)
+        if result is ReconciliationResult.FOUND_MATCHING:
+            incident = incident.transition(IncidentState.ROLLED_BACK)
+            outcome = "succeeded"
+            event_type = "incident.rolled_back"
+        else:
+            incident = incident.transition(IncidentState.FAILED)
+            outcome = "failed"
+            event_type = "incident.rollback_failed"
+        self._append_incident(incident, event_type=event_type)
+        self._append_authority_record(
+            incident_id=incident_id,
+            grant=grant,
+            policy_decision_id=str(decision.id),
+            outcome=outcome,
+            detail=f"rollback for target {target}: {result.value}",
+        )
+        return incident
+
+    def list_authority_records(
+        self, incident_id: IncidentId
+    ) -> tuple[DeploymentAuthorityRecord, ...]:
+        records = self.ledger.list_projections(aggregate_type=AUTHORITY_AGGREGATE_TYPE)
+        all_records = tuple(_authority_record_from_dict(record.state) for record in records)
+        return tuple(record for record in all_records if record.incident_id == str(incident_id))
+
+    def _require_deployment(self) -> DeploymentPort:
+        if self.deployment is None:
+            raise MissingPrerequisiteError(
+                "no deployment broker configured for this IncidentService"
+            )
+        return self.deployment
+
+    def _require_policy(self) -> PolicyEvaluator:
+        if self.policy is None:
+            raise MissingPrerequisiteError(
+                "no policy evaluator configured for this IncidentService"
+            )
+        return self.policy
+
+    def _append_authority_record(
+        self,
+        *,
+        incident_id: IncidentId,
+        grant: DeploymentGrant,
+        policy_decision_id: str,
+        outcome: str,
+        detail: str,
+    ) -> None:
+        record = DeploymentAuthorityRecord(
+            incident_id=str(incident_id),
+            grant=grant,
+            policy_decision_id=policy_decision_id,
+            outcome=outcome,
+            detail=detail,
+        )
+        self.ledger.append(
+            AppendCommand(
+                correlation_id=f"incident-authority:{incident_id}:{grant.grant_id}",
+                events=(
+                    EventWrite(
+                        aggregate_type=AUTHORITY_AGGREGATE_TYPE,
+                        aggregate_id=grant.grant_id,
+                        expected_version=0,
+                        event_type=f"deployment_authority.{outcome}",
+                        schema_version=1,
+                        payload=_authority_record_to_dict(record),
+                    ),
+                ),
+            )
+        )
+
     def read(self, incident_id: IncidentId) -> Incident | None:
         projection = self.ledger.read_projection(
             aggregate_type=INCIDENT_AGGREGATE_TYPE, aggregate_id=str(incident_id)
@@ -311,6 +596,7 @@ class IncidentService:
 
 
 __all__ = [
+    "AUTHORITY_AGGREGATE_TYPE",
     "INCIDENT_AGGREGATE_TYPE",
     "WORK_ITEM_AGGREGATE_TYPE",
     "IncidentService",
