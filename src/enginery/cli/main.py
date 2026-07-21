@@ -25,6 +25,7 @@ from enginery.cli.ledger import (
     run_restore,
     run_verify,
 )
+from enginery.cli.outcome import run_outcome
 from enginery.cli.stage1 import run_stage1
 from enginery.cli.stage2 import run_stage2
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
@@ -131,6 +132,27 @@ def _build_parser() -> argparse.ArgumentParser:
     stage2_status_parser.add_argument("--database", required=True, type=Path)
     stage2_status_parser.add_argument("--owner", required=True)
     stage2_status_parser.add_argument("--stack-id", required=True)
+
+    outcome_parser = subparsers.add_parser(
+        "outcome", help="Inspect raw outcome observations and completeness."
+    )
+    outcome_subparsers = outcome_parser.add_subparsers(dest="outcome_command")
+    outcome_list_parser = outcome_subparsers.add_parser(
+        "list", help="List registered observations, optionally filtered by state."
+    )
+    outcome_list_parser.add_argument("--database", required=True, type=Path)
+    outcome_list_parser.add_argument(
+        "--state", choices=("pending", "captured", "indeterminate"), default=None
+    )
+    outcome_show_parser = outcome_subparsers.add_parser(
+        "show", help="Show one observation and its captured outcome, if any."
+    )
+    outcome_show_parser.add_argument("--database", required=True, type=Path)
+    outcome_show_parser.add_argument("observation_id")
+    outcome_completeness_parser = outcome_subparsers.add_parser(
+        "completeness", help="Report the versioned outcome-capture completeness derivation."
+    )
+    outcome_completeness_parser.add_argument("--database", required=True, type=Path)
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
@@ -347,6 +369,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_stage1(args)
         if args.command == "stage2":
             return run_stage2(args)
+        if args.command == "outcome":
+            return run_outcome(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
                 return _run_adapter_doctor(as_json=args.json)

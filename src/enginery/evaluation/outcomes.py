@@ -27,6 +27,7 @@ before its window elapses.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -61,6 +62,57 @@ DEFAULT_WINDOW = timedelta(days=30)
 #: See the module docstring: only a subject with a live adapter read is
 #: swept automatically. Everything else requires an explicit capture.
 _AUTO_SWEEPABLE_KINDS = frozenset({OutcomeKind.MERGE_RESULT})
+
+#: Bumped whenever the completeness formula itself changes. Raw
+#: observation records are immutable and never rewritten; only this
+#: derivation's *interpretation* of them can gain a new version.
+COMPLETENESS_DERIVATION_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class CompletenessReport:
+    """A versioned snapshot of outcome-capture completeness."""
+
+    derivation_version: int
+    captured: int
+    indeterminate: int
+    pending: int
+    completeness: float
+
+
+def compute_completeness(
+    observations: Iterable[ObservationRequest], *, reference_time: datetime
+) -> CompletenessReport:
+    """``captured / (captured + indeterminate)``, counted only over
+    observations whose fate is already decided. A still-``pending``
+    observation inside its open window is excluded from both terms --
+    never counted as capture, never counted as a gap -- so it cannot
+    inflate completeness. A pending observation whose window has already
+    elapsed but has not yet been swept by :meth:`OutcomeCaptureService.expire_overdue`
+    is likewise excluded until it is actually resolved: this keeps the
+    report a read of durably recorded fact, never a projection of what
+    *should* have happened by ``reference_time``. Suppressing a capture
+    therefore can only ever lower this ratio once its window elapses and
+    is swept -- never raise it, satisfying the anti-gaming requirement by
+    construction rather than a special case."""
+    captured = indeterminate = pending = 0
+    for observation in observations:
+        if observation.state is ObservationState.CAPTURED:
+            captured += 1
+        elif observation.state is ObservationState.INDETERMINATE:
+            indeterminate += 1
+        else:
+            pending += 1
+    del reference_time  # reserved for a future time-windowed derivation version
+    denominator = captured + indeterminate
+    completeness = 1.0 if denominator == 0 else captured / denominator
+    return CompletenessReport(
+        derivation_version=COMPLETENESS_DERIVATION_VERSION,
+        captured=captured,
+        indeterminate=indeterminate,
+        pending=pending,
+        completeness=completeness,
+    )
 
 
 def observation_id_for(run_id: RunId, kind: OutcomeKind) -> ObservationId:
@@ -173,6 +225,26 @@ class OutcomeCaptureService:
                 captured.append(resolved_outcome)
         return tuple(captured)
 
+    def expire_overdue(self, *, reference_time: datetime) -> tuple[ObservationRequest, ...]:
+        """Resolve every pending observation whose declared window has
+        elapsed to ``indeterminate``. An observation resolved this way
+        never becomes ``captured`` later -- a late real-world signal opens
+        a fresh :class:`ObservationRequest` instead of rewriting history."""
+        expired: list[ObservationRequest] = []
+        for observation in self.list_observations(state=ObservationState.PENDING):
+            if not observation.is_overdue(reference_time=reference_time):
+                continue
+            resolved = observation.resolve_indeterminate(resolved_at=reference_time)
+            self._append_expiry(resolved)
+            expired.append(resolved)
+        return tuple(expired)
+
+    def completeness(self, *, reference_time: datetime) -> CompletenessReport:
+        """The current, versioned outcome-capture completeness derivation
+        over every registered observation. See :func:`compute_completeness`
+        for the formula and its anti-gaming rationale."""
+        return compute_completeness(self.list_observations(), reference_time=reference_time)
+
     def _sweep_merge_result(
         self, observation: ObservationRequest, *, reference_time: datetime
     ) -> Outcome | None:
@@ -201,6 +273,23 @@ class OutcomeCaptureService:
         if projection is None:
             return None
         return observation_from_dict(projection.state)
+
+    def _append_expiry(self, resolved: ObservationRequest) -> None:
+        self.ledger.append(
+            AppendCommand(
+                correlation_id=f"observation-expire:{resolved.id}",
+                events=(
+                    EventWrite(
+                        aggregate_type=OBSERVATION_AGGREGATE_TYPE,
+                        aggregate_id=str(resolved.id),
+                        expected_version=1,
+                        event_type="observation.expired",
+                        schema_version=resolved.schema_version,
+                        payload=observation_to_dict(resolved),
+                    ),
+                ),
+            )
+        )
 
     def read_outcome(self, outcome_id: OutcomeId) -> Outcome | None:
         projection = self.ledger.read_projection(
@@ -278,11 +367,14 @@ class OutcomeCaptureService:
 
 
 __all__ = [
+    "COMPLETENESS_DERIVATION_VERSION",
     "DEFAULT_WINDOW",
     "DEFAULT_WINDOWS",
     "OBSERVATION_AGGREGATE_TYPE",
     "OUTCOME_AGGREGATE_TYPE",
+    "CompletenessReport",
     "OutcomeCaptureService",
     "classify_pull_request_outcome",
+    "compute_completeness",
     "observation_id_for",
 ]
