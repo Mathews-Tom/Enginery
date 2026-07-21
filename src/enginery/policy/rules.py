@@ -27,6 +27,13 @@ _HUMAN_REQUIRED_ACTIONS = frozenset(
         # already built for the actions above, not a plain allow/deny
         # PolicyRule row.
         PolicyAction.RELEASE_PUBLISH,
+        # Deployment and rollback are separately authorized (design.md
+        # Section 12.3's incident-to-hotfix acceptance): each routes
+        # through this same interactive-approval machinery, keyed on its
+        # own exact action-bound digest, so a deployment approval can
+        # never satisfy a rollback request or vice versa.
+        PolicyAction.DEPLOYMENT_EXECUTE,
+        PolicyAction.DEPLOYMENT_ROLLBACK,
     }
 )
 _DUAL_HUMAN_ACTIONS = frozenset(

@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from enginery.application.adapter_types import AdapterStatus
+from enginery.application.delivery_ports import (
+    DeploymentReceipt,
+    DeploymentRequest,
+    ReleaseArtifact,
+)
+from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import InvalidInputError
-from enginery.domain.ids import IncidentId
+from enginery.domain.errors import (
+    HumanActionRequiredError,
+    InvalidInputError,
+    MissingPrerequisiteError,
+)
+from enginery.domain.ids import IncidentId, OperationId, RunId
 from enginery.domain.incident import (
     IncidentSeverity,
     IncidentState,
@@ -14,12 +27,38 @@ from enginery.domain.incident import (
     ReproductionOutcome,
     ReproductionRecord,
 )
+from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.policy_decision import PolicyAction
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.domain.work_item import WorkItemState
+from enginery.incidents.authority import DeploymentGrantExpiredError
 from enginery.incidents.service import IncidentService, incident_id_for
 from enginery.ledger.service import LedgerService
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.evaluator import PolicyEvaluator
+from enginery.policy.schemas import ApprovalSchema
+
+_HUMAN = AuthorityPrincipal(
+    id="human-1", principal_type=PrincipalType.HUMAN, role="operator", authorization_source="cli"
+)
+_REQUESTING_PRINCIPAL_ID = "incident-workflow"
+_NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
 
 _SOURCE_PROVIDER = "pagerduty"
 _EXTERNAL_REFERENCE = "PD-1001"
+
+
+def _approve(
+    registry: ApprovalRegistry, *, action: PolicyAction, target: str, artifact_digest: Digest
+) -> None:
+    schema = ApprovalSchema(
+        action=action,
+        risk_class=RiskClass.HIGH,
+        target_resource=target,
+        diff_or_artifact_digest=str(artifact_digest),
+        requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+    )
+    registry.record_approval(schema, (_HUMAN,), decided_at=_NOW)
 
 
 def _ingest(service: IncidentService, **overrides: object):  # type: ignore[no-untyped-def]
@@ -341,3 +380,271 @@ class TestResolveObservation:
         rolling_back = service.resolve_observation(incident.id, healthy=False)
 
         assert rolling_back.state is IncidentState.ROLLING_BACK
+
+
+class _FakeDeployment:
+    """A minimal structural DeploymentPort double: deploy/rollback are used."""
+
+    def __init__(
+        self, *, rollback_result: ReconciliationResult = ReconciliationResult.FOUND_MATCHING
+    ) -> None:
+        self.deploy_calls: list[DeploymentRequest] = []
+        self.rollback_calls: list[DeploymentReceipt] = []
+        self.rollback_result = rollback_result
+
+    def probe(self) -> AdapterStatus:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    def deploy(self, request: DeploymentRequest) -> DeploymentReceipt:
+        self.deploy_calls.append(request)
+        return DeploymentReceipt(
+            target=request.target,
+            artifact_digest=request.artifact.digest,
+            deployment_id=f"deployment-{request.operation_id}",
+        )
+
+    def rollback(
+        self, receipt: DeploymentReceipt, *, operation_id: OperationId
+    ) -> ReconciliationResult:
+        self.rollback_calls.append(receipt)
+        return self.rollback_result
+
+    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:  # pragma: no cover
+        raise NotImplementedError
+
+
+def _policy(*, registry: ApprovalRegistry | None = None) -> PolicyEvaluator:
+    return PolicyEvaluator(policy_version="1.0.0", approval_registry=registry)
+
+
+def _artifact() -> ReleaseArtifact:
+    return ReleaseArtifact(
+        version="v2", digest=Digest.of_bytes(b"v2-config"), media_type="application/json"
+    )
+
+
+_TARGET = "127.0.0.1:8765"
+
+
+def _reach_deploying(
+    service: IncidentService, incident_id: IncidentId, *, target: str = _TARGET
+) -> ReleaseLineage:
+    service.classify(incident_id)
+    lineage = ReleaseLineage(service=target, affected_revision="v1")
+    service.bind_release_lineage(incident_id, lineage)
+    service.begin_reproduction(incident_id)
+    service.attempt_reproduction(
+        incident_id,
+        check=lambda: ReproductionRecord(
+            outcome=ReproductionOutcome.REPRODUCED, detail="observed 500 on every request"
+        ),
+    )
+    service.begin_deployment(incident_id)
+    return lineage
+
+
+class TestExecuteDeployment:
+    def test_requires_a_bound_release_lineage(self, ledger_service: LedgerService) -> None:
+        deployment = _FakeDeployment()
+        service = IncidentService(ledger=ledger_service, deployment=deployment, policy=_policy())
+        incident = _ingest(service)
+        _reach_remediating(service, incident.id)
+        service.begin_deployment(incident.id)
+
+        with pytest.raises(MissingPrerequisiteError, match="release lineage"):
+            service.execute_deployment(
+                incident.id,
+                artifact=_artifact(),
+                requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+                now=_NOW,
+            )
+
+    def test_raises_without_a_recorded_human_approval(self, ledger_service: LedgerService) -> None:
+        deployment = _FakeDeployment()
+        service = IncidentService(ledger=ledger_service, deployment=deployment, policy=_policy())
+        incident = _ingest(service)
+        _reach_deploying(service, incident.id)
+
+        with pytest.raises(HumanActionRequiredError):
+            service.execute_deployment(
+                incident.id,
+                artifact=_artifact(),
+                requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+                now=_NOW,
+            )
+        assert deployment.deploy_calls == []
+
+    def test_succeeds_after_a_recorded_human_approval(self, ledger_service: LedgerService) -> None:
+        registry = ApprovalRegistry(registered_humans=(_HUMAN,))
+        deployment = _FakeDeployment()
+        service = IncidentService(
+            ledger=ledger_service, deployment=deployment, policy=_policy(registry=registry)
+        )
+        incident = _ingest(service)
+        lineage = _reach_deploying(service, incident.id)
+        artifact = _artifact()
+        _approve(
+            registry,
+            action=PolicyAction.DEPLOYMENT_EXECUTE,
+            target=lineage.service,
+            artifact_digest=artifact.digest,
+        )
+
+        receipt = service.execute_deployment(
+            incident.id,
+            artifact=artifact,
+            requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+            now=_NOW,
+        )
+
+        assert receipt.target == _TARGET
+        assert len(deployment.deploy_calls) == 1
+        assert deployment.deploy_calls[0].target == _TARGET
+        records = service.list_authority_records(incident.id)
+        assert len(records) == 1
+        assert records[0].outcome == "succeeded"
+        assert records[0].grant.action is PolicyAction.DEPLOYMENT_EXECUTE
+
+    def test_expired_grant_raises_even_after_approval(self, ledger_service: LedgerService) -> None:
+        registry = ApprovalRegistry(registered_humans=(_HUMAN,))
+        deployment = _FakeDeployment()
+        service = IncidentService(
+            ledger=ledger_service, deployment=deployment, policy=_policy(registry=registry)
+        )
+        incident = _ingest(service)
+        lineage = _reach_deploying(service, incident.id)
+        artifact = _artifact()
+        _approve(
+            registry,
+            action=PolicyAction.DEPLOYMENT_EXECUTE,
+            target=lineage.service,
+            artifact_digest=artifact.digest,
+        )
+
+        with pytest.raises(DeploymentGrantExpiredError):
+            service.execute_deployment(
+                incident.id,
+                artifact=artifact,
+                requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+                now=_NOW,
+                reference_time=_NOW + timedelta(minutes=10),
+            )
+        assert deployment.deploy_calls == []
+
+
+def _reach_rolling_back(
+    service: IncidentService, incident_id: IncidentId, *, deployment: _FakeDeployment
+) -> tuple[ReleaseLineage, DeploymentReceipt]:
+    lineage = _reach_deploying(service, incident_id)
+    receipt = deployment.deploy(
+        DeploymentRequest(
+            run_id=RunId(f"incident:{incident_id}"),
+            artifact=_artifact(),
+            target=lineage.service,
+            operation_id=OperationId(value="a" * 64),
+        )
+    )
+    service.begin_observation(incident_id)
+    service.resolve_observation(incident_id, healthy=False)
+    return lineage, receipt
+
+
+class TestExecuteRollback:
+    def test_raises_without_a_recorded_human_approval(self, ledger_service: LedgerService) -> None:
+        deployment = _FakeDeployment()
+        service = IncidentService(ledger=ledger_service, deployment=deployment, policy=_policy())
+        incident = _ingest(service)
+        _, receipt = _reach_rolling_back(service, incident.id, deployment=deployment)
+
+        with pytest.raises(HumanActionRequiredError):
+            service.execute_rollback(
+                incident.id,
+                receipt=receipt,
+                requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+                now=_NOW,
+            )
+        assert deployment.rollback_calls == []
+
+    def test_a_deployment_approval_does_not_satisfy_rollback(
+        self, ledger_service: LedgerService
+    ) -> None:
+        """Deployment and rollback approvals are independently keyed on
+        their own action -- proving design's "separately authorized"."""
+        registry = ApprovalRegistry(registered_humans=(_HUMAN,))
+        deployment = _FakeDeployment()
+        service = IncidentService(
+            ledger=ledger_service, deployment=deployment, policy=_policy(registry=registry)
+        )
+        incident = _ingest(service)
+        lineage, receipt = _reach_rolling_back(service, incident.id, deployment=deployment)
+        _approve(
+            registry,
+            action=PolicyAction.DEPLOYMENT_EXECUTE,
+            target=lineage.service,
+            artifact_digest=receipt.artifact_digest,
+        )
+
+        with pytest.raises(HumanActionRequiredError):
+            service.execute_rollback(
+                incident.id,
+                receipt=receipt,
+                requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+                now=_NOW,
+            )
+
+    def test_succeeds_after_a_recorded_rollback_approval(
+        self, ledger_service: LedgerService
+    ) -> None:
+        registry = ApprovalRegistry(registered_humans=(_HUMAN,))
+        deployment = _FakeDeployment()
+        service = IncidentService(
+            ledger=ledger_service, deployment=deployment, policy=_policy(registry=registry)
+        )
+        incident = _ingest(service)
+        lineage, receipt = _reach_rolling_back(service, incident.id, deployment=deployment)
+        _approve(
+            registry,
+            action=PolicyAction.DEPLOYMENT_ROLLBACK,
+            target=lineage.service,
+            artifact_digest=receipt.artifact_digest,
+        )
+
+        resolved = service.execute_rollback(
+            incident.id,
+            receipt=receipt,
+            requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+            now=_NOW,
+        )
+
+        assert resolved.state is IncidentState.ROLLED_BACK
+        assert len(deployment.rollback_calls) == 1
+        records = service.list_authority_records(incident.id)
+        assert any(record.outcome == "succeeded" for record in records)
+
+    def test_a_conflicting_broker_result_fails_rather_than_claims_success(
+        self, ledger_service: LedgerService
+    ) -> None:
+        registry = ApprovalRegistry(registered_humans=(_HUMAN,))
+        deployment = _FakeDeployment(rollback_result=ReconciliationResult.FOUND_CONFLICTING)
+        service = IncidentService(
+            ledger=ledger_service, deployment=deployment, policy=_policy(registry=registry)
+        )
+        incident = _ingest(service)
+        lineage, receipt = _reach_rolling_back(service, incident.id, deployment=deployment)
+        _approve(
+            registry,
+            action=PolicyAction.DEPLOYMENT_ROLLBACK,
+            target=lineage.service,
+            artifact_digest=receipt.artifact_digest,
+        )
+
+        resolved = service.execute_rollback(
+            incident.id,
+            receipt=receipt,
+            requesting_principal_id=_REQUESTING_PRINCIPAL_ID,
+            now=_NOW,
+        )
+
+        assert resolved.state is IncidentState.FAILED
+        records = service.list_authority_records(incident.id)
+        assert any(record.outcome == "failed" for record in records)
