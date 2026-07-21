@@ -1,6 +1,6 @@
 [project]
 name = "enginery"
-version = "0.0.0.dev0"
+version = "0.1.0"
 description = "Engineer the system that engineers software."
 readme = "README.md"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 authors = [{ name = "Mathews-Tom" }]
 keywords = ["agentic-engineering", "workflow", "coding-agents", "control-plane"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
