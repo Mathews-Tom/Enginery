@@ -16,9 +16,11 @@ import json
 from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.ids import ObservationId
+from enginery.domain.ids import ObservationId, RunId
 from enginery.domain.observation import ObservationRequest, ObservationState
+from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE
 from enginery.evaluation.outcomes import OutcomeCaptureService
+from enginery.evaluation.queries import list_failures, list_interventions
 from enginery.ledger.service import LedgerService
 
 
@@ -33,6 +35,10 @@ def run_outcome(args: argparse.Namespace) -> int:
         _show(args)
     elif command == "completeness":
         _report_completeness(args)
+    elif command == "interventions":
+        _interventions(args)
+    elif command == "failures":
+        _failures(args)
     else:  # pragma: no cover - argparse restricts command values
         raise AssertionError(f"unhandled outcome command: {command}")
     return 0
@@ -87,6 +93,52 @@ def _report_completeness(args: argparse.Namespace) -> None:
                 "indeterminate": report.indeterminate,
                 "pending": report.pending,
                 "completeness": report.completeness,
+            }
+        )
+    finally:
+        ledger.close()
+
+
+def _interventions(args: argparse.Namespace) -> None:
+    ledger = LedgerService.open(args.database)
+    try:
+        interventions = list_interventions(
+            ledger, run_id=RunId(args.run_id), aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE
+        )
+        _print(
+            {
+                "interventions": [
+                    {
+                        "run_id": intervention.run_id,
+                        "node_id": intervention.node_id,
+                        "decision": intervention.decision,
+                        "reason": intervention.reason,
+                        "status": intervention.status,
+                    }
+                    for intervention in interventions
+                ]
+            }
+        )
+    finally:
+        ledger.close()
+
+
+def _failures(args: argparse.Namespace) -> None:
+    ledger = LedgerService.open(args.database)
+    try:
+        failures = list_failures(
+            ledger, run_id=RunId(args.run_id), aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE
+        )
+        _print(
+            {
+                "failures": [
+                    {
+                        "run_id": failure.run_id,
+                        "node_id": failure.node_id,
+                        "detail": dict(failure.detail),
+                    }
+                    for failure in failures
+                ]
             }
         )
     finally:
