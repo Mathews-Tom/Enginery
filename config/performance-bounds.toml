@@ -1,0 +1,28 @@
+# Measured local performance bounds for the Stage-1 path only.
+#
+# Every bound below is derived from real, executed measurements on one
+# development machine (Apple M1 Pro, macOS; see the release-readiness
+# report for the exact measured values). These are *local* regression
+# bounds for this class of hardware, not a cross-platform performance
+# guarantee or a claim about production load, and include margin over
+# the observed measurements for CI-runner variance. Stage 2-4
+# performance is out of scope; only Stage-1 issue-to-merge-ready
+# timing, ledger append throughput, and ledger verification are
+# measured here.
+
+[stage1_full_lifecycle]
+# Wall-clock for two full local Stage-1 runs on one durable ledger, with
+# a coordinator restart injected between every externally observable
+# step (matches `scripts/full_system_gate.py --stages 1
+# --restart-between-stages`). Observed range: 0.05-0.07s.
+max_seconds = 2.0
+
+[ledger_append]
+# Sustained single-writer SQLite event-append throughput.
+# Observed range: 5600-7500 events/second.
+min_events_per_second = 1000.0
+
+[ledger_verify]
+# `enginery ledger verify` wall-clock against the ledger produced by the
+# append-throughput measurement above. Observed range: 0.003-0.016s.
+max_seconds = 0.5
