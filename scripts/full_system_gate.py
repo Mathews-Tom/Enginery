@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cumulative Stage-1 restart/replay gate.
+"""Cumulative Stage-1/Stage-2 restart/replay gate.
 
 Drives the real ``Stage1RunService`` composition the ``enginery`` CLI uses
 (``enginery.cli.stage1._advancing_service``) through two independent local
@@ -34,9 +34,31 @@ port implemented by a deterministic in-script fixture (no live GitHub
 credentials; live-provider Stage 1 recovery was already independently
 proven and retained at issue #84 -> PR #90 in this repository).
 
-Only Stage 1 is supported. ``--stages`` must be exactly ``1``; Stage 2-4
-cumulative gates belong to their own release trains (``v0.2.0``,
-``v0.3.0``, and the gate-deferred Stage 4 train), not to this milestone.
+``--stages`` accepts ``1``, ``2``, or ``1,2``. The Stage 2 leg drives the
+real ``Stage2ReleaseWorkflow`` (``enginery.workflows.plan_to_release``)
+through its full merge -> prepare -> build -> publish -> verify sequence
+against a disposable local fixture package: the merge phase uses a real,
+ledger-backed ``StackCoordinator``/``MergePolicyService`` pair (restart is
+proven the same way as the Stage 1 leg -- close and reopen the ledger
+handle, then re-read durable stack state); the build phase runs a real
+``uv build`` and a real isolated-venv clean install, exactly like a live
+release, with no network access at all; the publish phase runs the real
+``GitHubReleaseAdapter``/``PyPiAdapter`` code paths against injected fake
+command runners standing in for ``gh``/``uv publish`` and the PyPI JSON
+API, so no live GitHub or PyPI credential or network call is ever made.
+``restart_between_stages`` additionally proves publish-side idempotent
+replay: after the first publish, the two adapter objects are rebuilt from
+scratch (discarding their in-memory state, matching a real process
+restart) and ``publish()`` is called again against the *same* fake
+destination-server state (which, like a real external service, persists
+across the simulated restart); the gate fails if that replay creates a
+second GitHub release or reports a different artifact digest. Policy
+approval for ``release.publish`` is recorded once against one
+``ApprovalRegistry``/``PolicyEvaluator`` pair that is *not* itself
+reconstructed between stages -- durable policy-decision persistence
+across a real restart is Stage 2's own, separately covered surface
+(``tests/policy``, ``tests/workflows/test_plan_to_release.py``), not
+re-proven here.
 """
 
 from __future__ import annotations
@@ -44,7 +66,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
+import urllib.error
+import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -52,6 +78,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
+from enginery.adapters.github import (
+    GitHubAdapterConfig,
+    GitHubReleaseAdapter,
+    GitHubReleaseRequest,
+)
+from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -65,17 +97,36 @@ from enginery.application.work_ports import (
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
-from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.ids import (
+    NodeId,
+    OperationId,
+    PlanId,
+    PlanMilestoneId,
+    RunId,
+    StackId,
+    WorkflowDefinitionId,
+    WorkItemId,
+)
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.policy_decision import PolicyAction, PolicyResult
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
+from enginery.engine.fixture_build import FixtureBuilder
+from enginery.engine.release_manifest import ReleaseManifest, ReleaseTarget, VersionChangelogBroker
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.stack_coordinator import StackCoordinator
 from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.evaluator import PolicyEvaluator, PolicyRule
+from enginery.policy.schemas import ApprovalSchema
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.merge_policy import MergePolicyService
+from enginery.workflows.plan_to_release import Stage2ReleaseWorkflow
 from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
@@ -87,6 +138,14 @@ from enginery.workflows.stage1 import (
 _HEARTBEAT = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
 _NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+_SUPPORTED_STAGES = frozenset({"1", "2"})
+_STAGE2_MILESTONES = (
+    (PlanMilestoneId("gate-m1"), "fixture/gate-m1"),
+    (PlanMilestoneId("gate-m2"), "fixture/gate-m2"),
+)
+_STAGE2_DISTRIBUTION_NAME = "enginery-full-system-gate-fixture"
+_STAGE2_IMPORT_MODULE = "enginery_full_system_gate_fixture"
+_STAGE2_VERSION = "0.0.1"
 
 
 class _TerminalPullRequests:
@@ -442,21 +501,459 @@ def _drive_to_terminal(
     return evidence
 
 
+def _build_stage2_fixture_package(root: Path) -> None:
+    """Write a disposable, buildable local package -- never published anywhere.
+
+    Mirrors ``fixtures/enginery-stage2-fixture``'s own shape (hatchling
+    backend, ``importlib.metadata``-sourced ``__version__``) under a
+    distinctly named distribution so it can never be confused with that
+    real, already-published fixture.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        f'name = "{_STAGE2_DISTRIBUTION_NAME}"\n'
+        'version = "0.0.0"\n'
+        'description = "Disposable local full-system-gate Stage 2 fixture. Never published."\n'
+        'requires-python = ">=3.12"\n'
+        "\n"
+        "[build-system]\n"
+        'requires = ["hatchling>=1.25"]\n'
+        'build-backend = "hatchling.build"\n'
+        "\n"
+        "[tool.hatch.build.targets.wheel]\n"
+        f'packages = ["src/{_STAGE2_IMPORT_MODULE}"]\n',
+        encoding="utf-8",
+    )
+    (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    package_dir = root / "src" / _STAGE2_IMPORT_MODULE
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text(
+        "from __future__ import annotations\n\n"
+        "from importlib.metadata import PackageNotFoundError, version\n\n"
+        "try:\n"
+        f'    __version__ = version("{_STAGE2_DISTRIBUTION_NAME}")\n'
+        "except PackageNotFoundError:\n"
+        '    __version__ = "0.0.0.dev0"\n',
+        encoding="utf-8",
+    )
+
+
+class _Stage2PullRequests:
+    """A deterministic local pull-request fixture bound to the Stage 2 merge phase."""
+
+    def __init__(self) -> None:
+        self._evidence_by_number: dict[int, PullRequestEvidence] = {}
+        self._merged: dict[int, PullRequestSnapshot] = {}
+        self.merge_calls: list[int] = []
+
+    def register(
+        self, number: int, evidence: PullRequestEvidence, merged: PullRequestSnapshot
+    ) -> None:
+        self._evidence_by_number[number] = evidence
+        self._merged[number] = merged
+
+    def probe(self) -> object:
+        raise AssertionError("not used by this gate")
+
+    def create_or_update(self, request: PullRequestRequest) -> PullRequestSnapshot:
+        raise AssertionError("not used by this gate")
+
+    def get(self, number: int) -> PullRequestSnapshot:
+        raise AssertionError("not used by this gate")
+
+    def evidence(self, number: int) -> PullRequestEvidence:
+        return self._evidence_by_number[number]
+
+    def merge(
+        self,
+        number: int,
+        *,
+        expected_head_revision: str,
+        operation_id: OperationId,
+        merge_method: str = "merge",
+    ) -> PullRequestSnapshot:
+        self.merge_calls.append(number)
+        return self._merged[number]
+
+    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
+        return ReconciliationResult.NOT_FOUND
+
+
+def _stage2_pr_evidence(*, number: int, head: str, base: str) -> PullRequestEvidence:
+    snapshot = PullRequestSnapshot(
+        number=number,
+        url=f"https://example.test/pull/{number}",
+        state="open",
+        head_branch=f"fixture/gate-m{number}",
+        head_revision=head,
+        base_branch=base,
+        base_revision="b" * 40,
+    )
+    return PullRequestEvidence(
+        pull_request=snapshot,
+        reviews=(),
+        checks=(
+            PullRequestCheck(
+                name="CI", status="completed", conclusion="success", head_revision=head
+            ),
+        ),
+        mergeable=True,
+    )
+
+
+def _stage2_pr_merged(*, number: int, head: str, base: str) -> PullRequestSnapshot:
+    return PullRequestSnapshot(
+        number=number,
+        url=f"https://example.test/pull/{number}",
+        state="closed",
+        head_branch=f"fixture/gate-m{number}",
+        head_revision=head,
+        base_branch=base,
+        base_revision="b" * 40,
+        merged=True,
+    )
+
+
+class _FakeGitHubReleaseServer:
+    """Stands in for the real GitHub Release API across a simulated restart.
+
+    Deliberately persists across adapter reconstruction: a real GitHub
+    repository's release state outlives any one coordinator process, so
+    proving idempotent replay requires the *server*, not the adapter, to
+    remember what already exists.
+    """
+
+    def __init__(self) -> None:
+        self._releases: dict[str, dict[str, object]] = {}
+
+    @property
+    def release_count(self) -> int:
+        return len(self._releases)
+
+    def command_runner(self, arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if len(arguments) == 2 and arguments[1] == "--version":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout="gh version 0.0.0 (local fixture)", stderr=""
+            )
+        if len(arguments) < 9 or arguments[1] != "api":
+            raise AssertionError(
+                f"unexpected gh invocation for the local Stage 2 gate: {arguments}"
+            )
+        method = arguments[3]
+        endpoint = arguments[8]
+        if method == "GET":
+            tag_name = urllib.parse.unquote(endpoint.rsplit("/", 1)[-1])
+            release = self._releases.get(tag_name)
+            if release is None:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout="", stderr="HTTP 404: Not Found"
+                )
+            return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(release), stderr="")
+        if method == "POST":
+            fields: dict[str, str] = {}
+            for index in range(9, len(arguments), 2):
+                key, _, value = arguments[index + 1].partition("=")
+                fields[key] = value
+            tag_name = fields["tag_name"]
+            release = {
+                "tag_name": tag_name,
+                "target_commitish": fields["target_commitish"],
+                "name": fields.get("name", ""),
+                "body": fields.get("body", ""),
+                "draft": False,
+                "prerelease": fields.get("prerelease") == "true",
+            }
+            self._releases[tag_name] = release
+            return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(release), stderr="")
+        raise AssertionError(f"unexpected GitHub API method for the local Stage 2 gate: {method}")
+
+
+class _FakePyPiServer:
+    """Stands in for a real PyPI-compatible index across a simulated restart."""
+
+    def __init__(self) -> None:
+        self._digest_by_version: dict[str, str] = {}
+
+    def published_versions(self) -> list[str]:
+        return sorted(self._digest_by_version)
+
+    def command_runner(self, command: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if tuple(command[:2]) != ("uv", "publish"):
+            raise AssertionError(f"unexpected uv invocation for the local Stage 2 gate: {command}")
+        path = Path(command[-1])
+        version = path.name.removesuffix(".whl").split("-")[1]
+        self._digest_by_version[version] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return subprocess.CompletedProcess(tuple(command), 0, stdout="", stderr="")
+
+    def url_opener(self, url: str) -> bytes:
+        version = url.rsplit("/", 2)[1]
+        digest = self._digest_by_version.get(version)
+        if digest is None:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        payload = {"urls": [{"digests": {"sha256": digest}}]}
+        return json.dumps(payload).encode("utf-8")
+
+
+def _run_stage2_leg(
+    database: Path, fixture_root: Path, *, restart_between_stages: bool
+) -> dict[str, object]:
+    """Drive the real ``Stage2ReleaseWorkflow`` through merge -> publish -> verify.
+
+    See the module docstring for exactly what ``restart_between_stages``
+    proves for this leg (ledger-backed merge persistence and publish-side
+    idempotent replay) and what it does not (policy/approval persistence,
+    already covered elsewhere).
+    """
+    stack_id = StackId("gate-stage2-stack")
+    human = AuthorityPrincipal(
+        id="gate-operator",
+        principal_type=PrincipalType.HUMAN,
+        role="operator",
+        authorization_source="full-system-gate",
+    )
+    registry = ApprovalRegistry(registered_humans=(human,))
+    policy = PolicyEvaluator(
+        policy_version="full-system-gate-1.0.0",
+        rules=(
+            PolicyRule(
+                id="allow_merge",
+                action=PolicyAction.PULL_REQUEST_MERGE,
+                result=PolicyResult.ALLOW,
+                rationale="local Stage 2 gate",
+                risk_classes=frozenset({RiskClass.LOW}),
+            ),
+            PolicyRule(
+                id="allow_prepare",
+                action=PolicyAction.RELEASE_PREPARE,
+                result=PolicyResult.ALLOW,
+                rationale="local Stage 2 gate",
+                risk_classes=frozenset({RiskClass.LOW}),
+            ),
+        ),
+        approval_registry=registry,
+    )
+    github_server = _FakeGitHubReleaseServer()
+    pypi_server = _FakePyPiServer()
+    github_config = GitHubAdapterConfig(
+        repository="local/full-system-gate-stage2-fixture",
+        credential_reference="unused-local-fixture",
+    )
+    pypi_config = PyPiAdapterConfig(
+        project_name=_STAGE2_DISTRIBUTION_NAME,
+        index_url="https://pypi.example.test/simple/",
+        publish_url="https://pypi.example.test/legacy/",
+        json_api_base="https://pypi.example.test/pypi",
+    )
+    pull_requests = _Stage2PullRequests()
+    pull_requests.register(
+        201,
+        _stage2_pr_evidence(number=201, head="gate-m1-rev1", base="main"),
+        _stage2_pr_merged(number=201, head="gate-m1-rev1", base="main"),
+    )
+    pull_requests.register(
+        202,
+        _stage2_pr_evidence(number=202, head="gate-m2-rev1", base="fixture/gate-m1"),
+        _stage2_pr_merged(number=202, head="gate-m2-rev1", base="fixture/gate-m1"),
+    )
+    _build_stage2_fixture_package(fixture_root)
+
+    def reopen(owner: str) -> tuple[LedgerService, Stage2ReleaseWorkflow]:
+        ledger = LedgerService.open(database)
+        coordinator = StackCoordinator(ledger, CoordinatorRuntime(ledger, owner=owner))
+        workflow = Stage2ReleaseWorkflow(
+            merge_policy=MergePolicyService(
+                stacks=coordinator,
+                pull_requests=cast(PullRequestPort, pull_requests),
+                policy=policy,
+            ),
+            release_manifest=VersionChangelogBroker(fixture_root=fixture_root),
+            fixture_builder=FixtureBuilder(),
+            github_release=GitHubReleaseAdapter(
+                github_config, command_runner=github_server.command_runner
+            ),
+            pypi=PyPiAdapter(
+                pypi_config,
+                command_runner=pypi_server.command_runner,
+                url_opener=pypi_server.url_opener,
+            ),
+            release_policy=policy,
+        )
+        return ledger, workflow
+
+    ledger, workflow = reopen("full-system-gate-stage2")
+    try:
+        workflow.merge_policy.stacks.start(
+            stack_id=stack_id,
+            plan_id=PlanId("gate-plan-1"),
+            base_ref="main",
+            ordered_milestones=_STAGE2_MILESTONES,
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+        workflow.merge_policy.stacks.reconcile_after_publish(
+            stack_id,
+            PlanMilestoneId("gate-m1"),
+            head_revision="gate-m1-rev1",
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+        workflow.merge_policy.stacks.mark_merge_ready(
+            stack_id,
+            PlanMilestoneId("gate-m1"),
+            head_revision="gate-m1-rev1",
+            ci_evidence_digest=Digest.of_bytes(b"ci-gate-m1"),
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+        workflow.merge_policy.stacks.reconcile_after_publish(
+            stack_id,
+            PlanMilestoneId("gate-m2"),
+            head_revision="gate-m2-rev1",
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+        workflow.merge_policy.stacks.mark_merge_ready(
+            stack_id,
+            PlanMilestoneId("gate-m2"),
+            head_revision="gate-m2-rev1",
+            ci_evidence_digest=Digest.of_bytes(b"ci-gate-m2"),
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+        merged_stack = workflow.merge_all(
+            stack_id,
+            pull_request_numbers={PlanMilestoneId("gate-m1"): 201, PlanMilestoneId("gate-m2"): 202},
+            required_checks=("CI",),
+            require_approved_review=False,
+            risk_class=RiskClass.LOW,
+            requesting_principal_id="gate-agent",
+            now=_NOW,
+            heartbeat_window=_HEARTBEAT,
+        )
+    finally:
+        ledger.close()
+
+    if merged_stack.next_mergeable() is not None:
+        raise AssertionError("expected the Stage 2 gate stack to be fully merged")
+    if pull_requests.merge_calls != [201, 202]:
+        raise AssertionError("expected exactly one root-to-leaf merge call per slice")
+
+    if restart_between_stages:
+        ledger, workflow = reopen("full-system-gate-stage2-restart")
+        try:
+            reread_stack = workflow.merge_policy.stacks.read(stack_id)
+            if reread_stack is None or reread_stack.next_mergeable() is not None:
+                raise AssertionError("merged stack state did not survive a coordinator restart")
+        finally:
+            ledger.close()
+
+    ledger, workflow = reopen("full-system-gate-stage2-prepare")
+    try:
+        manifest = ReleaseManifest(
+            target=ReleaseTarget(
+                distribution_name=_STAGE2_DISTRIBUTION_NAME, version=_STAGE2_VERSION
+            ),
+            changelog_entry="Local full-system-gate Stage 2 fixture release.",
+        )
+        workflow.prepare_release(
+            manifest,
+            stack=merged_stack,
+            risk_class=RiskClass.LOW,
+            requesting_principal_id="gate-agent",
+        )
+        artifacts = workflow.build_and_verify_fixture(
+            fixture_root, expected_version=_STAGE2_VERSION, import_module=_STAGE2_IMPORT_MODULE
+        )
+    finally:
+        ledger.close()
+
+    github_request = GitHubReleaseRequest(
+        tag_name=f"{_STAGE2_DISTRIBUTION_NAME}-v{_STAGE2_VERSION}",
+        target_commitish="f" * 40,
+        name=f"v{_STAGE2_VERSION}",
+        body="Local full-system-gate Stage 2 fixture release.",
+    )
+    schema = ApprovalSchema(
+        action=PolicyAction.RELEASE_PUBLISH,
+        risk_class=RiskClass.LOW,
+        target_resource=github_request.tag_name,
+        diff_or_artifact_digest=str(artifacts.wheel.digest),
+        requesting_principal_id="gate-agent",
+    )
+    registry.record_approval(schema, approvers=(human,))
+
+    ledger, workflow = reopen("full-system-gate-stage2-publish")
+    try:
+        pypi_receipt, github_receipt = workflow.publish(
+            artifacts,
+            run_id=RunId("gate-stage2-run"),
+            github_request=github_request,
+            risk_class=RiskClass.LOW,
+            requesting_principal_id="gate-agent",
+        )
+        workflow.verify_destinations(pypi_receipt, github_receipt)
+    finally:
+        ledger.close()
+
+    if github_server.release_count != 1:
+        raise AssertionError("expected exactly one GitHub release after the first publish")
+
+    # Idempotent-replay proof: a second publish() call -- simulating a coordinator
+    # restart after a lost response -- must not create a duplicate GitHub release or
+    # a mismatched PyPI publish. The adapters are rebuilt with no memory of the
+    # first call; only the fake destination servers (standing in for the real,
+    # persistent external services) remember what already exists.
+    ledger, workflow = reopen("full-system-gate-stage2-publish-replay")
+    try:
+        replay_pypi_receipt, replay_github_receipt = workflow.publish(
+            artifacts,
+            run_id=RunId("gate-stage2-run"),
+            github_request=github_request,
+            risk_class=RiskClass.LOW,
+            requesting_principal_id="gate-agent",
+        )
+    finally:
+        ledger.close()
+
+    if github_server.release_count != 1:
+        raise AssertionError(
+            "replaying publish() after a simulated restart created a duplicate GitHub release"
+        )
+    if replay_github_receipt.artifact_digest != github_receipt.artifact_digest:
+        raise AssertionError("replayed publish() did not report the same GitHub artifact digest")
+    if replay_pypi_receipt.artifact_digest != pypi_receipt.artifact_digest:
+        raise AssertionError("replayed publish() did not report the same PyPI artifact digest")
+
+    return {
+        "distribution_name": _STAGE2_DISTRIBUTION_NAME,
+        "version": _STAGE2_VERSION,
+        "merged_slices": list(pull_requests.merge_calls),
+        "wheel_digest": str(artifacts.wheel.digest),
+        "sdist_digest": str(artifacts.sdist.digest),
+        "github_release_count": github_server.release_count,
+        "pypi_published_versions": pypi_server.published_versions(),
+        "restart_between_stages": restart_between_stages,
+    }
+
+
 @dataclass(slots=True)
 class GateReport:
     stages: str
     restart_between_stages: bool
     run_evidence: list[dict[str, object]] = field(default_factory=list)
+    stage2_evidence: dict[str, object] | None = None
     evidence_digest: str = ""
 
 
 def run_gate(
     *, stages: str = "1", restart_between_stages: bool = True, run_count: int = 2
 ) -> GateReport:
-    if stages != "1":
+    requested_stages = frozenset(part.strip() for part in stages.split(",") if part.strip())
+    if not requested_stages or not requested_stages <= _SUPPORTED_STAGES:
         raise EngineryError(
-            "full_system_gate.py only supports --stages 1 in this milestone; "
-            "Stage 2-4 cumulative gates belong to their own release trains",
+            "full_system_gate.py only supports --stages 1, 2, or 1,2; "
+            "Stage 3-4 cumulative gates belong to their own release trains",
             details={"requested_stages": stages},
         )
     if run_count < 2:
@@ -467,28 +964,39 @@ def run_gate(
     report = GateReport(stages=stages, restart_between_stages=restart_between_stages)
     with TemporaryDirectory(prefix="enginery-full-system-gate-") as tmp:
         artifact_root = Path(tmp)
-        database = artifact_root / "ledger.db"
-        for run_index in range(1, run_count + 1):
-            fixture = _build_fixture(run_index, artifact_root)
-            evidence = _drive_to_terminal(
-                database, fixture, restart_between_stages=restart_between_stages
+        if "1" in requested_stages:
+            database = artifact_root / "stage1-ledger.db"
+            for run_index in range(1, run_count + 1):
+                fixture = _build_fixture(run_index, artifact_root)
+                evidence = _drive_to_terminal(
+                    database, fixture, restart_between_stages=restart_between_stages
+                )
+                report.run_evidence.append(evidence)
+        if "2" in requested_stages:
+            stage2_database = artifact_root / "stage2-ledger.db"
+            stage2_fixture_root = artifact_root / "stage2-fixture"
+            report.stage2_evidence = _run_stage2_leg(
+                stage2_database, stage2_fixture_root, restart_between_stages=restart_between_stages
             )
-            report.run_evidence.append(evidence)
     report.evidence_digest = (
         "sha256:"
-        + hashlib.sha256(json.dumps(report.run_evidence, sort_keys=True).encode()).hexdigest()
+        + hashlib.sha256(
+            json.dumps(
+                {"stage1": report.run_evidence, "stage2": report.stage2_evidence}, sort_keys=True
+            ).encode()
+        ).hexdigest()
     )
     return report
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Cumulative Stage-1 restart/replay gate (local fixtures only)."
+        description="Cumulative Stage-1/Stage-2 restart/replay gate (local fixtures only)."
     )
     parser.add_argument(
         "--stages",
         default="1",
-        help="comma-separated stages to gate; only '1' is supported in this milestone",
+        help="comma-separated stages to gate; '1', '2', or '1,2'",
     )
     parser.add_argument(
         "--restart-between-stages",
@@ -511,7 +1019,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "PASS full-system-gate "
         f"stages={report.stages} restart_between_stages={report.restart_between_stages} "
-        f"runs={len(report.run_evidence)} evidence_digest={report.evidence_digest}"
+        f"stage1_runs={len(report.run_evidence)} "
+        f"stage2_evidence={'yes' if report.stage2_evidence is not None else 'no'} "
+        f"evidence_digest={report.evidence_digest}"
     )
     return 0
 
