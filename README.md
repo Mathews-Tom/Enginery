@@ -10,11 +10,22 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-Pre-`v0.1.0`. The repository implements typed workflow, persistence, policy, coordinator, and deterministic local-adapter foundations. It is not yet a published package or a complete issue-to-PR automation product. The local adapter set provides contract-tested work-ledger, harness, workspace, Git, validation, publication, deployment-fixture, and capability-source implementations.
+`v0.1.0` (Stage 1 only). Enginery ships a coordinator-owned, durable
+issue-to-merge-ready-pull-request workflow, proven end to end against a
+real GitHub repository and a real coding-agent harness, plus a versioned
+raw outcome-observation schema. Stage 2 (plan to verified release) and
+Stage 3 (incident to hotfix) ship in later release trains (`v0.2.0`,
+`v0.3.0`); Stage 4 (governed factory self-improvement) is gate-deferred
+with no committed date. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
+[`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
 ## Installation
 
-Not yet published. Install from source:
+```bash
+pip install enginery
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/Mathews-Tom/Enginery.git

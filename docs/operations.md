@@ -19,7 +19,13 @@ publish orchestration is exposed through the CLI in this release — see
 
 ## Installation
 
-Enginery has not published a package yet. Install from source:
+`v0.1.0` is published to PyPI. Install with:
+
+```bash
+pip install enginery
+```
+
+Or install from source:
 
 ```bash
 git clone https://github.com/Mathews-Tom/Enginery.git
