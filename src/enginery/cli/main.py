@@ -15,7 +15,9 @@ from collections.abc import Sequence
 from importlib import metadata
 from pathlib import Path
 
+from enginery.adapters.broker_doctor import broker_provider_statuses
 from enginery.adapters.local import local_provider_statuses
+from enginery.application.adapter_types import AdapterAvailability
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.capability import check_lock
 from enginery.cli.doctor import run_doctor
@@ -58,6 +60,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor", help="Report deterministic local provider capabilities."
     )
     adapter_doctor_parser.add_argument("--json", action="store_true")
+    adapter_doctor_parser.add_argument(
+        "--github-repository", default=None, help="Defaults to installed package metadata."
+    )
+    adapter_doctor_parser.add_argument("--github-executable", default="gh")
+    adapter_doctor_parser.add_argument(
+        "--pypi-project-name", default=None, help="Defaults to installed package metadata."
+    )
+    adapter_doctor_parser.add_argument("--pypi-executable", default="uv")
+    adapter_doctor_parser.add_argument("--deployment-app-script", type=Path, default=None)
+    adapter_doctor_parser.add_argument("--deployment-artifacts-root", type=Path, default=None)
+    adapter_doctor_parser.add_argument("--deployment-state-root", type=Path, default=None)
+    adapter_doctor_parser.add_argument("--deployment-python-executable", default=None)
 
     ledger_parser = subparsers.add_parser("ledger", help="Ledger consistency and storage commands.")
     ledger_subparsers = ledger_parser.add_subparsers(dest="ledger_command")
@@ -244,31 +258,44 @@ def _run_doctor(*, as_json: bool) -> int:
     return SUCCESS if report.ok else exit_code_for(FailureClass.MISSING_PREREQUISITE)
 
 
-def _run_adapter_doctor(*, as_json: bool) -> int:
-    statuses = local_provider_statuses()
-    if as_json:
+def _run_adapter_doctor(args: argparse.Namespace) -> int:
+    statuses = local_provider_statuses() + broker_provider_statuses(
+        github_repository=args.github_repository,
+        github_executable=args.github_executable,
+        pypi_project_name=args.pypi_project_name,
+        pypi_executable=args.pypi_executable,
+        deployment_app_script=args.deployment_app_script,
+        deployment_artifacts_root=args.deployment_artifacts_root,
+        deployment_state_root=args.deployment_state_root,
+        deployment_python_executable=args.deployment_python_executable,
+    )
+    ok = all(status.availability is AdapterAvailability.AVAILABLE for status in statuses)
+    if args.json:
         payload: list[dict[str, object]] = []
         for status in statuses:
             fingerprint = status.fingerprint
-            assert fingerprint is not None
-            payload.append(
-                {
-                    "availability": status.availability.value,
-                    "capabilities": [capability.name for capability in fingerprint.capabilities],
-                    "fingerprint": str(fingerprint.digest),
-                    "kind": status.kind.value,
-                    "provider_id": fingerprint.provider_id,
-                }
-            )
+            entry: dict[str, object] = {
+                "availability": status.availability.value,
+                "detail": status.detail,
+                "kind": status.kind.value,
+            }
+            if fingerprint is not None:
+                entry["capabilities"] = [capability.name for capability in fingerprint.capabilities]
+                entry["fingerprint"] = str(fingerprint.digest)
+                entry["provider_id"] = fingerprint.provider_id
+            payload.append(entry)
         print(json.dumps(payload, indent=2))
     else:
         for status in statuses:
-            assert status.fingerprint is not None
-            print(
-                f"[{status.availability.value}] {status.kind.value}: "
-                f"{status.fingerprint.provider_id} {status.fingerprint.digest}"
-            )
-    return SUCCESS
+            fingerprint = status.fingerprint
+            if fingerprint is not None:
+                print(
+                    f"[{status.availability.value}] {status.kind.value}: "
+                    f"{fingerprint.provider_id} {fingerprint.digest}"
+                )
+            else:
+                print(f"[{status.availability.value}] {status.kind.value}: {status.detail}")
+    return SUCCESS if ok else exit_code_for(FailureClass.MISSING_PREREQUISITE)
 
 
 def _run_ledger_verify(args: argparse.Namespace) -> int:
@@ -428,7 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_workspace(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
-                return _run_adapter_doctor(as_json=args.json)
+                return _run_adapter_doctor(args)
             raise InvalidInputError("adapter requires a subcommand")
     except EngineryError as error:
         print(str(error), file=sys.stderr)

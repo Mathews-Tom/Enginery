@@ -120,7 +120,7 @@ script against a command that is not listed above.
 | Command | Purpose |
 |---|---|
 | `enginery doctor [--json]` | Report locally implemented prerequisites (Python version, installed package). |
-| `enginery adapter doctor [--json]` | Report the deterministic local provider fingerprints Enginery ships (see [Local provider inventory](#local-provider-inventory)). |
+| `enginery adapter doctor [--json] [--github-repository ...] [--deployment-app-script PATH] ...` | Report the deterministic local provider and Stage 2/3 broker configuration state Enginery ships (see [Local provider inventory and Stage 2/3 broker configuration](#local-provider-inventory-and-stage-23-broker-configuration)). |
 | `enginery ledger verify --database PATH [--artifacts PATH] [--json]` | Check ledger and artifact-store consistency. |
 | `enginery ledger backup --database PATH --output PATH [--artifacts PATH]` | Snapshot a ledger to a directory. |
 | `enginery ledger restore --backup PATH --database PATH [--artifacts PATH]` | Restore a ledger from a backup directory. |
@@ -134,13 +134,19 @@ script against a command that is not listed above.
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
 | `enginery capability lock [--check] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Inspect or verify a capability lock. |
 
-### Local provider inventory
+### Local provider inventory and Stage 2/3 broker configuration
 
 `enginery adapter doctor --json` reports the deterministic local providers
 Enginery ships out of the box — these back local development and the
 cumulative Stage-1 gate described in
 [Cumulative Stage-1 recovery evidence](#cumulative-stage-1-recovery-evidence),
-not a live GitHub/OMP run:
+not a live GitHub/OMP run — plus the real Stage 2 release brokers
+(`GitHubReleaseAdapter`, `PyPiAdapter`) and the real Stage 3
+`LocalServiceDeploymentAdapter`. Every broker entry is a local
+configuration-sanity check only — is the required CLI tool installed
+(`gh --version`, `uv --version`), does the deployment fixture's
+`app_script` exist, does its `python_executable` resolve — never a
+live GitHub, PyPI, or local-service network call:
 
 ```text
 $ enginery adapter doctor --json
@@ -152,9 +158,29 @@ $ enginery adapter doctor --json
   {"kind": "validation",        "provider_id": "local-validation",        "capabilities": ["commands"]},
   {"kind": "release",           "provider_id": "local-publication",       "capabilities": ["publish", "verify"]},
   {"kind": "deployment",        "provider_id": "local-deployment-fixture","capabilities": ["deploy", "rollback"]},
-  {"kind": "capability_source", "provider_id": "local-capability-source", "capabilities": ["discover", "resolve"]}
+  {"kind": "capability_source", "provider_id": "local-capability-source", "capabilities": ["discover", "resolve"]},
+  {"kind": "release",           "provider_id": "github-release",         "capabilities": ["release_create_and_verify"]},
+  {"kind": "release",           "provider_id": "pypi",                   "capabilities": ["publish_and_verify"]},
+  {"kind": "deployment",        "provider_id": "local-service-deployment","capabilities": ["deploy", "observe", "rollback"]}
 ]
 ```
+
+`github-release` and `pypi` bind to the GitHub repository and PyPI
+project name an installed `enginery` distribution's own package
+metadata reports (`Project-URL: Repository`, `Name`) — the same source
+`scripts/verify_project_identity.py` treats as canonical — never a
+fabricated placeholder; `--github-repository`/`--pypi-project-name`
+override them, and `--github-executable`/`--pypi-executable` override
+the CLI tool checked (default `gh`/`uv`). `local-service-deployment`
+checks `--deployment-app-script` (default
+`fixtures/enginery-stage3-local-service/app.py`, relative to the
+current directory), `--deployment-artifacts-root`/
+`--deployment-state-root` (default under `.enginery/`), and
+`--deployment-python-executable` (default the running interpreter). A
+missing prerequisite reports `"availability": "misconfigured"` or
+`"unavailable"` with a `detail` string, never a silent pass, and
+`adapter doctor` exits non-zero — the same fail-closed convention
+`doctor`/`gate status` already use.
 
 Each entry also carries a content-addressed `fingerprint`; a Stage 1 run
 binds to the exact fingerprint of every provider it uses and refuses to
@@ -394,13 +420,17 @@ implemented.
   production/publication credentials are confined to reviewed broker code
   that never enters an agent workspace — governs Stage 2's release
   actions and Stage 3's deployment/rollback actions, both shipped in this
-  release. Neither has an `enginery` CLI verb of its own yet: Stage 2's
+  release. Neither has an `enginery` action verb of its own yet: Stage 2's
   broker runs through the release-preparation workflow
   (`Stage2ReleaseWorkflow`) and Stage 3's through the library-level
   `IncidentService`/`LocalServiceDeploymentAdapter` pair (see
   [`docs/adapters.md`](adapters.md#the-incident-to-hotfix-and-rollback-surface));
   both are exercised by this repository's own release/gate tooling, not
-  by a shipped operator-facing command.
+  by a shipped operator-facing action command.
+  `enginery adapter doctor` reports read-only configuration sanity for
+  both brokers (see
+  [Local provider inventory and Stage 2/3 broker configuration](#local-provider-inventory-and-stage-23-broker-configuration)),
+  but performs neither a publish nor a deploy action.
 - **Single-operator authority model.** Every consequential action is
   policy-gated to `allow`, `deny`, or `require_human`; there is no global
   autonomous mode. Producer separation (the human approving an action must

@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -116,6 +117,16 @@ class LocalServiceDeploymentAdapter:
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
 
     def probe(self) -> AdapterStatus:
+        """Report configuration sanity without deploying, starting, or
+        contacting anything -- a local file/executable check only."""
+        problems = self._configuration_problems()
+        if problems:
+            return AdapterStatus(
+                kind=ProviderKind.DEPLOYMENT,
+                availability=AdapterAvailability.MISCONFIGURED,
+                fingerprint=None,
+                detail="; ".join(problems),
+            )
         return AdapterStatus(
             kind=ProviderKind.DEPLOYMENT,
             availability=AdapterAvailability.AVAILABLE,
@@ -131,6 +142,20 @@ class LocalServiceDeploymentAdapter:
             ),
             detail="local-service-deployment is available",
         )
+
+    def _configuration_problems(self) -> tuple[str, ...]:
+        problems: list[str] = []
+        if not self.app_script.is_file():
+            problems.append(f"app_script does not exist: {self.app_script}")
+        if not _executable_resolves(self.python_executable):
+            problems.append(f"python_executable could not be resolved: {self.python_executable!r}")
+        for label, root in (
+            ("artifacts_root", self.artifacts_root),
+            ("state_root", self.state_root),
+        ):
+            if root.exists() and not root.is_dir():
+                problems.append(f"{label} exists but is not a directory: {root}")
+        return tuple(problems)
 
     def deploy(self, request: DeploymentRequest) -> DeploymentReceipt:
         config = self._load_artifact_config(request.artifact)
@@ -326,6 +351,14 @@ def _parse_target(target: str) -> tuple[str, int]:
             "local service deployment target must be host:port", details={"target": target}
         )
     return host, int(port_text)
+
+
+def _executable_resolves(executable: str) -> bool:
+    """Whether ``executable`` names a runnable file, absolute or on PATH."""
+    path = Path(executable)
+    if path.is_absolute():
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(executable) is not None
 
 
 def _get_json(host: str, port: int, path: str) -> dict[str, Any]:
