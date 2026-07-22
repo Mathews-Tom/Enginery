@@ -19,6 +19,7 @@ from enginery.adapters.local import local_provider_statuses
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.capability import check_lock
 from enginery.cli.doctor import run_doctor
+from enginery.cli.gate import run_gate
 from enginery.cli.ledger import (
     run_backup,
     run_rebuild_projections,
@@ -163,6 +164,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     outcome_failures_parser.add_argument("--database", required=True, type=Path)
     outcome_failures_parser.add_argument("--run-id", required=True)
+
+    gate_parser = subparsers.add_parser("gate", help="Report readiness against a decision gate.")
+    gate_subparsers = gate_parser.add_subparsers(dest="gate_command")
+    gate_status_parser = gate_subparsers.add_parser(
+        "status", help="Report the current state of every condition for one registered gate."
+    )
+    gate_status_parser.add_argument("--gate", required=True, choices=("G4",))
+    gate_status_parser.add_argument("--database", required=True, type=Path)
+    gate_status_parser.add_argument(
+        "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
+    )
+    gate_status_parser.add_argument("--json", action="store_true")
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
@@ -381,6 +394,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_stage2(args)
         if args.command == "outcome":
             return run_outcome(args)
+        if args.command == "gate":
+            return run_gate(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
                 return _run_adapter_doctor(as_json=args.json)
