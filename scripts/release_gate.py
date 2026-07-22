@@ -26,6 +26,9 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from check_docs_currency import DocsCurrencyError
+from check_docs_currency import run_check as _run_docs_currency_check
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 CHANGELOG_PATH = REPO_ROOT / "CHANGELOG.md"
@@ -157,7 +160,15 @@ def _install_smoke(wheel: Path, expected_version: str) -> None:
             )
 
 
+def _check_docs_currency() -> None:
+    try:
+        _run_docs_currency_check(repo_root=REPO_ROOT)
+    except DocsCurrencyError as error:
+        raise ReleaseGateError(f"docs-currency check failed: {error}") from error
+
+
 def run_gate(*, version: str, skip_install_smoke: bool) -> dict[str, object]:
+    _check_docs_currency()
     _check_pyproject_version(version)
     _check_changelog_entry(version)
     _check_version_test(version)
@@ -174,6 +185,7 @@ def run_gate(*, version: str, skip_install_smoke: bool) -> dict[str, object]:
         "version": version,
         "artifacts": artifact_hashes,
         "install_smoke": "not-run" if skip_install_smoke else "passed",
+        "docs_currency": "passed",
     }
 
 
