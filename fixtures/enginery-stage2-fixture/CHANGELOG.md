@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+Enginery-orchestrated publication for the M22 Stage 2 pilot comparison: prepared, built, verified, and published through Stage2ReleaseWorkflow (VersionChangelogBroker, FixtureBuilder, PyPiAdapter, GitHubReleaseAdapter) under a policy-gated human approval.
+
 ## 0.2.0
 
 Manual-baseline publication for the M22 Stage 2 pilot comparison: built and published by an operator running raw `uv build`/`uv publish`/`git tag`/`gh release create` commands directly, with no Enginery orchestration.
