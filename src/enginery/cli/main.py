@@ -28,6 +28,7 @@ from enginery.cli.ledger import (
 )
 from enginery.cli.outcome import run_outcome
 from enginery.cli.stage1 import run_stage1
+from enginery.cli.stage1_request import add_build_request_parser
 from enginery.cli.stage2 import run_stage2
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
 from enginery.domain.policy_decision import PolicyResult
@@ -122,6 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
         if command == "resume":
             lifecycle_parser.add_argument("--attempt-id", required=True)
             lifecycle_parser.add_argument("--operation-id", required=True)
+    add_build_request_parser(stage1_subparsers)
 
     stage2_parser = subparsers.add_parser(
         "stage2", help="Inspect Stage 2 plan-to-release stack state."
