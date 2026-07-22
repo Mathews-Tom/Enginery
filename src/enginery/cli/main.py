@@ -30,6 +30,7 @@ from enginery.cli.outcome import run_outcome
 from enginery.cli.stage1 import run_stage1
 from enginery.cli.stage1_request import add_build_request_parser
 from enginery.cli.stage2 import run_stage2
+from enginery.cli.workspace import run_workspace
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
 from enginery.domain.policy_decision import PolicyResult
 from enginery.policy.evaluator import PolicyEvaluator
@@ -178,6 +179,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
     )
     gate_status_parser.add_argument("--json", action="store_true")
+
+    workspace_parser = subparsers.add_parser(
+        "workspace", help="Inspect and release run-scoped workspace reservations."
+    )
+    workspace_subparsers = workspace_parser.add_subparsers(dest="workspace_command")
+    workspace_inspect_parser = workspace_subparsers.add_parser(
+        "inspect", help="List every repository's current workspace reservation."
+    )
+    workspace_inspect_parser.add_argument("--database", required=True, type=Path)
+    workspace_inspect_parser.add_argument("--owner", required=True)
+    workspace_inspect_parser.add_argument("--json", action="store_true")
+    workspace_release_parser = workspace_subparsers.add_parser(
+        "release",
+        help="Release a retained workspace reservation with no live lease.",
+    )
+    workspace_release_parser.add_argument("--database", required=True, type=Path)
+    workspace_release_parser.add_argument("--owner", required=True)
+    workspace_release_parser.add_argument("--repository-id", required=True)
+    workspace_release_parser.add_argument("--run-id", required=True)
+    workspace_release_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report whether release would succeed without releasing anything.",
+    )
+    workspace_release_parser.add_argument("--json", action="store_true")
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
@@ -398,6 +424,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_outcome(args)
         if args.command == "gate":
             return run_gate(args)
+        if args.command == "workspace":
+            return run_workspace(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
                 return _run_adapter_doctor(as_json=args.json)
