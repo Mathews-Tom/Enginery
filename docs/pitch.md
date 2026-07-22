@@ -14,7 +14,7 @@ Have you had a coding agent open a pull request, lose the network response, and 
 
 It coordinates the agents and deterministic operations a team already chooses to use, while retaining durable state, evidence, policy decisions, and human authority.
 
-The first claim under test is deliberately narrow: for a supported provider operation, an interrupted or retried run reconciles the persisted operation ID and provider state before another side effect is attempted. The first public artifact is planned as a recorded fault-injection demonstration: kill the coordinator mid-run, show reconciliation-driven recovery, show whether a duplicate effect was prevented for the supported operation, and publish the evidence bundle for independent inspection.
+The first claim under test is deliberately narrow: for a supported provider operation, an interrupted or retried run reconciles the persisted operation ID and provider state before another side effect is attempted. The first public artifact is a recorded fault-injection demonstration, published 2026-07-22: a real coordinator interruption mid-run, reconciliation-driven recovery, confirmation that no duplicate effect occurred for the supported operation, and the evidence bundle published for independent inspection — [gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945](https://gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945). The reusable runbook is [`docs/recovery-demonstration.md`](recovery-demonstration.md).
 
 ### Plain-language terms
 
@@ -248,13 +248,14 @@ Ran the documented comparison protocol against three comparable low-risk work-it
 
 **Result: `go`.** Combined with the Stage 1 gate evidence recorded above, this satisfies gate G1 in full. The `v0.2.0` train (M9–M12) may proceed.
 
-**Status update.** The `v0.2.0` train did proceed and shipped for real: second-harness neutrality (Claude Code), capability locking and provenance, plan ingestion, and the complete Stage 2 (plan to verified release) lifecycle, published to PyPI and GitHub Releases on 2026-07-21. A `v0.3.0` train followed with Stage 3 (incident to hotfix and rollback) against a controlled local service, published the same day. Stage 4 (governed factory self-improvement) remains gate-deferred; the current corpus is single-repository, single-operator dogfooding, which fails the gate's own corpus-diversity and dual-human-principal conditions.
+**Status update.** The `v0.2.0` train did proceed and shipped for real: second-harness neutrality (Claude Code), capability locking and provenance, plan ingestion, and the complete Stage 2 (plan to verified release) lifecycle, published to PyPI and GitHub Releases on 2026-07-21. A `v0.3.0` train followed with Stage 3 (incident to hotfix and rollback) against a controlled local service, published the same day. Stage 4 (governed factory self-improvement) remains gate-deferred; the current corpus is single-repository, single-operator dogfooding, which fails the gate's own corpus-diversity and dual-human-principal conditions. The standalone recorded fault-injection recovery demonstration this section's own G1 pass action named — separate from the pilot record above — published 2026-07-22: [gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945](https://gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945).
 
 
 ## Supporting material
 
 - [System overview](overview.md)
 - [System design](design.md)
+- [Fault-injection recovery demonstration runbook](recovery-demonstration.md)
 - [Workflow examples](workflows.md)
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.

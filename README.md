@@ -22,6 +22,18 @@ Stage 4 (governed factory self-improvement) is gate-deferred with no
 committed date. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
+## Recovery demonstration
+
+A recorded, real coordinator-interruption-and-recovery run: a live
+coding-agent worker dispatched against a real GitHub issue, deliberately
+interrupted (no coordinator polling for 39 seconds while the worker kept
+running as an independent process), then recovered by a later, separate
+invocation that recognized the still-running worker and never dispatched
+a second one — confirmed by exactly one pull request and one commit.
+Published write-up:
+[gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945](https://gist.github.com/Mathews-Tom/eb2ff07e918b329dc25a0fbfcab71945).
+The reusable runbook is [`docs/recovery-demonstration.md`](docs/recovery-demonstration.md).
+
 ## Installation
 
 ```bash
