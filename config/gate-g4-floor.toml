@@ -1,0 +1,37 @@
+# Registered readiness floor and human-principal roster for gate G4
+# (the M14b/M15 self-improvement entry gate). Every floor below is
+# unset until a human records a real number at a quarterly gate
+# review; `enginery gate status --gate G4` reports "unmeasured" for any
+# condition whose floor is absent here, never "pass" by default.
+#
+# Editing this file by hand is the only way a floor is registered or a
+# human principal is added to the roster below -- nothing in this
+# codebase mutates it programmatically, matching
+# config/performance-bounds.toml's existing human-maintained-floor
+# convention.
+
+schema_version = 1
+
+[registered_principals]
+# Human `AuthorityPrincipal` ids formally registered for dual-human
+# separation (docs/design.md's authority model). Empty today: this
+# repository's own development to date has one human operator.
+ids = []
+
+[completed_runs]
+# "Volume sufficient for registered cohorts" -- concrete counts are set
+# at the first quarterly gate review after the v0.2 train ships (not
+# yet held). Leave `min_total` unset (commented out) until that review
+# records a real number.
+# min_total = 0
+
+[interventions]
+# "Comparable volume" of recorded human interventions with a reason --
+# same quarterly-review provenance as `completed_runs.min_total` above.
+# min_with_reason = 0
+
+[outcome_completeness]
+# The outcome-capture completeness floor docs/design.md's evaluation
+# section calls "the registered floor". Leave `floor` unset until a
+# human records a real fraction between 0 and 1.
+# floor = 0.8

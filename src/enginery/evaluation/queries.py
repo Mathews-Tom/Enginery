@@ -74,6 +74,35 @@ def list_interventions(
     return tuple(interventions)
 
 
+def list_all_interventions(
+    ledger: LedgerService, *, aggregate_type: str
+) -> tuple[InterventionRecord, ...]:
+    """Every recorded human decision across every run, ledger-wide.
+
+    Same recording contract as :func:`list_interventions` -- a node with
+    no ``operator_decision`` field is not an intervention and is
+    excluded -- but scoped to the whole ledger rather than one
+    ``run_id``, for callers (such as a gate-readiness report) that need
+    an aggregate count across every run rather than one run's history.
+    """
+    interventions: list[InterventionRecord] = []
+    for record in ledger.list_projections(aggregate_type=aggregate_type):
+        decision = record.state.get("operator_decision")
+        if not isinstance(decision, str):
+            continue
+        reason = record.state.get("reason")
+        interventions.append(
+            InterventionRecord(
+                run_id=_run_id(record.aggregate_id),
+                node_id=_node_id(record.aggregate_id),
+                decision=decision,
+                reason=reason if isinstance(reason, str) else None,
+                status=str(record.state.get("status", "")),
+            )
+        )
+    return tuple(interventions)
+
+
 def list_failures(
     ledger: LedgerService, *, run_id: RunId, aggregate_type: str
 ) -> tuple[FailureRecord, ...]:
@@ -103,4 +132,14 @@ def _node_id(aggregate_id: str) -> str:
     return aggregate_id.split(":", 1)[1] if ":" in aggregate_id else aggregate_id
 
 
-__all__ = ["FailureRecord", "InterventionRecord", "list_failures", "list_interventions"]
+def _run_id(aggregate_id: str) -> str:
+    return aggregate_id.split(":", 1)[0] if ":" in aggregate_id else aggregate_id
+
+
+__all__ = [
+    "FailureRecord",
+    "InterventionRecord",
+    "list_all_interventions",
+    "list_failures",
+    "list_interventions",
+]

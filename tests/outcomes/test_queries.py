@@ -14,7 +14,7 @@ from enginery.engine.runtime import (
     CoordinatorRuntime,
     WorkflowNodeDispatch,
 )
-from enginery.evaluation.queries import list_failures, list_interventions
+from enginery.evaluation.queries import list_all_interventions, list_failures, list_interventions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
 
@@ -163,3 +163,95 @@ def test_queries_are_scoped_to_the_requested_run(
     assert len(run_two_failures) == 1
     assert run_one_failures[0].run_id == "run-1"
     assert run_two_failures[0].run_id == "run-2"
+
+
+def test_list_all_interventions_reads_decisions_across_every_run(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    other_repository = tmp_path / "other-repository"
+    other_repository.mkdir()
+    first = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    second = WorkflowNodeDispatch(
+        replace(_request(other_repository), run_id="run-2", operation_id="operation-run-2"),
+        issue_to_pr_manifest(),
+    )
+    epoch_one = runtime.register_node(
+        dispatch=first, now=_NOW, heartbeat_window=timedelta(seconds=60)
+    )
+    epoch_two = runtime.register_node(
+        dispatch=second, now=_NOW, heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch_one.epoch, now=_NOW)
+    runtime.complete_node(run_id="run-2", node_id="qualify", epoch=epoch_two.epoch, now=_NOW)
+    approval_one = WorkflowNodeDispatch(
+        replace(
+            first.request,
+            node_id="plan_approval",
+            attempt_id="attempt-approval-1",
+            operation_id="operation-approval-1",
+            dependencies=(("run-1", "qualify"),),
+        ),
+        issue_to_pr_manifest(),
+    )
+    approval_two = WorkflowNodeDispatch(
+        replace(
+            second.request,
+            node_id="plan_approval",
+            attempt_id="attempt-approval-2",
+            operation_id="operation-approval-2",
+            dependencies=(("run-2", "qualify"),),
+        ),
+        issue_to_pr_manifest(),
+    )
+    runtime.register_node(dispatch=approval_one, now=_NOW, heartbeat_window=timedelta(seconds=60))
+    runtime.register_node(dispatch=approval_two, now=_NOW, heartbeat_window=timedelta(seconds=60))
+    runtime.await_human_node(
+        run_id="run-1", node_id="plan_approval", epoch=epoch_one.epoch, now=_NOW, reason="review"
+    )
+    runtime.await_human_node(
+        run_id="run-2", node_id="plan_approval", epoch=epoch_two.epoch, now=_NOW, reason="review"
+    )
+    runtime.resolve_human_wait(
+        run_id="run-1",
+        node_id="plan_approval",
+        epoch=epoch_one.epoch,
+        now=_NOW,
+        outcome="passed",
+        extra={"operator_decision": "approved", "reason": "reviewed and correct"},
+    )
+    runtime.resolve_human_wait(
+        run_id="run-2",
+        node_id="plan_approval",
+        epoch=epoch_two.epoch,
+        now=_NOW,
+        outcome="failed",
+        extra={"operator_decision": "rejected", "reason": "needs rework"},
+    )
+
+    interventions = list_all_interventions(
+        ledger_service, aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE
+    )
+
+    assert {intervention.run_id for intervention in interventions} == {"run-1", "run-2"}
+    assert {intervention.reason for intervention in interventions} == {
+        "reviewed and correct",
+        "needs rework",
+    }
+
+
+def test_list_all_interventions_excludes_nodes_without_an_operator_decision(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    epoch = runtime.register_node(
+        dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=_NOW)
+
+    interventions = list_all_interventions(
+        ledger_service, aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE
+    )
+
+    assert interventions == ()
