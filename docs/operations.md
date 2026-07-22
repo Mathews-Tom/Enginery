@@ -94,11 +94,11 @@ The full current CLI surface, generated from `enginery --help`:
 
 ```text
 usage: enginery [-h] [--version]
-                {doctor,adapter,ledger,policy,stage1,stage2,outcome,capability}
+                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,capability}
                 ...
 
 positional arguments:
-  {doctor,adapter,ledger,policy,stage1,stage2,outcome,capability}
+  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,capability}
     doctor              Report locally implemented prerequisites.
     adapter             Inspect configured adapter providers.
     ledger              Ledger consistency and storage commands.
@@ -106,6 +106,7 @@ positional arguments:
     stage1              Run the Stage 1 issue-to-PR lifecycle.
     stage2              Inspect Stage 2 plan-to-release stack state.
     outcome             Inspect raw outcome observations and completeness.
+    gate                Report readiness against a decision gate.
     capability          Capability lock commands.
 ```
 
@@ -124,9 +125,10 @@ script against a command that is not listed above.
 | `enginery ledger restore --backup PATH --database PATH [--artifacts PATH]` | Restore a ledger from a backup directory. |
 | `enginery ledger rebuild-projections --database PATH` | Rebuild ledger projections from stored events. |
 | `enginery policy explain REQUEST [--json]` | Explain a policy decision for a request document without authorizing it. |
-| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence}` | Run and inspect the Stage 1 lifecycle (below). |
+| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus compose a `--request` document from flags (below). |
 | `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
+| `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report readiness against a registered decision gate. |
 | `enginery capability lock [--check] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Inspect or verify a capability lock. |
 
 ### Local provider inventory
@@ -175,6 +177,49 @@ flowchart LR
     Verify --> Register[register_outcome_observation]
     Register --> Wait[wait: merge_ready]
 ```
+
+### Composing a request
+
+`stage1 start --request` needs a JSON document decodable by
+`stage1_request_from_state`. `enginery stage1 build-request` writes one
+from flags instead of hand-writing the Python composition
+[`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness)
+documents:
+
+```bash
+uv run enginery stage1 build-request \
+  --output request.json \
+  --run-id issue-142 \
+  --repository <owner>/<repo> \
+  --external-reference "https://github.com/<owner>/<repo>/issues/142" \
+  --source-snapshot-reference "issue:142@<observed-revision>" \
+  --source-revision <observed-revision> \
+  --base-revision <real base revision> \
+  --title "<issue title>" \
+  --objective "<what a merge-ready PR must accomplish>" \
+  --acceptance-criterion "<criterion 1>" --acceptance-criterion "<criterion 2>" \
+  --repository-path <absolute path to the local checkout> \
+  --workspace-path <absolute path to a fresh workspace directory> \
+  --artifact-root <absolute path to an artifact directory>
+```
+
+Every field not shown above defaults to the same values
+`docs/examples.md` documents (`policy-v1`, `uv run pytest -q`,
+`repair-limit 1`, a 1800-second/`5.0`-cost-budget OMP implementation
+attempt, `operator-gh-cli`/`operator-harness-session` credential
+references). `--capability-lockfile` (default
+`.enginery/capabilities.lock.json`) binds the request's
+`capability_lock_digest` to the real lockfile `enginery capability
+lock` already reads when one exists, and to the documented
+no-capabilities-locked sentinel otherwise.
+`--environment-manifest-digest`/`--environment-manifest-file` and
+`--configuration-snapshot-digest`/`--configuration-snapshot-file`
+bind the two remaining opaque `Run` digests to real bytes when a real
+environment manifest or configuration snapshot exists; omitted, they
+fall back to the same fixed local-environment/local-configuration
+sentinels the documented manual script uses. The command never
+contacts GitHub, OMP, or any external provider — it only writes a
+local file.
 
 Every step after `stage1 start` runs through `enginery stage1 watch
 --advance`, which performs **at most one durable next action** derived

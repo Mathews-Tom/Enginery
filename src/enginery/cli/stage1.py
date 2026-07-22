@@ -15,6 +15,7 @@ from enginery.adapters.github import (
     GitHubWorkLedger,
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
+from enginery.cli.stage1_request import run_build_request
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
@@ -60,6 +61,8 @@ def run_stage1(args: argparse.Namespace) -> int:
         _resume(args)
     elif command == "evidence":
         _evidence(args)
+    elif command == "build-request":
+        return run_build_request(args)
     else:  # pragma: no cover - argparse restricts command values
         raise AssertionError(f"unhandled Stage 1 command: {command}")
     return 0

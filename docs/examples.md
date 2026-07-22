@@ -37,6 +37,13 @@ to end. It reuses the same request-building pattern
 [`docs/migration-sage-dev.md`](migration-sage-dev.md#step-3-build-one-enginery-request-per-active-ticket)
 uses for a migrated ticket, adapted for a fresh GitHub issue instead:
 
+**Preferred:** `enginery stage1 build-request` composes this exact
+document from flags — see
+[`docs/operations.md`](operations.md#composing-a-request). The manual
+Python composition below remains accurate and is kept for readers who
+want to see the exact domain objects a request is built from, or who
+need a field the command does not yet expose.
+
 ```python
 # build_request.py
 from __future__ import annotations
