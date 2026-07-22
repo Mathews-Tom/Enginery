@@ -35,6 +35,7 @@ from enginery.ledger.outbox import OutboxRecord
 from enginery.ledger.outbox import list_pending as _list_pending_outbox
 from enginery.ledger.outbox import mark_dispatched as _mark_outbox_dispatched
 from enginery.ledger.process_manager import ProcessManagerStateRecord
+from enginery.ledger.process_manager import list_process_manager_states as _list_pm_states
 from enginery.ledger.process_manager import read_process_manager_state as _read_pm_state
 from enginery.ledger.projections import ProjectionRecord, RebuildReport
 from enginery.ledger.projections import list_projections as _list_projections
@@ -134,6 +135,11 @@ class LedgerService:
         return _read_pm_state(
             self._connection, process_manager_name=process_manager_name, state_key=state_key
         )
+
+    def list_process_manager_states(
+        self, *, process_manager_name: str
+    ) -> tuple[ProcessManagerStateRecord, ...]:
+        return _list_pm_states(self._connection, process_manager_name=process_manager_name)
 
     def read_lease(self, *, run_id: str, node_id: str) -> LeaseRecord | None:
         return _read_lease(self._connection, run_id=run_id, node_id=node_id)

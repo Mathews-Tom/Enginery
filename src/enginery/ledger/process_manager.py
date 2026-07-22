@@ -134,9 +134,30 @@ def read_process_manager_state(
     )
 
 
+def list_process_manager_states(
+    connection: sqlite3.Connection, *, process_manager_name: str
+) -> tuple[ProcessManagerStateRecord, ...]:
+    """Return every durable state row for one process manager, ordered by key."""
+    rows = connection.execute(
+        "SELECT * FROM process_manager_state WHERE process_manager_name = ? ORDER BY state_key",
+        (process_manager_name,),
+    ).fetchall()
+    return tuple(
+        ProcessManagerStateRecord(
+            process_manager_name=row["process_manager_name"],
+            state_key=row["state_key"],
+            state_version=row["state_version"],
+            state=json.loads(row["state_json"]),
+            updated_at=row["updated_at"],
+        )
+        for row in rows
+    )
+
+
 __all__ = [
     "ProcessManagerStateRecord",
     "ProcessManagerStateWrite",
     "apply_process_manager_update",
+    "list_process_manager_states",
     "read_process_manager_state",
 ]

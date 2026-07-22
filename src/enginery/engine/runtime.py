@@ -566,6 +566,14 @@ class CoordinatorRuntime:
             raise ExternalConflictError("workspace release requires a retained workspace")
         return self._workspaces.cleanup(reservation, epoch=epoch, now=now)
 
+    def list_workspace_reservations(self) -> tuple[WorkspaceReservation, ...]:
+        """Return every repository's current workspace reservation."""
+        return self._workspaces.list_reservations()
+
+    def read_workspace_reservation(self, repository_id: str) -> WorkspaceReservation | None:
+        """Return one repository's current workspace reservation, if any."""
+        return self._workspaces.read_reservation(repository_id)
+
     def cancel_node(self, *, run_id: str, node_id: str, epoch: int, now: datetime) -> None:
         """Cancel a queued, running, or human-waiting node through durable state."""
         request = self._request_for(run_id, node_id)

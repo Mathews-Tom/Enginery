@@ -320,6 +320,14 @@ class GitWorktreeBackend:
             return None
         return _reservation_from_state(record.state, record.state_version)
 
+    def list_reservations(self) -> tuple[WorkspaceReservation, ...]:
+        """Return every repository's current reservation, from the same durable
+        state :meth:`read_reservation` reads -- no separate listing store."""
+        records = self._ledger.list_process_manager_states(process_manager_name=_MANAGER_NAME)
+        return tuple(
+            _reservation_from_state(record.state, record.state_version) for record in records
+        )
+
     @staticmethod
     def _run_git(path: Path, *arguments: str) -> str:
         completed = subprocess.run(

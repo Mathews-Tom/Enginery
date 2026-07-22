@@ -94,11 +94,11 @@ The full current CLI surface, generated from `enginery --help`:
 
 ```text
 usage: enginery [-h] [--version]
-                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,capability}
+                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,capability}
                 ...
 
 positional arguments:
-  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,capability}
+  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,capability}
     doctor              Report locally implemented prerequisites.
     adapter             Inspect configured adapter providers.
     ledger              Ledger consistency and storage commands.
@@ -107,6 +107,7 @@ positional arguments:
     stage2              Inspect Stage 2 plan-to-release stack state.
     outcome             Inspect raw outcome observations and completeness.
     gate                Report readiness against a decision gate.
+    workspace           Inspect and release run-scoped workspace reservations.
     capability          Capability lock commands.
 ```
 
@@ -129,6 +130,8 @@ script against a command that is not listed above.
 | `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
 | `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report readiness against a registered decision gate. |
+| `enginery workspace inspect --database PATH --owner OWNER [--json]` | List every repository's current workspace reservation. |
+| `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
 | `enginery capability lock [--check] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Inspect or verify a capability lock. |
 
 ### Local provider inventory
@@ -260,6 +263,42 @@ process containment: git worktrees isolate concurrent runs from each other,
 not a compromised or malicious process from the operator's account,
 filesystem, network, or keychain. See
 [Security limits](#security-limits) below.
+
+### Inspecting and releasing a stuck workspace reservation
+
+A run's `implement` node reserves one workspace per repository for the
+run's lifetime. If a run is aborted outside the normal lifecycle (the
+process was killed, or a human decides not to continue), that
+reservation can outlive the run. `enginery workspace inspect` lists
+every repository's current reservation, from the same durable state
+`stage1`'s coordinator already reads:
+
+```bash
+uv run enginery workspace inspect --database ledger.db --owner operator --json
+```
+
+`enginery workspace release` releases one reservation through
+`CoordinatorRuntime.release_workspace` -- the identical fenced-proof
+check the coordinator already enforces internally, not a weaker
+CLI-only check: it refuses unless the reservation belongs to the given
+`--run-id` and its status is `retained` (a human-wait or otherwise
+quiesced workspace with no live worker lease). A `materialized`
+workspace -- one a live worker still holds -- is always refused.
+`--dry-run` reports whether release would succeed, and why not when it
+would not, without releasing anything:
+
+```bash
+uv run enginery workspace release --database ledger.db --owner operator \
+  --repository-id owner/repo --run-id run-1 --dry-run
+# review the dry-run output, then, only once satisfied, drop --dry-run
+uv run enginery workspace release --database ledger.db --owner operator \
+  --repository-id owner/repo --run-id run-1
+```
+
+**This command is destructive** -- it removes the reserved git
+worktree. Always run `--dry-run` first and review its output before
+running the real release, especially in an unattended or scripted
+context.
 
 ### Cumulative restart/replay evidence
 
