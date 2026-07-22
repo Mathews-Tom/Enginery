@@ -91,7 +91,15 @@ class PyPiAdapter:
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
 
     def probe(self) -> AdapterStatus:
-        result = self.command_runner((self.config.executable, "--version"), Path.cwd())
+        try:
+            result = self.command_runner((self.config.executable, "--version"), Path.cwd())
+        except OSError:
+            return AdapterStatus(
+                kind=ProviderKind.RELEASE,
+                availability=AdapterAvailability.UNAVAILABLE,
+                fingerprint=None,
+                detail="uv is not available",
+            )
         if result.returncode != 0:
             return AdapterStatus(
                 kind=ProviderKind.RELEASE,

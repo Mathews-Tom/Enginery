@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -57,6 +58,73 @@ def test_adapter_doctor_reports_all_local_provider_kinds(
         "workspace",
     }
     assert all(provider["availability"] == "available" for provider in payload)
+
+
+def test_adapter_doctor_reports_stage2_and_stage3_broker_coverage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app_script = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "enginery-stage3-local-service"
+        / "app.py"
+    )
+
+    exit_code = main(
+        [
+            "adapter",
+            "doctor",
+            "--json",
+            "--github-repository",
+            "owner/repo",
+            "--github-executable",
+            "true",
+            "--pypi-project-name",
+            "fixture-project",
+            "--pypi-executable",
+            "true",
+            "--deployment-app-script",
+            str(app_script),
+            "--deployment-artifacts-root",
+            str(tmp_path / "artifacts"),
+            "--deployment-state-root",
+            str(tmp_path / "state"),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 11
+    provider_ids = {entry.get("provider_id") for entry in payload}
+    assert {"github-release", "pypi", "local-service-deployment"} <= provider_ids
+    assert all(entry["availability"] == "available" for entry in payload)
+
+
+def test_adapter_doctor_reports_misconfigured_deployment_without_crashing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = main(
+        [
+            "adapter",
+            "doctor",
+            "--json",
+            "--github-executable",
+            "true",
+            "--pypi-executable",
+            "true",
+            "--deployment-app-script",
+            str(tmp_path / "no-such-app.py"),
+        ]
+    )
+
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    deployment_entries = [entry for entry in payload if entry["kind"] == "deployment"]
+    assert any(entry["availability"] == "misconfigured" for entry in deployment_entries)
+    misconfigured = next(
+        entry for entry in deployment_entries if entry["availability"] == "misconfigured"
+    )
+    assert "app_script" in misconfigured["detail"]
 
 
 def test_check_python_version_flags_unsupported_version() -> None:

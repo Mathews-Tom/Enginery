@@ -23,6 +23,7 @@ from enginery.adapters.local_service import (
     LocalServiceDeploymentAdapter,
     build_local_service_artifact,
 )
+from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.delivery_ports import (
     DeploymentReceipt,
     DeploymentRequest,
@@ -333,3 +334,74 @@ class TestReconcile:
             adapter.reconcile(operation_id=_operation_id("never-happened"))
             is ReconciliationResult.NOT_FOUND
         )
+
+
+class TestProbe:
+    def test_reports_available_for_a_valid_configuration(
+        self, adapter: LocalServiceDeploymentAdapter
+    ) -> None:
+        status = adapter.probe()
+
+        assert status.availability is AdapterAvailability.AVAILABLE
+        assert status.fingerprint is not None
+        assert status.fingerprint.provider_id == "local-service-deployment"
+
+    def test_reports_misconfigured_when_app_script_is_missing(self, tmp_path: Path) -> None:
+        adapter = LocalServiceDeploymentAdapter(
+            artifacts_root=tmp_path / "artifacts",
+            state_root=tmp_path / "state",
+            app_script=tmp_path / "no-such-app.py",
+        )
+
+        status = adapter.probe()
+
+        assert status.availability is AdapterAvailability.MISCONFIGURED
+        assert status.fingerprint is None
+        assert "app_script" in status.detail
+
+    def test_reports_misconfigured_when_python_executable_does_not_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        adapter = LocalServiceDeploymentAdapter(
+            artifacts_root=tmp_path / "artifacts",
+            state_root=tmp_path / "state",
+            app_script=_APP_SCRIPT,
+            python_executable="no-such-enginery-fixture-python-xyz",
+        )
+
+        status = adapter.probe()
+
+        assert status.availability is AdapterAvailability.MISCONFIGURED
+        assert status.fingerprint is None
+        assert "python_executable" in status.detail
+
+    def test_reports_misconfigured_when_artifacts_root_is_not_a_directory(
+        self, tmp_path: Path
+    ) -> None:
+        occupied = tmp_path / "artifacts"
+        occupied.write_text("not a directory", encoding="utf-8")
+        adapter = LocalServiceDeploymentAdapter(
+            artifacts_root=occupied,
+            state_root=tmp_path / "state",
+            app_script=_APP_SCRIPT,
+        )
+
+        status = adapter.probe()
+
+        assert status.availability is AdapterAvailability.MISCONFIGURED
+        assert status.fingerprint is None
+        assert "artifacts_root" in status.detail
+
+    def test_probe_performs_no_deployment_side_effect(self, tmp_path: Path) -> None:
+        """probe() must never start a process or write state -- purely local
+        file/executable checks, per the ADAPTER doctor contract."""
+        adapter = LocalServiceDeploymentAdapter(
+            artifacts_root=tmp_path / "artifacts",
+            state_root=tmp_path / "state",
+            app_script=_APP_SCRIPT,
+        )
+
+        adapter.probe()
+
+        assert not adapter.artifacts_root.exists()
+        assert not adapter.state_root.exists()

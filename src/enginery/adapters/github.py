@@ -602,7 +602,15 @@ class GitHubReleaseAdapter:
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
 
     def probe(self) -> AdapterStatus:
-        result = _run(self.command_runner, (self.config.executable, "--version"))
+        try:
+            result = _run(self.command_runner, (self.config.executable, "--version"))
+        except OSError:
+            return AdapterStatus(
+                kind=ProviderKind.RELEASE,
+                availability=AdapterAvailability.UNAVAILABLE,
+                fingerprint=None,
+                detail="GitHub CLI is not available",
+            )
         if result.returncode != 0:
             return AdapterStatus(
                 kind=ProviderKind.RELEASE,
