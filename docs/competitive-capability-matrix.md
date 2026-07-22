@@ -1,0 +1,75 @@
+# Competitive capability matrix — control-plane mechanisms
+
+**Status:** Research document, dated observation. Not a package release; not marketing copy.
+**Date:** 2026-07-22 (all entrant states, versions, and citations below are as observed on this date; re-verify before reuse)
+**Author's note on scope:** This document exists so that any future comparative or uniqueness claim about Enginery has hands-on evidence behind it, per `docs/overview.md` §7 ("Differentiation evidence required"). It records what was actually observed, not what marketing copy claims. It makes no product-code change and is not itself a marketing claim.
+
+## Why this document exists
+
+`docs/overview.md` §7 states the rule this document exists to satisfy: *"Any public claim that a specific mechanism is unique to Enginery additionally requires hands-on verification of the closest control-plane entrants; secondary-source absence is not evidence of absence."* It further requires testing the closest entrants against the same scenarios Enginery's own adversarial gates already define: ambiguous side effects, exact-head CI and evidence binding, and approval supersession after input changes.
+
+This document tests three named entrants against three of those scenarios, drawn directly from already-implemented Enginery hard rules and adversarial-gate fixtures (`docs/design.md` §§3, 7–9, 14; `scripts/adversarial_merge_ready_gate.py`; `scripts/adversarial_policy_gate.py`):
+
+1. **Ambiguous side effect.** An external mutating operation (creating a pull request, publishing a release) whose completion status is uncertain after an interruption or timeout must be reconciled — via a stable operation identity and a deterministic query — to one of four outcomes before any retry: `not_found` (a fresh attempt is permitted), `found_matching` (the existing result is adopted), or `found_conflicting` / `indeterminate` (blocked for human reconciliation). Blind retry is prohibited.
+2. **Stale evidence.** A terminal success claim requires evidence bound to the exact current subject revision. A CI result computed against a prior commit, or evidence produced against since-changed acceptance criteria, cannot satisfy the terminal contract; hard-required evidence cannot be waived by the run that produced it.
+3. **Approval supersession.** A human approval binds a digest of its inputs (diff, base revision, configuration, workflow/policy version, acceptance criteria, evidence bundle). Any change to a bound input after the approval was granted supersedes that approval; work cannot proceed on the superseded decision.
+
+## Method and evidence classes
+
+Every row below is tagged with exactly one evidence class:
+
+| Tag | Meaning |
+|---|---|
+| **Code-inspected** | The entrant is open source and self-hostable with no account gate. The claim is grounded in direct installation and reading of the entrant's real, currently-shipping implementation (not a summary, not marketing copy). |
+| **Docs-verified** | The entrant's live product requires creating an account bound to a real human identity before any session can run (no anonymous or credential-less path exists). Creating such an account without the account holder's explicit authorization was out of scope for this pass. The claim is grounded in the entrant's own current, dated technical documentation — a primary source describing the shipping product, not a marketing page — but no live session was run. This is a weaker evidence class than code-inspected and is disclosed as such on every row that uses it. |
+| **Not independently verified** | Neither of the above was possible; the row cites its secondary source explicitly. |
+
+No row in this document is graded from an entrant's own marketing copy alone.
+
+## Re-verification of active entrants (required before this pass began)
+
+Three entrants were named as candidates in a prior planning pass: OpenHands' Agent Control Plane, Databricks' Omnigent, and Guild.ai. Live research on 2026-07-22 reconfirmed all three are active and remain the correct comparison set — none has been discontinued, and no closer entrant was found:
+
+- **OpenHands.** The project restructured since it was first named: the top-level `OpenHands/OpenHands` repository now hosts "Agent Canvas" (a self-hosted developer control center for coding agents), and the underlying agent runtime and SDK live in the separate `OpenHands/software-agent-sdk` repository (MIT license). Both are real, actively maintained, public repositories, confirmed by direct fetch.
+- **Omnigent.** Still active, and more directly reproducible than its original framing suggested: it is a real, self-hostable, one-command-install open-source project (`github.com/omnigent-ai/omnigent`, Apache-2.0, alpha status), footer-credited to "the Databricks AI team and Neon." The product is branded and hosted independently of `databricks.com` — a Databricks-workspace-gated "preview" surface exists separately from the open-source project used for this document's evidence.
+- **Guild.ai.** Still active. Guild raised a combined seed and Series A round ($44M, led by GV) in March 2026. Its own documentation (`docs.guild.ai`) describes a real, currently-shipping product with self-serve sign-in at `app.guild.ai`.
+
+No fourth entrant qualifies as a "closest control-plane entrant" under `docs/overview.md` §6's own landscape distinction: a dedicated control plane governing coding/engineering agents in production, not a general agent-orchestration *framework* (which builds agents but does not govern an already-built fleet) and not a generic low/no-code automation platform (which orchestrates workflows without coding-agent-specific governance). General frameworks (e.g. LangGraph, CrewAI, AutoGen) and generic automation platforms (e.g. n8n, Vertex AI Agent Builder, AWS Bedrock AgentCore) were considered and excluded on that basis, not omitted by oversight.
+
+## Capability matrix
+
+### Scenario 1 — Ambiguous side effect (reconcile before retry)
+
+| Entrant | Observation | Evidence class | Citation |
+|---|---|---|---|
+| OpenHands (Agent Canvas / software-agent-sdk) | No mechanism found. The SDK's confirmation gate (`openhands-sdk/openhands/sdk/security/confirmation_policy.py`, `risk.py`) evaluates a single tool call against a `SecurityRisk` threshold (`LOW`/`MEDIUM`/`HIGH`/`UNKNOWN`) *before* it runs; it has no notion of a stable operation identity, a post-hoc reconciliation query, or a `not_found`/`found_matching`/`found_conflicting`/`indeterminate` outcome model. GitHub pull-request creation is not a dedicated typed adapter — it happens through the general terminal tool shelling out to `git`/`gh` — so avoiding a duplicate PR after an interrupted retry is left to the agent's own judgment and `gh`'s native behavior, not a platform guarantee. A repository-wide search for `idempot`, `operation_id`, `duplicate` + pull/release, and `supersed` across `openhands-sdk`, `openhands-tools`, and `openhands-agent-server` returned no relevant hits beyond MCP tool-protocol `idempotentHint` metadata fields (an author-set hint, not a runtime reconciliation protocol) and unrelated in-flight-prompt supersession. | Code-inspected | `github.com/OpenHands/software-agent-sdk`, commit fetched 2026-07-22 (`openhands-sdk/openhands/sdk/security/risk.py`, `confirmation_policy.py`; `examples/03_github_workflows/`) |
+| Omnigent | No mechanism found. `omnigent/policies/builtins/github.py` is a real-time ALLOW/ASK/DENY authorization gate over GitHub MCP-tool and `git`/`gh` shell-command calls, scoped by repository and branch allowlists (e.g. blocking a write to an unlisted repo or branch). It classifies each call as read or write and returns a policy verdict per call; it contains no operation identity, no reconciliation query, and no four-outcome model. A repository-wide search for the same terms returned only unrelated hits (session-state idempotent writes, terminal-close operations, CLI config re-adds). | Code-inspected | `github.com/omnigent-ai/omnigent`, installed and inspected 2026-07-22 (`omnigent/policies/builtins/github.py`) |
+| Guild.ai | Documented as a direct, operation-by-operation pass-through of the GitHub REST API: Guild's tool names are generated from GitHub's own OpenAPI spec and match GitHub's REST operation IDs one-to-one (e.g. `github_pulls_create` maps directly to `POST /repos/{owner}/{repo}/pulls`). The documentation describes no idempotency key, retry-reconciliation step, or duplicate-PR-adoption behavior layered on top of the raw call; per the documented behavior, retrying `pulls_create` after an ambiguous failure issues the same GitHub API call again. | Docs-verified | `docs.guild.ai/integrations/github.md`, fetched 2026-07-22 |
+
+### Scenario 2 — Stale evidence (evidence bound to the exact current subject revision)
+
+| Entrant | Observation | Evidence class | Citation |
+|---|---|---|---|
+| OpenHands (Agent Canvas / software-agent-sdk) | No platform-enforced terminal contract found. Commit-SHA-aware code exists (`workspace/repo.py`'s `_is_commit_sha`, `git/utils.py`'s `head_sha` resolution) but is used to resolve refs and detect whether a local workspace is behind its upstream — not to gate a terminal "this PR is ready" claim on CI freshness against the exact current head. The documented PR-review workflow (`examples/03_github_workflows/02_pr_review`) reacts to PR events but does not itself verify or reject stale CI evidence before producing its review. | Code-inspected | Same repository and commit as above (`openhands-sdk/openhands/sdk/workspace/repo.py`, `openhands-sdk/openhands/sdk/git/utils.py`) |
+| Omnigent | No mechanism found. The only `head_sha`/`commit_sha` tracking in the codebase (`omnigent/update_check.py`) is Omnigent's own self-update checker comparing its *own* installed build against its upstream repository — unrelated to verifying a user's coding-agent output against a target repository's current head. No merge-ready or terminal-evidence verifier exists in the policy or tool layer. | Code-inspected | `github.com/omnigent-ai/omnigent`, installed and inspected 2026-07-22 (`omnigent/update_check.py`) |
+| Guild.ai | Read-only check-run and commit-status endpoints are exposed as raw tool calls an agent author can wire up (`github_checks_list_for_ref`, `github_repos_get_combined_status_for_ref`), but the documentation describes no platform-level verifier that itself rejects evidence bound to a stale commit before a terminal claim. Any such binding would need to be built into the agent author's own code; it is not a platform-provided guarantee. | Docs-verified | `docs.guild.ai/integrations/github.md`, fetched 2026-07-22 |
+
+### Scenario 3 — Approval supersession (a changed bound input invalidates a prior approval)
+
+| Entrant | Observation | Evidence class | Citation |
+|---|---|---|---|
+| OpenHands (Agent Canvas / software-agent-sdk) | No mechanism found. A repository-wide search for "approval" combined with invalidation/supersession/staleness terms returned no hits describing a digest binding an approval to a diff, base revision, or acceptance-criteria snapshot. The only "supersede" usage found in the security- or approval-adjacent code paths refers to a newer chat message superseding an *in-flight prompt*, not a granted tool-execution approval being invalidated because the diff it approved subsequently changed. | Code-inspected | Same repository and commit as above (repository-wide search, 2026-07-22) |
+| Omnigent | No mechanism found. Contextual Policies (spend caps, model routing, risk-based escalation) are stateful over a session, but no policy schema binds an approval to a diff/base/acceptance-criteria digest, and no code path invalidates a previously granted "ASK" approval when the underlying diff changes after the approval was given. | Code-inspected | `github.com/omnigent-ai/omnigent`, installed and inspected 2026-07-22 (`omnigent/policies/`) |
+| Guild.ai | "Credential policies" are documented as static, per-operation-name ALLOW/DENY rule lists (with glob-style wildcards), evaluated per request; they do not bind to a diff, base revision, or acceptance-criteria snapshot, and the documented policy model does not invalidate a previously granted decision when a target PR's diff changes. Guild's separate "Versions" mechanism ("ship a version, roll it back in 30s") governs rollback of the *agent's own code version* — a different object than a workflow-run approval bound to a specific target-repository diff. | Docs-verified | `docs.guild.ai/platform/credential-policies.md` and `docs.guild.ai/guide/versions.md`, fetched 2026-07-22 |
+
+## Reading this matrix honestly
+
+Every row above found the tested mechanism absent, not weaker. That is a real, evidence-backed finding, not an inferred gap: for the two open-source entrants, the absence was confirmed by reading the actual shipping implementation; for Guild.ai, by reading its own current technical documentation. None of the nine rows relies on the absence of a marketing claim as evidence of absence, per `docs/overview.md` §7's own rule.
+
+The honest boundary this matrix supports is narrower than "Enginery is uniquely capable": all three entrants are governance layers over coding-agent *execution, sessions, cost, and access* — a different layer than Enginery's software-configuration-management-workflow terminal-evidence contracts (merge-readiness, release verification, incident rollback). None of them ships a GitHub-issue-to-merge-ready-PR workflow engine with a durable ledger, so testing them against SCM-workflow-specific scenarios (exact-head CI binding, diff-bound approval digests, four-outcome side-effect reconciliation) finds those scenarios largely out of scope for what these products are, not a defect in what they do offer (session governance, cost budgeting, credential scoping, audit trails — each documented and, where inspectable, real). A claim built on this matrix should say exactly that: these entrants do not implement the specific mechanisms tested, at the product surface observed on 2026-07-22 — not that they are inferior control planes in general, and not that no future version of any of them will add these mechanisms.
+
+The Guild.ai rows are weaker evidence than the OpenHands and Omnigent rows: they reflect the vendor's own documentation of a live product, not direct interaction with a running instance. A future revision of this matrix with an authorized Guild.ai account could strengthen those three rows to code-inspected-equivalent evidence (direct session observation) without changing this document's current conclusions, which are already conservative given that constraint.
+
+## Human review gate
+
+Per `DEVELOPMENT_PLAN.md`'s M23 milestone, no public-facing copy may cite this matrix, and no version of it that overstates a competitor gap may be treated as final, until a human has reviewed every row above for citation quality and confirmed that each "docs-verified" or "not independently verified" mark was an honest fallback rather than a shortcut around a claim that should have been reproduced directly against a live instance.
