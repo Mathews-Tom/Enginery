@@ -300,6 +300,28 @@ worktree. Always run `--dry-run` first and review its output before
 running the real release, especially in an unattended or scripted
 context.
 
+### A queued node not selected on its registering tick
+
+`stage1`'s scheduler enforces one global concurrency slot and one
+per-repository slot by default (matching every documented `stage1`
+invocation above). If the `implement` node's registering
+`dispatch_implementation` tick finds no free slot -- another run
+already occupies the sole global slot -- the node is still durably
+registered as `queued`, but `dispatch_implementation` raises rather
+than silently leaving the run to retry later. Confirmed by fault
+injection (`tests/engine/test_queued_node_fault.py`): once this
+happens, `stage1 watch --advance`'s `next_action` reports `wait`
+forever and never re-attempts scheduling, even after the slot that
+blocked it genuinely frees up. This is the accepted, precisely
+documented limit `docs/pitch.md`'s pilot named -- not a bug this
+release fixes with a dedicated retry mechanism, because none is
+needed beyond the path already documented above:
+`stage1 cancel --node-id implement` cancels the stuck queued node
+(no active lease is required to cancel a `queued` node), after which
+`next_action` routes to `await_human_review` -- the same repair path
+an actionable review finding already takes, letting `stage1 review`
+start a fresh implementation attempt within the run's `repair_limit`.
+
 ### Cumulative restart/replay evidence
 
 `scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages`
