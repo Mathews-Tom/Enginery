@@ -61,7 +61,7 @@ def test_real_docs_bumped_version_detects_readme_self_declaration() -> None:
     )
 
     assert any(
-        failure.startswith("README.md:") and f"`v{canonical_version}`" in failure
+        failure.startswith("README.md:") and f"canonical version is `v{bumped_version}`" in failure
         for failure in failures
     )
 
