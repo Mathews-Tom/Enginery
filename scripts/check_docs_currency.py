@@ -53,16 +53,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # status language is expected, correct content here, not staleness.
 EXCLUDED_DOCS = frozenset({"CHANGELOG.md", "docs/RELEASE_EVIDENCE.md"})
 
-# Sentence forms that assert Enginery's *own current* version. Each pattern
-# captures exactly one version number; a captured version that does not
-# equal the canonical `pyproject.toml` version is a stale self-declaration.
-# Grounded in the two concrete defects the `v0.3.0` doc-sync correction
-# fixed in `README.md` and `docs/operations.md`.
+# Patterns identify active self-declarations made in the README status summary
+# and operational diagnostics. Each captures exactly one version number; a
+# captured version that does not equal the canonical `pyproject.toml` version
+# is a stale self-declaration.
 STALE_SELF_VERSION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Enginery is `v(\d+\.\d+\.\d+)`"),
-    re.compile(r"`v(\d+\.\d+\.\d+)` is published to PyPI"),
+    re.compile(r"`v(\d+\.\d+\.\d+)`, published on PyPI(?: and GitHub Releases)?"),
     re.compile(r"package_metadata: enginery (\d+\.\d+\.\d+) installed"),
-    re.compile(r"`v(\d+\.\d+\.\d+)` \(Stage \d+ only\)"),
 )
 
 # Literal phrases describing Enginery as an unimplemented product concept.

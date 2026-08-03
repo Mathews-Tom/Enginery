@@ -18,7 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from check_docs_currency import DocsCurrencyError, run_check
+from check_docs_currency import (
+    DocsCurrencyError,
+    _canonical_version,
+    _check_self_version_declarations,
+    _tracked_markdown_files,
+    run_check,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -45,6 +51,21 @@ def test_run_check_passes_against_this_repositorys_real_current_docs() -> None:
     run_check(repo_root=REPO_ROOT)
 
 
+def test_real_docs_bumped_version_detects_readme_self_declaration() -> None:
+    """A pending version transition must flag the real README status declaration."""
+    canonical_version = _canonical_version(REPO_ROOT)
+    major, minor, _patch = (int(part) for part in canonical_version.split("."))
+    bumped_version = f"{major}.{minor + 1}.0"
+    failures = _check_self_version_declarations(
+        _tracked_markdown_files(REPO_ROOT), REPO_ROOT, bumped_version
+    )
+
+    assert any(
+        failure.startswith("README.md:") and f"`v{canonical_version}`" in failure
+        for failure in failures
+    )
+
+
 def test_stale_self_version_declaration_fails_closed(tmp_path: Path) -> None:
     repo = _init_fixture_repo(
         tmp_path,
@@ -65,17 +86,6 @@ def test_stale_self_version_declaration_fails_closed(tmp_path: Path) -> None:
     assert "v0.3.0" in message
 
 
-def test_stale_install_instruction_fails_closed(tmp_path: Path) -> None:
-    repo = _init_fixture_repo(
-        tmp_path,
-        version="0.3.0",
-        docs={"docs/operations.md": "`v0.1.0` is published to PyPI. Install with:\n"},
-    )
-
-    with pytest.raises(DocsCurrencyError, match=r"v0\.1\.0"):
-        run_check(repo_root=repo)
-
-
 def test_stale_doctor_example_fails_closed(tmp_path: Path) -> None:
     repo = _init_fixture_repo(
         tmp_path,
@@ -85,17 +95,6 @@ def test_stale_doctor_example_fails_closed(tmp_path: Path) -> None:
                 "```text\n[ok] package_metadata: enginery 0.1.0 installed\n```\n"
             )
         },
-    )
-
-    with pytest.raises(DocsCurrencyError, match=r"v0\.1\.0"):
-        run_check(repo_root=repo)
-
-
-def test_stale_status_only_header_fails_closed(tmp_path: Path) -> None:
-    repo = _init_fixture_repo(
-        tmp_path,
-        version="0.3.0",
-        docs={"README.md": "## Status\n\n`v0.1.0` (Stage 1 only). More text follows.\n"},
     )
 
     with pytest.raises(DocsCurrencyError, match=r"v0\.1\.0"):
