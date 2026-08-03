@@ -8,6 +8,52 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.4.0`
+
+Post-publication evidence for the 2026-08-03 release-preparation pass.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#151](https://github.com/Mathews-Tom/Enginery/pull/151) | `fix(release): catch README version transitions` | `2ae0fd9b731a3a42ec3e80586db0b7ee7b2a6af3` |
+| [#152](https://github.com/Mathews-Tom/Enginery/pull/152) | `build(release): prepare v0.4.0 metadata` | `2d529f75dd10ff9313be8c4e4692b5417db94982` |
+| [#153](https://github.com/Mathews-Tom/Enginery/pull/153) | `docs: sync v0.4.0 operator documentation` | `5de64aa943bf070c8284938c801330f44ec81023` |
+| [#154](https://github.com/Mathews-Tom/Enginery/pull/154) | `docs(release): finalize v0.4.0 notes` | `adbd47300ac38298a291386653a43bf85dea34bd` |
+
+The corrective PR proved the documentation-currency guard against the tracked corpus: with canonical version `0.4.0`, it reported `README.md:13`, `docs/operations.md:10`, and `docs/operations.md:57` as stale `v0.3.0` self-declarations. After the documentation synchronization, `uv run python scripts/check_docs_currency.py` reported `PASS docs-currency`.
+
+The final release commit `adbd47300ac38298a291386653a43bf85dea34bd` passed the full local release gate: 1,450 tests passed and one live-provider test was skipped because it requires explicit authorization; lint, formatting, strict typing, project-identity, fault-injection, and all import-boundary checks passed. `scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` passed with `stage1_runs=2`, Stage 2/3 evidence, and digest `sha256:83800a6a4bd3d743e8e585d45e47c237fa908759e234a7238264511215aace36`. The final documentation and release-notes PRs each passed their macOS and Ubuntu CI gates.
+
+### Tag and artifacts
+
+Annotated tag `v0.4.0` (object `23984f52ce66d76221bbe89b2c371c6d5e8f5390`) targets `adbd47300ac38298a291386653a43bf85dea34bd`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.4.0-py3-none-any.whl` | `b29463f4d510b94329e95ce73f9f976b7b5fe5041f48a756230872e4df063390` |
+| `enginery-0.4.0.tar.gz` | `37d97f4beeefc44a9888f6365581712949955d7279de346010375b4d072e3ce9` |
+
+`uv build` ran once from the exact tagged commit. `uvx twine check dist/*` passed for both artifacts.
+
+### Clean-install and published-package verification
+
+Wheel and sdist clean installs each passed `enginery --version`, `enginery doctor`, and `scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` on macOS (Apple M1 Pro, Python 3.12.8) and real Ubuntu 24.04 containers (arm64, Python 3.12.13). Every environment was a fresh virtual environment; the Ubuntu checks used the published local release artifacts only, never an editable install.
+
+From an empty scratch directory, `uv --no-cache run --isolated --no-project --with enginery==0.4.0` resolved the public PyPI package and ran `enginery --version`, `doctor`, `gate status --gate G4`, `stage1 build-request --help`, `workspace inspect --help`, `workspace release --help`, and `adapter doctor --json`. Gate G4 correctly returned exit code `3` with `overall: fail` for its unmeasured and unmet prerequisites. The adapter report included the `github-release` and `pypi` Stage 2 brokers and the `local-deployment-fixture` Stage 3 broker; the fixture was `misconfigured` in the empty scratch directory because its local application script was intentionally absent.
+
+### Publication and approval
+
+- **PyPI:** <https://pypi.org/project/enginery/0.4.0/>. `uv publish` uploaded the two explicitly named artifacts; the public version JSON reports both hashes above.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.4.0>. It is neither draft nor prerelease and attaches the same two digest-matching artifacts.
+- **Human approval:** the `ask` tool recorded “Approve publication” before the annotated tag, PyPI upload, and GitHub Release were created.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` passed, independently confirming the tag target, non-draft GitHub Release, both GitHub asset digests, and both PyPI artifact digests.
+
+### Final verdict
+
+**GO.** `v0.4.0` is tagged from the verified release commit and is published on PyPI and GitHub Releases with matching wheel and sdist hashes. Clean local artifacts and the public PyPI package exercise the released CLI surface. The release adds no workflow stage; Stage 4 self-improvement remains unimplemented and gate-deferred behind G4 with no committed date.
+
 ## `v0.3.0`
 
 Post-publication evidence for the M13b release-preparation pass.
