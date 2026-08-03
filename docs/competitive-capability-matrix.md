@@ -72,4 +72,4 @@ The Guild.ai rows are weaker evidence than the OpenHands and Omnigent rows: they
 
 ## Human review gate
 
-Per `DEVELOPMENT_PLAN.md`'s M23 milestone, no public-facing copy may cite this matrix, and no version of it that overstates a competitor gap may be treated as final, until a human has reviewed every row above for citation quality and confirmed that each "docs-verified" or "not independently verified" mark was an honest fallback rather than a shortcut around a claim that should have been reproduced directly against a live instance.
+No public-facing copy may cite this matrix, and no version of it that overstates a competitor gap may be treated as final, until a human has reviewed every row above for citation quality and confirmed that each "docs-verified" or "not independently verified" mark was an honest fallback rather than a shortcut around a claim that should have been reproduced directly against a live instance.

@@ -2,7 +2,7 @@
 
 - **Conversation memo**
 - **Purpose:** Test whether this is a problem worth solving with engineers, potential collaborators, and engineering leaders.
-- **Status:** `v0.3.0` published (Stage 1, 2, and 3 shipped, each with real evidence — see [Pilot results](#pilot-results-2026-07-20) below and the `v0.2.0`/`v0.3.0` release trains that followed it); Stage 4 remains gate-deferred and unclaimed. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
+- **Status:** `v0.4.0` published (Stage 1, 2, and 3 shipped; `v0.4.0` adds operator commands, not a workflow stage); Stage 4 remains gate-deferred and unclaimed. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
 
 ## The short version
 

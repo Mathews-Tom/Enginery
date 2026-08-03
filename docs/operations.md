@@ -7,7 +7,7 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.3.0`. The Stage 1
+[`README.md`](../README.md#status). Enginery is `v0.4.0`. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `stage2 status` remains the only Stage 2 CLI command (a
@@ -23,7 +23,7 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, and `v0.3.0` are all published to PyPI. Install the
+`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are all published to PyPI. Install
 latest with:
 
 ```bash
@@ -54,7 +54,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.3.0 installed
+[ok] package_metadata: enginery 0.4.0 installed
 ```
 
 `enginery doctor --json` emits the same report as a machine-readable
@@ -369,8 +369,8 @@ executors; those three nodes' own crash/fault-injection coverage
 already exists in the merged Stage 1 implementation stack. `--stages`
 accepts any combination of `1`, `2`, and `3`; Stage 4's cumulative gate
 belongs to its own gate-deferred, unversioned train once gate G4
-passes. See [`docs/RELEASE_EVIDENCE.md`](RELEASE_EVIDENCE.md) (`v0.3.0`
-first, `v0.2.0` and `v0.1.0` below it) for the exact evidence digests
+passes. See [`docs/RELEASE_EVIDENCE.md`](RELEASE_EVIDENCE.md) (newest release
+first) for the exact evidence digests
 each release's gate run produced, and
 [`docs/release-readiness-v0.1.0.md`](release-readiness-v0.1.0.md) for
 the measured local performance baseline from
@@ -463,14 +463,14 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-`v0.1.0`, `v0.2.0`, and `v0.3.0` are all published. Together they cover
-Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
+`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are all published. Together they
+cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
-(incident to hotfix and rollback), plus the raw outcome-observation
-schema and capture pipeline. Stage 4 (governed factory
-self-improvement) is the only remaining stage; it is a separate,
-unversioned, gate-deferred train with its own milestones, gate, and
-operator documentation once it starts. In particular:
+(incident to hotfix and rollback), plus the raw outcome-observation schema and
+capture pipeline. `v0.4.0` adds gate, request-builder, workspace, and adapter
+diagnostic commands but no workflow stage. Stage 4 (governed factory self-improvement) is the only remaining stage;
+it is a separate, unversioned, gate-deferred train with its own milestones,
+gate, and operator documentation once it starts. In particular:
 
 - Stage 4's milestones (cohorts/replay/comparison and governed
   self-improvement) may not start — including design work beyond the raw
@@ -482,10 +482,9 @@ operator documentation once it starts. In particular:
   dual-human authority precondition described above. The gate is reviewed
   on a cadence, never assumed from elapsed time.
 - Do not run this release expecting a Stage 4 CLI surface, a hosted UI,
-  or additional harness/work-ledger providers beyond OMP, Claude Code,
-  and GitHub. None of those exist yet. `stage2 status` (read-only stack
-  inspection) remains the only Stage 2+ CLI surface; Stage 3 has no CLI
-  surface at all (library-level only, see above).
+or additional harness/work-ledger providers beyond OMP, Claude Code, and
+GitHub. None of those exist yet. `stage2 status` remains the only Stage 2 CLI
+surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ## See also
 

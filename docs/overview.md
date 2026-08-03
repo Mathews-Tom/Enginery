@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** `v0.3.0` published (Stage 1, 2, and 3 shipped); Stage 4 gate-deferred
+- **Status:** `v0.4.0` published (Stage 1, 2, and 3 shipped; no new stage); Stage 4 gate-deferred
 - **Date:** 2026-07-14
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 
@@ -105,7 +105,7 @@ and is additionally gate-deferred (see below).
 
 The product must not market itself as a complete self-improving software factory before the fourth target passes with evidence from the earlier three.
 
-Release packaging: the first workflow target plus the outcome-capture schema shipped as `v0.1.0`; the second shipped as `v0.2.0` (also carrying second-harness neutrality and capability provenance); the third shipped as `v0.3.0`; the fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations. That gate has not passed: the current corpus is single-repository, single-operator dogfooding, which the gate's own corpus-diversity condition explicitly disqualifies.
+Release packaging: the first workflow target plus the outcome-capture schema shipped as `v0.1.0`; the second shipped as `v0.2.0` (also carrying second-harness neutrality and capability provenance); the third shipped as `v0.3.0`; `v0.4.0` makes its operator surface available without adding a workflow stage. The fourth is retained as a design target but gate-deferred — its milestones may not start until a data-threshold entry gate passes, including corpus diversity beyond a single repository and a second registered human principal for its dual-human approval separations. That gate has not passed: the current corpus is single-repository, single-operator dogfooding, which the gate's own corpus-diversity condition explicitly disqualifies.
 
 ### Product-hypothesis decision rule
 

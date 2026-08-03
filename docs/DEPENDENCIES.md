@@ -42,8 +42,8 @@ base install has no YAML dependency.
 
 ## License summary
 
-Generated with `pip-licenses --format=markdown --with-urls` against a
-clean install (`uv pip install enginery-0.4.0-py3-none-any.whl[armory]`)
+The table summarizes licenses for the resolved runtime and optional-extra
+dependencies:
 
 | Name         | Version | License                    | URL                                                 |
 |--------------|---------|----------------------------|------------------------------------------------------|
@@ -74,4 +74,4 @@ dependency graph.
 | `v0.1.0` | Baseline: `cryptography`, optional `pyyaml` (via `armory` extra) | First published graph |
 | `v0.2.0` | None | Capability locking/provenance, the Claude Code adapter, plan ingestion, and Stage 2 publication all build on the existing `cryptography`/`pyyaml` footprint |
 | `v0.3.0` | None | Stage 3's incident, hotfix, and controlled-local-service deployment code is stdlib-only (`http.server`, `subprocess`, `socket`, `urllib.request`, `git` as an external binary) |
-| `v0.4.0` | None | The M18/M19 CLI surface adds no runtime dependency; M20–M23 repository tooling and evidence are not distribution contents |
+| `v0.4.0` | None | Gate, request-builder, workspace, and adapter-diagnostic CLI additions add no runtime dependency; repository tooling and evidence are not distribution contents |
