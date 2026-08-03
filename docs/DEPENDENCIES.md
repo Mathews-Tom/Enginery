@@ -4,10 +4,8 @@ Enginery's runtime dependency footprint is intentionally minimal. This
 is a plain-language manifest generated from the resolved `uv.lock`;
 full pinned versions and per-platform `sha256` wheel/sdist hashes are
 recorded in [`uv.lock`](../uv.lock), which `uv build`/`uv sync` verify
-on every install. This document is the human-readable summary required
-as release evidence for every version (`DEVELOPMENT_PLAN.md`'s
-"SBOM or dependency manifest" deliverable); it is not itself a build
-input.
+on every install. This document is the human-readable dependency and license
+summary required as release evidence; it is not itself a build input.
 
 Consolidated into one file, replacing the previous
 `dependencies-v0.1.0.md`/`dependencies-v0.2.0.md`/`dependencies-v0.3.0.md`
@@ -17,7 +15,7 @@ release to date, so per-version duplication added no information. The
 changed, or didn't, at each release; add a new row there the next time
 a release actually changes this graph.
 
-## Current dependency graph (`v0.3.0`)
+## Current dependency graph (`v0.4.0`)
 
 ### Base install (`pip install enginery`)
 
@@ -45,12 +43,11 @@ base install has no YAML dependency.
 ## License summary
 
 Generated with `pip-licenses --format=markdown --with-urls` against a
-clean install (`uv pip install enginery-0.3.0-py3-none-any.whl[armory]`)
-in an isolated virtual environment:
+clean install (`uv pip install enginery-0.4.0-py3-none-any.whl[armory]`)
 
 | Name         | Version | License                    | URL                                                 |
 |--------------|---------|----------------------------|------------------------------------------------------|
-| enginery     | 0.3.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
+| enginery     | 0.4.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
 | cryptography | 49.0.0  | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography                 |
 | cffi         | 2.1.0   | MIT-0                      | https://cffi.readthedocs.io/en/latest/whatsnew.html  |
 | pycparser    | 3.0     | BSD-3-Clause               | https://github.com/eliben/pycparser                  |
@@ -77,3 +74,4 @@ dependency graph.
 | `v0.1.0` | Baseline: `cryptography`, optional `pyyaml` (via `armory` extra) | First published graph |
 | `v0.2.0` | None | Capability locking/provenance, the Claude Code adapter, plan ingestion, and Stage 2 publication all build on the existing `cryptography`/`pyyaml` footprint |
 | `v0.3.0` | None | Stage 3's incident, hotfix, and controlled-local-service deployment code is stdlib-only (`http.server`, `subprocess`, `socket`, `urllib.request`, `git` as an external binary) |
+| `v0.4.0` | None | The M18/M19 CLI surface adds no runtime dependency; M20–M23 repository tooling and evidence are not distribution contents |

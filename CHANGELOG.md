@@ -4,6 +4,23 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.4.0] - 2026-08-04
+
+Fourth public release. `v0.4.0` makes the already-merged M18/M19 operator surface available to consumers. It adds no workflow stage.
+
+### Added
+
+- `enginery gate status --gate G4` reports the registered G4 entry conditions from durable ledger state and configured floors, including fail-closed `unmeasured` results where the evidence cannot support a pass.
+- `enginery stage1 build-request` writes a validated Stage 1 request document from explicit command-line inputs.
+- `enginery workspace inspect` reports durable workspace reservations, and `enginery workspace release` requires the existing fenced release proof before releasing a reservation.
+- `enginery adapter doctor --json` includes the Stage 2 GitHub Release and PyPI brokers plus the Stage 3 controlled-local-service deployment broker alongside the existing adapter probes.
+
+### Not part of this release
+
+- This release adds no workflow stage. Stage 1, Stage 2, and Stage 3 remain the shipped workflow surface.
+- Self-improvement is not implemented. Stage 4 (governed factory self-improvement) remains gate-deferred behind G4 with no committed date.
+- M20–M23's repository tooling and published evidence are intentionally not part of the distribution.
+
 ## [0.3.0] - 2026-07-22
 
 Third public release. Layered on `v0.1.0`'s Stage 1 and `v0.2.0`'s
