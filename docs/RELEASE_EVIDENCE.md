@@ -42,6 +42,8 @@ Wheel and sdist clean installs each passed `enginery --version`, `enginery docto
 
 From an empty scratch directory, `uv --no-cache run --isolated --no-project --with enginery==0.4.0` resolved the public PyPI package and ran `enginery --version`, `doctor`, `gate status --gate G4`, `stage1 build-request --help`, `workspace inspect --help`, `workspace release --help`, and `adapter doctor --json`. Gate G4 correctly returned exit code `3` with `overall: fail` for its unmeasured and unmet prerequisites. The adapter report included the `github-release` and `pypi` Stage 2 brokers and the `local-deployment-fixture` Stage 3 broker; the fixture was `misconfigured` in the empty scratch directory because its local application script was intentionally absent.
 
+A separate fresh PyPI consumer then passed `scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` through `uv --no-cache run --isolated --no-project --with enginery==0.4.0`; it reported `stage1_runs=2`, Stage 2/3 evidence, and digest `sha256:b7701c79f949d5ccc00376f17b846aeba20175213434dc00cfe1f92f940c1494`. The source-only gate driver was used from the repository because workflow-gate fixtures are not distribution contents; Python imported `enginery==0.4.0` from PyPI rather than the checkout.
+
 ### Publication and approval
 
 - **PyPI:** <https://pypi.org/project/enginery/0.4.0/>. `uv publish` uploaded the two explicitly named artifacts; the public version JSON reports both hashes above.
