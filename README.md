@@ -10,8 +10,8 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.3.0`, published on PyPI and GitHub Releases (`v0.1.0`, `v0.2.0`,
-and `v0.3.0` are all live). Enginery ships three of its four planned
+`v0.4.0`, published on PyPI and GitHub Releases (`v0.1.0`, `v0.2.0`,
+`v0.3.0`, and `v0.4.0` are all live). Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered
@@ -82,6 +82,8 @@ uv run enginery stage1 start --database ledger.db --owner operator --request req
 uv run enginery stage2 status --database ledger.db --owner operator --stack-id ID
 uv run enginery workspace inspect --database ledger.db --owner operator --json
 uv run enginery outcome completeness --database ledger.db
+uv run enginery workspace release --database ledger.db --owner operator \
+  --repository-id ID --run-id ID --dry-run
 uv run enginery gate status --gate G4 --database ledger.db --json
 uv run enginery capability lock --check
 ```

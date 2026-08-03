@@ -1,6 +1,6 @@
 # Enginery Workflow Examples: Using Existing Coding Agents and Models
 
-- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped, `v0.1.0`-`v0.3.0`; the concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior.
+- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped in `v0.1.0`–`v0.4.0`; `v0.4.0` adds operator commands, not a workflow stage. The concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior.
 - **Audience:** Engineers choosing how existing coding agents and models participate in an Enginery workflow.
 
 > **Core rule:** Users choose their preferred coding agents and models. Enginery coordinates the workflow around them; it does not replace their reasoning loop or silently select a different worker.

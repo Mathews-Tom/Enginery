@@ -6,7 +6,7 @@ for the current compatibility statement.
 
 ## [0.4.0] - 2026-08-04
 
-Fourth public release. `v0.4.0` makes the already-merged M18/M19 operator surface available to consumers. It adds no workflow stage.
+Fourth public release. `v0.4.0` makes the already-merged operator surface available to consumers. It adds no workflow stage.
 
 ### Added
 
