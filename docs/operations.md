@@ -129,10 +129,89 @@ script against a command that is not listed above.
 | `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus compose a `--request` document from flags (below). |
 | `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
-| `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report readiness against a registered decision gate. |
+| `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report fail-closed G4 readiness from classified completed runs and recorded authority evidence. |
+| `enginery gate record-g4-deficiency --database PATH --finding-id ID --deficiency TEXT --cited-run-id RUN_ID ... --evidence-pull-request-number N --evidence-document-digest ALGORITHM:HEX --producer-principal-id ID --evidence-pull-request-author-login LOGIN --correlation-id ID [--floor-config PATH] [--json]` | Record an immutable recurring-deficiency finding against a verified classified cohort. |
+| `enginery gate record-g4-deficiency-evidence --database PATH --finding-id ID --correlation-id ID --github-repository OWNER/REPO --github-credential-reference REF [--github-executable PATH] [--floor-config PATH] [--json]` | Verify one merged GitHub evidence PR and record its immutable two-human authority evidence. |
 | `enginery workspace inspect --database PATH --owner OWNER [--json]` | List every repository's current workspace reservation. |
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
 | `enginery capability lock [--check] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Inspect or verify a capability lock. |
+
+### Gate G4 operational evidence
+
+G4 is a measurement gate, not a self-improvement capability. A failing or unmeasured status blocks the later self-improvement work; it never creates a pass through a local flag, manually edited ledger row, or a command transcript.
+
+#### Classify a source work item
+
+For every GitHub source item intended for the classified cohort, apply exactly these two labels, with matching lowercase spelling:
+
+```text
+enginery/work-kind/issue | enginery/work-kind/plan
+enginery/risk/low | enginery/risk/medium
+```
+
+Enginery rejects an absent, unknown, conflicting, duplicate, or case-variant label. It never infers a kind or risk. The source adapter reads the issue and all label pages twice; a source or classification change during that read rejects the snapshot. The serialized request retains the canonical labels, source URL, source revision, and source-bound digest. Legacy or manually constructed requests without this provenance are excluded from classified G4 cohort counts.
+
+Only low-risk `issue` and `plan` work is eligible for direct Stage 1 implementation. Medium-risk classified work remains human-approval-gated. High risk and every other kind are rejected rather than rerouted.
+
+#### Register current authority principals
+
+Use the schema-2 `registered_principals.identities` list in the G4 floor configuration. Each row maps one stable principal ID to one GitHub login:
+
+```toml
+schema_version = 2
+
+[registered_principals]
+identities = [
+  { id = "operator-a", github_login = "operator-a-login" },
+  { id = "operator-b", github_login = "operator-b-login" },
+]
+```
+
+Principal IDs and GitHub logins must be unique; GitHub logins compare case-insensitively. Schema-1 `registered_principals.ids` configuration is deliberately unsupported. Migrate it by replacing each opaque ID with a verified GitHub identity. Do not change the roster to reinterpret a recorded authority decision.
+
+#### Record a recurring-deficiency evidence PR
+
+First record the recurring deficiency. The command rejects any cited run not in the current verified classified cohort:
+
+```bash
+uv run enginery gate record-g4-deficiency \
+  --database ledger.db \
+  --finding-id recurring-validation-failure \
+  --deficiency "Validation fails after generated dependency update" \
+  --cited-run-id run-001 \
+  --cited-run-id run-002 \
+  --evidence-pull-request-number 42 \
+  --evidence-document-digest sha256:EXACT_EVIDENCE_PR_BODY_HEX \
+  --producer-principal-id operator-a \
+  --evidence-pull-request-author-login evidence-author-login \
+  --correlation-id record-g4-finding-2026q3
+```
+
+The digest uses the exact UTF-8 evidence-PR body, not a filename or local draft.
+
+Open and merge an evidence PR whose body has exactly the recorded digest. Its author must not be the finding producer. Two distinct configured humans, neither the author nor producer, must have their current review state `APPROVED` on the exact merged PR head. Re-review after a push; a stale approval is not sufficient.
+
+Run the live verifier only after the PR is merged:
+
+```bash
+uv run enginery gate record-g4-deficiency-evidence \
+  --database ledger.db \
+  --finding-id recurring-validation-failure \
+  --correlation-id record-g4-authority-evidence-2026q3 \
+  --github-repository OWNER/REPO \
+  --github-credential-reference operator-gh-cli \
+  --json
+```
+
+The command reads the GitHub pull request and every review page. GitHub authentication, API, malformed-payload, unmerged-PR, document-digest, stale-head, author/producer, and approver failures stop the command without recording authority evidence. A successful record is immutable; use a new deficiency finding when any cited evidence changes.
+
+#### Inspect status
+
+```bash
+uv run enginery gate status --gate G4 --database ledger.db --json
+```
+
+The `recurring_evidence_backed_deficiency` condition remains `unmeasured` until a finding cites eligible classified completed runs and an immutable authority record matches its PR number and evidence digest with two principals still in the configured roster. Other G4 conditions remain independent. A passing single condition does not make G4 pass; every reported condition must pass.
 
 ### Local provider inventory and Stage 2/3 broker configuration
 
