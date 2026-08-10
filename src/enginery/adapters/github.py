@@ -152,11 +152,17 @@ class GitHubWorkLedger:
         payload = self._request_object("GET", endpoint)
         if "pull_request" in payload:
             raise InvalidInputError("GitHub pull requests cannot be ingested as issues")
-        labels = self._request_array("GET", f"{endpoint}/labels?per_page={_PAGE_SIZE}&page=1")
+        labels = self._labels(endpoint)
+        _declared_classification(labels, source_url=_required_string(payload, "url"))
         confirmed_payload = self._request_object("GET", endpoint)
         if payload != confirmed_payload:
             raise StaleEvidenceError(
                 "GitHub issue changed while declared classification was collected"
+            )
+        confirmed_labels = self._labels(endpoint)
+        if _label_names(labels) != _label_names(confirmed_labels):
+            raise StaleEvidenceError(
+                "GitHub declared classification changed while it was collected"
             )
         return self._snapshot(payload, labels, issue_number)
 
@@ -267,6 +273,18 @@ class GitHubWorkLedger:
         if not number.isdecimal() or int(number) < 1:
             raise InvalidInputError("GitHub issue reference must end with a positive issue number")
         return int(number)
+
+    def _labels(self, issue_endpoint: str) -> list[object]:
+        labels: list[object] = []
+        page = 1
+        while True:
+            records = self._request_array(
+                "GET", f"{issue_endpoint}/labels?per_page={_PAGE_SIZE}&page={page}"
+            )
+            labels.extend(records)
+            if len(records) < _PAGE_SIZE:
+                return labels
+            page += 1
 
     def _request_object(self, method: str, endpoint: str, *fields: str) -> Mapping[str, object]:
         payload = self._request(method, endpoint, *fields)
@@ -822,6 +840,15 @@ def _declared_classification(
             canonical_labels=(work_label, risk_label),
         ),
     )
+
+
+def _label_names(labels: Sequence[object]) -> tuple[str, ...]:
+    names: list[str] = []
+    for label in labels:
+        if not isinstance(label, Mapping):
+            raise TransientProviderFailureError("GitHub issue label record must be an object")
+        names.append(_required_string(label, "name"))
+    return tuple(sorted(names))
 
 
 def _request(

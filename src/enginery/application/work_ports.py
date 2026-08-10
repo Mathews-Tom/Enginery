@@ -57,11 +57,23 @@ class WorkLedgerSnapshot:
     def __post_init__(self) -> None:
         if not self.source_revision.strip():
             raise ValueError("work ledger source_revision must be non-blank")
-        if self.classification_provenance is not None and (
-            self.classification_provenance.source_provider != self.work_item.source_provider
-            or self.classification_provenance.source_url != self.work_item.source_snapshot_reference
+        provenance = self.classification_provenance
+        if provenance is None:
+            return
+        if (
+            provenance.source_provider != self.work_item.source_provider
+            or provenance.source_url != self.work_item.source_snapshot_reference
         ):
             raise ValueError("classification provenance must bind the work item's source")
+        if provenance.source_provider == "github-issues":
+            expected_labels = (
+                f"enginery/work-kind/{self.work_item.work_kind.value}",
+                f"enginery/risk/{self.work_item.risk_class.value}",
+            )
+            if provenance.canonical_labels != expected_labels:
+                raise ValueError(
+                    "GitHub classification provenance must exactly match the work item"
+                )
 
     @property
     def bound_digest(self) -> Digest:
