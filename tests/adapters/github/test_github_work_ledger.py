@@ -13,6 +13,7 @@ from enginery.domain.errors import (
     ExternalConflictError,
     InvalidInputError,
     RateLimitError,
+    StaleEvidenceError,
 )
 from enginery.domain.ids import OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -117,6 +118,42 @@ def test_fetch_rejects_pull_requests_from_issue_endpoint() -> None:
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 
     with pytest.raises(InvalidInputError, match="pull requests"):
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [],
+        _labels(work_kind="enginery/work-kind/incident"),
+        _labels(work_kind="Enginery/work-kind/issue"),
+        _labels(work_kind="enginery/work-kind/issue", risk="enginery/risk/high"),
+        [*_labels(), {"name": "enginery/work-kind/issue"}],
+        [*_labels(), {"name": "enginery/risk/low"}],
+    ],
+)
+def test_fetch_rejects_missing_ambiguous_or_noncanonical_classification(
+    labels: list[dict[str, str]],
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    ledger = GitHubWorkLedger(
+        _config(), command_runner=_runner(_fetch_responses(labels=labels), calls)
+    )
+
+    with pytest.raises(InvalidInputError):
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+
+def test_fetch_rejects_source_changed_during_classification_collection() -> None:
+    original = _issue()
+    changed = _issue()
+    changed["updated_at"] = "2026-07-19T09:01:00Z"
+    calls: list[tuple[str, ...]] = []
+    ledger = GitHubWorkLedger(
+        _config(), command_runner=_runner([original, _labels(), changed], calls)
+    )
+
+    with pytest.raises(StaleEvidenceError, match="changed"):
         ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
 
 
