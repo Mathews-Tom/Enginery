@@ -19,7 +19,7 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
@@ -314,7 +314,7 @@ def _dispatch(
 
 
 def _request(tmp_path: Path) -> Stage1RunRequest:
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     work_item = WorkItem(
         id=WorkItemId("work-1"),
         work_kind=WorkKind.ISSUE,

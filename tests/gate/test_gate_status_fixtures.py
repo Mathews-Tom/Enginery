@@ -24,7 +24,7 @@ from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
@@ -43,7 +43,7 @@ def _stage1_request(
     risk_class: RiskClass,
     tmp_path: Path,
 ) -> Stage1RunRequest:
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     work_item = WorkItem(
         id=WorkItemId(f"{run_id}-work-item"),
         work_kind=work_kind,
