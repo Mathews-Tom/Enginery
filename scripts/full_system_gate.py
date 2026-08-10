@@ -167,7 +167,7 @@ from enginery.ledger.service import LedgerService
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator, PolicyRule
 from enginery.policy.schemas import ApprovalSchema
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.merge_policy import MergePolicyService
 from enginery.workflows.plan_to_release import Stage2ReleaseWorkflow
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport, route_review
@@ -306,7 +306,7 @@ def _snapshot(run_index: int) -> WorkLedgerSnapshot:
 
 def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     run_id = f"run-gate-{run_index}"
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     manifest = replace(
         manifest,
         nodes={
