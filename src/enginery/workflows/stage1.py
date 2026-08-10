@@ -10,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from enginery.application.work_ports import (
+    DeclaredWorkClassification,
     HarnessResult,
     HarnessTask,
     PullRequestEvidence,
@@ -99,8 +100,8 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 run must bind its manifest digest")
         if self.run.work_item_id != self.work_snapshot.work_item.id:
             raise InvalidInputError("Stage 1 run must bind its work-item identity")
-        if self.run.work_item_snapshot_digest != self.work_snapshot.work_item.bound_field_digest:
-            raise InvalidInputError("Stage 1 run must bind its work-item digest")
+        if self.run.work_item_snapshot_digest != self.work_snapshot.bound_digest:
+            raise InvalidInputError("Stage 1 run must bind its source snapshot digest")
         if self.repository_id not in self.work_snapshot.work_item.repository_targets:
             raise InvalidInputError("Stage 1 run repository is not an approved work-item target")
         if not self.repository_path.is_absolute() or not self.workspace_path.is_absolute():
@@ -145,6 +146,11 @@ class Stage1RunRequest:
             "run": run_to_dict(self.run),
             "work_item": work_item_to_dict(self.work_snapshot.work_item),
             "source_revision": self.work_snapshot.source_revision,
+            "classification_provenance": (
+                None
+                if self.work_snapshot.classification_provenance is None
+                else self.work_snapshot.classification_provenance.to_state()
+            ),
             "manifest": workflow_manifest_to_dict(self.manifest),
             "repository_id": self.repository_id,
             "repository_path": str(self.repository_path),
@@ -883,7 +889,7 @@ class Stage1RunService:
             ),
             external_reference=request.work_snapshot.work_item.external_reference,
             issue_revision=request.work_snapshot.source_revision,
-            issue_digest=str(request.work_snapshot.work_item.bound_field_digest),
+            issue_digest=str(request.work_snapshot.bound_digest),
             base_revision=request.run.base_revision,
             pull_request_number=_integer(open_pr, "pull_request_number"),
             requirements=PullRequestRequirements(
@@ -1129,6 +1135,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     run = run_from_dict(_mapping(state, "run"))
     work_item = work_item_from_dict(_mapping(state, "work_item"))
     source_revision = _string(state, "source_revision")
+    classification_provenance = _classification_from_state(state)
     manifest = workflow_manifest_from_dict(_mapping(state, "manifest"))
     commands_value = state.get("validation_commands")
     if not isinstance(commands_value, list) or not all(
@@ -1152,7 +1159,11 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     status = RunState(_string(state, "status"))
     request = Stage1RunRequest(
         run=run,
-        work_snapshot=WorkLedgerSnapshot(work_item=work_item, source_revision=source_revision),
+        work_snapshot=WorkLedgerSnapshot(
+            work_item=work_item,
+            source_revision=source_revision,
+            classification_provenance=classification_provenance,
+        ),
         manifest=manifest,
         repository_id=_string(state, "repository_id"),
         repository_path=Path(_string(state, "repository_path")),
@@ -1176,6 +1187,28 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     if state.get("request_digest") != str(request.digest):
         raise InvalidInputError("Stage 1 run projection has a mismatched request digest")
     return Stage1Run(request=request, status=status, aggregate_version=aggregate_version)
+
+
+def _classification_from_state(
+    state: Mapping[str, object],
+) -> DeclaredWorkClassification | None:
+    raw = state.get("classification_provenance")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise InvalidInputError("Stage 1 classification_provenance must be a mapping or null")
+    source_provider = _string(raw, "source_provider")
+    source_url = _string(raw, "source_url")
+    labels = raw.get("canonical_labels")
+    if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+        raise InvalidInputError(
+            "Stage 1 classification_provenance canonical_labels must be a list of strings"
+        )
+    return DeclaredWorkClassification(
+        source_provider=source_provider,
+        source_url=source_url,
+        canonical_labels=tuple(labels),
+    )
 
 
 def _mapping(state: Mapping[str, object], field_name: str) -> dict[str, object]:

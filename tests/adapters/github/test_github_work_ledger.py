@@ -59,8 +59,25 @@ def _issue(*, body: str | None = "Add provider smoke coverage") -> dict[str, obj
     }
 
 
+def _labels(
+    work_kind: str = "enginery/work-kind/issue",
+    risk: str = "enginery/risk/low",
+) -> list[dict[str, str]]:
+    return [{"name": work_kind}, {"name": risk}]
+
+
+def _fetch_responses(
+    *,
+    issue: dict[str, object] | None = None,
+    labels: list[dict[str, str]] | None = None,
+) -> list[object]:
+    issue_payload = issue if issue is not None else _issue()
+    label_payload = labels if labels is not None else _labels()
+    return [issue_payload, label_payload, issue_payload]
+
+
 def test_fetch_normalizes_a_revisioned_github_issue() -> None:
-    responses: list[object] = [_issue()]
+    responses = _fetch_responses()
     calls: list[tuple[str, ...]] = []
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 
@@ -69,12 +86,21 @@ def test_fetch_normalizes_a_revisioned_github_issue() -> None:
     assert snapshot.work_item.external_reference == "Mathews-Tom/enginery-provider-smoke#7"
     assert snapshot.work_item.objective == "Add provider smoke coverage"
     assert snapshot.work_item.acceptance_criteria == ("Add provider smoke coverage",)
+    assert snapshot.work_item.work_kind.value == "issue"
+    assert snapshot.work_item.risk_class.value == "low"
+    assert snapshot.classification_provenance is not None
+    assert snapshot.classification_provenance.canonical_labels == (
+        "enginery/work-kind/issue",
+        "enginery/risk/low",
+    )
     assert snapshot.source_revision.startswith("2026-07-19T09:00:00Z:sha256:")
     assert calls[0][-1] == "repos/Mathews-Tom/enginery-provider-smoke/issues/7"
+    assert calls[1][-1].endswith("/issues/7/labels?per_page=100&page=1")
+    assert calls[2][-1] == calls[0][-1]
 
 
 def test_fetch_uses_title_when_an_issue_has_no_body() -> None:
-    responses: list[object] = [_issue(body=None)]
+    responses = _fetch_responses(issue=_issue(body=None))
     calls: list[tuple[str, ...]] = []
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 

@@ -19,6 +19,7 @@ from enginery.application.adapter_types import (
 )
 from enginery.application.delivery_ports import PublicationReceipt, PublicationRequest
 from enginery.application.work_ports import (
+    DeclaredWorkClassification,
     LifecycleProjection,
     PullRequestCheck,
     PullRequestEvidence,
@@ -47,6 +48,16 @@ _PAGE_SIZE = 100
 _LIFECYCLE_MARKER_PREFIX = "<!-- enginery:lifecycle:"
 _PULL_REQUEST_MARKER_PREFIX = "<!-- enginery:pull-request:"
 _MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
+
+_WORK_KIND_LABELS = {
+    "enginery/work-kind/issue": WorkKind.ISSUE,
+    "enginery/work-kind/plan": WorkKind.PLAN,
+}
+_RISK_LABELS = {
+    "enginery/risk/low": RiskClass.LOW,
+    "enginery/risk/medium": RiskClass.MEDIUM,
+}
+_CLASSIFICATION_PREFIXES = ("enginery/work-kind/", "enginery/risk/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,12 +148,17 @@ class GitHubWorkLedger:
 
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
         issue_number = self._issue_number(external_reference)
-        payload = self._request_object(
-            "GET", f"repos/{self.config.repository}/issues/{issue_number}"
-        )
+        endpoint = f"repos/{self.config.repository}/issues/{issue_number}"
+        payload = self._request_object("GET", endpoint)
         if "pull_request" in payload:
             raise InvalidInputError("GitHub pull requests cannot be ingested as issues")
-        return self._snapshot(payload, issue_number)
+        labels = self._request_array("GET", f"{endpoint}/labels?per_page={_PAGE_SIZE}&page=1")
+        confirmed_payload = self._request_object("GET", endpoint)
+        if payload != confirmed_payload:
+            raise StaleEvidenceError(
+                "GitHub issue changed while declared classification was collected"
+            )
+        return self._snapshot(payload, labels, issue_number)
 
     def publish_lifecycle(
         self, projection: LifecycleProjection, *, operation_id: OperationId
@@ -177,7 +193,9 @@ class GitHubWorkLedger:
             return discovered
         return self._outcomes.get(str(operation_id), ReconciliationResult.NOT_FOUND)
 
-    def _snapshot(self, payload: Mapping[str, object], issue_number: int) -> WorkLedgerSnapshot:
+    def _snapshot(
+        self, payload: Mapping[str, object], labels: Sequence[object], issue_number: int
+    ) -> WorkLedgerSnapshot:
         title = _required_string(payload, "title")
         updated_at = _required_string(payload, "updated_at")
         body_value = payload.get("body")
@@ -188,9 +206,12 @@ class GitHubWorkLedger:
         else:
             raise InvalidInputError("GitHub issue body must be a non-blank string or null")
         source_snapshot_reference = _required_string(payload, "url")
+        work_kind, risk_class, classification = _declared_classification(
+            labels, source_url=source_snapshot_reference
+        )
         work_item = WorkItem(
             id=WorkItemId(f"github:{self.config.repository}#{issue_number}"),
-            work_kind=WorkKind.ISSUE,
+            work_kind=work_kind,
             source_provider="github-issues",
             external_reference=f"{self.config.repository}#{issue_number}",
             source_snapshot_reference=source_snapshot_reference,
@@ -198,14 +219,21 @@ class GitHubWorkLedger:
             objective=body,
             acceptance_criteria=(body,),
             constraints=(),
-            risk_class=RiskClass.LOW,
+            risk_class=risk_class,
             repository_targets=(self.config.repository,),
             dependencies=(),
             state=WorkItemState.NEW,
         )
+        source_digest = Digest.of_json(
+            {
+                "work_item_digest": str(work_item.bound_field_digest),
+                "classification": classification.to_state(),
+            }
+        )
         return WorkLedgerSnapshot(
             work_item=work_item,
-            source_revision=f"{updated_at}:{work_item.bound_field_digest}",
+            source_revision=f"{updated_at}:{source_digest}",
+            classification_provenance=classification,
         )
 
     def _find_lifecycle_projection(self, operation_id: OperationId) -> ReconciliationResult:
@@ -759,6 +787,37 @@ class GitHubReleaseAdapter:
         if not isinstance(payload, Mapping):
             raise TransientProviderFailureError("GitHub API response must be a JSON object")
         return payload
+
+
+def _declared_classification(
+    labels: Sequence[object], *, source_url: str
+) -> tuple[WorkKind, RiskClass, DeclaredWorkClassification]:
+    names: list[str] = []
+    for label in labels:
+        if not isinstance(label, Mapping):
+            raise TransientProviderFailureError("GitHub issue label record must be an object")
+        names.append(_required_string(label, "name"))
+    work_labels = [name for name in names if name.casefold().startswith("enginery/work-kind/")]
+    risk_labels = [name for name in names if name.casefold().startswith("enginery/risk/")]
+    if any(name not in _WORK_KIND_LABELS for name in work_labels):
+        raise InvalidInputError("GitHub work-kind labels must use the exact declared vocabulary")
+    if any(name not in _RISK_LABELS for name in risk_labels):
+        raise InvalidInputError("GitHub risk labels must use the exact declared vocabulary")
+    if len(work_labels) != 1:
+        raise InvalidInputError("GitHub issue requires exactly one declared work-kind label")
+    if len(risk_labels) != 1:
+        raise InvalidInputError("GitHub issue requires exactly one declared risk label")
+    work_label = work_labels[0]
+    risk_label = risk_labels[0]
+    return (
+        _WORK_KIND_LABELS[work_label],
+        _RISK_LABELS[risk_label],
+        DeclaredWorkClassification(
+            source_provider="github-issues",
+            source_url=source_url,
+            canonical_labels=(work_label, risk_label),
+        ),
+    )
 
 
 def _request(
