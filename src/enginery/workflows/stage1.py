@@ -142,16 +142,11 @@ class Stage1RunRequest:
 
     def _state(self) -> dict[str, object]:
         execution = self.execution_configuration
-        return {
+        state: dict[str, object] = {
             "run_id": str(self.run.id),
             "run": run_to_dict(self.run),
             "work_item": work_item_to_dict(self.work_snapshot.work_item),
             "source_revision": self.work_snapshot.source_revision,
-            "classification_provenance": (
-                None
-                if self.work_snapshot.classification_provenance is None
-                else self.work_snapshot.classification_provenance.to_state()
-            ),
             "manifest": workflow_manifest_to_dict(self.manifest),
             "repository_id": self.repository_id,
             "repository_path": str(self.repository_path),
@@ -184,6 +179,11 @@ class Stage1RunRequest:
                 "artifact_root": str(execution.artifact_root),
             },
         }
+        if self.work_snapshot.classification_provenance is not None:
+            state["classification_provenance"] = (
+                self.work_snapshot.classification_provenance.to_state()
+            )
+        return state
 
 
 @dataclass(frozen=True, slots=True)

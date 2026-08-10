@@ -122,7 +122,7 @@ def _qualification(
 ) -> WorkQualification:
     return WorkQualification(
         source_revision=snapshot.source_revision,
-        source_digest=str(snapshot.work_item.bound_field_digest),
+        source_digest=str(snapshot.bound_digest),
         readiness=readiness,
         requires_human_review=readiness
         in {
