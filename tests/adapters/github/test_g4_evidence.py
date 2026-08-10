@@ -122,7 +122,6 @@ def test_verifier_rejects_duplicate_approvals_from_one_principal() -> None:
             verified_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
 
-
 def test_verifier_rejects_document_digest_mismatch() -> None:
     pull_request = _pull_request()
     pull_request["body"] = "different evidence"
