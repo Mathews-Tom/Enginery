@@ -20,16 +20,16 @@ def test_load_reports_every_floor_as_unset_when_config_omits_them(tmp_path: Path
     path = _write(
         tmp_path / "floor.toml",
         """
-        schema_version = 1
+        schema_version = 2
         [registered_principals]
-        ids = []
+        identities = []
         """,
     )
 
     config = load_gate_floor_config(path)
 
     assert config == GateFloorConfig(
-        schema_version=1,
+        schema_version=2,
         registered_principal_ids=(),
         completed_run_volume_floor=None,
         intervention_volume_floor=None,
@@ -41,9 +41,12 @@ def test_load_reads_a_fully_registered_config(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
         """
-        schema_version = 1
+        schema_version = 2
         [registered_principals]
-        ids = ["operator-a", "operator-b"]
+        identities = [
+          { id = "operator-a", github_login = "Operator-A" },
+          { id = "operator-b", github_login = "operator-b" },
+        ]
         [completed_runs]
         min_total = 40
         [interventions]
@@ -56,24 +59,30 @@ def test_load_reads_a_fully_registered_config(tmp_path: Path) -> None:
     config = load_gate_floor_config(path)
 
     assert config.registered_principal_ids == ("operator-a", "operator-b")
+    assert config.github_login_by_principal_id == (
+        ("operator-a", "operator-a"),
+        ("operator-b", "operator-b"),
+    )
     assert config.completed_run_volume_floor == 40
     assert config.intervention_volume_floor == 10
     assert config.outcome_completeness_floor == 0.8
 
 
-def test_load_deduplicates_registered_principal_ids(tmp_path: Path) -> None:
+def test_load_rejects_duplicate_registered_principal_identity(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
         """
-        schema_version = 1
+        schema_version = 2
         [registered_principals]
-        ids = ["operator-a", "operator-a"]
+        identities = [
+          { id = "operator-a", github_login = "operator-a" },
+          { id = "operator-a", github_login = "operator-b" },
+        ]
         """,
     )
 
-    config = load_gate_floor_config(path)
-
-    assert config.registered_principal_ids == ("operator-a",)
+    with pytest.raises(InvalidInputError, match="unique ids"):
+        load_gate_floor_config(path)
 
 
 def test_load_rejects_a_missing_file(tmp_path: Path) -> None:
@@ -89,14 +98,14 @@ def test_load_rejects_malformed_toml(tmp_path: Path) -> None:
 
 
 def test_load_rejects_an_unsupported_schema_version(tmp_path: Path) -> None:
-    path = _write(tmp_path / "floor.toml", "schema_version = 2\n")
+    path = _write(tmp_path / "floor.toml", "schema_version = 1\n")
 
     with pytest.raises(InvalidInputError, match="schema version"):
         load_gate_floor_config(path)
 
 
 def test_load_rejects_unknown_top_level_keys(tmp_path: Path) -> None:
-    path = _write(tmp_path / "floor.toml", "schema_version = 1\nunexpected = true\n")
+    path = _write(tmp_path / "floor.toml", "schema_version = 2\nunexpected = true\n")
 
     with pytest.raises(InvalidInputError, match="unrecognized"):
         load_gate_floor_config(path)
@@ -105,7 +114,7 @@ def test_load_rejects_unknown_top_level_keys(tmp_path: Path) -> None:
 def test_load_rejects_a_negative_volume_floor(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
-        "schema_version = 1\n[completed_runs]\nmin_total = -1\n",
+        "schema_version = 2\n[completed_runs]\nmin_total = -1\n",
     )
 
     with pytest.raises(InvalidInputError, match="non-negative"):
@@ -115,18 +124,18 @@ def test_load_rejects_a_negative_volume_floor(tmp_path: Path) -> None:
 def test_load_rejects_a_completeness_floor_outside_the_unit_interval(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
-        "schema_version = 1\n[outcome_completeness]\nfloor = 1.5\n",
+        "schema_version = 2\n[outcome_completeness]\nfloor = 1.5\n",
     )
 
     with pytest.raises(InvalidInputError, match="between 0 and 1"):
         load_gate_floor_config(path)
 
 
-def test_load_rejects_a_non_string_principal_id(tmp_path: Path) -> None:
+def test_load_rejects_legacy_principal_ids(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
-        "schema_version = 1\n[registered_principals]\nids = [1]\n",
+        'schema_version = 2\n[registered_principals]\nids = ["operator-a"]\n',
     )
 
-    with pytest.raises(InvalidInputError, match="non-blank strings"):
+    with pytest.raises(InvalidInputError, match="GitHub-mapped"):
         load_gate_floor_config(path)
