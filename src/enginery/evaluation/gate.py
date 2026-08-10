@@ -23,6 +23,7 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from enginery.domain.g4_deficiency import G4DeficiencyFinding
 from enginery.evaluation.gate_floor import GateFloorConfig
 from enginery.evaluation.outcomes import CompletenessReport
 
@@ -79,6 +80,8 @@ class G4Inputs:
     intervention_with_reason_count: int
     completeness: CompletenessReport
     repository_count: int
+    eligible_classified_completed_run_ids: tuple[str, ...] = ()
+    deficiency_findings: tuple[G4DeficiencyFinding, ...] = ()
 
 
 def evaluate_g4(*, floor: GateFloorConfig, inputs: G4Inputs) -> GateReport:
@@ -88,7 +91,7 @@ def evaluate_g4(*, floor: GateFloorConfig, inputs: G4Inputs) -> GateReport:
         _completed_run_diversity(floor, inputs),
         _human_intervention_volume(floor, inputs),
         _outcome_capture_completeness(floor, inputs),
-        _recurring_workflow_deficiency(),
+        _recurring_workflow_deficiency(inputs),
         _corpus_diversity(inputs),
         _registered_human_principals(floor),
     )
@@ -208,16 +211,37 @@ def _outcome_capture_completeness(floor: GateFloorConfig, inputs: G4Inputs) -> G
     )
 
 
-def _recurring_workflow_deficiency() -> GateCondition:
+def _recurring_workflow_deficiency(inputs: G4Inputs) -> GateCondition:
+    eligible_run_ids = set(inputs.eligible_classified_completed_run_ids)
+    eligible_findings = tuple(
+        finding
+        for finding in inputs.deficiency_findings
+        if set(finding.cited_run_ids) <= eligible_run_ids
+    )
+    if not eligible_findings:
+        return GateCondition(
+            id="recurring_evidence_backed_deficiency",
+            status=ConditionStatus.UNMEASURED,
+            detail=(
+                "no recurring deficiency finding cites two eligible classified completed "
+                "runs; local records cannot prove dual-authority GitHub evidence"
+            ),
+            metrics={
+                "eligible_classified_completed_run_count": len(eligible_run_ids),
+                "eligible_finding_count": 0,
+            },
+        )
     return GateCondition(
         id="recurring_evidence_backed_deficiency",
         status=ConditionStatus.UNMEASURED,
         detail=(
-            "this instrument has no mechanism to detect a recurring, evidence-backed "
-            "workflow deficiency from captured data; identifying one is a human judgment "
-            "call this command never reports pass or fail for"
+            f"{len(eligible_findings)} eligible recurring deficiency finding(s) await "
+            "GitHub evidence-PR authority verification"
         ),
-        metrics={},
+        metrics={
+            "eligible_classified_completed_run_count": len(eligible_run_ids),
+            "eligible_finding_count": len(eligible_findings),
+        },
     )
 
 

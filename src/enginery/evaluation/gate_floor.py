@@ -22,7 +22,7 @@ from pathlib import Path
 
 from enginery.domain.errors import InvalidInputError
 
-GATE_FLOOR_SCHEMA_VERSION = 1
+GATE_FLOOR_SCHEMA_VERSION = 2
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -44,6 +44,7 @@ class GateFloorConfig:
     completed_run_volume_floor: int | None
     intervention_volume_floor: int | None
     outcome_completeness_floor: float | None
+    github_login_by_principal_id: tuple[tuple[str, str], ...] = ()
 
 
 def load_gate_floor_config(path: Path) -> GateFloorConfig:
@@ -82,12 +83,14 @@ def load_gate_floor_config(path: Path) -> GateFloorConfig:
     completed_runs = _table(raw, "completed_runs", path=path)
     interventions = _table(raw, "interventions", path=path)
     outcome_completeness = _table(raw, "outcome_completeness", path=path)
+    github_login_by_principal_id = _principal_identities(principals, path=path)
     return GateFloorConfig(
         schema_version=GATE_FLOOR_SCHEMA_VERSION,
-        registered_principal_ids=tuple(dict.fromkeys(_string_list(principals, "ids", path=path))),
+        registered_principal_ids=tuple(github_login_by_principal_id),
         completed_run_volume_floor=_optional_int(completed_runs, "min_total", path=path),
         intervention_volume_floor=_optional_int(interventions, "min_with_reason", path=path),
         outcome_completeness_floor=_optional_fraction(outcome_completeness, "floor", path=path),
+        github_login_by_principal_id=tuple(github_login_by_principal_id.items()),
     )
 
 
@@ -111,6 +114,52 @@ def _string_list(table: dict[str, object], key: str, *, path: Path) -> list[str]
             details={"path": str(path), "key": key},
         )
     return list(value)
+
+
+def _principal_identities(table: dict[str, object], *, path: Path) -> dict[str, str]:
+    if "ids" in table:
+        legacy_ids = _string_list(table, "ids", path=path)
+        if legacy_ids:
+            raise InvalidInputError(
+                "gate floor schema 2 requires GitHub-mapped principal identities",
+                details={"path": str(path), "key": "registered_principals.ids"},
+            )
+        return {}
+    value = table.get("identities", [])
+    if not isinstance(value, list):
+        raise InvalidInputError(
+            "registered principal identities must be a list",
+            details={"path": str(path)},
+        )
+    identities: dict[str, str] = {}
+    github_logins: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise InvalidInputError(
+                "registered principal identity must be a table",
+                details={"path": str(path)},
+            )
+        principal_id = entry.get("id")
+        github_login = entry.get("github_login")
+        if (
+            not isinstance(principal_id, str)
+            or not principal_id.strip()
+            or not isinstance(github_login, str)
+            or not github_login.strip()
+        ):
+            raise InvalidInputError(
+                "registered principal identities require non-blank id and github_login",
+                details={"path": str(path)},
+            )
+        normalized_login = github_login.casefold()
+        if principal_id in identities or normalized_login in github_logins:
+            raise InvalidInputError(
+                "registered principal identities must have unique ids and GitHub logins",
+                details={"path": str(path)},
+            )
+        identities[principal_id] = normalized_login
+        github_logins.add(normalized_login)
+    return identities
 
 
 def _optional_int(table: dict[str, object], key: str, *, path: Path) -> int | None:
