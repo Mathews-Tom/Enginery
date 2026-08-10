@@ -227,7 +227,7 @@ class GitHubWorkLedger:
         source_digest = Digest.of_json(
             {
                 "work_item_digest": str(work_item.bound_field_digest),
-                "classification": classification.to_state(),
+                "classification_digest": str(classification.digest),
             }
         )
         return WorkLedgerSnapshot(
@@ -797,16 +797,20 @@ def _declared_classification(
         if not isinstance(label, Mapping):
             raise TransientProviderFailureError("GitHub issue label record must be an object")
         names.append(_required_string(label, "name"))
-    work_labels = [name for name in names if name.casefold().startswith("enginery/work-kind/")]
-    risk_labels = [name for name in names if name.casefold().startswith("enginery/risk/")]
-    if any(name not in _WORK_KIND_LABELS for name in work_labels):
-        raise InvalidInputError("GitHub work-kind labels must use the exact declared vocabulary")
-    if any(name not in _RISK_LABELS for name in risk_labels):
-        raise InvalidInputError("GitHub risk labels must use the exact declared vocabulary")
+    work_labels = [
+        name for name in names if name.casefold().startswith(_CLASSIFICATION_PREFIXES[0])
+    ]
+    risk_labels = [
+        name for name in names if name.casefold().startswith(_CLASSIFICATION_PREFIXES[1])
+    ]
     if len(work_labels) != 1:
         raise InvalidInputError("GitHub issue requires exactly one declared work-kind label")
     if len(risk_labels) != 1:
         raise InvalidInputError("GitHub issue requires exactly one declared risk label")
+    if work_labels[0] not in _WORK_KIND_LABELS:
+        raise InvalidInputError("GitHub work-kind labels must use the exact declared vocabulary")
+    if risk_labels[0] not in _RISK_LABELS:
+        raise InvalidInputError("GitHub risk labels must use the exact declared vocabulary")
     work_label = work_labels[0]
     risk_label = risk_labels[0]
     return (

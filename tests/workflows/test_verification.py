@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from enginery.application.work_ports import (
+    DeclaredWorkClassification,
     LifecycleProjection,
     PullRequestCheck,
     PullRequestEvidence,
@@ -29,24 +30,35 @@ from enginery.workflows.verification import (
 )
 
 
-def _snapshot(revision: str = "issue-1") -> WorkLedgerSnapshot:
-    return WorkLedgerSnapshot(
-        work_item=WorkItem(
-            id=WorkItemId("work-1"),
-            work_kind=WorkKind.ISSUE,
+def _snapshot(revision: str = "issue-1", *, classified: bool = False) -> WorkLedgerSnapshot:
+    work_item = WorkItem(
+        id=WorkItemId("work-1"),
+        work_kind=WorkKind.ISSUE,
+        source_provider="github",
+        external_reference="issue:1",
+        source_snapshot_reference=f"issue:1@{revision}",
+        title="Bounded change",
+        objective="Change one bounded behavior.",
+        acceptance_criteria=("observable result",),
+        constraints=("retain evidence",),
+        risk_class=RiskClass.LOW,
+        repository_targets=("repository-1",),
+        dependencies=(),
+        state=WorkItemState.QUALIFYING,
+    )
+    classification = (
+        DeclaredWorkClassification(
             source_provider="github",
-            external_reference="issue:1",
-            source_snapshot_reference=f"issue:1@{revision}",
-            title="Bounded change",
-            objective="Change one bounded behavior.",
-            acceptance_criteria=("observable result",),
-            constraints=("retain evidence",),
-            risk_class=RiskClass.LOW,
-            repository_targets=("repository-1",),
-            dependencies=(),
-            state=WorkItemState.QUALIFYING,
-        ),
+            source_url=work_item.source_snapshot_reference,
+            canonical_labels=("enginery/work-kind/issue", "enginery/risk/low"),
+        )
+        if classified
+        else None
+    )
+    return WorkLedgerSnapshot(
+        work_item=work_item,
         source_revision=revision,
+        classification_provenance=classification,
     )
 
 
@@ -103,7 +115,7 @@ def _request(snapshot: WorkLedgerSnapshot) -> Stage1VerificationRequest:
         issue_revision=snapshot.source_revision,
         run_id=RunId("run-1"),
         lifecycle_operation_id=OperationId("lifecycle-1"),
-        issue_digest=str(snapshot.work_item.bound_field_digest),
+        issue_digest=str(snapshot.bound_digest),
         base_revision="base",
         pull_request_number=1,
         requirements=PullRequestRequirements(
@@ -115,7 +127,7 @@ def _request(snapshot: WorkLedgerSnapshot) -> Stage1VerificationRequest:
 
 
 def test_terminal_verification_emits_evidence_only_after_double_read() -> None:
-    snapshot = _snapshot()
+    snapshot = _snapshot(classified=True)
     executor = Stage1VerificationExecutor(
         cast(WorkLedgerPort, SequenceWorkLedger((snapshot, snapshot))),
         cast(PullRequestPort, SequencePullRequests((_evidence(), _evidence()))),

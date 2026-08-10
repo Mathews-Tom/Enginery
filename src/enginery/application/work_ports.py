@@ -77,7 +77,7 @@ class WorkLedgerSnapshot:
             {
                 "work_item_digest": str(self.work_item.bound_field_digest),
                 "source_revision": self.source_revision,
-                "classification": self.classification_provenance.to_state(),
+                "classification_digest": str(self.classification_provenance.digest),
             }
         )
 
