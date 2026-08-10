@@ -24,22 +24,32 @@ from datetime import UTC, datetime
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
+from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.g4_authority_evidence import (
     G4AuthorityEvidence,
     g4_authority_evidence_from_state,
 )
-from enginery.domain.g4_deficiency import g4_deficiency_finding_from_state
+from enginery.domain.g4_deficiency import (
+    G4DeficiencyFinding,
+    g4_deficiency_finding_from_state,
+)
 from enginery.engine.runtime import RUN_AGGREGATE_TYPE, RUNTIME_NODE_AGGREGATE_TYPE
 from enginery.evaluation.gate import G4Inputs, GateReport, evaluate_g4
 from enginery.evaluation.gate_floor import load_gate_floor_config
-from enginery.evaluation.outcomes import OutcomeCaptureService
+from enginery.evaluation.outcomes import (
+    OutcomeCaptureService,
+    compute_completeness,
+)
 from enginery.evaluation.queries import list_all_interventions
 from enginery.ledger.g4_authority_evidence import (
     G4_AUTHORITY_EVIDENCE_AGGREGATE_TYPE,
     record_g4_authority_evidence,
 )
-from enginery.ledger.g4_deficiency import G4_DEFICIENCY_AGGREGATE_TYPE
+from enginery.ledger.g4_deficiency import (
+    G4_DEFICIENCY_AGGREGATE_TYPE,
+    record_g4_deficiency,
+)
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import Stage1RunRequest, stage1_request_from_state
 
@@ -55,6 +65,8 @@ def run_gate(args: argparse.Namespace) -> int:
         raise InvalidInputError("gate requires a subcommand")
     if command == "status":
         return _status(args)
+    if command == "record-g4-deficiency":
+        return _record_g4_deficiency(args)
     if command == "record-g4-deficiency-evidence":
         return _record_g4_deficiency_evidence(args)
     raise AssertionError(f"unhandled gate command: {command}")  # pragma: no cover
@@ -71,6 +83,38 @@ def _status(args: argparse.Namespace) -> int:
         ledger.close()
     _print(report, as_json=args.json)
     return SUCCESS if report.passed else exit_code_for(FailureClass.MISSING_PREREQUISITE)
+
+
+def _record_g4_deficiency(args: argparse.Namespace) -> int:
+    floor = load_gate_floor_config(args.floor_config)
+    principal_github_logins = dict(floor.github_login_by_principal_id)
+    if args.producer_principal_id not in principal_github_logins:
+        raise InvalidInputError("G4 finding producer is not a configured authority principal")
+    producer_login = principal_github_logins[args.producer_principal_id]
+    if producer_login.casefold() == args.evidence_pull_request_author_login.casefold():
+        raise InvalidInputError("G4 evidence pull request author cannot be the finding producer")
+    finding = G4DeficiencyFinding(
+        finding_id=args.finding_id,
+        deficiency=args.deficiency,
+        cited_run_ids=tuple(args.cited_run_ids),
+        evidence_pull_request_number=args.evidence_pull_request_number,
+        evidence_document_digest=_digest(args.evidence_document_digest),
+        producer_principal_id=args.producer_principal_id,
+        evidence_pull_request_author_login=args.evidence_pull_request_author_login,
+        recorded_at=datetime.now(tz=UTC),
+    )
+    ledger = LedgerService.open(args.database)
+    try:
+        eligible_run_ids = set(_g4_inputs(ledger).eligible_classified_completed_run_ids)
+        if not set(finding.cited_run_ids) <= eligible_run_ids:
+            raise InvalidInputError(
+                "G4 deficiency finding must cite eligible classified completed runs"
+            )
+        record_g4_deficiency(ledger, finding=finding, correlation_id=args.correlation_id)
+    finally:
+        ledger.close()
+    _print_record(finding.to_state(), as_json=args.json)
+    return SUCCESS
 
 
 def _record_g4_deficiency_evidence(args: argparse.Namespace) -> int:
@@ -119,9 +163,16 @@ def _g4_inputs(ledger: LedgerService) -> G4Inputs:
         for request in completed
         if request.work_snapshot.classification_provenance is not None
     )
+    classified_run_ids = frozenset(str(request.run.id) for request in classified_completed)
     interventions = list_all_interventions(ledger, aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE)
-    completeness = OutcomeCaptureService(ledger=ledger).completeness(
-        reference_time=datetime.now(tz=UTC)
+    outcome_service = OutcomeCaptureService(ledger=ledger)
+    completeness = compute_completeness(
+        (
+            observation
+            for observation in outcome_service.list_observations()
+            if str(observation.run_id) in classified_run_ids
+        ),
+        reference_time=datetime.now(tz=UTC),
     )
     return G4Inputs(
         completed_run_count=len(classified_completed),
@@ -132,13 +183,13 @@ def _g4_inputs(ledger: LedgerService) -> G4Inputs:
             {request.work_snapshot.work_item.risk_class for request in classified_completed}
         ),
         intervention_with_reason_count=sum(
-            1 for intervention in interventions if intervention.reason
+            1
+            for intervention in interventions
+            if intervention.reason and intervention.run_id in classified_run_ids
         ),
         completeness=completeness,
         repository_count=len({request.run.repository for request in classified_completed}),
-        eligible_classified_completed_run_ids=tuple(
-            str(request.run.id) for request in classified_completed
-        ),
+        eligible_classified_completed_run_ids=tuple(sorted(classified_run_ids)),
         deficiency_findings=tuple(
             g4_deficiency_finding_from_state(record.state)
             for record in ledger.list_projections(aggregate_type=G4_DEFICIENCY_AGGREGATE_TYPE)
@@ -170,6 +221,20 @@ def _print_authority_evidence(evidence: G4AuthorityEvidence, *, as_json: bool) -
         "recorded G4 authority evidence for "
         f"{serialized['finding_id']} from pull request #{serialized['pull_request_number']}"
     )
+
+
+def _digest(value: str) -> Digest:
+    algorithm, separator, hex_value = value.partition(":")
+    if not separator:
+        raise InvalidInputError("G4 evidence document digest must use algorithm:hex form")
+    return Digest(algorithm=algorithm, hex_value=hex_value)
+
+
+def _print_record(state: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(state, indent=2, sort_keys=True))
+        return
+    print(f"recorded G4 deficiency finding {state['finding_id']}")
 
 
 def _print(report: GateReport, *, as_json: bool) -> None:

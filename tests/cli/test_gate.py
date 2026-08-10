@@ -5,14 +5,17 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import enginery.cli.gate as gate_cli
 from enginery.adapters.github import GitHubWorkLedger
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.g4_authority_evidence import G4AuthorityEvidence
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
+from enginery.domain.observation import ObservationState
 from enginery.ledger.g4_authority_evidence import G4_AUTHORITY_EVIDENCE_AGGREGATE_TYPE
 from enginery.ledger.g4_deficiency import record_g4_deficiency
 from enginery.ledger.service import LedgerService
@@ -199,3 +202,118 @@ def test_gate_records_verified_g4_authority_evidence(
         ledger.close()
     assert projection is not None
     assert projection.state == evidence.to_state()
+
+
+def test_gate_rejects_deficiency_finding_without_eligible_classified_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    floor_config = _write_floor_config(
+        tmp_path / "floor.toml",
+        """
+        schema_version = 2
+        [registered_principals]
+        identities = [
+          { id = "producer", github_login = "producer-login" },
+          { id = "approver-one", github_login = "approver-one-login" },
+          { id = "approver-two", github_login = "approver-two-login" },
+        ]
+        """,
+    )
+
+    exit_code = main(
+        [
+            "gate",
+            "record-g4-deficiency",
+            "--database",
+            str(database),
+            "--finding-id",
+            "finding-1",
+            "--deficiency",
+            "Repeated validation failure",
+            "--cited-run-id",
+            "run-1",
+            "--cited-run-id",
+            "run-2",
+            "--evidence-pull-request-number",
+            "42",
+            "--evidence-document-digest",
+            str(Digest.of_bytes(b"evidence")),
+            "--producer-principal-id",
+            "producer",
+            "--evidence-pull-request-author-login",
+            "evidence-author",
+            "--correlation-id",
+            "record-finding",
+            "--floor-config",
+            str(floor_config),
+        ]
+    )
+
+    assert exit_code != 0
+    assert "must cite eligible classified completed runs" in capsys.readouterr().err
+
+
+def test_g4_inputs_excludes_unclassified_runs_from_every_quantitative_measure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    classified = SimpleNamespace(
+        run=SimpleNamespace(id="classified-run", repository="owner/classified"),
+        work_snapshot=SimpleNamespace(
+            classification_provenance=object(),
+            work_item=SimpleNamespace(work_kind="issue", risk_class="low"),
+        ),
+    )
+    legacy = SimpleNamespace(
+        run=SimpleNamespace(id="legacy-run", repository="owner/legacy"),
+        work_snapshot=SimpleNamespace(
+            classification_provenance=None,
+            work_item=SimpleNamespace(work_kind="plan", risk_class="medium"),
+        ),
+    )
+
+    class Ledger:
+        def list_projections(self, *, aggregate_type: str) -> tuple[SimpleNamespace, ...]:
+            if aggregate_type == gate_cli.RUN_AGGREGATE_TYPE:
+                return (SimpleNamespace(state="classified"), SimpleNamespace(state="legacy"))
+            return ()
+
+        def read_projection(self, *, aggregate_type: str, aggregate_id: str) -> SimpleNamespace:
+            del aggregate_type, aggregate_id
+            return SimpleNamespace(state={"status": "passed"})
+
+    class Outcomes:
+        def __init__(self, *, ledger: Ledger) -> None:
+            del ledger
+
+        def list_observations(self) -> tuple[SimpleNamespace, ...]:
+            return (
+                SimpleNamespace(run_id="classified-run", state=ObservationState.CAPTURED),
+                SimpleNamespace(run_id="legacy-run", state=ObservationState.INDETERMINATE),
+            )
+
+    monkeypatch.setattr(
+        gate_cli,
+        "stage1_request_from_state",
+        lambda state: classified if state == "classified" else legacy,
+    )
+    monkeypatch.setattr(
+        gate_cli,
+        "list_all_interventions",
+        lambda ledger, *, aggregate_type: (
+            SimpleNamespace(run_id="classified-run", reason="approved"),
+            SimpleNamespace(run_id="legacy-run", reason="legacy intervention"),
+        ),
+    )
+    monkeypatch.setattr(gate_cli, "OutcomeCaptureService", Outcomes)
+
+    inputs = gate_cli._g4_inputs(Ledger())
+
+    assert inputs.completed_run_count == 1
+    assert inputs.completed_workflow_type_count == 1
+    assert inputs.completed_risk_class_count == 1
+    assert inputs.repository_count == 1
+    assert inputs.intervention_with_reason_count == 1
+    assert inputs.completeness.captured == 1
+    assert inputs.completeness.indeterminate == 0
+    assert inputs.eligible_classified_completed_run_ids == ("classified-run",)
