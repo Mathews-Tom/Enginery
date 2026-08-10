@@ -41,7 +41,7 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
@@ -59,11 +59,11 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
     repository = tmp_path / "repository"
     repository.mkdir()
     manifest = replace(
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
         nodes={
-            **issue_to_pr_manifest().nodes,
+            **stage1_work_manifest().nodes,
             NodeId("implement"): replace(
-                issue_to_pr_manifest().nodes[NodeId("implement")],
+                stage1_work_manifest().nodes[NodeId("implement")],
                 actor_type=ActorType.DETERMINISTIC,
             ),
         },

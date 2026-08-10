@@ -33,7 +33,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
@@ -91,7 +91,7 @@ class _FixedWorkLedger:
 
 def _qualified_request(tmp_path: Path) -> Stage1RunRequest:
     repository, _base_revision = _repository(tmp_path, "repository-under-test")
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     work_item = WorkItem(
         id=WorkItemId("work-fault"),
         work_kind=WorkKind.ISSUE,

@@ -16,7 +16,7 @@ from enginery.engine.runtime import (
 )
 from enginery.evaluation.queries import list_all_interventions, list_failures, list_interventions
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 
 _NOW = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
@@ -25,7 +25,7 @@ def test_list_interventions_reads_a_recorded_human_decision(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
     )
@@ -38,7 +38,7 @@ def test_list_interventions_reads_a_recorded_human_decision(
             operation_id="operation-approval",
             dependencies=(("run-1", "qualify"),),
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
     runtime.register_node(dispatch=approval, now=_NOW, heartbeat_window=timedelta(seconds=60))
     runtime.await_human_node(
@@ -72,7 +72,7 @@ def test_list_interventions_excludes_nodes_without_an_operator_decision(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
     )
@@ -87,7 +87,7 @@ def test_list_interventions_excludes_nodes_without_an_operator_decision(
 
 def test_list_failures_reads_a_failed_node(ledger_service: LedgerService, tmp_path: Path) -> None:
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
     )
@@ -111,7 +111,7 @@ def test_list_failures_reads_a_failed_node(ledger_service: LedgerService, tmp_pa
 
 def test_list_failures_excludes_passed_nodes(ledger_service: LedgerService, tmp_path: Path) -> None:
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
     )
@@ -130,14 +130,14 @@ def test_queries_are_scoped_to_the_requested_run(
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     other_repository = tmp_path / "other-repository"
     other_repository.mkdir()
-    first = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    first = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     second = WorkflowNodeDispatch(
         replace(
             _request(other_repository),
             run_id="run-2",
             operation_id="operation-run-2",
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
     epoch_one = runtime.register_node(
         dispatch=first, now=_NOW, heartbeat_window=timedelta(seconds=60)
@@ -171,10 +171,10 @@ def test_list_all_interventions_reads_decisions_across_every_run(
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     other_repository = tmp_path / "other-repository"
     other_repository.mkdir()
-    first = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    first = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     second = WorkflowNodeDispatch(
         replace(_request(other_repository), run_id="run-2", operation_id="operation-run-2"),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
     epoch_one = runtime.register_node(
         dispatch=first, now=_NOW, heartbeat_window=timedelta(seconds=60)
@@ -192,7 +192,7 @@ def test_list_all_interventions_reads_decisions_across_every_run(
             operation_id="operation-approval-1",
             dependencies=(("run-1", "qualify"),),
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
     approval_two = WorkflowNodeDispatch(
         replace(
@@ -202,7 +202,7 @@ def test_list_all_interventions_reads_decisions_across_every_run(
             operation_id="operation-approval-2",
             dependencies=(("run-2", "qualify"),),
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
     runtime.register_node(dispatch=approval_one, now=_NOW, heartbeat_window=timedelta(seconds=60))
     runtime.register_node(dispatch=approval_two, now=_NOW, heartbeat_window=timedelta(seconds=60))
@@ -244,7 +244,7 @@ def test_list_all_interventions_excludes_nodes_without_an_operator_decision(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=_NOW, heartbeat_window=timedelta(seconds=60)
     )

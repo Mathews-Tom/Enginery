@@ -8,10 +8,10 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import WorkItemId
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.workflows.issue_to_pr import (
-    IssueReadiness,
     Stage1TerminalState,
-    issue_to_pr_manifest,
-    qualify_issue,
+    WorkReadiness,
+    qualify_work,
+    stage1_work_manifest,
 )
 
 
@@ -39,29 +39,51 @@ def _snapshot(
 
 
 def test_qualification_routes_low_risk_applicable_issue_to_implementation() -> None:
-    qualification = qualify_issue(_snapshot(), applicable_criteria=(True, False))
+    qualification = qualify_work(_snapshot(), applicable_criteria=(True, False))
 
-    assert qualification.readiness is IssueReadiness.READY
+    assert qualification.readiness is WorkReadiness.READY
     assert not qualification.requires_human_review
     assert qualification.source_revision == "42"
 
 
 def test_qualification_requires_human_approval_for_medium_risk() -> None:
-    qualification = qualify_issue(
-        _snapshot(risk=RiskClass.MEDIUM), applicable_criteria=(True, True)
-    )
+    qualification = qualify_work(_snapshot(risk=RiskClass.MEDIUM), applicable_criteria=(True, True))
 
-    assert qualification.readiness is IssueReadiness.AWAITING_PLAN_APPROVAL
+    assert qualification.readiness is WorkReadiness.AWAITING_PLAN_APPROVAL
     assert qualification.requires_human_review
+
+
+@pytest.mark.parametrize("work_kind", (WorkKind.ISSUE, WorkKind.PLAN))
+def test_qualification_routes_supported_low_risk_work_to_implementation(
+    work_kind: WorkKind,
+) -> None:
+    qualification = qualify_work(_snapshot(work_kind=work_kind), applicable_criteria=(True, True))
+
+    assert qualification.readiness is WorkReadiness.READY
+
+
+@pytest.mark.parametrize("work_kind", (WorkKind.INCIDENT, WorkKind.MILESTONE))
+def test_qualification_rejects_unsupported_work_kind(work_kind: WorkKind) -> None:
+    qualification = qualify_work(_snapshot(work_kind=work_kind), applicable_criteria=(True, True))
+
+    assert qualification.readiness is WorkReadiness.REJECTED
+    assert "does not support work kind" in qualification.reason
+
+
+def test_qualification_rejects_high_risk_work() -> None:
+    qualification = qualify_work(_snapshot(risk=RiskClass.HIGH), applicable_criteria=(True, True))
+
+    assert qualification.readiness is WorkReadiness.REJECTED
+    assert "high-risk" in qualification.reason
 
 
 def test_qualification_rejects_unaligned_applicability() -> None:
     with pytest.raises(InvalidInputError, match="align exactly"):
-        qualify_issue(_snapshot(), applicable_criteria=(True,))
+        qualify_work(_snapshot(), applicable_criteria=(True,))
 
 
 def test_manifest_declares_implementation_to_merge_ready_route() -> None:
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
 
     assert {"qualify", "implement", "validate", "review", "open_pr", "verify"} <= {
         str(node_id) for node_id in manifest.nodes
