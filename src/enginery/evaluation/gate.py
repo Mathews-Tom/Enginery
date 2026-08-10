@@ -23,6 +23,7 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from enginery.domain.g4_authority_evidence import G4AuthorityEvidence
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
 from enginery.evaluation.gate_floor import GateFloorConfig
 from enginery.evaluation.outcomes import CompletenessReport
@@ -82,6 +83,7 @@ class G4Inputs:
     repository_count: int
     eligible_classified_completed_run_ids: tuple[str, ...] = ()
     deficiency_findings: tuple[G4DeficiencyFinding, ...] = ()
+    authority_evidence: tuple[G4AuthorityEvidence, ...] = ()
 
 
 def evaluate_g4(*, floor: GateFloorConfig, inputs: G4Inputs) -> GateReport:
@@ -91,7 +93,7 @@ def evaluate_g4(*, floor: GateFloorConfig, inputs: G4Inputs) -> GateReport:
         _completed_run_diversity(floor, inputs),
         _human_intervention_volume(floor, inputs),
         _outcome_capture_completeness(floor, inputs),
-        _recurring_workflow_deficiency(inputs),
+        _recurring_workflow_deficiency(floor, inputs),
         _corpus_diversity(inputs),
         _registered_human_principals(floor),
     )
@@ -211,37 +213,58 @@ def _outcome_capture_completeness(floor: GateFloorConfig, inputs: G4Inputs) -> G
     )
 
 
-def _recurring_workflow_deficiency(inputs: G4Inputs) -> GateCondition:
+def _recurring_workflow_deficiency(floor: GateFloorConfig, inputs: G4Inputs) -> GateCondition:
     eligible_run_ids = set(inputs.eligible_classified_completed_run_ids)
     eligible_findings = tuple(
         finding
         for finding in inputs.deficiency_findings
         if set(finding.cited_run_ids) <= eligible_run_ids
     )
-    if not eligible_findings:
+    verified_findings = tuple(
+        finding
+        for finding in eligible_findings
+        if any(
+            _matches_authority_evidence(finding, evidence, floor)
+            for evidence in inputs.authority_evidence
+        )
+    )
+    metrics = {
+        "eligible_classified_completed_run_count": len(eligible_run_ids),
+        "eligible_finding_count": len(eligible_findings),
+        "authority_verified_finding_count": len(verified_findings),
+    }
+    if not verified_findings:
         return GateCondition(
             id="recurring_evidence_backed_deficiency",
             status=ConditionStatus.UNMEASURED,
             detail=(
-                "no recurring deficiency finding cites two eligible classified completed "
-                "runs; local records cannot prove dual-authority GitHub evidence"
+                "no recurring deficiency finding has current GitHub evidence-PR authority "
+                "verification from two configured distinct principals"
             ),
-            metrics={
-                "eligible_classified_completed_run_count": len(eligible_run_ids),
-                "eligible_finding_count": 0,
-            },
+            metrics=metrics,
         )
     return GateCondition(
         id="recurring_evidence_backed_deficiency",
-        status=ConditionStatus.UNMEASURED,
+        status=ConditionStatus.PASS,
         detail=(
-            f"{len(eligible_findings)} eligible recurring deficiency finding(s) await "
-            "GitHub evidence-PR authority verification"
+            f"{len(verified_findings)} eligible recurring deficiency finding(s) have "
+            "current GitHub evidence-PR authority verification"
         ),
-        metrics={
-            "eligible_classified_completed_run_count": len(eligible_run_ids),
-            "eligible_finding_count": len(eligible_findings),
-        },
+        metrics=metrics,
+    )
+
+
+def _matches_authority_evidence(
+    finding: G4DeficiencyFinding, evidence: G4AuthorityEvidence, floor: GateFloorConfig
+) -> bool:
+    configured_principals = set(floor.registered_principal_ids)
+    return (
+        evidence.finding_id == finding.finding_id
+        and evidence.pull_request_number == finding.evidence_pull_request_number
+        and evidence.document_digest == finding.evidence_document_digest
+        and finding.producer_principal_id in configured_principals
+        and set(evidence.approver_principal_ids) <= configured_principals
+        and finding.producer_principal_id not in evidence.approver_principal_ids
     )
 
 

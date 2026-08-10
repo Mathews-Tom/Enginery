@@ -6,6 +6,7 @@ import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import cast
 from urllib.parse import quote
 
@@ -39,6 +40,8 @@ from enginery.domain.errors import (
     StaleEvidenceError,
     TransientProviderFailureError,
 )
+from enginery.domain.g4_authority_evidence import G4AuthorityEvidence
+from enginery.domain.g4_deficiency import G4DeficiencyFinding
 from enginery.domain.ids import OperationId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -262,6 +265,38 @@ class GitHubWorkLedger:
         if matches == 1:
             return ReconciliationResult.FOUND_MATCHING
         return ReconciliationResult.FOUND_CONFLICTING
+
+    def verify_g4_evidence(
+        self,
+        *,
+        finding: G4DeficiencyFinding,
+        principal_github_logins: Mapping[str, str],
+        verified_at: datetime,
+    ) -> G4AuthorityEvidence:
+        """Read a merged evidence PR and all reviews before verifying authority."""
+        pull_request = self._request_object(
+            "GET",
+            f"repos/{self.config.repository}/pulls/{finding.evidence_pull_request_number}",
+        )
+        reviews: list[object] = []
+        page = 1
+        while True:
+            records = self._request_array(
+                "GET",
+                f"repos/{self.config.repository}/pulls/{finding.evidence_pull_request_number}"
+                f"/reviews?per_page={_PAGE_SIZE}&page={page}",
+            )
+            reviews.extend(records)
+            if len(records) < _PAGE_SIZE:
+                break
+            page += 1
+        return verify_g4_evidence_pull_request(
+            finding=finding,
+            principal_github_logins=principal_github_logins,
+            pull_request=pull_request,
+            reviews=reviews,
+            verified_at=verified_at,
+        )
 
     def _issue_number(self, external_reference: str) -> int:
         prefix = f"{self.config.repository}#"
@@ -963,6 +998,75 @@ def _lifecycle_marker(operation_id: OperationId) -> str:
     return f"{_LIFECYCLE_MARKER_PREFIX}{operation_id} -->"
 
 
+def verify_g4_evidence_pull_request(
+    *,
+    finding: G4DeficiencyFinding,
+    principal_github_logins: Mapping[str, str],
+    pull_request: Mapping[str, object],
+    reviews: Sequence[object],
+    verified_at: datetime,
+) -> G4AuthorityEvidence:
+    """Fail closed unless GitHub proves the finding's exact review evidence."""
+    if pull_request.get("merged") is not True:
+        raise StaleEvidenceError("G4 evidence pull request is not merged")
+    if pull_request.get("number") != finding.evidence_pull_request_number:
+        raise StaleEvidenceError("G4 evidence pull request number does not match the finding")
+    head = pull_request.get("head")
+    author = pull_request.get("user")
+    body = pull_request.get("body")
+    if (
+        not isinstance(head, Mapping)
+        or not isinstance(author, Mapping)
+        or not isinstance(body, str)
+    ):
+        raise TransientProviderFailureError("GitHub evidence pull request payload is malformed")
+    head_revision = _required_string(head, "sha")
+    author_login = _required_string(author, "login").casefold()
+    if author_login != finding.evidence_pull_request_author_login.casefold():
+        raise StaleEvidenceError("G4 evidence pull request author does not match the finding")
+    if Digest.of_bytes(body.encode("utf-8")) != finding.evidence_document_digest:
+        raise StaleEvidenceError("G4 evidence pull request document digest does not match")
+    producer_login = principal_github_logins.get(finding.producer_principal_id)
+    if producer_login is None:
+        raise InvalidInputError(
+            "G4 finding producer is not a configured GitHub authority principal"
+        )
+    if producer_login.casefold() == author_login:
+        raise InvalidInputError("G4 evidence pull request author cannot be the finding producer")
+    current_reviews: dict[str, tuple[str, str]] = {}
+    for record in reviews:
+        if not isinstance(record, Mapping):
+            raise TransientProviderFailureError("GitHub evidence review payload is malformed")
+        reviewer = record.get("user")
+        if not isinstance(reviewer, Mapping):
+            raise TransientProviderFailureError("GitHub evidence review is missing its reviewer")
+        current_reviews[_required_string(reviewer, "login").casefold()] = (
+            _required_string(record, "state").casefold(),
+            _required_string(record, "commit_id"),
+        )
+    approvers = tuple(
+        principal_id
+        for principal_id, github_login in principal_github_logins.items()
+        if (
+            github_login.casefold() != author_login
+            and github_login.casefold() != producer_login.casefold()
+            and current_reviews.get(github_login.casefold()) == ("approved", head_revision)
+        )
+    )
+    if len(approvers) < 2:
+        raise StaleEvidenceError(
+            "G4 evidence pull request requires two distinct current configured approvals"
+        )
+    return G4AuthorityEvidence(
+        finding_id=finding.finding_id,
+        pull_request_number=finding.evidence_pull_request_number,
+        merged_head_revision=head_revision,
+        document_digest=finding.evidence_document_digest,
+        approver_principal_ids=(approvers[0], approvers[1]),
+        verified_at=verified_at,
+    )
+
+
 def _raise_github_failure(stderr: str) -> None:
     detail = stderr.lower()
     if "http 401" in detail or "bad credentials" in detail or "authentication" in detail:
@@ -980,4 +1084,5 @@ __all__ = [
     "GitHubReleaseAdapter",
     "GitHubReleaseRequest",
     "GitHubWorkLedger",
+    "verify_g4_evidence_pull_request",
 ]

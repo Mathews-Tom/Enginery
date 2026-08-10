@@ -193,6 +193,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
     )
     gate_status_parser.add_argument("--json", action="store_true")
+    gate_evidence_parser = gate_subparsers.add_parser(
+        "record-g4-deficiency-evidence",
+        help="Verify and persist GitHub authority evidence for one G4 deficiency finding.",
+    )
+    gate_evidence_parser.add_argument("--database", required=True, type=Path)
+    gate_evidence_parser.add_argument("--finding-id", required=True)
+    gate_evidence_parser.add_argument("--correlation-id", required=True)
+    gate_evidence_parser.add_argument("--github-repository", required=True)
+    gate_evidence_parser.add_argument("--github-credential-reference", required=True)
+    gate_evidence_parser.add_argument("--github-executable", default="gh")
+    gate_evidence_parser.add_argument(
+        "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
+    )
+    gate_evidence_parser.add_argument("--json", action="store_true")
 
     workspace_parser = subparsers.add_parser(
         "workspace", help="Inspect and release run-scoped workspace reservations."
