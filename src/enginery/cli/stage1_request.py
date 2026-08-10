@@ -36,7 +36,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
@@ -206,7 +206,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     implementation_operation_id = OperationId(
         args.implementation_operation_id or f"implement:{run_id}"
     )
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
 
     work_item = WorkItem(
         id=WorkItemId(work_item_id),

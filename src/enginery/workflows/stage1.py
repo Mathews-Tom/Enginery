@@ -25,6 +25,7 @@ from enginery.domain.errors import (
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
+    StaleEvidenceError,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
@@ -51,7 +52,7 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
-from enginery.workflows.issue_to_pr import IssueQualification
+from enginery.workflows.issue_to_pr import WorkQualification
 from enginery.workflows.pull_request import (
     PullRequestOutcome,
     PullRequestRequirements,
@@ -475,8 +476,22 @@ class Stage1RunService:
         applicable_criteria: tuple[bool, ...],
         now: datetime,
         heartbeat_window: timedelta,
-    ) -> IssueQualification:
-        """Persist intent, then source-bind and classify the issue through the runtime."""
+    ) -> WorkQualification:
+        """Verify the source binding before recording a durable qualification node."""
+        snapshot = self._require_work_ledger().fetch(external_reference)
+        if (
+            snapshot.source_revision != request.work_snapshot.source_revision
+            or snapshot.bound_digest != request.work_snapshot.bound_digest
+        ):
+            raise StaleEvidenceError(
+                "Stage 1 source snapshot no longer matches the run request",
+                details={
+                    "expected_revision": request.work_snapshot.source_revision,
+                    "observed_revision": snapshot.source_revision,
+                    "expected_digest": str(request.work_snapshot.bound_digest),
+                    "observed_digest": str(snapshot.bound_digest),
+                },
+            )
         self.start(request, now=now, heartbeat_window=heartbeat_window)
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
@@ -488,11 +503,9 @@ class Stage1RunService:
             ),
             request.manifest,
         )
-        return Stage1QualificationExecutor(
-            runtime=self.runtime, work_ledger=self._require_work_ledger()
-        ).qualify(
+        return Stage1QualificationExecutor(runtime=self.runtime).qualify(
             dispatch=dispatch,
-            external_reference=external_reference,
+            snapshot=snapshot,
             applicable_criteria=applicable_criteria,
             now=now,
             heartbeat_window=heartbeat_window,
