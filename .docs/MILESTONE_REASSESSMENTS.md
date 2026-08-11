@@ -1612,3 +1612,25 @@ M24 product work may resume from `origin/main` under the reconciled five-PR stac
 ### Downstream impact and implementation authorization
 
 M14b and M15 remain unchanged and blocked by a persistent G4 pass backed by genuine multi-repository, dual-human, intervention, outcome, and deficiency evidence. This entry authorizes only `docs(plan): reconcile M24b design`. No release-preparation code or release documentation may begin until that docs-only prerequisite is reviewed, green, and externally merged. After merge, repeat the M24b design gate and require `DESIGN GO — PLAN REVISION: none` before implementation.
+
+## M24b — Post-reconciliation release-preparation authorization
+
+**Timestamp:** `2026-08-11T09:28:00Z`  
+**Decision:** `DESIGN GO — PLAN REVISION: none`  
+**Trigger:** PR #169 merged M24b-R1 at `230998fb4d448331cf64ca71a4e1f0443cd4f78c`; its fresh main CI passed on both macOS and Ubuntu.
+
+### Evidence inspected
+
+- Exact merged M24 surface: PRs #157, #166, #164, #165, and #161, plus procedure correction #167; their merged commits are ancestors of `origin/main`.
+- Released baseline: `v0.4.0` is a non-draft, non-prerelease GitHub Release with wheel/sdist hashes matching the live PyPI `enginery==0.4.0` version.
+- M24 command surface: `gate status --gate G4 --json`, `gate record-g4-deficiency`, and `gate record-g4-deficiency-evidence` are present; schema-2 authority configuration binds principal identities to unique numeric GitHub user IDs, preserving logins only as diagnostics.
+- Release tooling: `release_gate.py --version 0.5.0` accepts the requested command and rejects the current checkout only for the expected canonical `0.4.0` metadata mismatch; the cumulative gate supports only shipped Stages 1–3, preserving Stage 4 deferral.
+- Release scope: the changelog, release notes, README, operation procedure, G4 configuration, labeled fixture evidence, and published-consumer requirements remain coherent with M24-only `v0.5.0`; the G4 status remains fail-closed without genuine operational evidence.
+
+### Plan and prompt sections changed
+
+None. M24b-R1 already reconciled the sole material mismatch.
+
+### Downstream impact and implementation authorization
+
+Release-preparation implementation may begin from `230998fb4d448331cf64ca71a4e1f0443cd4f78c`. PR-1 is limited to the approved currency-selection correction, regression coverage, canonical metadata, changelog, dependency manifest, and artifact metadata. M14b and M15 remain blocked until genuine post-M24 multi-repository, dual-human numeric-identity, intervention, outcome, and deficiency evidence makes persistent G4 status pass. This decision does not create that evidence or authorize Stage 4 behavior.
