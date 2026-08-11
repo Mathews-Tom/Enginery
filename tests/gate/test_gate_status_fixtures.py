@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from enginery.application.work_ports import WorkLedgerSnapshot
+from enginery.application.work_ports import DeclaredWorkClassification, WorkLedgerSnapshot
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
@@ -47,9 +47,9 @@ def _stage1_request(
     work_item = WorkItem(
         id=WorkItemId(f"{run_id}-work-item"),
         work_kind=work_kind,
-        source_provider="github",
+        source_provider="github-issues",
         external_reference=f"{repository}#1",
-        source_snapshot_reference=f"issue:1@{run_id}",
+        source_snapshot_reference=f"https://api.github.com/repos/{repository}/issues/1",
         title="Bounded change",
         objective="Change one bounded behavior.",
         acceptance_criteria=("observable result",),
@@ -59,13 +59,24 @@ def _stage1_request(
         dependencies=(),
         state=WorkItemState.QUALIFYING,
     )
-    snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision=f"{run_id}-revision")
+    snapshot = WorkLedgerSnapshot(
+        work_item=work_item,
+        source_revision=f"{run_id}-revision",
+        classification_provenance=DeclaredWorkClassification(
+            source_provider="github-issues",
+            source_url=work_item.source_snapshot_reference,
+            canonical_labels=(
+                f"enginery/work-kind/{work_kind.value}",
+                f"enginery/risk/{risk_class.value}",
+            ),
+        ),
+    )
     root = tmp_path / run_id
     return Stage1RunRequest(
         run=Run(
             id=RunId(run_id),
             work_item_id=work_item.id,
-            work_item_snapshot_digest=work_item.bound_field_digest,
+            work_item_snapshot_digest=snapshot.bound_digest,
             workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
             workflow_definition_digest=manifest.content_digest,
             repository=repository,
@@ -308,9 +319,9 @@ def test_floor_gated_conditions_report_unmeasured_despite_abundant_real_data(
         for index, (work_kind, risk_class) in enumerate(
             [
                 (WorkKind.ISSUE, RiskClass.LOW),
-                (WorkKind.ISSUE, RiskClass.HIGH),
+                (WorkKind.ISSUE, RiskClass.MEDIUM),
                 (WorkKind.PLAN, RiskClass.LOW),
-                (WorkKind.INCIDENT, RiskClass.MEDIUM),
+                (WorkKind.PLAN, RiskClass.MEDIUM),
             ]
         ):
             _register_completed_run(
@@ -342,8 +353,8 @@ def test_floor_gated_conditions_report_unmeasured_despite_abundant_real_data(
     conditions = _conditions(payload)
     assert conditions["completed_run_diversity"]["status"] == "unmeasured"
     assert conditions["completed_run_diversity"]["metrics"]["completed_run_count"] == 4
-    assert conditions["completed_run_diversity"]["metrics"]["completed_workflow_type_count"] == 3
-    assert conditions["completed_run_diversity"]["metrics"]["completed_risk_class_count"] == 3
+    assert conditions["completed_run_diversity"]["metrics"]["completed_workflow_type_count"] == 2
+    assert conditions["completed_run_diversity"]["metrics"]["completed_risk_class_count"] == 2
     assert conditions["human_intervention_volume"]["status"] == "unmeasured"
     assert conditions["human_intervention_volume"]["metrics"]["intervention_with_reason_count"] == 4
     assert conditions["outcome_capture_completeness"]["status"] == "unmeasured"
@@ -360,7 +371,7 @@ def test_floor_gated_conditions_pass_once_the_floor_is_registered_and_met(
         for index, (work_kind, risk_class) in enumerate(
             [
                 (WorkKind.ISSUE, RiskClass.LOW),
-                (WorkKind.PLAN, RiskClass.HIGH),
+                (WorkKind.PLAN, RiskClass.MEDIUM),
             ]
         ):
             _register_completed_run(
