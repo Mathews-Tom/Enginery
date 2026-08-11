@@ -62,6 +62,17 @@ def test_github_and_omp_provider_smoke(tmp_path: Path) -> None:
         )
     )
     issue_number = issue["number"]
+    _run(
+        "gh",
+        "api",
+        "--method",
+        "POST",
+        f"repos/{_REPOSITORY}/issues/{issue_number}/labels",
+        "-f",
+        "labels[]=enginery/work-kind/issue",
+        "-f",
+        "labels[]=enginery/risk/low",
+    )
     branch = f"enginery/smoke-{suffix}"
     checkout = tmp_path / "repository"
     pull_number: int | None = None
@@ -79,6 +90,11 @@ def test_github_and_omp_provider_smoke(tmp_path: Path) -> None:
         ledger = GitHubWorkLedger(config)
         snapshot = ledger.fetch(f"{_REPOSITORY}#{issue_number}")
         assert snapshot.work_item.external_reference == f"{_REPOSITORY}#{issue_number}"
+        assert snapshot.classification_provenance is not None
+        assert snapshot.classification_provenance.canonical_labels == (
+            "enginery/work-kind/issue",
+            "enginery/risk/low",
+        )
         assert (
             ledger.publish_lifecycle(
                 LifecycleProjection(
@@ -126,6 +142,7 @@ def test_github_and_omp_provider_smoke(tmp_path: Path) -> None:
         pull_number = matching.number
         evidence = pull_requests.evidence(pull_number)
         assert evidence.pull_request.head_revision == matching.head_revision
+        assert isinstance(evidence.reviews, tuple)
         deadline = time.monotonic() + 120
         while True:
             evidence = pull_requests.evidence(pull_number)
