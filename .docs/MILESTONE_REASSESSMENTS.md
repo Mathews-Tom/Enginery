@@ -1656,3 +1656,24 @@ Release-preparation implementation may begin from `230998fb4d448331cf64ca71a4e1f
 ### Downstream impact and implementation authorization
 
 This is a material release-verification ordering correction. It authorizes only `docs(plan): reconcile M24b release-gate order`; no release-preparation code or release documentation may proceed until that docs-only prerequisite is reviewed, green, and externally merged. After merge, repeat the M24b design gate and require `DESIGN GO — PLAN REVISION: none`. M14b and M15 remain unchanged and blocked by a genuine persistent G4 pass.
+
+## M24b — Post-R2 release-preparation authorization
+
+**Timestamp:** `2026-08-11T09:39:00Z`  
+**Decision:** `DESIGN GO — PLAN REVISION: none`  
+**Trigger:** PR #171 merged M24b-R2 at `b426c0aec10b80bbb034d581b868de8454fc15c6`; fresh main CI passed on macOS and Ubuntu.
+
+### Evidence inspected
+
+- M24 PRs #157, #166, #164, #165, and #161 plus procedure correction #167 remain merged into `origin/main`; `v0.4.0` remains published at PyPI and in a non-draft, non-prerelease GitHub Release.
+- The merged command surface remains `gate status --gate G4 --json`, `gate record-g4-deficiency`, and `gate record-g4-deficiency-evidence`; schema-2 configuration requires numeric GitHub identity bindings.
+- The currency gate accepts the requested `0.5.0` invocation, evaluates current public documentation before metadata, and therefore requires PR-2's version sync before its passing release-gate run.
+- The revised stack correctly sequences PR-1's selector regression, lockfile, metadata, build, and hashes before PR-2's docs-currency and full release gate. M24 scope, labeled medium-risk approval smoke, published-consumer surface, and M14b/M15 deferral are unchanged.
+
+### Plan and prompt sections changed
+
+None. M24b-R2 already reconciled the sole remaining material mismatch.
+
+### Downstream impact and implementation authorization
+
+Release-preparation implementation may begin from `b426c0aec10b80bbb034d581b868de8454fc15c6` under the revised four-PR stack. This decision authorizes no product behavior beyond the release-only work described in M24b, creates no operational evidence, and preserves G4's fail-closed state and M14b/M15 block.
