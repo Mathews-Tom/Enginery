@@ -1634,3 +1634,25 @@ None. M24b-R1 already reconciled the sole material mismatch.
 ### Downstream impact and implementation authorization
 
 Release-preparation implementation may begin from `230998fb4d448331cf64ca71a4e1f0443cd4f78c`. PR-1 is limited to the approved currency-selection correction, regression coverage, canonical metadata, changelog, dependency manifest, and artifact metadata. M14b and M15 remain blocked until genuine post-M24 multi-repository, dual-human numeric-identity, intervention, outcome, and deficiency evidence makes persistent G4 status pass. This decision does not create that evidence or authorize Stage 4 behavior.
+
+## M24b — Release-gate execution-order reconciliation
+
+**Timestamp:** `2026-08-11T09:36:00Z`  
+**Decision:** `REPLAN REQUIRED — PLAN REVISION: M24b-R2`  
+**Trigger:** The authorized PR-1 implementation traced the release gate's execution order after canonical-version preparation.
+
+### Evidence inspected
+
+- `release_gate.py` runs the public-documentation currency check before checking canonical metadata.
+- The planned PR order updates canonical metadata in PR-1 and current public version declarations in PR-2. Therefore a post-PR-1 `release_gate.py --version 0.5.0` must stop at stale documentation; it cannot be a passing PR-1 verification.
+- The same ordering correctly permits a pre-metadata probe to stop at the expected `0.4.0` metadata mismatch, and permits the complete release gate after PR-2's documentation sync.
+- The R1 public-documentation selector correction, M24 command surface, numeric identity configuration, release target, labeled fixture smoke, published-consumer smoke, and M14b/M15 deferral remain unchanged.
+
+### Plan and prompt change
+
+- M24b-R2 assigns selection regression, lockfile, build, metadata, and hash evidence to PR-1.
+- M24b-R2 assigns the passing docs-currency and full release-gate invocations to PR-2, after public version declarations synchronize.
+
+### Downstream impact and implementation authorization
+
+This is a material release-verification ordering correction. It authorizes only `docs(plan): reconcile M24b release-gate order`; no release-preparation code or release documentation may proceed until that docs-only prerequisite is reviewed, green, and externally merged. After merge, repeat the M24b design gate and require `DESIGN GO — PLAN REVISION: none`. M14b and M15 remain unchanged and blocked by a genuine persistent G4 pass.
