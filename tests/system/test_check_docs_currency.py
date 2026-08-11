@@ -176,6 +176,36 @@ def test_changelog_and_release_evidence_historical_sections_are_excluded(tmp_pat
     run_check(repo_root=repo)
 
 
+def test_authoritative_planning_history_is_excluded(tmp_path: Path) -> None:
+    """Immutable planning records are historical evidence, not current docs."""
+    repo = _init_fixture_repo(
+        tmp_path,
+        version="0.3.0",
+        docs={
+            ".docs/DEVELOPMENT_PLAN.md": "Enginery is `v0.1.0`.\n",
+            ".docs/EXECUTION_PROMPTS.md": "Enginery is not yet implemented.\n",
+            ".docs/MILESTONE_REASSESSMENTS.md": (
+                "`v0.1.0`, published on PyPI and GitHub Releases.\n"
+            ),
+        },
+    )
+
+    run_check(repo_root=repo)
+
+
+def test_unlisted_planning_file_is_not_excluded(tmp_path: Path) -> None:
+    """The exemption is limited to the immutable planning records."""
+    repo = _init_fixture_repo(
+        tmp_path,
+        version="0.3.0",
+        docs={".docs/OTHER.md": "Enginery is `v0.1.0`.\n"},
+    )
+    subprocess.run(["git", "add", "--force", ".docs/OTHER.md"], cwd=repo, check=True)
+
+    with pytest.raises(DocsCurrencyError, match=r"\.docs/OTHER\.md"):
+        run_check(repo_root=repo)
+
+
 def test_missing_canonical_version_fails_closed(tmp_path: Path) -> None:
     repo = tmp_path / "no-version-repo"
     repo.mkdir()

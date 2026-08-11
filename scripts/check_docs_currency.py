@@ -32,10 +32,9 @@ evidence-grounded list does not. Extend either list when a new
 self-declaration or status-framing convention is introduced and found
 stale in review.
 
-`CHANGELOG.md` and `docs/RELEASE_EVIDENCE.md` are excluded entirely: both
-are append-only, newest-first historical records where every past
-version's own accurate-at-the-time status is expected content, not a
-regression.
+`CHANGELOG.md`, `docs/RELEASE_EVIDENCE.md`, and the named immutable planning
+records are excluded entirely: each preserves contemporaneous historical
+status, not a claim about the current release.
 """
 
 from __future__ import annotations
@@ -48,10 +47,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Entire files excluded from both checks below: append-only, newest-first
-# historical records. Every past release's own contemporaneous version and
-# status language is expected, correct content here, not staleness.
-EXCLUDED_DOCS = frozenset({"CHANGELOG.md", "docs/RELEASE_EVIDENCE.md"})
+# Entire files excluded from both checks below. `CHANGELOG.md` and
+# `docs/RELEASE_EVIDENCE.md` are append-only public records; the three named
+# `.docs/` files are immutable, pre-implementation planning and reassessment
+# records. Their contemporaneous version and status language is historical
+# evidence, not a claim about the current release.
+EXCLUDED_DOCS = frozenset(
+    {
+        "CHANGELOG.md",
+        "docs/RELEASE_EVIDENCE.md",
+        ".docs/DEVELOPMENT_PLAN.md",
+        ".docs/EXECUTION_PROMPTS.md",
+        ".docs/MILESTONE_REASSESSMENTS.md",
+    }
+)
 
 # Patterns identify active self-declarations made in the README status summary
 # and operational diagnostics. Each captures exactly one version number; a
