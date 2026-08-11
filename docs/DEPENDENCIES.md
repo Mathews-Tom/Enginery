@@ -15,7 +15,7 @@ release to date, so per-version duplication added no information. The
 changed, or didn't, at each release; add a new row there the next time
 a release actually changes this graph.
 
-## Current dependency graph (`v0.4.0`)
+## Current dependency graph (`v0.5.0`)
 
 ### Base install (`pip install enginery`)
 
@@ -47,7 +47,7 @@ dependencies:
 
 | Name         | Version | License                    | URL                                                 |
 |--------------|---------|----------------------------|------------------------------------------------------|
-| enginery     | 0.4.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
+| enginery     | 0.5.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
 | cryptography | 49.0.0  | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography                 |
 | cffi         | 2.1.0   | MIT-0                      | https://cffi.readthedocs.io/en/latest/whatsnew.html  |
 | pycparser    | 3.0     | BSD-3-Clause               | https://github.com/eliben/pycparser                  |
@@ -75,3 +75,4 @@ dependency graph.
 | `v0.2.0` | None | Capability locking/provenance, the Claude Code adapter, plan ingestion, and Stage 2 publication all build on the existing `cryptography`/`pyyaml` footprint |
 | `v0.3.0` | None | Stage 3's incident, hotfix, and controlled-local-service deployment code is stdlib-only (`http.server`, `subprocess`, `socket`, `urllib.request`, `git` as an external binary) |
 | `v0.4.0` | None | Gate, request-builder, workspace, and adapter-diagnostic CLI additions add no runtime dependency; repository tooling and evidence are not distribution contents |
+| `v0.5.0` | None | Measurable G4 evidence, source classification, and authority-verification additions use the existing runtime dependency footprint |
