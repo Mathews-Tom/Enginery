@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -69,4 +70,51 @@ class G4DeficiencyFinding:
         }
 
 
-__all__ = ["G4DeficiencyFinding"]
+def g4_deficiency_finding_from_state(state: Mapping[str, object]) -> G4DeficiencyFinding:
+    """Decode one immutable recurring-deficiency projection."""
+    cited_run_ids = state.get("cited_run_ids")
+    if not isinstance(cited_run_ids, list) or not all(
+        isinstance(run_id, str) and run_id.strip() for run_id in cited_run_ids
+    ):
+        raise InvalidInputError("G4 deficiency cited_run_ids must be a list of non-blank strings")
+    recorded_digest = _string(state, "evidence_document_digest")
+    finding = G4DeficiencyFinding(
+        finding_id=_string(state, "finding_id"),
+        deficiency=_string(state, "deficiency"),
+        cited_run_ids=tuple(cited_run_ids),
+        evidence_pull_request_number=_positive_int(state, "evidence_pull_request_number"),
+        producer_principal_id=_string(state, "producer_principal_id"),
+        evidence_pull_request_author_login=_string(state, "evidence_pull_request_author_login"),
+        recorded_at=_datetime(state, "recorded_at"),
+    )
+    if str(finding.evidence_document_digest) != recorded_digest:
+        raise InvalidInputError("G4 deficiency evidence document digest does not match finding")
+    return finding
+
+
+def _string(state: Mapping[str, object], field_name: str) -> str:
+    value = state.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(f"G4 deficiency {field_name} must be a non-blank string")
+    return value
+
+
+def _positive_int(state: Mapping[str, object], field_name: str) -> int:
+    value = state.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise InvalidInputError(f"G4 deficiency {field_name} must be a positive integer")
+    return value
+
+
+def _datetime(state: Mapping[str, object], field_name: str) -> datetime:
+    value = _string(state, field_name)
+    try:
+        decoded = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise InvalidInputError(f"G4 deficiency {field_name} must be ISO-8601") from error
+    if decoded.tzinfo is None:
+        raise InvalidInputError(f"G4 deficiency {field_name} must include a timezone")
+    return decoded
+
+
+__all__ = ["G4DeficiencyFinding", "g4_deficiency_finding_from_state"]
