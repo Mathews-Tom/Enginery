@@ -119,7 +119,7 @@ def _record_g4_deficiency(args: argparse.Namespace) -> int:
 
 def _record_g4_deficiency_evidence(args: argparse.Namespace) -> int:
     floor = load_gate_floor_config(args.floor_config)
-    principal_github_logins = dict(floor.github_login_by_principal_id)
+    principal_github_user_ids = dict(floor.github_user_id_by_principal_id)
     ledger = LedgerService.open(args.database)
     try:
         projection = ledger.read_projection(
@@ -140,7 +140,7 @@ def _record_g4_deficiency_evidence(args: argparse.Namespace) -> int:
         )
         evidence = adapter.verify_g4_evidence(
             finding=finding,
-            principal_github_logins=principal_github_logins,
+            principal_github_user_ids=principal_github_user_ids,
             verified_at=datetime.now(tz=UTC),
         )
         record_g4_authority_evidence(ledger, evidence=evidence, correlation_id=args.correlation_id)

@@ -124,9 +124,9 @@ def test_gate_records_verified_g4_authority_evidence(
         schema_version = 2
         [registered_principals]
         identities = [
-          { id = "producer", github_login = "producer-login" },
-          { id = "approver-one", github_login = "approver-one-login" },
-          { id = "approver-two", github_login = "approver-two-login" },
+          { id = "producer", github_user_id = 100, github_login = "producer-login" },
+          { id = "approver-one", github_user_id = 101, github_login = "approver-one-login" },
+          { id = "approver-two", github_user_id = 102, github_login = "approver-two-login" },
         ]
         """,
     )
@@ -159,12 +159,12 @@ def test_gate_records_verified_g4_authority_evidence(
         self: GitHubWorkLedger,
         *,
         finding: G4DeficiencyFinding,
-        principal_github_logins: dict[str, str],
+        principal_github_user_ids: dict[str, int],
         verified_at: datetime,
     ) -> G4AuthorityEvidence:
         assert self.config.repository == "Mathews-Tom/Enginery"
         assert finding.finding_id == "finding-1"
-        assert principal_github_logins["approver-one"] == "approver-one-login"
+        assert principal_github_user_ids["approver-one"] == 101
         assert verified_at.tzinfo is UTC
         return evidence
 
@@ -214,9 +214,9 @@ def test_gate_rejects_deficiency_finding_without_eligible_classified_runs(
         schema_version = 2
         [registered_principals]
         identities = [
-          { id = "producer", github_login = "producer-login" },
-          { id = "approver-one", github_login = "approver-one-login" },
-          { id = "approver-two", github_login = "approver-two-login" },
+          { id = "producer", github_user_id = 100, github_login = "producer-login" },
+          { id = "approver-one", github_user_id = 101, github_login = "approver-one-login" },
+          { id = "approver-two", github_user_id = 102, github_login = "approver-two-login" },
         ]
         """,
     )

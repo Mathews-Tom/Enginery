@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import cast
+from typing import TypeGuard, cast
 from urllib.parse import quote
 
 from enginery.application.adapter_types import (
@@ -270,7 +270,7 @@ class GitHubWorkLedger:
         self,
         *,
         finding: G4DeficiencyFinding,
-        principal_github_logins: Mapping[str, str],
+        principal_github_user_ids: Mapping[str, int],
         verified_at: datetime,
     ) -> G4AuthorityEvidence:
         """Read a merged evidence PR and all reviews before verifying authority."""
@@ -292,7 +292,7 @@ class GitHubWorkLedger:
             page += 1
         return verify_g4_evidence_pull_request(
             finding=finding,
-            principal_github_logins=principal_github_logins,
+            principal_github_user_ids=principal_github_user_ids,
             pull_request=pull_request,
             reviews=reviews,
             verified_at=verified_at,
@@ -1001,7 +1001,7 @@ def _lifecycle_marker(operation_id: OperationId) -> str:
 def verify_g4_evidence_pull_request(
     *,
     finding: G4DeficiencyFinding,
-    principal_github_logins: Mapping[str, str],
+    principal_github_user_ids: Mapping[str, int],
     pull_request: Mapping[str, object],
     reviews: Sequence[object],
     verified_at: datetime,
@@ -1022,35 +1022,37 @@ def verify_g4_evidence_pull_request(
         raise TransientProviderFailureError("GitHub evidence pull request payload is malformed")
     head_revision = _required_string(head, "sha")
     author_login = _required_string(author, "login").casefold()
+    author_user_id = _required_github_user_id(author, "id")
     if author_login != finding.evidence_pull_request_author_login.casefold():
         raise StaleEvidenceError("G4 evidence pull request author does not match the finding")
     if Digest.of_bytes(body.encode("utf-8")) != finding.evidence_document_digest:
         raise StaleEvidenceError("G4 evidence pull request document digest does not match")
-    producer_login = principal_github_logins.get(finding.producer_principal_id)
-    if producer_login is None:
+    producer_user_id = principal_github_user_ids.get(finding.producer_principal_id)
+    if not _is_github_user_id(producer_user_id):
         raise InvalidInputError(
             "G4 finding producer is not a configured GitHub authority principal"
         )
-    if producer_login.casefold() == author_login:
+    if producer_user_id == author_user_id:
         raise InvalidInputError("G4 evidence pull request author cannot be the finding producer")
-    current_reviews: dict[str, tuple[str, str]] = {}
+    current_reviews: dict[int, tuple[str, str]] = {}
     for record in reviews:
         if not isinstance(record, Mapping):
             raise TransientProviderFailureError("GitHub evidence review payload is malformed")
         reviewer = record.get("user")
         if not isinstance(reviewer, Mapping):
             raise TransientProviderFailureError("GitHub evidence review is missing its reviewer")
-        current_reviews[_required_string(reviewer, "login").casefold()] = (
+        current_reviews[_required_github_user_id(reviewer, "id")] = (
             _required_string(record, "state").casefold(),
             _required_string(record, "commit_id"),
         )
     approvers = tuple(
         principal_id
-        for principal_id, github_login in principal_github_logins.items()
+        for principal_id, github_user_id in principal_github_user_ids.items()
         if (
-            github_login.casefold() != author_login
-            and github_login.casefold() != producer_login.casefold()
-            and current_reviews.get(github_login.casefold()) == ("approved", head_revision)
+            _is_github_user_id(github_user_id)
+            and github_user_id != author_user_id
+            and github_user_id != producer_user_id
+            and current_reviews.get(github_user_id) == ("approved", head_revision)
         )
     )
     if len(approvers) < 2:
@@ -1065,6 +1067,19 @@ def verify_g4_evidence_pull_request(
         approver_principal_ids=(approvers[0], approvers[1]),
         verified_at=verified_at,
     )
+
+
+def _is_github_user_id(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _required_github_user_id(payload: Mapping[str, object], field: str) -> int:
+    value = payload.get(field)
+    if not _is_github_user_id(value):
+        raise TransientProviderFailureError(
+            f"GitHub payload field {field!r} must be a positive integer"
+        )
+    return value
 
 
 def _raise_github_failure(stderr: str) -> None:

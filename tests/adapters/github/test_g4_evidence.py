@@ -13,7 +13,11 @@ from enginery.adapters.github import (
     verify_g4_evidence_pull_request,
 )
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError, StaleEvidenceError
+from enginery.domain.errors import (
+    InvalidInputError,
+    StaleEvidenceError,
+    TransientProviderFailureError,
+)
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
 
 _BODY = "# Recurring validation failure\n"
@@ -39,29 +43,33 @@ def _pull_request() -> dict[str, object]:
         "merged": True,
         "body": _BODY,
         "head": {"sha": _HEAD},
-        "user": {"login": "evidence-author"},
+        "user": {"id": 99, "login": "evidence-author"},
     }
 
 
 def _reviews(*, head: str = _HEAD) -> list[object]:
     return [
-        {"user": {"login": "approver-one"}, "state": "APPROVED", "commit_id": head},
-        {"user": {"login": "approver-two"}, "state": "APPROVED", "commit_id": head},
+        {
+            "user": {"id": 101, "login": "approver-one"},
+            "state": "APPROVED",
+            "commit_id": head,
+        },
+        {
+            "user": {"id": 102, "login": "approver-two"},
+            "state": "APPROVED",
+            "commit_id": head,
+        },
     ]
 
 
-def _principals() -> dict[str, str]:
-    return {
-        "producer": "producer-login",
-        "one": "approver-one",
-        "two": "approver-two",
-    }
+def _principals() -> dict[str, int]:
+    return {"producer": 100, "one": 101, "two": 102}
 
 
 def test_verifier_requires_exact_merged_head_approvals() -> None:
     evidence = verify_g4_evidence_pull_request(
         finding=_finding(),
-        principal_github_logins=_principals(),
+        principal_github_user_ids=_principals(),
         pull_request=_pull_request(),
         reviews=_reviews(),
         verified_at=datetime(2026, 8, 10, tzinfo=UTC),
@@ -75,7 +83,7 @@ def test_verifier_rejects_stale_approval() -> None:
     with pytest.raises(StaleEvidenceError, match="two distinct current"):
         verify_g4_evidence_pull_request(
             finding=_finding(),
-            principal_github_logins=_principals(),
+            principal_github_user_ids=_principals(),
             pull_request=_pull_request(),
             reviews=_reviews(head="b" * 40),
             verified_at=datetime(2026, 8, 10, tzinfo=UTC),
@@ -88,7 +96,7 @@ def test_verifier_rejects_document_digest_mismatch() -> None:
     with pytest.raises(StaleEvidenceError, match="document digest"):
         verify_g4_evidence_pull_request(
             finding=_finding(),
-            principal_github_logins=_principals(),
+            principal_github_user_ids=_principals(),
             pull_request=pull_request,
             reviews=_reviews(),
             verified_at=datetime(2026, 8, 10, tzinfo=UTC),
@@ -97,15 +105,48 @@ def test_verifier_rejects_document_digest_mismatch() -> None:
 
 def test_verifier_rejects_evidence_author_who_is_the_finding_producer() -> None:
     pull_request = _pull_request()
-    pull_request["user"] = {"login": "producer-login"}
+    pull_request["user"] = {"id": 100, "login": "producer-login"}
     finding = replace(_finding(), evidence_pull_request_author_login="producer-login")
 
     with pytest.raises(InvalidInputError, match="author cannot be"):
         verify_g4_evidence_pull_request(
             finding=finding,
-            principal_github_logins=_principals(),
+            principal_github_user_ids=_principals(),
             pull_request=pull_request,
             reviews=_reviews(),
+            verified_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
+def test_verifier_rejects_reused_login_with_wrong_github_user_id() -> None:
+    reviews = _reviews()
+    for review in reviews:
+        reviewer = review["user"]
+        assert isinstance(reviewer, dict)
+        reviewer["id"] = int(reviewer["id"]) + 1000
+
+    with pytest.raises(StaleEvidenceError, match="two distinct current"):
+        verify_g4_evidence_pull_request(
+            finding=_finding(),
+            principal_github_user_ids=_principals(),
+            pull_request=_pull_request(),
+            reviews=reviews,
+            verified_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
+def test_verifier_rejects_review_without_numeric_github_user_id() -> None:
+    reviews = _reviews()
+    reviewer = reviews[0]["user"]
+    assert isinstance(reviewer, dict)
+    reviewer.pop("id")
+
+    with pytest.raises(TransientProviderFailureError, match="positive integer"):
+        verify_g4_evidence_pull_request(
+            finding=_finding(),
+            principal_github_user_ids=_principals(),
+            pull_request=_pull_request(),
+            reviews=reviews,
             verified_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
 
@@ -113,7 +154,8 @@ def test_verifier_rejects_evidence_author_who_is_the_finding_producer() -> None:
 def test_reader_fetches_every_review_page_before_verifying() -> None:
     calls: list[tuple[str, ...]] = []
     first_page = [
-        {"user": {"login": "other"}, "state": "COMMENTED", "commit_id": _HEAD} for _ in range(100)
+        {"user": {"id": 9, "login": "other"}, "state": "COMMENTED", "commit_id": _HEAD}
+        for _ in range(100)
     ]
     responses: list[object] = [_pull_request(), first_page, _reviews()]
 
@@ -129,7 +171,7 @@ def test_reader_fetches_every_review_page_before_verifying() -> None:
         command_runner=run,
     ).verify_g4_evidence(
         finding=_finding(),
-        principal_github_logins=_principals(),
+        principal_github_user_ids=_principals(),
         verified_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
 
