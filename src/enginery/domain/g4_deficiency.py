@@ -17,7 +17,6 @@ class G4DeficiencyFinding:
     deficiency: str
     cited_run_ids: tuple[str, ...]
     evidence_pull_request_number: int
-    evidence_document_digest: Digest
     producer_principal_id: str
     evidence_pull_request_author_login: str
     recorded_at: datetime
@@ -38,6 +37,24 @@ class G4DeficiencyFinding:
             or not self.evidence_pull_request_author_login.strip()
         ):
             raise InvalidInputError("G4 deficiency finding requires producer and evidence author")
+
+    @property
+    def evidence_document(self) -> str:
+        """Return the exact Markdown document that evidence-PR reviewers approve."""
+        cited_runs = "\n".join(f"- `{run_id}`" for run_id in self.cited_run_ids)
+        return (
+            "# Enginery G4 recurring-deficiency evidence\n\n"
+            f"Finding ID: `{self.finding_id}`\n\n"
+            f"Deficiency: {self.deficiency}\n\n"
+            "Cited verified classified runs:\n"
+            f"{cited_runs}\n\n"
+            f"Producer principal ID: `{self.producer_principal_id}`\n"
+        )
+
+    @property
+    def evidence_document_digest(self) -> Digest:
+        """Return the digest of the canonical reviewed evidence document."""
+        return Digest.of_bytes(self.evidence_document.encode("utf-8"))
 
     def to_state(self) -> dict[str, object]:
         return {

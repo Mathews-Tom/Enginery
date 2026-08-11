@@ -15,10 +15,23 @@ def _finding() -> G4DeficiencyFinding:
         deficiency="Validation command fails after generated dependency update.",
         cited_run_ids=("run-1", "run-2"),
         evidence_pull_request_number=42,
-        evidence_document_digest=Digest.of_bytes(b"evidence"),
         producer_principal_id="operator-a",
         evidence_pull_request_author_login="author-a",
         recorded_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+
+
+def test_finding_evidence_document_binds_its_cited_runs() -> None:
+    finding = _finding()
+
+    assert "Finding ID: `finding-1`" in finding.evidence_document
+    assert "Deficiency: Validation command fails after generated dependency update." in (
+        finding.evidence_document
+    )
+    assert "- `run-1`" in finding.evidence_document
+    assert "- `run-2`" in finding.evidence_document
+    assert finding.evidence_document_digest == Digest.of_bytes(
+        finding.evidence_document.encode("utf-8")
     )
 
 
