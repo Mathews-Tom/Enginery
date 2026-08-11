@@ -176,33 +176,26 @@ def test_changelog_and_release_evidence_historical_sections_are_excluded(tmp_pat
     run_check(repo_root=repo)
 
 
-def test_authoritative_planning_history_is_excluded(tmp_path: Path) -> None:
-    """Immutable planning records are historical evidence, not current docs."""
+def test_nonpublic_markdown_is_not_scanned(tmp_path: Path) -> None:
+    """Repository-private Markdown is not a released documentation declaration."""
     repo = _init_fixture_repo(
         tmp_path,
         version="0.3.0",
-        docs={
-            ".docs/DEVELOPMENT_PLAN.md": "Enginery is `v0.1.0`.\n",
-            ".docs/EXECUTION_PROMPTS.md": "Enginery is not yet implemented.\n",
-            ".docs/MILESTONE_REASSESSMENTS.md": (
-                "`v0.1.0`, published on PyPI and GitHub Releases.\n"
-            ),
-        },
+        docs={".private-history/record.md": "Enginery is `v0.1.0`.\n"},
     )
 
     run_check(repo_root=repo)
 
 
-def test_unlisted_planning_file_is_not_excluded(tmp_path: Path) -> None:
-    """The exemption is limited to the immutable planning records."""
+def test_public_documentation_is_scanned(tmp_path: Path) -> None:
+    """Published documentation still fails closed on a stale declaration."""
     repo = _init_fixture_repo(
         tmp_path,
         version="0.3.0",
-        docs={".docs/OTHER.md": "Enginery is `v0.1.0`.\n"},
+        docs={"docs/other.md": "Enginery is `v0.1.0`.\n"},
     )
-    subprocess.run(["git", "add", "--force", ".docs/OTHER.md"], cwd=repo, check=True)
 
-    with pytest.raises(DocsCurrencyError, match=r"\.docs/OTHER\.md"):
+    with pytest.raises(DocsCurrencyError, match=r"docs/other\.md"):
         run_check(repo_root=repo)
 
 

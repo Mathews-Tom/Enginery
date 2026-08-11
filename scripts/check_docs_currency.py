@@ -47,20 +47,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Entire files excluded from both checks below. `CHANGELOG.md` and
-# `docs/RELEASE_EVIDENCE.md` are append-only public records; the three named
-# `.docs/` files are immutable, pre-implementation planning and reassessment
-# records. Their contemporaneous version and status language is historical
-# evidence, not a claim about the current release.
-EXCLUDED_DOCS = frozenset(
-    {
-        "CHANGELOG.md",
-        "docs/RELEASE_EVIDENCE.md",
-        ".docs/DEVELOPMENT_PLAN.md",
-        ".docs/EXECUTION_PROMPTS.md",
-        ".docs/MILESTONE_REASSESSMENTS.md",
-    }
-)
+# Historical records are retained for public audit but do not declare the
+# current release state.
+EXCLUDED_DOCS = frozenset({"CHANGELOG.md", "docs/RELEASE_EVIDENCE.md"})
+PUBLIC_DOC_DIRECTORIES = frozenset({"docs"})
+
+
+def _is_public_documentation_path(name: str) -> bool:
+    path = Path(name)
+    return len(path.parts) == 1 or path.parts[0] in PUBLIC_DOC_DIRECTORIES
+
 
 # Patterns identify active self-declarations made in the README status summary
 # and operational diagnostics. Each captures exactly one version number; a
@@ -111,7 +107,11 @@ def _tracked_markdown_files(repo_root: Path) -> list[Path]:
     if result.returncode != 0:
         raise DocsCurrencyError(f"'git ls-files' failed:\n{result.stdout}\n{result.stderr}")
     names = [name for name in result.stdout.split("\0") if name]
-    return [repo_root / name for name in names if name not in EXCLUDED_DOCS]
+    return [
+        repo_root / name
+        for name in names
+        if name not in EXCLUDED_DOCS and _is_public_documentation_path(name)
+    ]
 
 
 def _line_number(text: str, offset: int) -> int:
