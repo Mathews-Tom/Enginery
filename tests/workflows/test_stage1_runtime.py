@@ -49,7 +49,7 @@ from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_f
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import IssueReadiness, issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import WorkReadiness, stage1_work_manifest
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
@@ -162,8 +162,7 @@ class RecordingWorkLedger:
             aggregate_type="runtime_node", aggregate_id=f"{self.expected_run_id}:qualify"
         )
         assert external_reference == "issue:1"
-        assert node is not None
-        assert node.state["status"] == "queued"
+        assert node is None
         return self.snapshot
 
 
@@ -194,18 +193,16 @@ class TerminalWorkLedger:
         return ReconciliationResult.FOUND_MATCHING
 
 
-def test_qualification_persists_manifest_node_before_provider_fetch(
+def test_qualification_persists_prebound_manifest_node(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    executor = Stage1QualificationExecutor(
-        runtime, cast(WorkLedgerPort, RecordingWorkLedger(ledger_service, _snapshot()))
-    )
+    executor = Stage1QualificationExecutor(runtime)
 
     qualification = executor.qualify(
-        dispatch=WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest()),
-        external_reference="issue:1",
+        dispatch=WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest()),
+        snapshot=_snapshot(),
         applicable_criteria=(True,),
         now=now,
         heartbeat_window=timedelta(seconds=60),
@@ -214,10 +211,36 @@ def test_qualification_persists_manifest_node_before_provider_fetch(
     node = ledger_service.read_projection(
         aggregate_type="runtime_node", aggregate_id="run-1:qualify"
     )
-    assert qualification.readiness is IssueReadiness.READY
+    assert qualification.readiness is WorkReadiness.READY
     assert node is not None
     assert node.state["status"] == "passed"
     assert node.state["source_revision"] == "1"
+
+
+def test_qualification_blocks_rejected_work_without_human_approval(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    rejected_snapshot = replace(
+        _snapshot(),
+        work_item=replace(_snapshot().work_item, risk_class=RiskClass.HIGH),
+    )
+
+    qualification = Stage1QualificationExecutor(runtime).qualify(
+        dispatch=WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest()),
+        snapshot=rejected_snapshot,
+        applicable_criteria=(True,),
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+    )
+    assert qualification.readiness is WorkReadiness.REJECTED
+    assert node is not None
+    assert node.state["status"] == "blocked"
 
 
 def test_validation_persists_node_before_running_commands(
@@ -226,7 +249,7 @@ def test_validation_persists_node_before_running_commands(
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     artifact_store = ArtifactStore(tmp_path / "artifacts")
-    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
 
     def run_command(
         command: tuple[str, ...], workspace_path: Path
@@ -320,7 +343,7 @@ def test_tick_does_not_dispatch_a_recovered_deterministic_node(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
 
     runtime.register_node(dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60))
     tick = runtime.tick(
@@ -341,7 +364,7 @@ def test_manifest_node_dispatch_rejects_agent_nodes(tmp_path: Path) -> None:
                 node_id="implement",
                 dependencies=(("run-1", "qualify"),),
             ),
-            issue_to_pr_manifest(),
+            stage1_work_manifest(),
         )
 
 
@@ -350,7 +373,7 @@ def test_manifest_registration_renews_its_active_epoch(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
 
     first = runtime.register_node(
         dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
@@ -375,7 +398,7 @@ def test_manifest_registration_requires_completed_dependencies(
             node_id="validate",
             dependencies=(("run-1", "implement"),),
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
 
     with pytest.raises(ExternalConflictError, match="dependencies"):
@@ -386,7 +409,7 @@ def test_manifest_node_dispatch_rejects_dependency_bypass(tmp_path: Path) -> Non
     with pytest.raises(InvalidInputError, match="dependencies"):
         WorkflowNodeDispatch(
             replace(_request(tmp_path), dependencies=(("run-1", "unrelated"),)),
-            issue_to_pr_manifest(),
+            stage1_work_manifest(),
         )
 
 
@@ -395,7 +418,7 @@ def test_raw_worker_dispatch_cannot_replace_a_manifest_node(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     runtime.register_node(dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60))
 
     with pytest.raises(ExternalConflictError, match="actor type"):
@@ -413,7 +436,7 @@ def test_human_wait_resolution_requires_prior_qualification(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    qualification = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    qualification = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=qualification, now=now, heartbeat_window=timedelta(seconds=60)
     )
@@ -426,7 +449,7 @@ def test_human_wait_resolution_requires_prior_qualification(
             operation_id="operation-approval",
             dependencies=(("run-1", "qualify"),),
         ),
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
     )
 
     runtime.register_node(dispatch=approval, now=now, heartbeat_window=timedelta(seconds=60))
@@ -459,7 +482,7 @@ def test_terminal_node_retry_requires_new_fenced_identity(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    initial = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
     runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
     retry = replace(
@@ -488,7 +511,7 @@ def test_human_wait_resolution_rejects_nonwaiting_node(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    dispatch = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    dispatch = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(
         dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
     )
@@ -508,7 +531,7 @@ def test_terminal_node_retry_rejects_reused_or_redefined_request(
 ) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    initial = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
     runtime.complete_node(run_id="run-1", node_id="qualify", epoch=epoch.epoch, now=now)
 
@@ -554,7 +577,7 @@ def test_terminal_node_retry_rejects_reused_or_redefined_request(
 def test_retry_rejects_nonterminal_node(ledger_service: LedgerService, tmp_path: Path) -> None:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    initial = WorkflowNodeDispatch(_request(tmp_path), issue_to_pr_manifest())
+    initial = WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest())
     epoch = runtime.register_node(dispatch=initial, now=now, heartbeat_window=timedelta(seconds=60))
 
     with pytest.raises(ExternalConflictError, match="terminal"):
@@ -593,7 +616,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         encoding="utf-8",
     )
     fake_omp.chmod(0o755)
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
         run=Run(
@@ -760,7 +783,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     assert qualification_node is not None
     assert qualification_node.state["status"] == "passed"
-    assert qualification_node.state["readiness"] == IssueReadiness.READY.value
+    assert qualification_node.state["readiness"] == WorkReadiness.READY.value
     projection = ledger_service.read_projection(aggregate_type="run", aggregate_id="run-stage1")
     assert projection is not None
     assert projection.state["request_digest"] == str(request.digest)
@@ -838,7 +861,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     repository = tmp_path / "repository"
     repository.mkdir()
-    template_manifest = issue_to_pr_manifest()
+    template_manifest = stage1_work_manifest()
     manifest = replace(
         template_manifest,
         nodes={
@@ -1039,7 +1062,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     repository = tmp_path / "repository"
     repository.mkdir()
-    template_manifest = issue_to_pr_manifest()
+    template_manifest = stage1_work_manifest()
     manifest = replace(
         template_manifest,
         nodes={
@@ -1180,7 +1203,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     repository = tmp_path / "repository"
     repository.mkdir()
-    template_manifest = issue_to_pr_manifest()
+    template_manifest = stage1_work_manifest()
     manifest = replace(
         template_manifest,
         nodes={
@@ -1375,11 +1398,11 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
     repository = tmp_path / "repository"
     repository.mkdir()
     manifest = replace(
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
         nodes={
-            **issue_to_pr_manifest().nodes,
+            **stage1_work_manifest().nodes,
             NodeId("implement"): replace(
-                issue_to_pr_manifest().nodes[NodeId("implement")],
+                stage1_work_manifest().nodes[NodeId("implement")],
                 actor_type=ActorType.DETERMINISTIC,
             ),
         },
@@ -1558,11 +1581,11 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
     repository = tmp_path / "repository"
     repository.mkdir()
     manifest = replace(
-        issue_to_pr_manifest(),
+        stage1_work_manifest(),
         nodes={
-            **issue_to_pr_manifest().nodes,
+            **stage1_work_manifest().nodes,
             NodeId("implement"): replace(
-                issue_to_pr_manifest().nodes[NodeId("implement")],
+                stage1_work_manifest().nodes[NodeId("implement")],
                 actor_type=ActorType.DETERMINISTIC,
             ),
         },
@@ -1717,7 +1740,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
     base = _request(tmp_path)
     repository = base.repository_path
     base_revision = base.base_revision
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
         run=Run(

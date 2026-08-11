@@ -9,45 +9,52 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from enginery.application.work_ports import WorkLedgerPort, WorkLedgerSnapshot
+from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
-from enginery.workflows.issue_to_pr import IssueQualification, IssueReadiness, qualify_issue
+from enginery.workflows.issue_to_pr import WorkQualification, WorkReadiness, qualify_work
 from enginery.workflows.review import ReviewOutcome, ReviewReport, route_review
 
 
 @dataclass(frozen=True, slots=True)
 class Stage1QualificationExecutor:
-    """Persist source-bound issue qualification through the shared runtime."""
+    """Persist a pre-bound source qualification through the shared runtime."""
 
     runtime: CoordinatorRuntime
-    work_ledger: WorkLedgerPort
 
     def qualify(
         self,
         *,
         dispatch: WorkflowNodeDispatch,
-        external_reference: str,
+        snapshot: WorkLedgerSnapshot,
         applicable_criteria: tuple[bool, ...],
         now: datetime,
         heartbeat_window: timedelta,
-    ) -> IssueQualification:
-        """Fetch and qualify an issue after recording its manifest node durably."""
+    ) -> WorkQualification:
+        """Record qualification only after the caller verifies the source binding."""
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        snapshot = self.work_ledger.fetch(external_reference)
-        qualification = qualify_issue(snapshot, applicable_criteria=applicable_criteria)
+        qualification = qualify_work(snapshot, applicable_criteria=applicable_criteria)
         details = _qualification_details(snapshot, qualification)
-        if qualification.readiness is IssueReadiness.READY:
+        if qualification.readiness is WorkReadiness.READY:
             self.runtime.complete_node(
                 run_id=dispatch.request.run_id,
                 node_id=dispatch.request.node_id,
                 epoch=epoch.epoch,
                 now=now,
+                extra=details,
+            )
+        elif qualification.readiness is WorkReadiness.REJECTED:
+            self.runtime.complete_node(
+                run_id=dispatch.request.run_id,
+                node_id=dispatch.request.node_id,
+                epoch=epoch.epoch,
+                now=now,
+                outcome="blocked",
                 extra=details,
             )
         else:
@@ -203,7 +210,7 @@ def _redacted_validation_report(
 
 
 def _qualification_details(
-    snapshot: WorkLedgerSnapshot, qualification: IssueQualification
+    snapshot: WorkLedgerSnapshot, qualification: WorkQualification
 ) -> dict[str, object]:
     return {
         "external_reference": str(snapshot.work_item.external_reference),

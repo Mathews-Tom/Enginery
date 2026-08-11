@@ -14,7 +14,7 @@ from enginery.domain.outcome import OutcomeKind
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import issue_to_pr_manifest
+from enginery.workflows.issue_to_pr import stage1_work_manifest
 
 _OPENED = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -138,7 +138,7 @@ def test_outcome_interventions_reports_a_recorded_human_decision(
     database = tmp_path / "ledger.db"
     ledger = LedgerService.open(database)
     runtime = CoordinatorRuntime(ledger, owner="cli-test")
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     request = FixtureDispatch(
         run_id="run-1",
         node_id="qualify",
@@ -194,7 +194,7 @@ def test_outcome_failures_reports_a_failed_node(
     database = tmp_path / "ledger.db"
     ledger = LedgerService.open(database)
     runtime = CoordinatorRuntime(ledger, owner="cli-test")
-    manifest = issue_to_pr_manifest()
+    manifest = stage1_work_manifest()
     request = FixtureDispatch(
         run_id="run-1",
         node_id="qualify",

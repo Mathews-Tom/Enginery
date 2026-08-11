@@ -11,7 +11,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.workflow.manifest import WorkflowManifest
 
 
-class IssueReadiness(enum.StrEnum):
+class WorkReadiness(enum.StrEnum):
     """Qualification outcomes before Stage 1 performs a mutation."""
 
     READY = "ready"
@@ -21,7 +21,7 @@ class IssueReadiness(enum.StrEnum):
 
 
 class Stage1TerminalState(enum.StrEnum):
-    """Closed outcomes of an issue-to-merge-ready run."""
+    """Closed outcomes of a qualified-work-to-merge-ready run."""
 
     MERGE_READY = "merge_ready"
     NO_CHANGE_REQUIRED = "no_change_required"
@@ -32,12 +32,12 @@ class Stage1TerminalState(enum.StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class IssueQualification:
-    """A source-bound intent decision for one normalized issue."""
+class WorkQualification:
+    """A source-bound intent decision for one normalized work item."""
 
     source_revision: str
     source_digest: str
-    readiness: IssueReadiness
+    readiness: WorkReadiness
     requires_human_review: bool
     reason: str
 
@@ -48,33 +48,41 @@ class IssueQualification:
             raise InvalidInputError("qualification requires a reason")
 
 
-def qualify_issue(
+def qualify_work(
     snapshot: WorkLedgerSnapshot, *, applicable_criteria: tuple[bool, ...]
-) -> IssueQualification:
-    """Classify issue intent without inferring applicability or risk approval."""
+) -> WorkQualification:
+    """Classify supported work without inferring applicability or risk approval."""
     work_item = snapshot.work_item
-    if work_item.work_kind is not WorkKind.ISSUE:
-        return _qualification(snapshot, IssueReadiness.REJECTED, "source is not an issue")
+    if work_item.work_kind not in {WorkKind.ISSUE, WorkKind.PLAN}:
+        return _qualification(
+            snapshot,
+            WorkReadiness.REJECTED,
+            f"Stage 1 does not support work kind {work_item.work_kind.value}",
+        )
     if len(applicable_criteria) != len(work_item.acceptance_criteria):
         raise InvalidInputError("applicability must align exactly with acceptance criteria")
     if not any(applicable_criteria):
         return _qualification(
             snapshot,
-            IssueReadiness.AWAITING_NO_CHANGE_CONFIRMATION,
+            WorkReadiness.AWAITING_NO_CHANGE_CONFIRMATION,
             "all acceptance criteria require human non-applicability confirmation",
         )
-    if work_item.risk_class in {RiskClass.MEDIUM, RiskClass.HIGH}:
+    if work_item.risk_class is RiskClass.HIGH:
         return _qualification(
             snapshot,
-            IssueReadiness.AWAITING_PLAN_APPROVAL,
-            "medium/high-risk issue requires human plan approval",
+            WorkReadiness.REJECTED,
+            "Stage 1 does not support high-risk work",
         )
-    return _qualification(
-        snapshot, IssueReadiness.READY, "issue has applicable acceptance criteria"
-    )
+    if work_item.risk_class is RiskClass.MEDIUM:
+        return _qualification(
+            snapshot,
+            WorkReadiness.AWAITING_PLAN_APPROVAL,
+            "medium-risk work requires human plan approval",
+        )
+    return _qualification(snapshot, WorkReadiness.READY, "work has applicable acceptance criteria")
 
 
-def issue_to_pr_manifest() -> WorkflowManifest:
+def stage1_work_manifest() -> WorkflowManifest:
     """Return the static Stage 1 graph executed under coordinator ownership."""
     nodes = {
         "qualify": _node("normalize_work", "deterministic"),
@@ -100,7 +108,7 @@ def issue_to_pr_manifest() -> WorkflowManifest:
     return WorkflowManifest.from_mapping(
         {
             "id": "issue-to-pr-v1",
-            "name": "issue-to-merge-ready-pull-request",
+            "name": "qualified-work-to-merge-ready-pull-request",
             "schema_version": 1,
             "nodes": nodes,
             "terminal_states": [state.value for state in Stage1TerminalState],
@@ -110,16 +118,16 @@ def issue_to_pr_manifest() -> WorkflowManifest:
 
 
 def _qualification(
-    snapshot: WorkLedgerSnapshot, readiness: IssueReadiness, reason: str
-) -> IssueQualification:
-    return IssueQualification(
+    snapshot: WorkLedgerSnapshot, readiness: WorkReadiness, reason: str
+) -> WorkQualification:
+    return WorkQualification(
         source_revision=snapshot.source_revision,
-        source_digest=str(snapshot.work_item.bound_field_digest),
+        source_digest=str(snapshot.bound_digest),
         readiness=readiness,
         requires_human_review=readiness
         in {
-            IssueReadiness.AWAITING_PLAN_APPROVAL,
-            IssueReadiness.AWAITING_NO_CHANGE_CONFIRMATION,
+            WorkReadiness.AWAITING_PLAN_APPROVAL,
+            WorkReadiness.AWAITING_NO_CHANGE_CONFIRMATION,
         },
         reason=reason,
     )
@@ -145,9 +153,9 @@ def _node(
 
 
 __all__ = [
-    "IssueQualification",
-    "IssueReadiness",
     "Stage1TerminalState",
-    "issue_to_pr_manifest",
-    "qualify_issue",
+    "WorkQualification",
+    "WorkReadiness",
+    "qualify_work",
+    "stage1_work_manifest",
 ]

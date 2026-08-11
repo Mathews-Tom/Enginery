@@ -25,6 +25,7 @@ from enginery.domain.errors import (
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
+    StaleEvidenceError,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
@@ -51,7 +52,7 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
-from enginery.workflows.issue_to_pr import IssueQualification
+from enginery.workflows.issue_to_pr import WorkQualification
 from enginery.workflows.pull_request import (
     PullRequestOutcome,
     PullRequestRequirements,
@@ -102,6 +103,8 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 run must bind its work-item identity")
         if self.run.work_item_snapshot_digest != self.work_snapshot.bound_digest:
             raise InvalidInputError("Stage 1 run must bind its source snapshot digest")
+        if self.run.repository != self.repository_id:
+            raise InvalidInputError("Stage 1 run repository must match the source-bound target")
         if self.repository_id not in self.work_snapshot.work_item.repository_targets:
             raise InvalidInputError("Stage 1 run repository is not an approved work-item target")
         if not self.repository_path.is_absolute() or not self.workspace_path.is_absolute():
@@ -141,16 +144,11 @@ class Stage1RunRequest:
 
     def _state(self) -> dict[str, object]:
         execution = self.execution_configuration
-        return {
+        state: dict[str, object] = {
             "run_id": str(self.run.id),
             "run": run_to_dict(self.run),
             "work_item": work_item_to_dict(self.work_snapshot.work_item),
             "source_revision": self.work_snapshot.source_revision,
-            "classification_provenance": (
-                None
-                if self.work_snapshot.classification_provenance is None
-                else self.work_snapshot.classification_provenance.to_state()
-            ),
             "manifest": workflow_manifest_to_dict(self.manifest),
             "repository_id": self.repository_id,
             "repository_path": str(self.repository_path),
@@ -183,6 +181,11 @@ class Stage1RunRequest:
                 "artifact_root": str(execution.artifact_root),
             },
         }
+        if self.work_snapshot.classification_provenance is not None:
+            state["classification_provenance"] = (
+                self.work_snapshot.classification_provenance.to_state()
+            )
+        return state
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,8 +478,22 @@ class Stage1RunService:
         applicable_criteria: tuple[bool, ...],
         now: datetime,
         heartbeat_window: timedelta,
-    ) -> IssueQualification:
-        """Persist intent, then source-bind and classify the issue through the runtime."""
+    ) -> WorkQualification:
+        """Verify the source binding before recording a durable qualification node."""
+        snapshot = self._require_work_ledger().fetch(external_reference)
+        if (
+            snapshot.source_revision != request.work_snapshot.source_revision
+            or snapshot.bound_digest != request.work_snapshot.bound_digest
+        ):
+            raise StaleEvidenceError(
+                "Stage 1 source snapshot no longer matches the run request",
+                details={
+                    "expected_revision": request.work_snapshot.source_revision,
+                    "observed_revision": snapshot.source_revision,
+                    "expected_digest": str(request.work_snapshot.bound_digest),
+                    "observed_digest": str(snapshot.bound_digest),
+                },
+            )
         self.start(request, now=now, heartbeat_window=heartbeat_window)
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
@@ -488,11 +505,9 @@ class Stage1RunService:
             ),
             request.manifest,
         )
-        return Stage1QualificationExecutor(
-            runtime=self.runtime, work_ledger=self._require_work_ledger()
-        ).qualify(
+        return Stage1QualificationExecutor(runtime=self.runtime).qualify(
             dispatch=dispatch,
-            external_reference=external_reference,
+            snapshot=snapshot,
             applicable_criteria=applicable_criteria,
             now=now,
             heartbeat_window=heartbeat_window,
