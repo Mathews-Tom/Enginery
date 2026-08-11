@@ -4,6 +4,24 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.5.0] - 2026-08-11
+
+Fifth public release. `v0.5.0` makes M24's measurable, fail-closed G4 evidence surface available to consumers. It adds no workflow stage.
+
+### Added
+
+- GitHub source snapshots bind exactly one declared `enginery/work-kind/{issue,plan}` label and one declared `enginery/risk/{low,medium}` label to the source revision and digest. Missing, unknown, duplicate, conflicting, or case-variant classifications reject before mutation.
+- Classified `issue` and `plan` work can enter Stage 1. Low-risk work follows the existing direct path; medium-risk work stops for human approval.
+- Gate G4 supports a schema-2 authority roster mapping durable principals to immutable GitHub numeric user IDs, with login names retained only as diagnostics.
+- `enginery gate record-g4-deficiency` records an immutable recurring-deficiency finding against eligible classified runs, and `enginery gate record-g4-deficiency-evidence` verifies its merged GitHub evidence pull request and exact-head approvals.
+- `enginery gate status --gate G4 --json` reports the enriched durable evidence state and remains fail-closed for every missing, stale, self-approved, unverifiable, or insufficient condition.
+
+### Not part of this release
+
+- This release adds no workflow stage. Stage 1, Stage 2, and Stage 3 remain the shipped workflow surface.
+- Gate G4 still requires real multi-repository, dual-human numeric-identity, intervention, outcome, and deficiency evidence before M14b/M15. This release does not create that evidence or report a G4 pass.
+- Stage 4 self-improvement, cohort/replay, candidate evaluation, canary, and promotion remain unimplemented and gate-deferred with no committed date.
+
 ## [0.4.0] - 2026-08-04
 
 Fourth public release. `v0.4.0` makes the already-merged operator surface available to consumers. It adds no workflow stage.
