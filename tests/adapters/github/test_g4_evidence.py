@@ -90,6 +90,35 @@ def test_verifier_rejects_stale_approval() -> None:
         )
 
 
+def test_verifier_rejects_unmerged_evidence_pull_request() -> None:
+    pull_request = _pull_request()
+    pull_request["merged"] = False
+
+    with pytest.raises(StaleEvidenceError, match="not merged"):
+        verify_g4_evidence_pull_request(
+            finding=_finding(),
+            principal_github_user_ids=_principals(),
+            pull_request=pull_request,
+            reviews=_reviews(),
+            verified_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
+def test_verifier_rejects_duplicate_approvals_from_one_principal() -> None:
+    reviews = [
+        {"user": {"id": 101, "login": "approver-one"}, "state": "APPROVED", "commit_id": _HEAD},
+        {"user": {"id": 101, "login": "approver-one"}, "state": "APPROVED", "commit_id": _HEAD},
+    ]
+
+    with pytest.raises(StaleEvidenceError, match="two distinct current"):
+        verify_g4_evidence_pull_request(
+            finding=_finding(),
+            principal_github_user_ids=_principals(),
+            pull_request=_pull_request(),
+            reviews=reviews,
+            verified_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
 def test_verifier_rejects_document_digest_mismatch() -> None:
     pull_request = _pull_request()
     pull_request["body"] = "different evidence"
