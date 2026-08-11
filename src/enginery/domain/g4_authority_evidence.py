@@ -18,7 +18,10 @@ class G4AuthorityEvidence:
     pull_request_number: int
     merged_head_revision: str
     document_digest: Digest
+    producer_github_user_id: int
+    evidence_pull_request_author_github_user_id: int
     approver_principal_ids: tuple[str, str]
+    approver_github_user_ids: tuple[int, int]
     verified_at: datetime
 
     def __post_init__(self) -> None:
@@ -30,6 +33,18 @@ class G4AuthorityEvidence:
             not principal_id.strip() for principal_id in self.approver_principal_ids
         ):
             raise InvalidInputError("G4 authority evidence requires two distinct approvers")
+        github_user_ids = (
+            self.producer_github_user_id,
+            self.evidence_pull_request_author_github_user_id,
+            *self.approver_github_user_ids,
+        )
+        if any(
+            isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1
+            for user_id in github_user_ids
+        ):
+            raise InvalidInputError("G4 authority evidence requires positive GitHub user IDs")
+        if len(set(github_user_ids)) != len(github_user_ids):
+            raise InvalidInputError("G4 authority evidence requires distinct GitHub identities")
 
     def to_state(self) -> dict[str, object]:
         return {
@@ -37,7 +52,12 @@ class G4AuthorityEvidence:
             "pull_request_number": self.pull_request_number,
             "merged_head_revision": self.merged_head_revision,
             "document_digest": str(self.document_digest),
+            "producer_github_user_id": self.producer_github_user_id,
+            "evidence_pull_request_author_github_user_id": (
+                self.evidence_pull_request_author_github_user_id
+            ),
             "approver_principal_ids": list(self.approver_principal_ids),
+            "approver_github_user_ids": list(self.approver_github_user_ids),
             "verified_at": self.verified_at.isoformat(),
         }
 
@@ -49,6 +69,7 @@ def g4_authority_evidence_from_state(state: Mapping[str, object]) -> G4Authority
     merged_head_revision = _string(state, "merged_head_revision")
     document_digest = _digest(state, "document_digest")
     approver_values = state.get("approver_principal_ids")
+    approver_user_values = state.get("approver_github_user_ids")
     if (
         not isinstance(approver_values, list)
         or len(approver_values) != 2
@@ -57,13 +78,28 @@ def g4_authority_evidence_from_state(state: Mapping[str, object]) -> G4Authority
         raise InvalidInputError(
             "G4 authority evidence approver_principal_ids must contain two non-blank strings"
         )
+    if (
+        not isinstance(approver_user_values, list)
+        or len(approver_user_values) != 2
+        or not all(_is_positive_int(value) for value in approver_user_values)
+    ):
+        raise InvalidInputError(
+            "G4 authority evidence approver_github_user_ids must contain two positive integers"
+        )
+    producer_github_user_id = _positive_int(state, "producer_github_user_id")
+    evidence_pull_request_author_github_user_id = _positive_int(
+        state, "evidence_pull_request_author_github_user_id"
+    )
     verified_at = _datetime(state, "verified_at")
     return G4AuthorityEvidence(
         finding_id=finding_id,
         pull_request_number=pull_request_number,
         merged_head_revision=merged_head_revision,
         document_digest=document_digest,
+        producer_github_user_id=producer_github_user_id,
+        evidence_pull_request_author_github_user_id=(evidence_pull_request_author_github_user_id),
         approver_principal_ids=(approver_values[0], approver_values[1]),
+        approver_github_user_ids=(approver_user_values[0], approver_user_values[1]),
         verified_at=verified_at,
     )
 
@@ -80,6 +116,10 @@ def _positive_int(state: Mapping[str, object], field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise InvalidInputError(f"G4 authority evidence {field_name} must be a positive integer")
     return value
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _digest(state: Mapping[str, object], field_name: str) -> Digest:

@@ -1046,7 +1046,7 @@ def verify_g4_evidence_pull_request(
             _required_string(record, "commit_id"),
         )
     approvers = tuple(
-        principal_id
+        (principal_id, github_user_id)
         for principal_id, github_user_id in principal_github_user_ids.items()
         if (
             _is_github_user_id(github_user_id)
@@ -1064,7 +1064,10 @@ def verify_g4_evidence_pull_request(
         pull_request_number=finding.evidence_pull_request_number,
         merged_head_revision=head_revision,
         document_digest=finding.evidence_document_digest,
-        approver_principal_ids=(approvers[0], approvers[1]),
+        producer_github_user_id=producer_user_id,
+        evidence_pull_request_author_github_user_id=author_user_id,
+        approver_principal_ids=(approvers[0][0], approvers[1][0]),
+        approver_github_user_ids=(approvers[0][1], approvers[1][1]),
         verified_at=verified_at,
     )
 

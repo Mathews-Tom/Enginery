@@ -8,7 +8,7 @@ from enginery.ledger.service import LedgerService
 
 G4_AUTHORITY_EVIDENCE_AGGREGATE_TYPE = "g4_authority_evidence"
 G4_AUTHORITY_EVIDENCE_EVENT_TYPE = "g4_authority_evidence_recorded"
-G4_AUTHORITY_EVIDENCE_SCHEMA_VERSION = 1
+G4_AUTHORITY_EVIDENCE_SCHEMA_VERSION = 2
 
 
 def record_g4_authority_evidence(

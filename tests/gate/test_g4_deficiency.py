@@ -43,7 +43,10 @@ def _authority_evidence() -> G4AuthorityEvidence:
         pull_request_number=finding.evidence_pull_request_number,
         merged_head_revision="a" * 40,
         document_digest=finding.evidence_document_digest,
+        producer_github_user_id=100,
+        evidence_pull_request_author_github_user_id=99,
         approver_principal_ids=("approver-one", "approver-two"),
+        approver_github_user_ids=(101, 102),
         verified_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
 def test_local_deficiency_record_never_passes_dual_authority_condition() -> None:
@@ -81,6 +84,44 @@ def test_verified_current_authority_evidence_passes_deficiency_condition() -> No
                 ("approver-one", "approver-one-login"),
                 ("approver-two", "approver-two-login"),
             ),
+            github_user_id_by_principal_id=(
+                ("operator-a", 100),
+                ("approver-one", 101),
+                ("approver-two", 102),
+            ),
+        ),
+        inputs=G4Inputs(
+            completed_run_count=2,
+            completed_workflow_type_count=2,
+            completed_risk_class_count=2,
+            intervention_with_reason_count=0,
+            completeness=CompletenessReport(1, 0, 0, 0, 1.0),
+            repository_count=2,
+            eligible_classified_completed_run_ids=("run-1", "run-2"),
+            deficiency_findings=(_finding(),),
+            authority_evidence=(_authority_evidence(),),
+        ),
+    )
+    condition = next(
+        item for item in report.conditions if item.id == "recurring_evidence_backed_deficiency"
+    )
+    assert condition.status is ConditionStatus.PASS
+    assert condition.metrics["authority_verified_finding_count"] == 1
+
+
+def test_authority_evidence_fails_when_a_principal_id_is_remapped() -> None:
+    report = evaluate_g4(
+        floor=GateFloorConfig(
+            schema_version=2,
+            registered_principal_ids=("operator-a", "approver-one", "approver-two"),
+            completed_run_volume_floor=None,
+            intervention_volume_floor=None,
+            outcome_completeness_floor=None,
+            github_user_id_by_principal_id=(
+                ("operator-a", 100),
+                ("approver-one", 1101),
+                ("approver-two", 102),
+            ),
         ),
         inputs=G4Inputs(
             completed_run_count=2,
@@ -98,5 +139,4 @@ def test_verified_current_authority_evidence_passes_deficiency_condition() -> No
     condition = next(
         item for item in report.conditions if item.id == "recurring_evidence_backed_deficiency"
     )
-    assert condition.status is ConditionStatus.PASS
-    assert condition.metrics["authority_verified_finding_count"] == 1
+    assert condition.status is ConditionStatus.UNMEASURED

@@ -76,6 +76,9 @@ def test_verifier_requires_exact_merged_head_approvals() -> None:
     )
 
     assert evidence.approver_principal_ids == ("one", "two")
+    assert evidence.producer_github_user_id == 100
+    assert evidence.evidence_pull_request_author_github_user_id == 99
+    assert evidence.approver_github_user_ids == (101, 102)
     assert evidence.merged_head_revision == _HEAD
 
 

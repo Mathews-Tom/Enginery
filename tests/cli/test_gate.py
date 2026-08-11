@@ -152,6 +152,9 @@ def test_gate_records_verified_g4_authority_evidence(
         merged_head_revision="a" * 40,
         document_digest=finding.evidence_document_digest,
         approver_principal_ids=("approver-one", "approver-two"),
+        producer_github_user_id=100,
+        evidence_pull_request_author_github_user_id=99,
+        approver_github_user_ids=(101, 102),
         verified_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
 

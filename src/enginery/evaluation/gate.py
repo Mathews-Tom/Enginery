@@ -257,14 +257,23 @@ def _recurring_workflow_deficiency(floor: GateFloorConfig, inputs: G4Inputs) -> 
 def _matches_authority_evidence(
     finding: G4DeficiencyFinding, evidence: G4AuthorityEvidence, floor: GateFloorConfig
 ) -> bool:
-    configured_principals = set(floor.registered_principal_ids)
+    github_user_ids_by_principal_id = dict(floor.github_user_id_by_principal_id)
+    configured_principals = set(github_user_ids_by_principal_id)
+    evidence_principal_ids = evidence.approver_principal_ids
     return (
         evidence.finding_id == finding.finding_id
         and evidence.pull_request_number == finding.evidence_pull_request_number
         and evidence.document_digest == finding.evidence_document_digest
+        and github_user_ids_by_principal_id.get(finding.producer_principal_id)
+        == evidence.producer_github_user_id
+        and tuple(
+            github_user_ids_by_principal_id.get(principal_id)
+            for principal_id in evidence_principal_ids
+        )
+        == evidence.approver_github_user_ids
         and finding.producer_principal_id in configured_principals
-        and set(evidence.approver_principal_ids) <= configured_principals
-        and finding.producer_principal_id not in evidence.approver_principal_ids
+        and set(evidence_principal_ids) <= configured_principals
+        and finding.producer_principal_id not in evidence_principal_ids
     )
 
 
