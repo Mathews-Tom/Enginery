@@ -612,7 +612,7 @@ Release rules:
 
 ### Repository hygiene
 
-- `.docs/` (this planning directory) is globally gitignored and must never be committed to the implementation repository.
+- `.docs/` (this planning directory) is globally gitignored and must never be committed to the implementation repository, except for the three immutable M24 reconciliation records required to review this authority correction. No other `.docs/` artifact may be committed.
 - Implementation code, docstrings, comments, and tracked documentation (`README.md`, `CONTRIBUTING.md`, `docs/`, source files) must never reference `.docs/` files by path, filename, or section number (for example `03_SYSTEM_DESIGN.md §9.5`). Cite design rationale in prose instead of pointing at an untracked source.
 - `docs/` (tracked, published product documentation) is the only design reference tracked files may cite by path.
 - Every milestone in §5 and every corresponding `/goal` block in `EXECUTION_PROMPTS.md` inherits this rule; it applies regardless of milestone.
