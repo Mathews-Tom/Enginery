@@ -155,19 +155,19 @@ Only low-risk `issue` and `plan` work is eligible for direct Stage 1 implementat
 
 #### Register current authority principals
 
-Use the schema-2 `registered_principals.identities` list in the G4 floor configuration. Each row maps one stable principal ID to one GitHub login:
+Use the schema-2 `registered_principals.identities` list in the G4 floor configuration. Each row binds one stable principal ID to one immutable GitHub numeric user ID. A login is retained only as a human-readable diagnostic:
 
 ```toml
 schema_version = 2
 
 [registered_principals]
 identities = [
-  { id = "operator-a", github_login = "operator-a-login" },
-  { id = "operator-b", github_login = "operator-b-login" },
+  { id = "operator-a", github_user_id = 101, github_login = "operator-a-login" },
+  { id = "operator-b", github_user_id = 102, github_login = "operator-b-login" },
 ]
 ```
 
-Principal IDs and GitHub logins must be unique; GitHub logins compare case-insensitively. Schema-1 `registered_principals.ids` configuration is deliberately unsupported. Migrate it by replacing each opaque ID with a verified GitHub identity. Do not change the roster to reinterpret a recorded authority decision.
+Principal IDs and GitHub numeric user IDs must be unique. GitHub logins are also unique case-insensitively, but are never used to authenticate authority. Schema-1 `registered_principals.ids` configuration and any schema-2 row without `github_user_id` are deliberately unsupported. Migrate each opaque ID to a verified GitHub numeric identity; preserve the login only for diagnostics. Do not change the roster to reinterpret a recorded authority decision.
 
 #### Record a recurring-deficiency evidence PR
 
@@ -189,7 +189,7 @@ uv run enginery gate record-g4-deficiency \
 
 The digest uses the exact UTF-8 evidence-PR body, not a filename or local draft.
 
-Open and merge an evidence PR whose body has exactly the recorded digest. Its author must not be the finding producer. Two distinct configured humans, neither the author nor producer, must have their current review state `APPROVED` on the exact merged PR head. Re-review after a push; a stale approval is not sufficient.
+Open and merge an evidence PR whose body has exactly the recorded digest. Its author must not be the finding producer. Two distinct configured humans, neither the author nor producer, must have their current review state `APPROVED` on the exact merged PR head. The verifier binds the PR author and every reviewer to GitHub's numeric `user.id`, not their mutable login; re-review after a push because a stale approval is insufficient.
 
 Run the live verifier only after the PR is merged:
 
@@ -203,7 +203,7 @@ uv run enginery gate record-g4-deficiency-evidence \
   --json
 ```
 
-The command reads the GitHub pull request and every review page. GitHub authentication, API, malformed-payload, unmerged-PR, document-digest, stale-head, author/producer, and approver failures stop the command without recording authority evidence. A successful record is immutable; use a new deficiency finding when any cited evidence changes.
+The command reads the GitHub pull request and every review page. GitHub authentication, API, malformed-payload, missing or non-numeric `user.id`, unmerged-PR, document-digest, stale-head, author/producer, and approver failures stop the command without recording authority evidence. A successful record is immutable; use a new deficiency finding when any cited evidence changes.
 
 #### Inspect status
 
