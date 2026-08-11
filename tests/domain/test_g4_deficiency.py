@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 
 import pytest
 
-from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
 
@@ -15,7 +14,6 @@ def _finding(*, cited_run_ids: tuple[str, ...] = ("run-1", "run-2")) -> G4Defici
         deficiency="Validation command fails after generated dependency update.",
         cited_run_ids=cited_run_ids,
         evidence_pull_request_number=42,
-        evidence_document_digest=Digest.of_bytes(b"evidence"),
         producer_principal_id="operator-a",
         evidence_pull_request_author_login="author-a",
         recorded_at=datetime(2026, 8, 10, tzinfo=UTC),
