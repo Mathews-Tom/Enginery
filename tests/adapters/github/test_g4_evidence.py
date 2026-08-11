@@ -12,7 +12,6 @@ from enginery.adapters.github import (
     GitHubWorkLedger,
     verify_g4_evidence_pull_request,
 )
-from enginery.domain.digests import Digest
 from enginery.domain.errors import (
     InvalidInputError,
     StaleEvidenceError,
@@ -20,7 +19,6 @@ from enginery.domain.errors import (
 )
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
 
-_BODY = "# Recurring validation failure\n"
 _HEAD = "a" * 40
 
 
@@ -30,11 +28,13 @@ def _finding() -> G4DeficiencyFinding:
         deficiency="Validation command fails after generated dependency update.",
         cited_run_ids=("run-1", "run-2"),
         evidence_pull_request_number=42,
-        evidence_document_digest=Digest.of_bytes(_BODY.encode()),
         producer_principal_id="producer",
         evidence_pull_request_author_login="evidence-author",
         recorded_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
+
+
+_BODY = _finding().evidence_document
 
 
 def _pull_request() -> dict[str, object]:

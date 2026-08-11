@@ -204,7 +204,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cited-run-id", dest="cited_run_ids", action="append", required=True
     )
     gate_finding_parser.add_argument("--evidence-pull-request-number", required=True, type=int)
-    gate_finding_parser.add_argument("--evidence-document-digest", required=True)
     gate_finding_parser.add_argument("--producer-principal-id", required=True)
     gate_finding_parser.add_argument("--evidence-pull-request-author-login", required=True)
     gate_finding_parser.add_argument("--correlation-id", required=True)

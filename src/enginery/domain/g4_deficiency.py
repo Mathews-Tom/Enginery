@@ -77,22 +77,19 @@ def g4_deficiency_finding_from_state(state: Mapping[str, object]) -> G4Deficienc
         isinstance(run_id, str) and run_id.strip() for run_id in cited_run_ids
     ):
         raise InvalidInputError("G4 deficiency cited_run_ids must be a list of non-blank strings")
-    digest_value = _string(state, "evidence_document_digest")
-    algorithm, separator, hex_value = digest_value.partition(":")
-    if not separator:
-        raise InvalidInputError(
-            "G4 deficiency evidence_document_digest must use algorithm:hex form"
-        )
-    return G4DeficiencyFinding(
+    recorded_digest = _string(state, "evidence_document_digest")
+    finding = G4DeficiencyFinding(
         finding_id=_string(state, "finding_id"),
         deficiency=_string(state, "deficiency"),
         cited_run_ids=tuple(cited_run_ids),
         evidence_pull_request_number=_positive_int(state, "evidence_pull_request_number"),
-        evidence_document_digest=Digest(algorithm=algorithm, hex_value=hex_value),
         producer_principal_id=_string(state, "producer_principal_id"),
         evidence_pull_request_author_login=_string(state, "evidence_pull_request_author_login"),
         recorded_at=_datetime(state, "recorded_at"),
     )
+    if str(finding.evidence_document_digest) != recorded_digest:
+        raise InvalidInputError("G4 deficiency evidence document digest does not match finding")
+    return finding
 
 
 def _string(state: Mapping[str, object], field_name: str) -> str:

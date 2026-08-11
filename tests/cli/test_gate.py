@@ -12,7 +12,6 @@ import pytest
 import enginery.cli.gate as gate_cli
 from enginery.adapters.github import GitHubWorkLedger
 from enginery.cli.main import main
-from enginery.domain.digests import Digest
 from enginery.domain.g4_authority_evidence import G4AuthorityEvidence
 from enginery.domain.g4_deficiency import G4DeficiencyFinding
 from enginery.domain.observation import ObservationState
@@ -135,7 +134,6 @@ def test_gate_records_verified_g4_authority_evidence(
         deficiency="Validation command fails after generated dependency update.",
         cited_run_ids=("run-1", "run-2"),
         evidence_pull_request_number=42,
-        evidence_document_digest=Digest.of_bytes(b"evidence"),
         producer_principal_id="producer",
         evidence_pull_request_author_login="evidence-author",
         recorded_at=datetime(2026, 8, 10, tzinfo=UTC),
@@ -240,8 +238,6 @@ def test_gate_rejects_deficiency_finding_without_eligible_classified_runs(
             "run-2",
             "--evidence-pull-request-number",
             "42",
-            "--evidence-document-digest",
-            str(Digest.of_bytes(b"evidence")),
             "--producer-principal-id",
             "producer",
             "--evidence-pull-request-author-login",
@@ -290,10 +286,7 @@ def test_g4_inputs_excludes_unclassified_runs_from_every_quantitative_measure(
             del ledger
 
         def list_observations(self) -> tuple[SimpleNamespace, ...]:
-            return (
-                SimpleNamespace(run_id="classified-run", state=ObservationState.CAPTURED),
-                SimpleNamespace(run_id="legacy-run", state=ObservationState.INDETERMINATE),
-            )
+            return (SimpleNamespace(run_id="legacy-run", state=ObservationState.CAPTURED),)
 
     monkeypatch.setattr(
         gate_cli,
@@ -317,6 +310,6 @@ def test_g4_inputs_excludes_unclassified_runs_from_every_quantitative_measure(
     assert inputs.completed_risk_class_count == 1
     assert inputs.repository_count == 1
     assert inputs.intervention_with_reason_count == 1
-    assert inputs.completeness.captured == 1
-    assert inputs.completeness.indeterminate == 0
+    assert inputs.completeness.captured == 0
+    assert inputs.completeness.indeterminate == 1
     assert inputs.eligible_classified_completed_run_ids == ("classified-run",)

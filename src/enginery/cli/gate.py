@@ -24,7 +24,6 @@ from datetime import UTC, datetime
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
-from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.g4_authority_evidence import (
     G4AuthorityEvidence,
@@ -38,6 +37,7 @@ from enginery.engine.runtime import RUN_AGGREGATE_TYPE, RUNTIME_NODE_AGGREGATE_T
 from enginery.evaluation.gate import G4Inputs, GateReport, evaluate_g4
 from enginery.evaluation.gate_floor import load_gate_floor_config
 from enginery.evaluation.outcomes import (
+    CompletenessReport,
     OutcomeCaptureService,
     compute_completeness,
 )
@@ -98,7 +98,6 @@ def _record_g4_deficiency(args: argparse.Namespace) -> int:
         deficiency=args.deficiency,
         cited_run_ids=tuple(args.cited_run_ids),
         evidence_pull_request_number=args.evidence_pull_request_number,
-        evidence_document_digest=_digest(args.evidence_document_digest),
         producer_principal_id=args.producer_principal_id,
         evidence_pull_request_author_login=args.evidence_pull_request_author_login,
         recorded_at=datetime.now(tz=UTC),
@@ -166,14 +165,24 @@ def _g4_inputs(ledger: LedgerService) -> G4Inputs:
     classified_run_ids = frozenset(str(request.run.id) for request in classified_completed)
     interventions = list_all_interventions(ledger, aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE)
     outcome_service = OutcomeCaptureService(ledger=ledger)
-    completeness = compute_completeness(
-        (
-            observation
-            for observation in outcome_service.list_observations()
-            if str(observation.run_id) in classified_run_ids
-        ),
-        reference_time=datetime.now(tz=UTC),
+    observations = tuple(
+        observation
+        for observation in outcome_service.list_observations()
+        if str(observation.run_id) in classified_run_ids
     )
+    completeness = compute_completeness(observations, reference_time=datetime.now(tz=UTC))
+    missing_observation_count = len(
+        classified_run_ids - {str(observation.run_id) for observation in observations}
+    )
+    if missing_observation_count:
+        indeterminate = completeness.indeterminate + missing_observation_count
+        completeness = CompletenessReport(
+            derivation_version=completeness.derivation_version,
+            captured=completeness.captured,
+            indeterminate=indeterminate,
+            pending=completeness.pending,
+            completeness=completeness.captured / (completeness.captured + indeterminate),
+        )
     return G4Inputs(
         completed_run_count=len(classified_completed),
         completed_workflow_type_count=len(
@@ -221,13 +230,6 @@ def _print_authority_evidence(evidence: G4AuthorityEvidence, *, as_json: bool) -
         "recorded G4 authority evidence for "
         f"{serialized['finding_id']} from pull request #{serialized['pull_request_number']}"
     )
-
-
-def _digest(value: str) -> Digest:
-    algorithm, separator, hex_value = value.partition(":")
-    if not separator:
-        raise InvalidInputError("G4 evidence document digest must use algorithm:hex form")
-    return Digest(algorithm=algorithm, hex_value=hex_value)
 
 
 def _print_record(state: dict[str, object], *, as_json: bool) -> None:
