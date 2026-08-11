@@ -49,6 +49,8 @@ def _authority_evidence() -> G4AuthorityEvidence:
         approver_github_user_ids=(101, 102),
         verified_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
+
+
 def test_local_deficiency_record_never_passes_dual_authority_condition() -> None:
     report = evaluate_g4(
         floor=GateFloorConfig(1, (), None, None, None),
