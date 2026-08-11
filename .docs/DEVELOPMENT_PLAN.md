@@ -404,7 +404,7 @@ Release rules:
 
 | Field | Value |
 |---|---|
-| Status | **Blocked by gate G4 (§8). Retained on the roadmap; must not start — including detailed design — before the gate passes.** |
+| Status | **Blocked by gate G4 (§8). Its verified classified cohort must include two registered human `AuthorityPrincipal`s mapped to immutable GitHub numeric user IDs; do not start — including detailed design — before the gate passes.** |
 | Objective | Turn the accumulated raw observation corpus into comparable cohorts and a replay environment suitable for baseline-versus-candidate evaluation. |
 | In / Out of scope | In: comparable cohort schema; fixed/independent cohort registry; replay/shadow provider set with side effects disabled; deterministic comparison; CLI compare. Out: candidate generation, promotion, canary control (M15). |
 | Depends on | M14a, M24, gate G4, and M12/M13 evidence corpora as gate inputs |
@@ -419,7 +419,7 @@ Release rules:
 
 | Field | Value |
 |---|---|
-| Status | **Blocked by gate G4 (§8). Also requires at least two registered human principals — canary and promotion approval are dual-human separations a single operator cannot satisfy (`docs/design.md` §8, §12.4).** |
+| Status | **Blocked by gate G4 (§8). Also requires at least two registered human principals mapped to immutable GitHub numeric user IDs — canary and promotion approval are dual-human separations a single operator cannot satisfy (`docs/design.md` §8, §12.4).** |
 | Objective | Complete Stage 4: propose a versioned factory change, evaluate it against independent held-out cases, reject gaming, require separate human canary/promotion decisions, and promote, retain, or roll back safely. |
 | In / Out of scope | In: `FactoryChange` lifecycle; evidence-backed hypothesis; candidate lock; independent held-out selection; baseline/candidate replay; hard constraints; anti-gaming family; factory-change PR; canary bounds; non-production/baseline-authoritative shadow; retained state; promotion/rollback; historical immutability. Out: online mutation, self-approval, production-authoritative gate changes. |
 | Depends on | M14b, M10, M4; gate G4 |
