@@ -1589,3 +1589,26 @@ M24b, M14b, and M15 remain otherwise unchanged and blocked by their existing gat
 ### Downstream impact and authorization
 
 M24 product work may resume from `origin/main` under the reconciled five-PR stack. M24b remains the sole `v0.5.0` publication unit and M14b/M15 remain blocked until a persistent G4 report passes using genuine post-M24 operational evidence. This authorization does not assert G4 passage, create a human principal, or manufacture a classified cohort, intervention, outcome, or deficiency.
+
+## M24b — Release-tool documentation-scope reconciliation
+
+**Timestamp:** `2026-08-11T09:25:00Z`  
+**Decision:** `REPLAN REQUIRED — PLAN REVISION: M24b-R1`  
+**Trigger:** The M24b release-preparation gate inspected the merged release gate before version metadata changed and found an implementation-code path exception for planning artifacts.
+
+### Evidence inspected
+
+- `origin/main` is clean at `c866de7ecffc7dc029aed645501ceff24541d939`; M24 PRs #157, #166, #164, #165, and #161 plus procedure correction #167 are merged with successful macOS and Ubuntu CI.
+- The published `v0.4.0` GitHub Release is non-draft and non-prerelease with matching wheel/sdist assets; PyPI serves `enginery==0.4.0` with the same hashes.
+- The `0.5.0` release-gate invocation accepts the requested command and fails only because the canonical metadata remains `0.4.0`, as required before preparation.
+- The currency gate introduced in reconciliation commit `2240085dd5132775eaa5704a757a54a33cb8e2f7` hard-codes planning-artifact paths in code and comments. That conflicts with the M24b prohibition on implementation-code, comment, docstring, and tracked-documentation references to those paths.
+- The merged G4 CLI commands are `gate status --gate G4 --json`, `gate record-g4-deficiency`, and `gate record-g4-deficiency-evidence`; the schema-2 authority configuration binds principals to numeric GitHub user IDs. The operator procedure preserves the classified label vocabulary, medium-risk human approval, fail-closed G4 result, and M14b/M15 deferral.
+
+### Plan and prompt change
+
+- M24b-R1 adds the conditional docs-only reconciliation prerequisite and permits a narrowly scoped release-tool correction plus regression coverage in PR-1 before version metadata changes.
+- M24b verification now requires public-documentation selection without planning-artifact path exceptions. The release target, M24-only train scope, command names, numeric identity migration, fixture requirement, consumer smoke, and M14b/M15 gate deferral are unchanged.
+
+### Downstream impact and implementation authorization
+
+M14b and M15 remain unchanged and blocked by a persistent G4 pass backed by genuine multi-repository, dual-human, intervention, outcome, and deficiency evidence. This entry authorizes only `docs(plan): reconcile M24b design`. No release-preparation code or release documentation may begin until that docs-only prerequisite is reviewed, green, and externally merged. After merge, repeat the M24b design gate and require `DESIGN GO — PLAN REVISION: none` before implementation.
