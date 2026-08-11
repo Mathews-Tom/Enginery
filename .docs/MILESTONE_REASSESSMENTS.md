@@ -1677,3 +1677,24 @@ None. M24b-R2 already reconciled the sole remaining material mismatch.
 ### Downstream impact and implementation authorization
 
 Release-preparation implementation may begin from `b426c0aec10b80bbb034d581b868de8454fc15c6` under the revised four-PR stack. This decision authorizes no product behavior beyond the release-only work described in M24b, creates no operational evidence, and preserves G4's fail-closed state and M14b/M15 block.
+
+## M24b — Independently-green PR-order reconciliation
+
+**Timestamp:** `2026-08-11T09:44:00Z`  
+**Decision:** `REPLAN REQUIRED — PLAN REVISION: M24b-R3`  
+**Trigger:** The first authorized PR-1 dry run updated canonical metadata and demonstrated that the full quality suite correctly rejects stale current public version declarations.
+
+### Evidence inspected
+
+- After only `pyproject.toml` changed from `0.4.0` to `0.5.0`, the real current-documentation test failed at the README and two operator-documentation declarations. This is correct fail-closed behavior.
+- Separating metadata from documentation therefore makes PR-1 impossible to green under the required full quality gate, even though deferring a passing release gate to PR-2 was already explicit.
+- The safe topology keeps PR-1 as the release-tool correction only and moves canonical metadata, changelog, dependency manifest, and current public documentation into PR-2, where they become one coherent, independently green consumer contract.
+
+### Plan and prompt change
+
+- M24b-R3 replaces the incompatible metadata-first PR-1 with a correction-only PR-1.
+- M24b-R3 makes PR-2 the canonical metadata and documentation synchronization PR, preserving four release-preparation PRs and all M24-only scope limits.
+
+### Downstream impact and implementation authorization
+
+This material correction authorizes only `docs(plan): reconcile M24b PR order`. No release-preparation code or release documentation may proceed until that docs-only prerequisite is reviewed, green, and externally merged. Repeat the design gate after merge and require `DESIGN GO — PLAN REVISION: none`. M14b and M15 remain blocked by genuine persistent G4 evidence.
