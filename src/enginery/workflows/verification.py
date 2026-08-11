@@ -127,7 +127,7 @@ def _matches_request(
 ) -> bool:
     return (
         issue.source_revision == request.issue_revision
-        and str(issue.work_item.bound_field_digest) == request.issue_digest
+        and str(issue.bound_digest) == request.issue_digest
         and base_revision == request.base_revision
     )
 

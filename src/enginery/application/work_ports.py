@@ -17,15 +17,81 @@ from enginery.domain.work_item import WorkItem
 
 
 @dataclass(frozen=True, slots=True)
+class DeclaredWorkClassification:
+    """Source-provided declared classification bound to one work snapshot."""
+
+    source_provider: str
+    source_url: str
+    canonical_labels: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.source_provider.strip() or not self.source_url.strip():
+            raise ValueError("classification provenance requires a provider and source URL")
+        if (
+            not self.canonical_labels
+            or any(not label.strip() for label in self.canonical_labels)
+            or len(set(self.canonical_labels)) != len(self.canonical_labels)
+        ):
+            raise ValueError("classification provenance requires unique non-blank labels")
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "source_provider": self.source_provider,
+            "source_url": self.source_url,
+            "canonical_labels": list(self.canonical_labels),
+        }
+
+    @property
+    def digest(self) -> Digest:
+        return Digest.of_json(self.to_state())
+
+
+@dataclass(frozen=True, slots=True)
 class WorkLedgerSnapshot:
     """A provider-neutral source snapshot already normalized into a work item."""
 
     work_item: WorkItem
     source_revision: str
+    classification_provenance: DeclaredWorkClassification | None = None
 
     def __post_init__(self) -> None:
         if not self.source_revision.strip():
             raise ValueError("work ledger source_revision must be non-blank")
+        provenance = self.classification_provenance
+        if provenance is None:
+            return
+        if (
+            provenance.source_provider != self.work_item.source_provider
+            or provenance.source_url != self.work_item.source_snapshot_reference
+        ):
+            raise ValueError("classification provenance must bind the work item's source")
+        if provenance.source_provider == "github-issues":
+            expected_labels = (
+                f"enginery/work-kind/{self.work_item.work_kind.value}",
+                f"enginery/risk/{self.work_item.risk_class.value}",
+            )
+            if provenance.canonical_labels != expected_labels:
+                raise ValueError(
+                    "GitHub classification provenance must exactly match the work item"
+                )
+
+    @property
+    def bound_digest(self) -> Digest:
+        """Digest the complete source-bound snapshot used by new classified runs.
+
+        Legacy snapshots retain the established work-item digest so their stored
+        requests remain decodable. They deliberately have no classification
+        provenance and are excluded from classified cohorts by the gate layer.
+        """
+        if self.classification_provenance is None:
+            return self.work_item.bound_field_digest
+        return Digest.of_json(
+            {
+                "work_item_digest": str(self.work_item.bound_field_digest),
+                "source_revision": self.source_revision,
+                "classification_digest": str(self.classification_provenance.digest),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)

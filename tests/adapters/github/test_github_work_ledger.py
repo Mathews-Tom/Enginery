@@ -13,6 +13,7 @@ from enginery.domain.errors import (
     ExternalConflictError,
     InvalidInputError,
     RateLimitError,
+    StaleEvidenceError,
 )
 from enginery.domain.ids import OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -59,8 +60,25 @@ def _issue(*, body: str | None = "Add provider smoke coverage") -> dict[str, obj
     }
 
 
+def _labels(
+    work_kind: str = "enginery/work-kind/issue",
+    risk: str = "enginery/risk/low",
+) -> list[dict[str, str]]:
+    return [{"name": work_kind}, {"name": risk}]
+
+
+def _fetch_responses(
+    *,
+    issue: dict[str, object] | None = None,
+    labels: list[dict[str, str]] | None = None,
+) -> list[object]:
+    issue_payload = issue if issue is not None else _issue()
+    label_payload = labels if labels is not None else _labels()
+    return [issue_payload, label_payload, issue_payload, label_payload]
+
+
 def test_fetch_normalizes_a_revisioned_github_issue() -> None:
-    responses: list[object] = [_issue()]
+    responses = _fetch_responses()
     calls: list[tuple[str, ...]] = []
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 
@@ -69,12 +87,20 @@ def test_fetch_normalizes_a_revisioned_github_issue() -> None:
     assert snapshot.work_item.external_reference == "Mathews-Tom/enginery-provider-smoke#7"
     assert snapshot.work_item.objective == "Add provider smoke coverage"
     assert snapshot.work_item.acceptance_criteria == ("Add provider smoke coverage",)
+    assert snapshot.work_item.work_kind.value == "issue"
+    assert snapshot.work_item.risk_class.value == "low"
+    assert snapshot.classification_provenance is not None
+    assert snapshot.classification_provenance.canonical_labels == (
+        "enginery/work-kind/issue",
+        "enginery/risk/low",
+    )
     assert snapshot.source_revision.startswith("2026-07-19T09:00:00Z:sha256:")
-    assert calls[0][-1] == "repos/Mathews-Tom/enginery-provider-smoke/issues/7"
+    assert calls[2][-1] == calls[0][-1]
+    assert calls[3][-1] == calls[1][-1]
 
 
 def test_fetch_uses_title_when_an_issue_has_no_body() -> None:
-    responses: list[object] = [_issue(body=None)]
+    responses = _fetch_responses(issue=_issue(body=None))
     calls: list[tuple[str, ...]] = []
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 
@@ -91,6 +117,56 @@ def test_fetch_rejects_pull_requests_from_issue_endpoint() -> None:
     ledger = GitHubWorkLedger(_config(), command_runner=_runner(responses, calls))
 
     with pytest.raises(InvalidInputError, match="pull requests"):
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [],
+        _labels(work_kind="enginery/work-kind/incident"),
+        _labels(work_kind="Enginery/work-kind/issue"),
+        _labels(work_kind="enginery/work-kind/issue", risk="enginery/risk/high"),
+        [*_labels(), {"name": "enginery/work-kind/issue"}],
+        [*_labels(), {"name": "enginery/risk/low"}],
+    ],
+)
+def test_fetch_rejects_missing_ambiguous_or_noncanonical_classification(
+    labels: list[dict[str, str]],
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    ledger = GitHubWorkLedger(
+        _config(), command_runner=_runner(_fetch_responses(labels=labels), calls)
+    )
+
+    with pytest.raises(InvalidInputError):
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+
+def test_fetch_rejects_source_changed_during_classification_collection() -> None:
+    original = _issue()
+    changed = _issue()
+    changed["updated_at"] = "2026-07-19T09:01:00Z"
+    calls: list[tuple[str, ...]] = []
+    ledger = GitHubWorkLedger(
+        _config(), command_runner=_runner([original, _labels(), changed], calls)
+    )
+
+    with pytest.raises(StaleEvidenceError, match="changed"):
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+
+def test_fetch_rejects_classification_changed_during_collection() -> None:
+    calls: list[tuple[str, ...]] = []
+    ledger = GitHubWorkLedger(
+        _config(),
+        command_runner=_runner(
+            [_issue(), _labels(), _issue(), _labels(risk="enginery/risk/medium")],
+            calls,
+        ),
+    )
+
+    with pytest.raises(StaleEvidenceError, match="classification changed"):
         ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
 
 
