@@ -232,8 +232,8 @@ def test_registered_human_principals_zero_one_two(
     database = tmp_path / "ledger.db"
     LedgerService.open(database).close()
     identities_toml = ", ".join(
-        f'{{ id = "{principal_id}", github_login = "{principal_id}" }}'
-        for principal_id in principal_ids
+        f'{{ id = "{principal_id}", github_user_id = {index}, github_login = "{principal_id}" }}'
+        for index, principal_id in enumerate(principal_ids, start=1)
     )
     floor_config = _write_floor_config(
         tmp_path / "floor.toml",
@@ -244,7 +244,7 @@ def test_registered_human_principals_zero_one_two(
 
     assert _conditions(payload)["registered_human_principals"]["status"] == expected_status
     assert _conditions(payload)["registered_human_principals"]["metrics"][
-        "registered_principal_count"
+        "registered_github_user_id_count"
     ] == len(set(principal_ids))
 
 
@@ -459,8 +459,8 @@ def test_registering_a_second_principal_by_hand_is_the_only_way_the_principal_co
         floor_config,
         (
             "schema_version = 2\n[registered_principals]\nidentities = "
-            '[{ id = "operator-a", github_login = "operator-a" }, '
-            '{ id = "operator-b", github_login = "operator-b" }]\n'
+            '[{ id = "operator-a", github_user_id = 101, github_login = "operator-a" }, '
+            '{ id = "operator-b", github_user_id = 102, github_login = "operator-b" }]\n'
         ),
     )
     after = _gate_status(database, floor_config, capsys)

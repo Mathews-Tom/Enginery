@@ -265,13 +265,22 @@ def _corpus_diversity(inputs: G4Inputs) -> GateCondition:
 
 
 def _registered_human_principals(floor: GateFloorConfig) -> GateCondition:
-    count = len(floor.registered_principal_ids)
+    registered_principals = set(floor.registered_principal_ids)
+    github_user_ids = {
+        github_user_id
+        for principal_id, github_user_id in floor.github_user_id_by_principal_id
+        if principal_id in registered_principals
+        and isinstance(github_user_id, int)
+        and not isinstance(github_user_id, bool)
+        and github_user_id > 0
+    }
+    count = len(github_user_ids)
     status = ConditionStatus.PASS if count >= _MIN_REGISTERED_PRINCIPALS else ConditionStatus.FAIL
     return GateCondition(
         id="registered_human_principals",
         status=status,
-        detail=f"{count} registered human principal(s) on file",
-        metrics={"registered_principal_count": count},
+        detail=f"{count} registered human principal(s) with distinct GitHub user IDs on file",
+        metrics={"registered_github_user_id_count": count},
     )
 
 

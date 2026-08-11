@@ -44,8 +44,8 @@ def test_load_reads_a_fully_registered_config(tmp_path: Path) -> None:
         schema_version = 2
         [registered_principals]
         identities = [
-          { id = "operator-a", github_login = "Operator-A" },
-          { id = "operator-b", github_login = "operator-b" },
+          { id = "operator-a", github_user_id = 101, github_login = "Operator-A" },
+          { id = "operator-b", github_user_id = 102, github_login = "operator-b" },
         ]
         [completed_runs]
         min_total = 40
@@ -63,6 +63,10 @@ def test_load_reads_a_fully_registered_config(tmp_path: Path) -> None:
         ("operator-a", "operator-a"),
         ("operator-b", "operator-b"),
     )
+    assert config.github_user_id_by_principal_id == (
+        ("operator-a", 101),
+        ("operator-b", 102),
+    )
     assert config.completed_run_volume_floor == 40
     assert config.intervention_volume_floor == 10
     assert config.outcome_completeness_floor == 0.8
@@ -75,13 +79,44 @@ def test_load_rejects_duplicate_registered_principal_identity(tmp_path: Path) ->
         schema_version = 2
         [registered_principals]
         identities = [
-          { id = "operator-a", github_login = "operator-a" },
-          { id = "operator-a", github_login = "operator-b" },
+          { id = "operator-a", github_user_id = 101, github_login = "operator-a" },
+          { id = "operator-a", github_user_id = 102, github_login = "operator-b" },
         ]
         """,
     )
 
     with pytest.raises(InvalidInputError, match="unique ids"):
+        load_gate_floor_config(path)
+
+
+def test_load_rejects_duplicate_github_user_id(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "floor.toml",
+        """
+        schema_version = 2
+        [registered_principals]
+        identities = [
+          { id = "operator-a", github_user_id = 101, github_login = "operator-a" },
+          { id = "operator-b", github_user_id = 101, github_login = "operator-b" },
+        ]
+        """,
+    )
+
+    with pytest.raises(InvalidInputError, match="GitHub user IDs"):
+        load_gate_floor_config(path)
+
+
+def test_load_rejects_login_only_principal_identity(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "floor.toml",
+        """
+        schema_version = 2
+        [registered_principals]
+        identities = [{ id = "operator-a", github_login = "operator-a" }]
+        """,
+    )
+
+    with pytest.raises(InvalidInputError, match="GitHub user ID"):
         load_gate_floor_config(path)
 
 
@@ -134,8 +169,8 @@ def test_load_rejects_a_completeness_floor_outside_the_unit_interval(tmp_path: P
 def test_load_rejects_legacy_principal_ids(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "floor.toml",
-        'schema_version = 2\n[registered_principals]\nids = ["operator-a"]\n',
+        "schema_version = 2\n[registered_principals]\nids = []\n",
     )
 
-    with pytest.raises(InvalidInputError, match="GitHub-mapped"):
+    with pytest.raises(InvalidInputError, match=r"legacy registered_principals\.ids"):
         load_gate_floor_config(path)

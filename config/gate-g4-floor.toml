@@ -13,9 +13,9 @@
 schema_version = 2
 
 [registered_principals]
-# Configured authority principals map one durable principal ID to one
-# case-insensitive GitHub login. Empty today: this repository has one
-# human operator and no dual-authority G4 evidence.
+# Configured authority principals map one durable principal ID to one immutable
+# GitHub numeric user ID. GitHub logins are retained only as diagnostics. Empty
+# today: this repository has one human operator and no dual-authority G4 evidence.
 identities = []
 
 [completed_runs]

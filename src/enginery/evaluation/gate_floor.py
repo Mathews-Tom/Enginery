@@ -44,6 +44,7 @@ class GateFloorConfig:
     completed_run_volume_floor: int | None
     intervention_volume_floor: int | None
     outcome_completeness_floor: float | None
+    github_user_id_by_principal_id: tuple[tuple[str, int], ...] = ()
     github_login_by_principal_id: tuple[tuple[str, str], ...] = ()
 
 
@@ -83,14 +84,21 @@ def load_gate_floor_config(path: Path) -> GateFloorConfig:
     completed_runs = _table(raw, "completed_runs", path=path)
     interventions = _table(raw, "interventions", path=path)
     outcome_completeness = _table(raw, "outcome_completeness", path=path)
-    github_login_by_principal_id = _principal_identities(principals, path=path)
+    principal_identities = _principal_identities(principals, path=path)
     return GateFloorConfig(
         schema_version=GATE_FLOOR_SCHEMA_VERSION,
-        registered_principal_ids=tuple(github_login_by_principal_id),
+        registered_principal_ids=tuple(principal_identities),
         completed_run_volume_floor=_optional_int(completed_runs, "min_total", path=path),
         intervention_volume_floor=_optional_int(interventions, "min_with_reason", path=path),
         outcome_completeness_floor=_optional_fraction(outcome_completeness, "floor", path=path),
-        github_login_by_principal_id=tuple(github_login_by_principal_id.items()),
+        github_user_id_by_principal_id=tuple(
+            (principal_id, github_identity[0])
+            for principal_id, github_identity in principal_identities.items()
+        ),
+        github_login_by_principal_id=tuple(
+            (principal_id, github_identity[1])
+            for principal_id, github_identity in principal_identities.items()
+        ),
     )
 
 
@@ -116,22 +124,20 @@ def _string_list(table: dict[str, object], key: str, *, path: Path) -> list[str]
     return list(value)
 
 
-def _principal_identities(table: dict[str, object], *, path: Path) -> dict[str, str]:
+def _principal_identities(table: dict[str, object], *, path: Path) -> dict[str, tuple[int, str]]:
     if "ids" in table:
-        legacy_ids = _string_list(table, "ids", path=path)
-        if legacy_ids:
-            raise InvalidInputError(
-                "gate floor schema 2 requires GitHub-mapped principal identities",
-                details={"path": str(path), "key": "registered_principals.ids"},
-            )
-        return {}
+        raise InvalidInputError(
+            "gate floor schema 2 does not support legacy registered_principals.ids",
+            details={"path": str(path), "key": "registered_principals.ids"},
+        )
     value = table.get("identities", [])
     if not isinstance(value, list):
         raise InvalidInputError(
             "registered principal identities must be a list",
             details={"path": str(path)},
         )
-    identities: dict[str, str] = {}
+    identities: dict[str, tuple[int, str]] = {}
+    github_user_ids: set[int] = set()
     github_logins: set[str] = set()
     for entry in value:
         if not isinstance(entry, dict):
@@ -140,24 +146,35 @@ def _principal_identities(table: dict[str, object], *, path: Path) -> dict[str, 
                 details={"path": str(path)},
             )
         principal_id = entry.get("id")
+        github_user_id = entry.get("github_user_id")
         github_login = entry.get("github_login")
         if (
             not isinstance(principal_id, str)
             or not principal_id.strip()
+            or isinstance(github_user_id, bool)
+            or not isinstance(github_user_id, int)
+            or github_user_id < 1
             or not isinstance(github_login, str)
             or not github_login.strip()
         ):
             raise InvalidInputError(
-                "registered principal identities require non-blank id and github_login",
+                "registered principal identities require non-blank id and GitHub login "
+                "with a positive GitHub user ID",
                 details={"path": str(path)},
             )
         normalized_login = github_login.casefold()
-        if principal_id in identities or normalized_login in github_logins:
+        if (
+            principal_id in identities
+            or github_user_id in github_user_ids
+            or normalized_login in github_logins
+        ):
             raise InvalidInputError(
-                "registered principal identities must have unique ids and GitHub logins",
+                "registered principal identities must have unique ids, GitHub user IDs, "
+                "and GitHub logins",
                 details={"path": str(path)},
             )
-        identities[principal_id] = normalized_login
+        identities[principal_id] = (github_user_id, normalized_login)
+        github_user_ids.add(github_user_id)
         github_logins.add(normalized_login)
     return identities
 
