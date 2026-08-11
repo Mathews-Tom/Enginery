@@ -38,6 +38,7 @@ from enginery.domain.policy_decision import PolicyResult
 from enginery.policy.evaluator import PolicyEvaluator
 
 _DISTRIBUTION = "enginery"
+DEFAULT_G4_FLOOR_CONFIG = Path(__file__).parent.parent / "config" / "gate-g4-floor.toml"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -189,9 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     gate_status_parser.add_argument("--gate", required=True, choices=("G4",))
     gate_status_parser.add_argument("--database", required=True, type=Path)
-    gate_status_parser.add_argument(
-        "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
-    )
+    gate_status_parser.add_argument("--floor-config", type=Path, default=DEFAULT_G4_FLOOR_CONFIG)
     gate_status_parser.add_argument("--json", action="store_true")
     gate_finding_parser = gate_subparsers.add_parser(
         "record-g4-deficiency",
@@ -207,9 +206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate_finding_parser.add_argument("--producer-principal-id", required=True)
     gate_finding_parser.add_argument("--evidence-pull-request-author-login", required=True)
     gate_finding_parser.add_argument("--correlation-id", required=True)
-    gate_finding_parser.add_argument(
-        "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
-    )
+    gate_finding_parser.add_argument("--floor-config", type=Path, default=DEFAULT_G4_FLOOR_CONFIG)
     gate_finding_parser.add_argument("--json", action="store_true")
     gate_evidence_parser = gate_subparsers.add_parser(
         "record-g4-deficiency-evidence",
@@ -221,9 +218,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate_evidence_parser.add_argument("--github-repository", required=True)
     gate_evidence_parser.add_argument("--github-credential-reference", required=True)
     gate_evidence_parser.add_argument("--github-executable", default="gh")
-    gate_evidence_parser.add_argument(
-        "--floor-config", type=Path, default=Path("config/gate-g4-floor.toml")
-    )
+    gate_evidence_parser.add_argument("--floor-config", type=Path, default=DEFAULT_G4_FLOOR_CONFIG)
     gate_evidence_parser.add_argument("--json", action="store_true")
 
     workspace_parser = subparsers.add_parser(
