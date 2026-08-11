@@ -64,10 +64,10 @@ def _is_public_documentation_path(name: str) -> bool:
 # is a stale self-declaration.
 STALE_SELF_VERSION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Enginery is `v(\d+\.\d+\.\d+)`"),
+    re.compile(r"`v(\d+\.\d+\.\d+)` is the current release candidate"),
     re.compile(r"`v(\d+\.\d+\.\d+)`, published on PyPI(?: and GitHub Releases)?"),
     re.compile(r"package_metadata: enginery (\d+\.\d+\.\d+) installed"),
 )
-
 # Literal phrases describing Enginery as an unimplemented product concept.
 # Every phrase below was live in this repository's tracked docs until the
 # `v0.3.0` doc-sync correction removed it, well after the described

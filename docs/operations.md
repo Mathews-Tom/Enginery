@@ -7,7 +7,7 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.4.0`. The Stage 1
+[`README.md`](../README.md#status). Enginery is `v0.5.0`. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `stage2 status` remains the only Stage 2 CLI command (a
@@ -23,8 +23,8 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are all published to PyPI. Install
-latest with:
+`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are published to PyPI. `v0.5.0`
+is the current release candidate. Install the current local build with:
 
 ```bash
 pip install enginery
@@ -54,7 +54,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.4.0 installed
+[ok] package_metadata: enginery 0.5.0 installed
 ```
 
 `enginery doctor --json` emits the same report as a machine-readable
