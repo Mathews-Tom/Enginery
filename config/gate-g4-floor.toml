@@ -10,13 +10,13 @@
 # config/performance-bounds.toml's existing human-maintained-floor
 # convention.
 
-schema_version = 1
+schema_version = 2
 
 [registered_principals]
-# Human `AuthorityPrincipal` ids formally registered for dual-human
-# separation (docs/design.md's authority model). Empty today: this
-# repository's own development to date has one human operator.
-ids = []
+# Configured authority principals map one durable principal ID to one immutable
+# GitHub numeric user ID. GitHub logins are retained only as diagnostics. Empty
+# today: this repository has one human operator and no dual-authority G4 evidence.
+identities = []
 
 [completed_runs]
 # "Volume sufficient for registered cohorts" -- concrete counts are set

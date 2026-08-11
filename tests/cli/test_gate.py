@@ -22,9 +22,9 @@ def test_gate_status_reports_fail_closed_against_an_empty_ledger(
     floor_config = _write_floor_config(
         tmp_path / "floor.toml",
         """
-        schema_version = 1
+        schema_version = 2
         [registered_principals]
-        ids = []
+        identities = []
         """,
     )
 
@@ -58,7 +58,7 @@ def test_gate_status_reports_fail_closed_against_an_empty_ledger(
 def test_gate_status_rejects_an_unsupported_gate_name(tmp_path: Path) -> None:
     database = tmp_path / "ledger.db"
     floor_config = _write_floor_config(
-        tmp_path / "floor.toml", "schema_version = 1\n[registered_principals]\nids = []\n"
+        tmp_path / "floor.toml", "schema_version = 2\n[registered_principals]\nidentities = []\n"
     )
 
     with pytest.raises(SystemExit):
@@ -81,7 +81,7 @@ def test_gate_status_prints_human_readable_output_by_default(
 ) -> None:
     database = tmp_path / "ledger.db"
     floor_config = _write_floor_config(
-        tmp_path / "floor.toml", "schema_version = 1\n[registered_principals]\nids = []\n"
+        tmp_path / "floor.toml", "schema_version = 2\n[registered_principals]\nidentities = []\n"
     )
 
     main(

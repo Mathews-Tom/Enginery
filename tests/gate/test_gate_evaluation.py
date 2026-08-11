@@ -223,6 +223,7 @@ def test_registered_human_principals_fails_at_zero_and_one() -> None:
         completed_run_volume_floor=None,
         intervention_volume_floor=None,
         outcome_completeness_floor=None,
+        github_user_id_by_principal_id=(("operator-a", 101),),
     )
 
     assert (
@@ -242,12 +243,30 @@ def test_registered_human_principals_passes_at_two() -> None:
         completed_run_volume_floor=None,
         intervention_volume_floor=None,
         outcome_completeness_floor=None,
+        github_user_id_by_principal_id=(("operator-a", 101), ("operator-b", 102)),
     )
 
     report = evaluate_g4(floor=two, inputs=_inputs())
 
     condition = _condition(report, "registered_human_principals")
     assert condition.status is ConditionStatus.PASS  # type: ignore[union-attr]
+
+
+def test_registered_human_principals_rejects_duplicate_github_identity() -> None:
+    floor = GateFloorConfig(
+        schema_version=1,
+        registered_principal_ids=("operator-a", "operator-b"),
+        completed_run_volume_floor=None,
+        intervention_volume_floor=None,
+        outcome_completeness_floor=None,
+        github_user_id_by_principal_id=(("operator-a", 101), ("operator-b", 101)),
+    )
+
+    condition = _condition(
+        evaluate_g4(floor=floor, inputs=_inputs()), "registered_human_principals"
+    )
+
+    assert condition.status is ConditionStatus.FAIL  # type: ignore[union-attr]
 
 
 def test_gate_passes_overall_only_when_every_condition_passes() -> None:
@@ -257,6 +276,7 @@ def test_gate_passes_overall_only_when_every_condition_passes() -> None:
         completed_run_volume_floor=5,
         intervention_volume_floor=1,
         outcome_completeness_floor=0.5,
+        github_user_id_by_principal_id=(("operator-a", 101), ("operator-b", 102)),
     )
     inputs = _inputs(
         completed_run_count=5,

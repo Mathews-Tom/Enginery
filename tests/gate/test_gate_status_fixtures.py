@@ -231,17 +231,20 @@ def test_registered_human_principals_zero_one_two(
 ) -> None:
     database = tmp_path / "ledger.db"
     LedgerService.open(database).close()
-    ids_toml = ", ".join(f'"{principal_id}"' for principal_id in principal_ids)
+    identities_toml = ", ".join(
+        f'{{ id = "{principal_id}", github_user_id = {index}, github_login = "{principal_id}" }}'
+        for index, principal_id in enumerate(principal_ids, start=1)
+    )
     floor_config = _write_floor_config(
         tmp_path / "floor.toml",
-        f"schema_version = 1\n[registered_principals]\nids = [{ids_toml}]\n",
+        f"schema_version = 2\n[registered_principals]\nidentities = [{identities_toml}]\n",
     )
 
     payload = _gate_status(database, floor_config, capsys)
 
     assert _conditions(payload)["registered_human_principals"]["status"] == expected_status
     assert _conditions(payload)["registered_human_principals"]["metrics"][
-        "registered_principal_count"
+        "registered_github_user_id_count"
     ] == len(set(principal_ids))
 
 
@@ -262,7 +265,8 @@ def test_corpus_diversity_one_repository_fails(
     finally:
         ledger.close()
     floor_config = _write_floor_config(
-        tmp_path / "floor.toml", "schema_version = 1\n[registered_principals]\nids = []\n"
+        tmp_path / "floor.toml",
+        "schema_version = 2\n[registered_principals]\nidentities = []\n",
     )
 
     payload = _gate_status(database, floor_config, capsys)
@@ -310,7 +314,8 @@ def test_corpus_diversity_two_repositories_passes(
     finally:
         ledger.close()
     floor_config = _write_floor_config(
-        tmp_path / "floor.toml", "schema_version = 1\n[registered_principals]\nids = []\n"
+        tmp_path / "floor.toml",
+        "schema_version = 2\n[registered_principals]\nidentities = []\n",
     )
 
     payload = _gate_status(database, floor_config, capsys)
@@ -360,7 +365,8 @@ def test_floor_gated_conditions_report_unmeasured_despite_abundant_real_data(
     # registered -- only the (irrelevant to this assertion) principal
     # roster is present.
     floor_config = _write_floor_config(
-        tmp_path / "floor.toml", "schema_version = 1\n[registered_principals]\nids = []\n"
+        tmp_path / "floor.toml",
+        "schema_version = 2\n[registered_principals]\nidentities = []\n",
     )
 
     payload = _gate_status(database, floor_config, capsys)
@@ -409,9 +415,9 @@ def test_floor_gated_conditions_pass_once_the_floor_is_registered_and_met(
     floor_config = _write_floor_config(
         tmp_path / "floor.toml",
         """
-        schema_version = 1
+        schema_version = 2
         [registered_principals]
-        ids = []
+        identities = []
         [completed_runs]
         min_total = 2
         [interventions]
@@ -443,13 +449,19 @@ def test_registering_a_second_principal_by_hand_is_the_only_way_the_principal_co
     LedgerService.open(database).close()
     floor_config = tmp_path / "floor.toml"
 
-    _write_floor_config(floor_config, "schema_version = 1\n[registered_principals]\nids = []\n")
+    _write_floor_config(
+        floor_config, "schema_version = 2\n[registered_principals]\nidentities = []\n"
+    )
     before = _gate_status(database, floor_config, capsys)
     assert _conditions(before)["registered_human_principals"]["status"] == "fail"
 
     _write_floor_config(
         floor_config,
-        'schema_version = 1\n[registered_principals]\nids = ["operator-a", "operator-b"]\n',
+        (
+            "schema_version = 2\n[registered_principals]\nidentities = "
+            '[{ id = "operator-a", github_user_id = 101, github_login = "operator-a" }, '
+            '{ id = "operator-b", github_user_id = 102, github_login = "operator-b" }]\n'
+        ),
     )
     after = _gate_status(database, floor_config, capsys)
     assert _conditions(after)["registered_human_principals"]["status"] == "pass"
