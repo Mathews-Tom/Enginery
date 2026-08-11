@@ -217,6 +217,32 @@ def test_qualification_persists_prebound_manifest_node(
     assert node.state["source_revision"] == "1"
 
 
+def test_qualification_blocks_rejected_work_without_human_approval(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    rejected_snapshot = replace(
+        _snapshot(),
+        work_item=replace(_snapshot().work_item, risk_class=RiskClass.HIGH),
+    )
+
+    qualification = Stage1QualificationExecutor(runtime).qualify(
+        dispatch=WorkflowNodeDispatch(_request(tmp_path), stage1_work_manifest()),
+        snapshot=rejected_snapshot,
+        applicable_criteria=(True,),
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-1:qualify"
+    )
+    assert qualification.readiness is WorkReadiness.REJECTED
+    assert node is not None
+    assert node.state["status"] == "blocked"
+
+
 def test_validation_persists_node_before_running_commands(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:

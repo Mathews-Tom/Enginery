@@ -48,6 +48,15 @@ class Stage1QualificationExecutor:
                 now=now,
                 extra=details,
             )
+        elif qualification.readiness is WorkReadiness.REJECTED:
+            self.runtime.complete_node(
+                run_id=dispatch.request.run_id,
+                node_id=dispatch.request.node_id,
+                epoch=epoch.epoch,
+                now=now,
+                outcome="blocked",
+                extra=details,
+            )
         else:
             self.runtime.await_human_node(
                 run_id=dispatch.request.run_id,
