@@ -1572,3 +1572,20 @@ The current owner directive supplies explicit approval for this reassessment res
 ### Downstream impact and authorization
 
 M24b, M14b, and M15 remain otherwise unchanged and blocked by their existing gates. This entry authorizes only the docs-only reconciliation prerequisite. The existing M24 implementation stack must not merge or receive further product-code work until that prerequisite is reviewed, green, externally merged, and a fresh M24 reassessment reports `DESIGN GO — PLAN REVISION: none`.
+
+## M24 — Post-reconciliation implementation authorization
+
+**Timestamp:** `2026-08-11T05:51:11Z`  
+**Decision:** `DESIGN GO — PLAN REVISION: none`  
+**Trigger:** PR #162 merged the M24-I1 authority identity reconciliation at `2240085dd5132775eaa5704a757a54a33cb8e2f7` after both platform gates passed.
+
+### Evidence
+
+- The published `v0.4.0` release remains a non-draft, non-prerelease GitHub release, published on `2026-08-03T22:23:08Z`.
+- The merged authority contract requires immutable GitHub numeric user IDs for configured human principals and exact-head evidence-PR approvals. GitHub review payloads provide `user.id`; labels and reviews remain read through the documented GitHub issue-label and pull-review APIs.
+- The reconciled M24, M24b, M14b, and M15 plan/prompt text consistently retains the closed source-label vocabulary, classified-cohort-only measurements, immutable deficiency finding, two-principal separation, Stage 4 deferral, and the `v0.5.0` release target.
+- PR #162 contains no M24 product behavior or operational G4 evidence. The prior M24 branches require rebase onto this merged prerequisite before review or merge.
+
+### Downstream impact and authorization
+
+M24 product work may resume from `origin/main` under the reconciled five-PR stack. M24b remains the sole `v0.5.0` publication unit and M14b/M15 remain blocked until a persistent G4 report passes using genuine post-M24 operational evidence. This authorization does not assert G4 passage, create a human principal, or manufacture a classified cohort, intervention, outcome, or deficiency.
