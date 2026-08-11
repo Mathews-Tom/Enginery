@@ -1918,12 +1918,12 @@ CONSTRAINTS:
 - Never reference `.docs/` files, filenames, or section numbers from implementation code, docstrings, comments, or tracked documentation.
 - Build only from the verified origin/main commit after all M24 PRs merge; never publish a feature branch or stale checkout.
 - The changelog and release notes derive from actual merged M24 diffs. State that v0.5.0 adds no workflow stage and that G4 still requires real multi-repository, dual-authority numeric-identity, intervention, outcome, and deficiency evidence before M14b/M15.
-- Verify the release gate's own v0.5.0 command support and docs-currency coverage before changing version metadata.
+- Verify the release gate's own v0.5.0 command support and docs-currency coverage before changing version metadata. Its implementation must select public product documentation without hard-coding planning-artifact paths.
 - PyPI versions and public tags are immutable. Obtain interactive human approval immediately before publication.
 
 PLANNED STACK:
 0. Conditional prerequisite `docs(plan): reconcile M24b design` — scope: authoritative plan/prompt updates only; gate: reviewed, green, and merged before the implementation stack.
-1. PR-1 `build(release): prepare v0.5.0 metadata and dependency manifest` — scope: canonical version, changelog, dependency manifest, artifact metadata; commits: `build(release): prepare v0.5.0 metadata`, `docs(changelog): add v0.5.0 release entry`; verification: release gate, build, metadata, and hash checks.
+1. PR-1 `build(release): prepare v0.5.0 metadata and dependency manifest` — scope: the justified release-tool currency-selection correction, its regression coverage, canonical version, changelog, dependency manifest, artifact metadata; commits: `fix(release): select public documentation for currency checks`, `build(release): prepare v0.5.0 metadata`, `docs(changelog): add v0.5.0 release entry`; verification: release gate, build, metadata, docs-currency, and hash checks.
 2. PR-2 `docs: sync v0.5.0 operator documentation` — scope: README and operator docs, label/config migration, evidence-PR operation, compatibility/known-limit statement; commits: `docs: sync measurable G4 operation for v0.5.0`; verification: docs-currency check and command examples against the installed wheel.
 3. PR-3 `test(release): prove v0.5.0 consumer installation` — scope: macOS/Ubuntu clean-install scripts, labeled Stage 1 fixture smoke, published-consumer command smoke; commits: `test(release): add v0.5.0 consumer smoke`; verification: platform-clean-install and fixture smoke evidence.
 4. PR-4 `docs(release): finalize v0.5.0 notes and evidence` — scope: final release notes, hashes, dependency/evidence records; commits: `docs(release): record v0.5.0 publication evidence`; verification: destination verification after human-approved publication.
