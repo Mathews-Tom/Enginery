@@ -8,6 +8,42 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.5.0`
+
+Post-publication evidence for the M24b release-preparation pass on 2026-08-11.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#174](https://github.com/Mathews-Tom/Enginery/pull/174) | `fix(release): select public documentation for currency checks` | `3959003c512ba2eac4755daeedcb5cad6c58bcb1` |
+| [#175](https://github.com/Mathews-Tom/Enginery/pull/175) | `docs: sync v0.5.0 operator documentation` | `ff20fbc` |
+| [#176](https://github.com/Mathews-Tom/Enginery/pull/176) | `test(release): prove v0.5.0 consumer installation` | `a6fac31492c578c239bdfb4494966c8428a1e49d` |
+| [#177](https://github.com/Mathews-Tom/Enginery/pull/177) | `docs(release): finalize v0.5.0 notes` | `739c8d32acc7c4b4c4cce41f0ddb1e915c2fb678` |
+
+The tagged release commit passed `uv run python scripts/release_gate.py --version 0.5.0`, `uv build`, and `uvx twine check dist/*`. Ruff, strict mypy, and pytest passed; pytest reported 1,490 passed and one opt-in live-provider test skipped. macOS and real Ubuntu 24.04 clean wheel and sdist installs passed `enginery --version`, `enginery doctor`, and fail-closed `enginery gate status --gate G4 --json`.
+
+### Tag and artifacts
+
+Annotated tag `v0.5.0` targets `739c8d32acc7c4b4c4cce41f0ddb1e915c2fb678`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.5.0-py3-none-any.whl` | `360fe49b81f7093492aa69ad47735f3edc9bb4de8cd4037da24f2d55411b932c` |
+| `enginery-0.5.0.tar.gz` | `00b1320280fd608fa97aa2ed2af3c7eaeffa0b7f22ab80880dd258f0e0e9b3a3` |
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.5.0/>.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.5.0>.
+- **Human approval:** the `ask` tool recorded “Approve publication” immediately before the tag, PyPI upload, and GitHub Release.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` independently verified the non-draft GitHub Release target and both GitHub/PyPI artifact hashes. A no-cache, isolated, no-project PyPI consumer ran `enginery --version`, both G4 deficiency command helps, labeled Stage 1 request help, and bare G4 status; G4 returned exit code `3` with `"overall": "fail"`.
+
+### Final verdict
+
+**GO.** `v0.5.0` is tagged from verified main and published on PyPI and GitHub Releases with matching wheel and sdist hashes. It adds no workflow stage. G4 remains fail-closed until real multi-repository, dual-human numeric-identity, intervention, outcome, and deficiency evidence exists; M14b/M15 remain blocked and Stage 4 self-improvement remains unimplemented.
+
 ## `v0.4.0`
 
 Post-publication evidence for the 2026-08-03 release-preparation pass.
