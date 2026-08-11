@@ -7,6 +7,7 @@ an unregistered floor to ``pass``.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ from enginery.application.work_ports import DeclaredWorkClassification, WorkLedg
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -268,6 +270,19 @@ def test_corpus_diversity_one_repository_fails(
     condition = _conditions(payload)["corpus_diversity"]
     assert condition["status"] == "fail"
     assert condition["metrics"]["repository_count"] == 1
+
+
+def test_stage1_request_rejects_repository_outside_source_bound_target(tmp_path: Path) -> None:
+    request = _stage1_request(
+        run_id="run-1",
+        repository="Mathews-Tom/source-bound",
+        work_kind=WorkKind.ISSUE,
+        risk_class=RiskClass.LOW,
+        tmp_path=tmp_path,
+    )
+
+    with pytest.raises(InvalidInputError, match="must match the source-bound target"):
+        replace(request, run=replace(request.run, repository="Mathews-Tom/invented"))
 
 
 def test_corpus_diversity_two_repositories_passes(

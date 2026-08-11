@@ -103,6 +103,8 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 run must bind its work-item identity")
         if self.run.work_item_snapshot_digest != self.work_snapshot.bound_digest:
             raise InvalidInputError("Stage 1 run must bind its source snapshot digest")
+        if self.run.repository != self.repository_id:
+            raise InvalidInputError("Stage 1 run repository must match the source-bound target")
         if self.repository_id not in self.work_snapshot.work_item.repository_targets:
             raise InvalidInputError("Stage 1 run repository is not an approved work-item target")
         if not self.repository_path.is_absolute() or not self.workspace_path.is_absolute():
