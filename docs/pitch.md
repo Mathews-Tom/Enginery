@@ -2,7 +2,7 @@
 
 - **Conversation memo**
 - **Purpose:** Test whether this is a problem worth solving with engineers, potential collaborators, and engineering leaders.
-- **Status:** `v0.4.0` published (Stage 1, 2, and 3 shipped; `v0.4.0` adds operator commands, not a workflow stage); Stage 4 remains gate-deferred and unclaimed. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
+- **Status:** `v0.5.0` published on PyPI and GitHub Releases (2026-08-11), alongside `v0.1.0`–`v0.4.0` (Stage 1, 2, and 3 shipped; `v0.4.0` and `v0.5.0` add operator commands and gate evidence, not a workflow stage); Stage 4 remains gate-deferred and unclaimed. A manual-first factory layer is proposed and not shipped; see the operator guide. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
 
 ## The short version
 
@@ -116,6 +116,8 @@ Unknown actions deny. An implementation task, a credential request, a pull-reque
 ### Honest workspace claims
 
 The first backend uses git worktrees and child-process supervision. This prevents accidental repository collision; it is not hostile-process containment. Production and publication credentials stay in fixed, reviewed broker code outside agent workspaces. Stronger isolation is a future implementation choice, not a marketing adjective.
+
+Trusted-local operation is not containment, and no claim of safety against hostile code is made. Enginery does not merge, release, publish, or deploy without a human action, and it does not trigger external reviewer bots.
 
 ## The first four proofs
 
