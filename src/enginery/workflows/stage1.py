@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -29,7 +29,7 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
     StaleEvidenceError,
 )
-from enginery.domain.execution_catalog import ExecutionCatalog
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
     ExecutionHold,
     ExecutionSelection,
@@ -324,6 +324,7 @@ class Stage1RunService:
     harness: SupervisedHarness | None = None
     outcomes: OutcomeCaptureService | None = None
     execution_catalog: ExecutionCatalog | None = None
+    host_probe: Callable[[], InstalledHost | None] | None = None
 
     def start(
         self,
@@ -403,9 +404,14 @@ class Stage1RunService:
         if hold is not None:
             return hold
         selection = request.execution_selection
-        if self.harness is None or selection.legacy or not selection.requires_native_controls:
+        if selection.legacy or not selection.requires_native_controls:
             return None
-        return detect_host_drift(selection, installed=self.harness.installed_host())
+        probe = self.host_probe
+        if probe is None and self.harness is not None:
+            probe = self.harness.installed_host
+        if probe is None:
+            return None
+        return detect_host_drift(selection, installed=probe())
 
     def _recorded_execution_hold(
         self, implement_state: Mapping[str, object]

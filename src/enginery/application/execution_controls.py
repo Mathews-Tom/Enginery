@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import ExecutionCatalog, HostCapability, InstalledHost
-from enginery.domain.execution_receipt import EffectiveControl
+from enginery.domain.execution_receipt import EffectiveControl, ExecutionReceipt
 from enginery.domain.execution_selection import ExecutionSelection, validate_against_catalog
 
 
@@ -58,14 +58,88 @@ def prepare_native_controls(
     return native_control_arguments(selection, host=host)
 
 
-def submitted_arguments(
-    selection: ExecutionSelection, *, harness: str, catalog: ExecutionCatalog
+def expected_native_arguments(
+    selection: ExecutionSelection, *, catalog: ExecutionCatalog
 ) -> tuple[str, ...]:
-    """Return the control tokens a launch of this selection emits, for the receipt."""
-    require_selection_harness(selection, harness=harness)
+    """Return exactly the control tokens a launch of this selection must carry."""
     if selection.legacy or not selection.requires_native_controls:
         return ()
-    return native_control_arguments(selection, host=catalog.host(harness))
+    return native_control_arguments(selection, host=catalog.host(selection.harness))
+
+
+# Flags that steer which model serves a run. A launch carrying one the selection did not
+# ask for (for example a fallback model) is not the launch that was selected.
+_STEERING_FLAGS = ("--fallback-model", "--provider", "--smol", "--slow", "--plan", "--models")
+_MISSING_VALUE = "<missing>"
+
+
+def extract_native_arguments(command: tuple[str, ...], *, host: HostCapability) -> tuple[str, ...]:
+    """Return the model-steering flag/value pairs actually present in a launched command.
+
+    The catalog's model and effort flags and the known model-steering flags are read from
+    the command itself, in order, skipping the prompt that follows ``-p``. This is evidence
+    of what was launched, not of what was intended.
+    """
+    flags = {host.model.flag, host.effort.flag, *_STEERING_FLAGS}
+    found: list[str] = []
+    index = 0
+    while index < len(command):
+        token = command[index]
+        if token == "-p":
+            index += 2
+            continue
+        if token in flags:
+            value = command[index + 1] if index + 1 < len(command) else _MISSING_VALUE
+            found += [token, value]
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in flags):
+            found.append(token)
+        index += 1
+    return tuple(found)
+
+
+def build_receipt(
+    selection: ExecutionSelection,
+    *,
+    harness: str,
+    catalog: ExecutionCatalog,
+    launched_command: tuple[str, ...] | None,
+    models: Iterable[str],
+) -> ExecutionReceipt:
+    """Build a receipt from the launched command and the host's own reported models.
+
+    Submitted tokens are extracted from the command that was launched. The effective model's
+    evidence description comes from the catalog; effective effort has no extractor, so it is
+    unknown and says whether the catalog records any evidence for it.
+    """
+    require_selection_harness(selection, harness=harness)
+    host = catalog.host(harness)
+    submitted = (
+        () if launched_command is None else extract_native_arguments(launched_command, host=host)
+    )
+    if host.model.effective_evidence:
+        model = distinct_model(
+            models,
+            source=host.model.effective_evidence,
+            reason=f"no {harness} event reported a model ({host.model.effective_evidence})",
+        )
+    else:
+        model = EffectiveControl.unknown(
+            reason=f"the catalog records no effective-model evidence for {harness}"
+        )
+    effort_reason = (
+        f"the catalog records no effective-effort evidence for {harness}"
+        if not host.effort.effective_evidence
+        else f"effective-effort evidence '{host.effort.effective_evidence}' is not extracted"
+    )
+    return ExecutionReceipt(
+        selection_digest=None if selection.legacy else selection.digest,
+        harness=harness,
+        submitted_arguments=submitted,
+        effective_model=model,
+        effective_effort=EffectiveControl.unknown(reason=effort_reason),
+    )
 
 
 def distinct_model(models: Iterable[str], *, source: str, reason: str) -> EffectiveControl:
@@ -82,9 +156,11 @@ def distinct_model(models: Iterable[str], *, source: str, reason: str) -> Effect
 
 
 __all__ = [
+    "build_receipt",
     "distinct_model",
+    "expected_native_arguments",
+    "extract_native_arguments",
     "native_control_arguments",
     "prepare_native_controls",
     "require_selection_harness",
-    "submitted_arguments",
 ]

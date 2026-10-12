@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from enginery.application.adapter_types import NormalizedAdapterEvent
+from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.execution_controls import expected_native_arguments
 from enginery.application.work_ports import HarnessResult, HarnessTask
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
-from enginery.domain.execution_catalog import InstalledHost
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_receipt import ExecutionReceipt, evaluate_effective_requirement
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.workflow.manifest import WorkflowManifest
@@ -37,7 +39,11 @@ class SupervisedHarness(Protocol):
     def installed_host(self) -> InstalledHost | None: ...
 
     def collect_supervised(
-        self, task: HarnessTask, *, result_path: Path
+        self,
+        task: HarnessTask,
+        *,
+        result_path: Path,
+        launched_command: tuple[str, ...] | None = None,
     ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]: ...
 
 
@@ -49,6 +55,7 @@ class Stage1ImplementationExecutor:
     harness: SupervisedHarness
     manifest: WorkflowManifest
     head_branch: str | None = None
+    catalog: ExecutionCatalog = field(default_factory=load_execution_catalog)
 
     def dispatch(self, request: FixtureDispatch, task: HarnessTask) -> WorkflowDispatch:
         """Bind one implementation task to the existing fenced runtime dispatch path."""
@@ -68,9 +75,13 @@ class Stage1ImplementationExecutor:
         """Ingest a completed supervised implementation result through the coordinator."""
         _require_matching_dispatch(dispatched, task)
         path = _result_path(task) if result_path is None else result_path
-        _, result = self.harness.collect_supervised(task, result_path=path)
+        _, result = self.harness.collect_supervised(
+            task, result_path=path, launched_command=launched_command
+        )
         receipt = result.execution_receipt
-        hold = _execution_hold(task, receipt, launched_command)
+        hold = _execution_hold(
+            task, receipt, expected_native_arguments(task.selection, catalog=self.catalog)
+        )
         terminal_result = (
             "passed" if result.terminal_status == "succeeded" and hold is None else "failed"
         )
@@ -112,29 +123,28 @@ def _result_path(task: HarnessTask) -> Path:
     )
 
 
-def _contains_sequence(command: tuple[str, ...], sequence: tuple[str, ...]) -> bool:
-    if not sequence:
-        return True
-    width = len(sequence)
-    return any(command[start : start + width] == sequence for start in range(len(command)))
-
-
 def _execution_hold(
-    task: HarnessTask, receipt: ExecutionReceipt | None, launched_command: tuple[str, ...] | None
+    task: HarnessTask, receipt: ExecutionReceipt | None, expected: tuple[str, ...]
 ) -> ExecutionHold | None:
-    """Hold when the receipt misstates what was launched or a strict requirement is unmet."""
-    if (
-        receipt is not None
-        and launched_command is not None
-        and not _contains_sequence(launched_command, receipt.submitted_arguments)
-    ):
+    """Hold when the launched controls are not exactly the selected ones, or a strict
+    effective-control requirement is unmet.
+
+    The receipt's submitted tokens are extracted from the command that was actually
+    launched, so a missing or extra control token (an unexpected fallback model, a dropped
+    pin) differs from the expectation derived from the selection and holds the run.
+    """
+    submitted = () if receipt is None else receipt.submitted_arguments
+    if submitted != expected:
         return ExecutionHold(
             reason=HoldReason.SUBMITTED_CONTROLS_MISMATCH,
             message=(
-                "the receipt's submitted controls are not in the command that was launched; "
+                "the controls in the launched command are not exactly the selected controls; "
                 "the run is held, not passed"
             ),
-            details={"submitted_arguments": " ".join(receipt.submitted_arguments)},
+            details={
+                "expected_arguments": " ".join(expected),
+                "submitted_arguments": " ".join(submitted),
+            },
         )
     return evaluate_effective_requirement(task.selection, receipt)
 

@@ -108,7 +108,7 @@ def test_a_strict_requirement_passes_only_for_an_observed_exact_match() -> None:
 
 
 def test_requested_values_are_never_a_substitute_for_an_effective_one() -> None:
-    selection = selection_for("omp", model=MODEL, effort="high", strict_effective=True)
+    selection = replace(selection_for("omp", model=MODEL, effort="high"), strict_effective=True)
     model_only = _receipt(
         selection.digest, model=EffectiveControl.observed(MODEL, source="message_end")
     )

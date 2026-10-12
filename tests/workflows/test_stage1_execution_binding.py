@@ -9,13 +9,16 @@ from tests.support.execution import selection_for
 from tests.workflows.test_stage1_runtime import (
     _check_disposition_fixture,
     _check_node_dispatch,
+    _complete_check_node,
     _drive_check_to_non_pass,
 )
 
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.execution_controls import build_receipt
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost, SupportTier
+from enginery.domain.execution_receipt import evaluate_effective_requirement
 from enginery.domain.execution_selection import (
     ExecutionSelection,
     HoldReason,
@@ -24,6 +27,7 @@ from enginery.domain.execution_selection import (
 )
 from enginery.domain.ids import RunId
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
@@ -534,3 +538,80 @@ def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
         ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
         is None
     )
+
+
+def test_a_recorded_execution_hold_makes_the_next_action_hold_with_that_hold(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    strict = selection_for("omp", model="openai/gpt-5.2", strict_effective=True)
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, execution_selection=strict
+    )
+    _complete_check_node(runtime, request, "qualify", now)
+    unverified = evaluate_effective_requirement(
+        strict,
+        build_receipt(
+            strict,
+            harness="omp",
+            catalog=load_execution_catalog(),
+            launched_command=("omp", "--model", "openai/gpt-5.2"),
+            models=(),
+        ),
+    )
+    assert unverified is not None
+    epoch = runtime.register_node(
+        dispatch=_check_node_dispatch(request, "implement"), now=now, heartbeat_window=_WINDOW
+    )
+    runtime.complete_node(
+        run_id=str(request.run.id),
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="failed",
+    )
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="execution-hold",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id=request.implementation.attempt_id,
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"result": {"execution_hold": unverified.to_state()}},
+                ),
+            ),
+        )
+    )
+
+    progression = service.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold == unverified
+    assert progression.hold.reason is HoldReason.EFFECTIVE_CONTROL_UNVERIFIED
+    # Without a recorded hold the same failed implementation waits for a human instead.
+    other = LedgerService.open(tmp_path / "plain.db")
+    try:
+        (tmp_path / "plain").mkdir()
+        plain_request, plain_service, plain_runtime, _, plain_now = _check_disposition_fixture(
+            other, tmp_path / "plain", execution_selection=strict
+        )
+        _complete_check_node(plain_runtime, plain_request, "qualify", plain_now)
+        plain_epoch = plain_runtime.register_node(
+            dispatch=_check_node_dispatch(plain_request, "implement"),
+            now=plain_now,
+            heartbeat_window=_WINDOW,
+        )
+        plain_runtime.complete_node(
+            run_id=str(plain_request.run.id),
+            node_id="implement",
+            epoch=plain_epoch.epoch,
+            now=plain_now,
+            outcome="failed",
+        )
+        plain = plain_service.next_action(plain_request.run.id)
+    finally:
+        other.close()
+    assert plain.action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    assert plain.hold is None

@@ -489,3 +489,86 @@ def test_harness_for_rejects_an_unconfigured_provider_instead_of_falling_back(
 
     with pytest.raises(InvalidInputError, match="harness_provider"):
         _harness_for(configuration)
+
+
+def _readonly_request(
+    tmp_path: Path, *, selection: ExecutionSelection, executable: str, blocked: Path
+) -> Path:
+    request = _request(tmp_path)
+    request = replace(
+        request,
+        execution_selection=selection,
+        execution_configuration=replace(
+            request.execution_configuration,
+            harness_executable=executable,
+            artifact_root=blocked / "artifacts",
+        ),
+    )
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("executable", "expected_action", "expected_hold"),
+    [
+        ("/nonexistent/enginery-host", "hold", "host_fingerprint_drift"),
+        ("host-script", "qualify", None),
+    ],
+    ids=["unobservable-host", "tested-host"],
+)
+def test_read_only_diagnostics_never_create_harness_state_and_never_crash_on_the_host(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    executable: str,
+    expected_action: str,
+    expected_hold: str | None,
+) -> None:
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("a file where the artifact root's parent would be", encoding="utf-8")
+    if executable == "host-script":
+        script = tmp_path / "host-script"
+        script.write_text("#!/bin/sh\necho 'omp v18.10.2'\n", encoding="utf-8")
+        script.chmod(0o755)
+        executable = str(script)
+    pinned = selection_for("omp", model="openai/gpt-5.2")
+    request_path = _readonly_request(
+        tmp_path, selection=pinned, executable=executable, blocked=blocker
+    )
+    database = tmp_path / "ledger.db"
+    assert _start(database, request_path) == 0
+    capsys.readouterr()
+
+    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+
+    watched = json.loads(capsys.readouterr().out)
+    assert watched["next_action"] == expected_action
+    if expected_hold is None:
+        assert watched["hold"] is None
+    else:
+        assert watched["hold"]["reason"] == expected_hold
+        assert watched["hold"]["details"]["installed_executable_version"] == "unobservable"
+    assert blocker.read_text(encoding="utf-8").startswith("a file")
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_a_host_default_run_is_never_probed_by_read_only_diagnostics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("file", encoding="utf-8")
+    request_path = _readonly_request(
+        tmp_path,
+        selection=selection_for("omp"),
+        executable="/nonexistent/enginery-host",
+        blocked=blocker,
+    )
+    database = tmp_path / "ledger.db"
+    assert _start(database, request_path) == 0
+    capsys.readouterr()
+
+    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+
+    watched = json.loads(capsys.readouterr().out)
+    assert watched["next_action"] == "qualify"
+    assert watched["hold"] is None
