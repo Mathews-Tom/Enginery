@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,11 +31,12 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
 )
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
-from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.node_attempt import EvidenceResult, ReconciliationResult
 from enginery.domain.observation import ObservationState
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.domain.workflow.check import CheckDisposition
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.results import WorkerResultEnvelope
@@ -46,14 +48,21 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
+from enginery.evidence.acceptance_baseline import AcceptanceBaselineError
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.issue_to_pr import WorkReadiness, stage1_work_manifest
+from enginery.workflows.issue_to_pr import (
+    STAGE1_VALIDATE_CHECK_ID,
+    STAGE1_VERIFY_CHECK_ID,
+    WorkReadiness,
+    stage1_work_manifest,
+)
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
+    Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,
 )
@@ -1963,3 +1972,346 @@ class RecordingPullRequests:
 
     def reconcile(self, *, operation_id: OperationId) -> object:
         raise AssertionError("not used by this test")
+
+
+def _check_disposition_fixture(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    *,
+    source_drift: bool = False,
+    start: bool = True,
+    manifest_transform: Callable[[WorkflowManifest], WorkflowManifest] | None = None,
+    validation_commands: tuple[tuple[str, ...], ...] = (("uv", "run", "pytest", "-q"),),
+) -> tuple[Stage1RunRequest, Stage1RunService, CoordinatorRuntime, RecordingPullRequests, datetime]:
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    template_manifest = stage1_work_manifest()
+    manifest = replace(
+        template_manifest,
+        nodes={
+            **template_manifest.nodes,
+            NodeId("implement"): replace(
+                template_manifest.nodes[NodeId("implement")],
+                actor_type=ActorType.DETERMINISTIC,
+            ),
+        },
+    )
+    if manifest_transform is not None:
+        manifest = manifest_transform(manifest)
+    snapshot = _snapshot()
+    request = Stage1RunRequest(
+        run=Run(
+            id=RunId("run-check"),
+            work_item_id=snapshot.work_item.id,
+            work_item_snapshot_digest=snapshot.work_item.bound_field_digest,
+            workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
+            workflow_definition_digest=manifest.content_digest,
+            repository="repository-1",
+            base_revision="base-revision",
+            policy_set_version="policy-v1",
+            adapter_versions={},
+            adapter_fingerprints={},
+            capability_lock_digest=Digest.of_bytes(b"capability-lock"),
+            environment_manifest_digest=Digest.of_bytes(b"environment"),
+            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            state=RunState.CREATED,
+        ),
+        work_snapshot=snapshot,
+        manifest=manifest,
+        repository_id="repository-1",
+        repository_path=repository,
+        workspace_path=(tmp_path / "workspace").resolve(),
+        base_branch="main",
+        head_branch="enginery/run-check",
+        validation_commands=validation_commands,
+        applicable_criteria=(True,),
+        required_checks=("CI",),
+        repair_limit=1,
+        implementation=Stage1ImplementationRequest(
+            attempt_id="implement-0",
+            operation_id=OperationId("implement:run-check"),
+            time_budget_seconds=60,
+            cost_budget=Decimal("1.0"),
+            permitted_capabilities=("git",),
+            evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_configuration=Stage1ExecutionConfiguration(
+            github_repository="Mathews-Tom/enginery-provider-smoke",
+            github_credential_reference="test-github-keyring",
+            github_executable="gh",
+            harness_provider="omp",
+            harness_credential_reference="test-omp-keyring",
+            harness_executable="omp",
+            artifact_root=(tmp_path / "artifacts").resolve(),
+        ),
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
+    pull_requests = RecordingPullRequests()
+    terminal_snapshot = (
+        replace(snapshot, source_revision="superseding-issue") if source_drift else None
+    )
+    service = Stage1RunService(
+        runtime=runtime,
+        ledger=ledger_service,
+        work_ledger=cast(
+            WorkLedgerPort, TerminalWorkLedger(snapshot, terminal_snapshot=terminal_snapshot)
+        ),
+        pull_requests=cast(PullRequestPort, pull_requests),
+    )
+    if start:
+        service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+    return request, service, runtime, pull_requests, now
+
+
+def _check_node_dispatch(request: Stage1RunRequest, node_id: str) -> WorkflowNodeDispatch:
+    previous = {"implement": "qualify", "validate": "implement"}
+    return WorkflowNodeDispatch(
+        FixtureDispatch(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            attempt_id=f"{node_id}-0",
+            repository_id=request.repository_id,
+            repository_path=request.repository_path,
+            workspace_path=request.workspace_path,
+            base_revision="base-revision",
+            command=(node_id,),
+            expected_attempt_version=0,
+            operation_id=f"{node_id}:run-check",
+            dependencies=(
+                ((str(request.run.id), previous[node_id]),) if node_id in previous else ()
+            ),
+            workflow_definition_id=request.manifest.id.value,
+        ),
+        request.manifest,
+    )
+
+
+def _complete_check_node(
+    runtime: CoordinatorRuntime, request: Stage1RunRequest, node_id: str, now: datetime
+) -> None:
+    epoch = runtime.register_node(
+        dispatch=_check_node_dispatch(request, node_id), now=now, heartbeat_window=timedelta(60)
+    )
+    runtime.complete_node(
+        run_id=str(request.run.id),
+        node_id=node_id,
+        epoch=epoch.epoch,
+        now=now,
+        extra=(
+            {"validation_artifact_digest": str(Digest.of_bytes(b"validation"))}
+            if node_id == "validate"
+            else None
+        ),
+    )
+
+
+def _drive_check_to_non_pass(
+    ledger_service: LedgerService, tmp_path: Path, *, check_id: str, result: str
+) -> tuple[Stage1RunService, Stage1RunRequest, int]:
+    """Drive the real Stage 1 executors until ``check_id`` yields a ``result`` non-pass.
+
+    Returns the service, the request, and the repair budget remaining at that point.
+    """
+    request, service, runtime, pull_requests, now = _check_disposition_fixture(
+        ledger_service,
+        tmp_path,
+        source_drift=check_id == STAGE1_VERIFY_CHECK_ID and result == "fail",
+    )
+    heartbeat = timedelta(seconds=60)
+    _complete_check_node(runtime, request, "qualify", now)
+    _complete_check_node(runtime, request, "implement", now)
+    if check_id == STAGE1_VALIDATE_CHECK_ID:
+
+        def fail(command: tuple[str, ...], workspace: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, 1, "", "boom")
+
+        def cannot_run(
+            command: tuple[str, ...], workspace: Path
+        ) -> subprocess.CompletedProcess[str]:
+            raise OSError("validation command could not be started")
+
+        executor = Stage1ValidationExecutor(
+            runtime=runtime,
+            artifact_store=ArtifactStore(tmp_path / "artifacts"),
+            command_runner=fail if result == "fail" else cannot_run,
+        )
+        dispatch = _check_node_dispatch(request, "validate")
+        if result == "fail":
+            assert not executor.validate(
+                dispatch=dispatch,
+                commands=request.validation_commands,
+                now=now,
+                heartbeat_window=heartbeat,
+            ).passed
+        else:
+            with pytest.raises(OSError):
+                executor.validate(
+                    dispatch=dispatch,
+                    commands=request.validation_commands,
+                    now=now,
+                    heartbeat_window=heartbeat,
+                )
+        return service, request, request.repair_limit
+    _complete_check_node(runtime, request, "validate", now)
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="implementation-artifacts",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id=request.implementation.attempt_id,
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                ),
+            ),
+        )
+    )
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=heartbeat,
+    )
+    service.open_pull_request(request, now=now, heartbeat_window=heartbeat)
+    service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
+    if result == "indeterminate":
+        pull_requests.check_status = "in_progress"
+        pull_requests.check_conclusion = None
+    service.verify_merge_ready(request, now=now, heartbeat_window=heartbeat)
+    return service, request, request.repair_limit
+
+
+@pytest.mark.parametrize("result", ["fail", "indeterminate"])
+@pytest.mark.parametrize("check_id", [STAGE1_VALIDATE_CHECK_ID, STAGE1_VERIFY_CHECK_ID])
+def test_stage1_declared_check_dispositions_match_executor_behavior(
+    ledger_service: LedgerService, tmp_path: Path, check_id: str, result: str
+) -> None:
+    """The next action the real Stage 1 service derives equals each check's declared disposition.
+
+    A validation command that exits non-zero is FAIL and one that cannot be started is
+    INDETERMINATE; a superseded pull-request subject is FAIL and a still-running required
+    check is INDETERMINATE. The expected action comes from the manifest declaration, so a
+    declaration the executor does not honor (for example a repair edge the service never
+    takes) fails here instead of drifting silently.
+    """
+    declared = next(
+        node.check
+        for node in stage1_work_manifest().nodes.values()
+        if node.check is not None and node.check.check_id == check_id
+    )
+    disposition = declared.disposition(
+        EvidenceResult.FAIL if result == "fail" else EvidenceResult.INDETERMINATE
+    )
+
+    service, request, repair_limit = _drive_check_to_non_pass(
+        ledger_service, tmp_path, check_id=check_id, result=result
+    )
+    action = service.next_action(request.run.id).action
+
+    assert repair_limit >= 1  # a repair edge is available, so repair_or_stop would be observable
+    if disposition is CheckDisposition.STOP:
+        assert action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    elif disposition is CheckDisposition.HOLD:
+        assert action is Stage1ProgressionAction.VERIFY
+    else:
+        assert disposition is CheckDisposition.REPAIR_OR_STOP
+        assert action is Stage1ProgressionAction.IMPLEMENT
+    assert action is not Stage1ProgressionAction.OPEN_PR
+
+
+def _legacy_manifest(manifest: WorkflowManifest) -> WorkflowManifest:
+    """The pre-check shape: schema_version 1 with no check bound on any node."""
+    return replace(
+        manifest,
+        schema_version=1,
+        nodes={node_id: replace(node, check=None) for node_id, node in manifest.nodes.items()},
+    )
+
+
+def _renamed_validate_check(manifest: WorkflowManifest) -> WorkflowManifest:
+    validate = manifest.nodes[NodeId("validate")]
+    assert validate.check is not None
+    return replace(
+        manifest,
+        nodes={
+            **manifest.nodes,
+            NodeId("validate"): replace(
+                validate, check=replace(validate.check, check_id="stage1.not_in_baseline")
+            ),
+        },
+    )
+
+
+def test_a_new_stage1_run_cannot_dodge_check_binding_with_a_legacy_manifest(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, manifest_transform=_legacy_manifest
+    )
+
+    with pytest.raises(InvalidInputError, match="build-request"):
+        service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
+
+
+def test_a_persisted_pre_check_run_still_reads_and_restarts_with_its_original_digest(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, manifest_transform=_legacy_manifest
+    )
+    runtime.register_run(
+        run_id=str(request.run.id),
+        initial_state=request.initial_state(),
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+
+    restarted = service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+    read_back = service.read(request.run.id)
+
+    assert restarted.request.manifest.schema_version == 1
+    assert read_back.request.manifest.content_digest == request.manifest.content_digest
+    assert read_back.request.run.workflow_definition_digest == request.manifest.content_digest
+
+
+def test_a_new_stage1_run_with_a_check_missing_from_the_baseline_is_rejected(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, manifest_transform=_renamed_validate_check
+    )
+
+    with pytest.raises(AcceptanceBaselineError, match="does not reference"):
+        service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("bash", "-c", "pytest -q"),
+        ("/usr/bin/env", "-i", "FOO=1", "sh", "-c", "pytest"),
+        ("busybox", "sh", "-c", "pytest"),
+        ("C:\\Windows\\System32\\cmd.exe", "/c", "pytest"),
+    ],
+)
+def test_a_new_stage1_run_rejects_a_request_validation_command_that_runs_a_shell(
+    ledger_service: LedgerService, tmp_path: Path, command: tuple[str, ...]
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service,
+        tmp_path,
+        start=False,
+        validation_commands=(("uv", "run", "pytest", "-q"), command),
+    )
+
+    with pytest.raises(InvalidInputError, match="shell interpreter"):
+        service.start(request, now=now, heartbeat_window=timedelta(seconds=60))

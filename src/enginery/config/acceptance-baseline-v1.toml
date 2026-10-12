@@ -1,0 +1,121 @@
+# Enginery acceptance baseline, version 1.
+#
+# Frozen: the loader verifies this file's bytes against a SHA-256 registered in
+# enginery.evidence.acceptance_baseline, so an in-place edit of this file alone
+# is detected and fails loudly. Changing a version's registered digest is a
+# reviewable source change; new behavior requires a new version file. The
+# baseline covers CURRENT SUPPORTED BEHAVIOR ONLY. Acceptance for a new feature
+# is task acceptance owned by that task and never belongs here.
+#
+# Every assertion declares a full typed check (subject, exactly one of a command
+# or a named observer, and the stop behavior for each non-pass result), parsed
+# by the same CheckDeclaration parser the workflow manifests use.
+
+baseline_version = "1"
+scope = "current_supported_behavior"
+owner = "evaluator"
+
+[calibration]
+# Every injected-defect calibration run ends in exactly one of these outcomes.
+categories = ["caught", "escaped", "not_injected", "inconclusive"]
+
+[scenario_custody]
+# Calibration scenarios are private. This file carries identities only, never
+# scenario content.
+owner = "operator_or_evaluator"
+storage = "outside_worker_readable_mounts"
+public_content = "identities_only"
+
+[[journeys]]
+id = "stage1_issue_to_merge_ready_pull_request"
+summary = "A qualified issue runs through implementation, validation, pull request, CI, and merge-ready verification against local fixtures."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 1",
+  "tests/system/test_full_system_gate.py::test_stage1_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage1.validation_passes_at_workspace_head"
+[journeys.assertions.check]
+id = "stage1.validate"
+subject = "workspace_head"
+command = { source = "request" }
+on_fail = "stop"
+on_indeterminate = "stop"
+
+[[journeys.assertions]]
+id = "stage1.merge_ready_at_pull_request_head"
+[journeys.assertions.check]
+id = "stage1.verify"
+subject = "pull_request_head"
+observer = "pull_request_merge_readiness"
+on_fail = "stop"
+on_indeterminate = "hold"
+
+[[journeys]]
+id = "stage2_plan_to_verified_release"
+summary = "A dependency-ordered plan merges its slices and publishes one verified release against local fixtures."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 2",
+  "tests/system/test_full_system_gate.py::test_stage2_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage2.slices_merged_and_release_published"
+[journeys.assertions.check]
+id = "stage2.release_gate"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "python", "scripts/full_system_gate.py", "--stages", "2"] }
+on_fail = "stop"
+on_indeterminate = "hold"
+
+[[journeys]]
+id = "stage3_incident_to_hotfix_and_rollback"
+summary = "A controlled local service incident is hotfixed, observed, rolled back, and restored to the base revision."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 3",
+  "tests/system/test_full_system_gate.py::test_stage3_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage3.rollback_restores_base_revision"
+[journeys.assertions.check]
+id = "stage3.rollback_gate"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "python", "scripts/full_system_gate.py", "--stages", "3"] }
+on_fail = "stop"
+on_indeterminate = "hold"
+
+[[journeys]]
+id = "doctor_reports_local_prerequisites"
+summary = "The doctor command reports implemented local prerequisites and exits zero when they hold."
+exercised_by = [
+  "tests/cli/test_doctor.py::test_doctor_reports_ok_checks_and_exits_zero",
+]
+
+[[journeys.assertions]]
+id = "doctor.prerequisites_ok"
+[journeys.assertions.check]
+id = "doctor.prerequisites"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "enginery", "doctor"] }
+on_fail = "stop"
+on_indeterminate = "hold"
+
+[[journeys]]
+id = "g4_status_fails_closed"
+summary = "Gate G4 status reports fail-closed against a ledger with no qualifying evidence."
+exercised_by = [
+  "tests/cli/test_gate.py::test_gate_status_reports_fail_closed_against_an_empty_ledger",
+]
+
+[[journeys.assertions]]
+id = "gate.g4_fails_closed_without_evidence"
+[journeys.assertions.check]
+# The gate status command needs an operator-supplied ledger path, so this check
+# is a named observer rather than a fixed argv.
+id = "gate.g4_fail_closed"
+subject = "source_revision"
+observer = "g4_gate_fail_closed"
+on_fail = "stop"
+on_indeterminate = "hold"
