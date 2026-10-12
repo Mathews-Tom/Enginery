@@ -384,10 +384,13 @@ controls at the run layer:
   `low`, `medium`, `high`, `xhigh`, `max`; `claude-code`: `low`, `medium`, `high`,
   `xhigh`, `max`). The vocabularies are not mapped onto each other, and OMP's
   `auto` cannot be pinned because it hands the choice to the host.
-- `--strict-effective` holds the run unless every pinned control is observed as
+- `--strict-effective` is a modifier, not a pin: it requires `--model` or
+  `--effort` and holds the run unless every pinned control is observed as
   effective and equal to what was pinned. Neither host reports the effective
-  effort, so a strict effort pin always holds; a strict model pin passes only
-  when the host reports the same model.
+  effort, so `build-request` rejects it together with `--effort` (exit code 2, no
+  file written, and the same check applies when a run starts) rather than spend a
+  worker session on a run that cannot pass. With `--model` alone it passes only
+  when the host reports exactly that model.
 
 Unsupported pins are rejected by `build-request` itself, with exit code 2 and
 before any file is written. Omitted flags leave the host's own default, which is
@@ -397,18 +400,26 @@ failure.
 
 `stage1 watch` and `stage1 evidence` print an `execution` block that keeps four
 things apart: `requested` (the value and the layer that supplied it), `selected`,
-`submitted` (the control arguments actually emitted to the host, once the
-implementation has run) and `effective` (the model the host reported, or `unknown`
-with the reason; the effective effort is always `unknown` today). It also carries
-the support tier (both hosts are `experimental`), the catalog version and digest,
-the host version and protocol fingerprint the controls were tested against, and
-any `holds`. A run is held, with a diagnostic, when its bound catalog digest no
-longer matches the packaged catalog, when the installed host is not the tested
-fingerprint (only for a run that pinned a native control; an unobservable host
-counts), when a strict requirement is unmet, or when a receipt's submitted
-controls are not in the launched command. A held run is not advanced and its
-original binding is never rewritten. A matching fingerprint or a captured launch
-request does not raise a host above `experimental`.
+`submitted` (the control arguments extracted from the command that was actually
+launched, once the implementation has run) and `effective` (the model the host
+reported, or `unknown` with the reason; the effective effort is always `unknown`
+today). It also carries the support tier (both hosts are `experimental`), the
+catalog version and digest, the host version and protocol fingerprint the controls
+were tested against, and any `holds`. The same hold is also printed as the
+top-level `hold`. Only the host's executable version is probed (a read-only
+diagnostic creates no files); its protocol is the one the adapter declares. A
+matching fingerprint or a captured launch request does not raise a host above
+`experimental`.
+
+A held run is not advanced, and its original binding is never rewritten. Recovery
+depends on the reason, and `stage1 resume` does not clear a hold:
+
+| Hold reason | Cause | Recovery |
+|---|---|---|
+| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and resume, or start a new run from a rebuilt request. |
+| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
+| `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
+| `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
 
 ## Recovery semantics
 
