@@ -80,9 +80,10 @@ serializes a literal secret value.
 The request also carries an `execution_selection` block: the harness a run
 requested and, optionally, a model and a native effort, each recorded with
 the layer that supplied it, together with the digest of the packaged
-execution-control catalog it was resolved against. `build-request` currently
-binds the host's own default model and effort; it has no flag to pin either
-yet. A request document is validated against the packaged catalog when a run
+execution-control catalog it was resolved against. `build-request` binds the
+host's own default model and effort unless `--model`, `--effort` or
+`--strict-effective` are given (see
+[Execution selection and receipts](#execution-selection-and-receipts)). A request document is validated against the packaged catalog when a run
 starts, so an alias, an unpinnable effort, a different tested host version or
 a support tier the catalog does not assign is rejected. A run persisted
 before this block existed keeps its original request digest, decodes
@@ -367,8 +368,47 @@ human or reviewer decision `watch --advance` cannot manufacture on its own.
 on a human decision for; `stage1 cancel` terminates a running or
 human-waiting node; `stage1 resume` restarts a specific human-wait node
 after a durable interruption. `stage1 evidence` prints the run's current
-status, request digest, source revision, and every runtime node's state —
-the operator's read path for "what is this run doing and why."
+status, request digest, source revision, every runtime node's state, and an
+`execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
+— the operator's read path for "what is this run doing and why."
+
+### Execution selection and receipts
+
+`stage1 build-request` accepts three optional flags that pin the run's execution
+controls at the run layer:
+
+- `--model` pins an exact model. For `omp` it must be provider-qualified
+  (`provider/id`); for `claude-code` it must be a full model name, not an alias
+  such as `opus` or `sonnet`.
+- `--effort` pins the harness's own native effort level (`omp`: `off`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`; `claude-code`: `low`, `medium`, `high`,
+  `xhigh`, `max`). The vocabularies are not mapped onto each other, and OMP's
+  `auto` cannot be pinned because it hands the choice to the host.
+- `--strict-effective` holds the run unless every pinned control is observed as
+  effective and equal to what was pinned. Neither host reports the effective
+  effort, so a strict effort pin always holds; a strict model pin passes only
+  when the host reports the same model.
+
+Unsupported pins are rejected by `build-request` itself, with exit code 2 and
+before any file is written. Omitted flags leave the host's own default, which is
+shown as `host default`, never as a level. Pins are exact: there is no fuzzy
+matching, no fallback model, and no retry with a different model or effort after a
+failure.
+
+`stage1 watch` and `stage1 evidence` print an `execution` block that keeps four
+things apart: `requested` (the value and the layer that supplied it), `selected`,
+`submitted` (the control arguments actually emitted to the host, once the
+implementation has run) and `effective` (the model the host reported, or `unknown`
+with the reason; the effective effort is always `unknown` today). It also carries
+the support tier (both hosts are `experimental`), the catalog version and digest,
+the host version and protocol fingerprint the controls were tested against, and
+any `holds`. A run is held, with a diagnostic, when its bound catalog digest no
+longer matches the packaged catalog, when the installed host is not the tested
+fingerprint (only for a run that pinned a native control; an unobservable host
+counts), when a strict requirement is unmet, or when a receipt's submitted
+controls are not in the launched command. A held run is not advanced and its
+original binding is never rewritten. A matching fingerprint or a captured launch
+request does not raise a host above `experimental`.
 
 ## Recovery semantics
 

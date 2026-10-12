@@ -147,6 +147,24 @@ def add_build_request_parser(
     parser.add_argument(
         "--harness-executable", default=None, help="Defaults to omp/claude by provider."
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Pin an exact model for the harness: provider-qualified provider/id for omp, a "
+        "full model name (not an alias) for claude-code. Omit to use the host's own default.",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help="Pin the harness's own native effort level (omp: off, minimal, low, medium, high, "
+        "xhigh, max; claude-code: low, medium, high, xhigh, max). Omit for the host default.",
+    )
+    parser.add_argument(
+        "--strict-effective",
+        action="store_true",
+        help="Hold the run unless every pinned control is observed as effective and equal. "
+        "Neither host reports effective effort, so a strict effort pin always holds.",
+    )
     parser.add_argument("--artifact-root", required=True, type=Path)
 
 
@@ -297,7 +315,17 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             artifact_root=args.artifact_root.resolve(),
         ),
         execution_selection=resolve_execution_selection(
-            (LayerControls(layer=SelectionLayer.RUN, harness=args.harness_provider),),
+            (
+                LayerControls(
+                    layer=SelectionLayer.RUN,
+                    harness=args.harness_provider,
+                    model=args.model,
+                    effort=args.effort,
+                    model_pinned=args.model is not None,
+                    effort_pinned=args.effort is not None,
+                    strict_effective=True if args.strict_effective else None,
+                ),
+            ),
             catalog=load_execution_catalog(),
         ),
     )
