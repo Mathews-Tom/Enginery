@@ -80,9 +80,10 @@ serializes a literal secret value.
 The request also carries an `execution_selection` block: the harness a run
 requested and, optionally, a model and a native effort, each recorded with
 the layer that supplied it, together with the digest of the packaged
-execution-control catalog it was resolved against. `build-request` currently
-binds the host's own default model and effort; it has no flag to pin either
-yet. A request document is validated against the packaged catalog when a run
+execution-control catalog it was resolved against. `build-request` binds the
+host's own default model and effort unless `--model` or `--effort` is given (see
+[Execution selection and receipts](#execution-selection-and-receipts)); `--strict-effective`
+only modifies a pinned model and never changes what is bound. A request document is validated against the packaged catalog when a run
 starts, so an alias, an unpinnable effort, a different tested host version or
 a support tier the catalog does not assign is rejected. A run persisted
 before this block existed keeps its original request digest, decodes
@@ -367,8 +368,56 @@ human or reviewer decision `watch --advance` cannot manufacture on its own.
 on a human decision for; `stage1 cancel` terminates a running or
 human-waiting node; `stage1 resume` restarts a specific human-wait node
 after a durable interruption. `stage1 evidence` prints the run's current
-status, request digest, source revision, and every runtime node's state —
-the operator's read path for "what is this run doing and why."
+status, request digest, source revision, every runtime node's state, and an
+`execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
+— the operator's read path for "what is this run doing and why."
+
+### Execution selection and receipts
+
+`stage1 build-request` accepts three optional flags that pin the run's execution
+controls at the run layer:
+
+- `--model` pins an exact model. For `omp` it must be provider-qualified
+  (`provider/id`); for `claude-code` it must be a full model name, not an alias
+  such as `opus` or `sonnet`.
+- `--effort` pins the harness's own native effort level (`omp`: `off`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`; `claude-code`: `low`, `medium`, `high`,
+  `xhigh`, `max`). The vocabularies are not mapped onto each other, and OMP's
+  `auto` cannot be pinned because it hands the choice to the host.
+- `--strict-effective` is a modifier for `--model`, not a pin: it requires `--model`
+  and holds the run unless the host reports exactly the pinned model. Neither host
+  reports the effective effort, so `build-request` rejects it together with `--effort`
+  (exit code 2, no file written, and the same check applies when a run starts) rather
+  than spend a worker session on a run that cannot pass.
+
+Unsupported pins are rejected by `build-request` itself, with exit code 2 and
+before any file is written. Omitted flags leave the host's own default, which is
+shown as `host default`, never as a level. Pins are exact: there is no fuzzy
+matching, no fallback model, and no retry with a different model or effort after a
+failure.
+
+`stage1 watch` and `stage1 evidence` print an `execution` block that keeps four
+things apart: `requested` (the value and the layer that supplied it), `selected`,
+`submitted` (the control arguments extracted from the command that was actually
+launched, once the implementation has run) and `effective` (the model the host
+reported, or `unknown` with the reason; the effective effort is always `unknown`
+today). It also carries the support tier (both hosts are `experimental`), the
+catalog version and digest, the host version and protocol fingerprint the controls
+were tested against, and any `holds`. The same hold is also printed as the
+top-level `hold`. Only the host's executable version is probed (a read-only
+diagnostic creates no files); its protocol is the one the adapter declares. A
+matching fingerprint or a captured launch request does not raise a host above
+`experimental`.
+
+A held run is not advanced, and its original binding is never rewritten. Recovery
+depends on the reason, and `stage1 resume` does not clear a hold:
+
+| Hold reason | Cause | Recovery |
+|---|---|---|
+| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and re-run `stage1 watch`, or start a new run from a rebuilt request. |
+| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
+| `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
+| `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
 
 ## Recovery semantics
 

@@ -18,6 +18,7 @@ from enginery.adapters.github import (
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
+from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
@@ -119,6 +120,7 @@ def _watch(args: argparse.Namespace) -> None:
                 "next_action": progression.action.value,
                 "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
                 "hold": None if progression.hold is None else progression.hold.to_state(),
+                "execution": execution_report(ledger, run, hold=progression.hold),
             }
         )
     finally:
@@ -327,9 +329,11 @@ def _resume(args: argparse.Namespace) -> None:
 def _evidence(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        run = Stage1RunService(
-            runtime=CoordinatorRuntime(ledger, owner=args.owner), ledger=ledger
-        ).read(RunId(args.run_id))
+        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id))
+        progression = _read_only_service(
+            runtime=runtime, ledger=ledger, request=run.request
+        ).next_action(RunId(args.run_id))
         _print(
             {
                 "run_id": str(run.request.run.id),
@@ -338,6 +342,8 @@ def _evidence(args: argparse.Namespace) -> None:
                 "source_revision": run.request.work_snapshot.source_revision,
                 "base_revision": run.request.run.base_revision,
                 "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
+                "hold": None if progression.hold is None else progression.hold.to_state(),
+                "execution": execution_report(ledger, run, hold=progression.hold),
             }
         )
     finally:

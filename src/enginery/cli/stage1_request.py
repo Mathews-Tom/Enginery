@@ -53,6 +53,7 @@ _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
 _LOCAL_ENVIRONMENT_DIGEST = Digest.of_bytes(b"local-environment")
 _LOCAL_CONFIGURATION_DIGEST = Digest.of_bytes(b"local-configuration")
 _DEFAULT_CAPABILITY_LOCKFILE = Path(".enginery/capabilities.lock.json")
+_FACTORY_DEFAULT_HARNESS = "omp"
 
 
 def add_build_request_parser(
@@ -142,10 +143,34 @@ def add_build_request_parser(
     parser.add_argument("--github-repository", default=None, help="Defaults to --repository.")
     parser.add_argument("--github-credential-reference", default="operator-gh-cli")
     parser.add_argument("--github-executable", default="gh")
-    parser.add_argument("--harness-provider", choices=("omp", "claude-code"), default="omp")
+    parser.add_argument(
+        "--harness-provider",
+        choices=("omp", "claude-code"),
+        default=None,
+        help=f"The harness to run. Omitted, the built-in default ({_FACTORY_DEFAULT_HARNESS}) "
+        "is recorded as a factory-layer choice rather than an explicit run-layer one.",
+    )
     parser.add_argument("--harness-credential-reference", default="operator-harness-session")
     parser.add_argument(
         "--harness-executable", default=None, help="Defaults to omp/claude by provider."
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Pin an exact model for the harness: provider-qualified provider/id for omp, a "
+        "full model name (not an alias) for claude-code. Omit to use the host's own default.",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        help="Pin the harness's own native effort level (omp: off, minimal, low, medium, high, "
+        "xhigh, max; claude-code: low, medium, high, xhigh, max). Omit for the host default.",
+    )
+    parser.add_argument(
+        "--strict-effective",
+        action="store_true",
+        help="Modifier for --model: hold the run unless the host reports exactly the pinned "
+        "model. Rejected with --effort, since neither host reports effective effort.",
     )
     parser.add_argument("--artifact-root", required=True, type=Path)
 
@@ -198,10 +223,10 @@ def _validation_commands(values: list[str] | None) -> tuple[tuple[str, ...], ...
     return tuple(tuple(shlex.split(value)) for value in values)
 
 
-def _harness_executable(args: argparse.Namespace) -> str:
+def _harness_executable(args: argparse.Namespace, harness: str) -> str:
     if args.harness_executable is not None:
         return str(args.harness_executable)
-    return "claude" if args.harness_provider == "claude-code" else "omp"
+    return "claude" if harness == "claude-code" else "omp"
 
 
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
@@ -233,6 +258,24 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     applicable_criteria = tuple(
         index not in set(args.inapplicable_criteria)
         for index in range(len(work_item.acceptance_criteria))
+    )
+
+    # The built-in default harness is a factory-layer input; only a harness the operator named
+    # on the command line is a run-layer input, so the recorded source says which it was.
+    selection = resolve_execution_selection(
+        (
+            LayerControls(layer=SelectionLayer.FACTORY, harness=_FACTORY_DEFAULT_HARNESS),
+            LayerControls(
+                layer=SelectionLayer.RUN,
+                harness=args.harness_provider,
+                model=args.model,
+                effort=args.effort,
+                model_pinned=args.model is not None,
+                effort_pinned=args.effort is not None,
+                strict_effective=True if args.strict_effective else None,
+            ),
+        ),
+        catalog=load_execution_catalog(),
     )
 
     run = Run(
@@ -291,15 +334,12 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             github_repository=args.github_repository or args.repository,
             github_credential_reference=args.github_credential_reference,
             github_executable=args.github_executable,
-            harness_provider=args.harness_provider,
+            harness_provider=selection.harness,
             harness_credential_reference=args.harness_credential_reference,
-            harness_executable=_harness_executable(args),
+            harness_executable=_harness_executable(args, selection.harness),
             artifact_root=args.artifact_root.resolve(),
         ),
-        execution_selection=resolve_execution_selection(
-            (LayerControls(layer=SelectionLayer.RUN, harness=args.harness_provider),),
-            catalog=load_execution_catalog(),
-        ),
+        execution_selection=selection,
     )
 
 
