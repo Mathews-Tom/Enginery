@@ -23,9 +23,9 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are published to PyPI;
-`v0.5.0` is also a GitHub Release, published 2026-08-11 and the current
-release. Install the published package with:
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are published to PyPI
+and GitHub Releases; `v0.5.0` (2026-08-11) is the current release. Install
+the published package with:
 
 ```bash
 pip install enginery
@@ -488,9 +488,12 @@ implemented.
   which does not exist in this release.
 - **Trusted-local is not containment, and no hostile-code safety claim is
   made.** Run Enginery only against repositories, issues, and harness
-  sessions you trust. Enginery never merges, releases, publishes, or deploys
-  without an explicit human action, and it never triggers or mentions
-  external reviewer bots on its own.
+  sessions you trust. Stage 1 never merges. A Stage 2 pull-request merge is
+  policy-gated: the shipped default rules allow low- and medium-risk merges
+  once current-head merge-ready evidence passes, and deny high-risk merges by
+  default. Release publication, deployment, and rollback always require a
+  current interactive human approval. Enginery never triggers external
+  reviewer bots.
 - **Credential references, not credentials, cross the Stage 1 boundary.**
   Stage 1 never merges, publishes, or deploys, so it never needs
   production or publication credentials in the first place. The GitHub and

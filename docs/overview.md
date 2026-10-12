@@ -1,7 +1,7 @@
 # Enginery System Overview
 
-- **Status:** `v0.5.0` published on PyPI and GitHub Releases (2026-08-11), alongside `v0.1.0`–`v0.4.0` (Stage 1, 2, and 3 shipped; no new stage since `v0.3.0`); Stage 4 gate-deferred
-- **Date:** 2026-07-14
+- **Status:** `v0.5.0` published on PyPI and GitHub Releases (2026-08-11), alongside `v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` (Stage 1, 2, and 3 shipped; no new stage since `v0.3.0`); Stage 4 gate-deferred
+- **Date:** 2026-07-14 (original authoring date; the status line above reflects the current release)
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 
 > **Thesis:** Coding agents perform tasks. Enginery engineers the system in which those tasks become trustworthy software outcomes.
@@ -200,7 +200,7 @@ The planned first backend binds supported external actions to stable operation I
 
 ### Proposed factory direction (not shipped)
 
-A manual-first software-factory layer over the shipped substrate is proposed, not shipped; the current CLI has no `enginery factory` command. The proposed command family is `init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`. Its boundary is manual-first, local-first, and deterministic: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. Harness, model, session, and worker machine are separate axes. Trusted-local operation is not containment, and Enginery never merges, releases, publishes, or deploys without an explicit human action. No upstream skills or source are vendored; reference projects inform independently re-implemented patterns only.
+A manual-first software-factory layer over the shipped substrate is proposed, not shipped; the current CLI has no `enginery factory` command. The proposed command family is `init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`. Its boundary is manual-first, local-first, and deterministic: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. Harness, model, session, and worker machine are separate axes. Trusted-local operation is not containment. Stage 1 never merges; a Stage 2 pull-request merge is policy-gated (the shipped default rules allow low- and medium-risk merges once current-head merge-ready evidence passes and deny high-risk merges by default); release publication, deployment, and rollback always require a current interactive human approval; Enginery never triggers external reviewer bots. No upstream skills or source are vendored; reference projects inform independently re-implemented patterns only.
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.

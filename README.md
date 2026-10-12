@@ -47,8 +47,11 @@ any pattern learned from them is independently re-implemented under this
 repository's Apache-2.0 license. Trusted-local operation is not containment:
 a worker process can reach the operator's account, filesystem, network, and
 keychain, and Enginery makes no claim of safety against hostile code.
-Enginery never merges, releases, publishes, or deploys without an explicit
-human action, and it does not trigger external reviewer bots.
+Stage 1 never merges. A Stage 2 pull-request merge is policy-gated: the
+shipped default rules allow low- and medium-risk merges once current-head
+merge-ready evidence passes, and deny high-risk merges by default. Release
+publication, deployment, and rollback always require a current interactive
+human approval. Enginery never triggers external reviewer bots.
 
 ## Recovery demonstration
 
