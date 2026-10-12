@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import NodeId, WorkflowDefinitionId
 from enginery.domain.workflow.budget import Budget
+from enginery.domain.workflow.check import CheckDeclaration
 from enginery.domain.workflow.schema import IOSchema
 
 
@@ -134,6 +135,10 @@ class BranchCondition:
         return cls(operator=operator, field_path=raw_field, values=tuple(raw_values))
 
 
+CHECK_BOUND_KINDS = frozenset({NodeKind.RUN_COMMAND, NodeKind.VERIFY_EVIDENCE})
+"""The node kinds that execute a check and so must bind a check contract."""
+
+
 _NODE_DECLARATION_KEYS = frozenset(
     {
         "kind",
@@ -152,6 +157,7 @@ _NODE_DECLARATION_KEYS = frozenset(
         "parallel_group",
         "subworkflow",
         "budget",
+        "check",
     }
 )
 
@@ -177,6 +183,7 @@ class NodeDeclaration:
     parallel_group: str | None = None
     subworkflow: WorkflowDefinitionId | None = None
     budget: Budget = field(default_factory=Budget)
+    check: CheckDeclaration | None = None
 
     def __post_init__(self) -> None:
         if self.node_id in self.dependencies:
@@ -217,6 +224,11 @@ class NodeDeclaration:
         if self.kind is not NodeKind.INVOKE_SUBWORKFLOW and self.subworkflow is not None:
             raise InvalidInputError(
                 "only an invoke_subworkflow node may declare a subworkflow",
+                details={"node_id": str(self.node_id)},
+            )
+        if self.check is not None and self.kind not in CHECK_BOUND_KINDS:
+            raise InvalidInputError(
+                "only run_command and verify_evidence nodes may declare a check",
                 details={"node_id": str(self.node_id)},
             )
 
@@ -275,6 +287,11 @@ class NodeDeclaration:
             parallel_group=_optional_str(raw, "parallel_group"),
             subworkflow=subworkflow,
             budget=Budget.from_mapping(budget_raw),
+            check=(
+                CheckDeclaration.from_mapping(raw["check"])
+                if raw.get("check") is not None
+                else None
+            ),
         )
 
 
@@ -321,6 +338,7 @@ def _optional_str(raw: Mapping[str, object], key: str) -> str | None:
 
 
 __all__ = [
+    "CHECK_BOUND_KINDS",
     "ActorType",
     "BranchCondition",
     "BranchOperator",

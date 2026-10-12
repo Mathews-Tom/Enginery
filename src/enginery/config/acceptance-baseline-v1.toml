@@ -1,0 +1,84 @@
+# Enginery acceptance baseline, version 1.
+#
+# Frozen: this file is verified against a SHA-256 registered in
+# enginery.evidence.acceptance_baseline. An in-place edit fails loudly; a change
+# is a new version file. The baseline covers CURRENT SUPPORTED BEHAVIOR ONLY.
+# Acceptance for a new feature is task acceptance owned by that task and never
+# belongs here.
+
+baseline_version = "1"
+scope = "current_supported_behavior"
+owner = "evaluator"
+
+[calibration]
+# Every injected-defect calibration run ends in exactly one of these outcomes.
+categories = ["caught", "escaped", "not_injected", "inconclusive"]
+
+[scenario_custody]
+# Calibration scenarios are private. This file carries identities only, never
+# scenario content.
+owner = "operator_or_evaluator"
+storage = "outside_worker_readable_mounts"
+public_content = "identities_only"
+
+[[journeys]]
+id = "stage1_issue_to_merge_ready_pull_request"
+summary = "A qualified issue runs through implementation, validation, pull request, CI, and merge-ready verification against local fixtures."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 1",
+  "tests/system/test_full_system_gate.py::test_stage1_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage1.validation_passes_at_workspace_head"
+check_id = "stage1.validate"
+
+[[journeys.assertions]]
+id = "stage1.merge_ready_at_pull_request_head"
+check_id = "stage1.verify"
+
+[[journeys]]
+id = "stage2_plan_to_verified_release"
+summary = "A dependency-ordered plan merges its slices and publishes one verified release against local fixtures."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 2",
+  "tests/system/test_full_system_gate.py::test_stage2_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage2.slices_merged_and_release_published"
+check_id = "stage2.release_gate"
+
+[[journeys]]
+id = "stage3_incident_to_hotfix_and_rollback"
+summary = "A controlled local service incident is hotfixed, observed, rolled back, and restored to the base revision."
+exercised_by = [
+  "scripts/full_system_gate.py --stages 3",
+  "tests/system/test_full_system_gate.py::test_stage3_only_gate_passes",
+]
+
+[[journeys.assertions]]
+id = "stage3.rollback_restores_base_revision"
+check_id = "stage3.rollback_gate"
+
+[[journeys]]
+id = "doctor_reports_local_prerequisites"
+summary = "The doctor command reports implemented local prerequisites and exits zero when they hold."
+exercised_by = [
+  "tests/cli/test_doctor.py::test_doctor_reports_ok_checks_and_exits_zero",
+]
+
+[[journeys.assertions]]
+id = "doctor.prerequisites_ok"
+check_id = "doctor.prerequisites"
+
+[[journeys]]
+id = "g4_status_fails_closed"
+summary = "Gate G4 status reports fail-closed against a ledger with no qualifying evidence."
+exercised_by = [
+  "tests/cli/test_gate.py::test_gate_status_reports_fail_closed_against_an_empty_ledger",
+]
+
+[[journeys.assertions]]
+id = "gate.g4_fails_closed_without_evidence"
+check_id = "gate.g4_fail_closed"

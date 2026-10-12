@@ -415,6 +415,16 @@ A work train is `released` only when: required constituent work is merged; versi
 
 Node completion, evidence satisfaction, policy approval, workflow success, and external outcome are distinct and never conflated. This prevents a successful workflow execution from being misreported as successful production behavior.
 
+### Check contracts and the acceptance baseline
+
+A workflow node that executes a check binds a typed, closed check contract in its manifest. Every `run_command` and `verify_evidence` node in a manifest at `schema_version` 2 or later must bind exactly one check, and no other node kind may. A check declares a stable dotted check id (unique within the manifest); the subject its result is bound to (`source_revision`, `workspace_head`, or `pull_request_head`); exactly one of a command contract or a named observer contract; and what the workflow does for each non-pass result. A command contract is an explicit argv tuple with no shell string and no shell interpreter, or an explicit request-bound command whose argv comes from the run request. An observer is a member of a closed enumeration. Unknown keys reject, and there is no expression language.
+
+The result space is the evidence result space: `pass`, `fail`, or `indeterminate`. Only `pass` proceeds. A `fail` maps to `repair_or_stop` or `stop`; an `indeterminate` maps to `stop` or `hold`; neither can map to proceed. Manifests persisted at `schema_version` 1 predate check contracts: they continue to decode byte-identically with their original content digest, so a resumed run never changes its bound workflow fingerprint.
+
+The Stage 1 manifest binds `stage1.validate` (a request-bound command evaluated at the workspace head, `fail` to repair-or-stop, `indeterminate` to stop) and `stage1.verify` (the pull-request merge-readiness observer evaluated at the pull-request head, `fail` to stop, `indeterminate` to hold).
+
+Current supported behavior is frozen as a versioned acceptance baseline shipped as package data (`acceptance-baseline-v1.toml`). It is owned by the evaluator, not by workers. Each version file is verified against a SHA-256 registered in code before it is parsed, so an in-place edit of a frozen version fails loudly and a change requires a new version file. The baseline lists only journeys that existing code supports and tests exercise: the Stage 1, Stage 2, and Stage 3 local gates, the doctor command, and fail-closed G4 status. It maps each journey's assertion identities to check ids and to the script or test that exercises them, and it never lists future behavior; acceptance for a new feature is task acceptance owned by that task. Calibration results use exactly four categories: `caught`, `escaped`, `not_injected`, and `inconclusive`. Calibration scenarios are private, held by the operator or evaluator outside worker-readable mounts; the public file carries identities only.
+
 ## 10. Adapter boundary
 
 Adapters normalize provider behavior and do not export provider SDK objects into the core.

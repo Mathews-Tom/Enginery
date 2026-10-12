@@ -364,6 +364,14 @@ The planned credential model runs production and publication actions through fix
 
 The evidence contract requires every test result to apply to the exact current subject. It rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why an evidence-complete terminal claim is stronger than a generic “tests passed” statement.
 
+### Checks and the acceptance baseline
+
+Every command or evidence-verification step in an executable workflow declares a typed check: a stable id, the exact subject its result applies to, either an explicit command (an argv list, never a shell string) or a named observer, and what happens on each non-pass result. A check returns `pass`, `fail`, or `indeterminate`; only `pass` proceeds. A `fail` repairs within its bound or stops, and an `indeterminate` result stops or holds — it is never treated as a pass.
+
+Stage 1 binds two checks. `stage1.validate` runs the validation command supplied by the run request against the workspace head. `stage1.verify` observes merge readiness at the current pull-request head. Both are evaluated by Enginery's deterministic code, not by the worker being checked.
+
+Current supported behavior is frozen in a versioned, digest-verified acceptance baseline (`acceptance-baseline-v1.toml`, package data). It lists the Stage 1 to 3 local gates, the doctor command, and fail-closed G4 status, with each assertion mapped to a check id and to the script or test that exercises it. Acceptance for a new feature is defined separately by that feature's task and is never added to the baseline. Calibration outcomes are `caught`, `escaped`, `not_injected`, or `inconclusive`; private calibration scenarios are held by the operator or evaluator outside worker-readable mounts.
+
 ### Proposed factory direction (not shipped)
 
 Harness, model, session, and worker machine are separate axes in every example above. A proposed manual-first factory layer would keep control deterministic and local: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. This is not shipped behavior. No upstream skills or code are vendored; reference projects are independently re-implemented patterns only, and trusted-local operation is not containment.

@@ -17,8 +17,16 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId
 from enginery.domain.immutable import freeze_mapping
-from enginery.domain.workflow.node import BranchCondition, NodeDeclaration, SideEffectClass
+from enginery.domain.workflow.node import (
+    CHECK_BOUND_KINDS,
+    BranchCondition,
+    NodeDeclaration,
+    SideEffectClass,
+)
 from enginery.domain.workflow.schema import FieldSchema, IOSchema
+
+CHECK_BINDING_SCHEMA_VERSION = 2
+"""First manifest schema version that requires check binding on executable nodes."""
 
 _MANIFEST_KEYS = frozenset(
     {
@@ -179,6 +187,7 @@ def _validate_manifest(manifest: WorkflowManifest) -> None:
         raise InvalidInputError("workflow manifest must declare at least one node")
     if not manifest.terminal_states:
         raise InvalidInputError("workflow manifest must declare at least one terminal state")
+    _validate_check_bindings(manifest)
 
     for node_id, node in manifest.nodes.items():
         for dependency in node.dependencies:
@@ -260,12 +269,40 @@ def _field_schema_to_json(item: FieldSchema) -> dict[str, object]:
     return {"type": item.field_type.value, "required": item.required}
 
 
+def _validate_check_bindings(manifest: WorkflowManifest) -> None:
+    """Enforce check binding for current-schema manifests and unique check ids.
+
+    Manifests persisted at ``schema_version`` 1 predate check contracts and keep
+    decoding byte-identically, so their content digest and any run bound to it
+    are unchanged. ``CHECK_BINDING_SCHEMA_VERSION`` and later require every
+    ``run_command`` and ``verify_evidence`` node to bind a check.
+    """
+    seen: set[str] = set()
+    for node_id, node in manifest.nodes.items():
+        if (
+            manifest.schema_version >= CHECK_BINDING_SCHEMA_VERSION
+            and node.kind in CHECK_BOUND_KINDS
+            and node.check is None
+        ):
+            raise InvalidInputError(
+                "a run_command or verify_evidence node must bind a check contract",
+                details={"node_id": str(node_id), "schema_version": manifest.schema_version},
+            )
+        if node.check is not None:
+            if node.check.check_id in seen:
+                raise InvalidInputError(
+                    "check ids must be unique within a manifest",
+                    details={"check_id": node.check.check_id},
+                )
+            seen.add(node.check.check_id)
+
+
 def _schema_to_json(schema: IOSchema) -> dict[str, dict[str, object]]:
     return {item.name: _field_schema_to_json(item) for item in schema.fields}
 
 
 def _node_to_json(node: NodeDeclaration) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "kind": node.kind.value,
         "input_schema": _schema_to_json(node.input_schema),
         "output_schema": _schema_to_json(node.output_schema),
@@ -289,6 +326,9 @@ def _node_to_json(node: NodeDeclaration) -> dict[str, object]:
             "max_cost": node.budget.max_cost,
         },
     }
+    if node.check is not None:
+        document["check"] = node.check.to_mapping()
+    return document
 
 
 def _manifest_to_json(manifest: WorkflowManifest) -> dict[str, object]:

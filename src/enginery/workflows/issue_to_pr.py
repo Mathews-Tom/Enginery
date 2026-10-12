@@ -82,6 +82,10 @@ def qualify_work(
     return _qualification(snapshot, WorkReadiness.READY, "work has applicable acceptance criteria")
 
 
+STAGE1_VALIDATE_CHECK_ID = "stage1.validate"
+STAGE1_VERIFY_CHECK_ID = "stage1.verify"
+
+
 def stage1_work_manifest() -> WorkflowManifest:
     """Return the static Stage 1 graph executed under coordinator ownership."""
     nodes = {
@@ -93,7 +97,18 @@ def stage1_work_manifest() -> WorkflowManifest:
         "implement": _node(
             "execute_agent_task", "agent", dependencies=("qualify",), side_effecting=True
         ),
-        "validate": _node("run_command", "deterministic", dependencies=("implement",)),
+        "validate": _node(
+            "run_command",
+            "deterministic",
+            dependencies=("implement",),
+            check=_check(
+                STAGE1_VALIDATE_CHECK_ID,
+                "workspace_head",
+                command={"source": "request"},
+                on_fail="repair_or_stop",
+                on_indeterminate="stop",
+            ),
+        ),
         "review": _node("request_human_decision", "human", dependencies=("validate",)),
         "repair": _node("route", "deterministic", dependencies=("review",)),
         "open_pr": _node(
@@ -103,13 +118,24 @@ def stage1_work_manifest() -> WorkflowManifest:
             side_effecting=True,
         ),
         "wait_for_ci": _node("wait_for_ci", "deterministic", dependencies=("open_pr",)),
-        "verify": _node("verify_evidence", "deterministic", dependencies=("wait_for_ci",)),
+        "verify": _node(
+            "verify_evidence",
+            "deterministic",
+            dependencies=("wait_for_ci",),
+            check=_check(
+                STAGE1_VERIFY_CHECK_ID,
+                "pull_request_head",
+                observer="pull_request_merge_readiness",
+                on_fail="stop",
+                on_indeterminate="hold",
+            ),
+        ),
     }
     return WorkflowManifest.from_mapping(
         {
             "id": "issue-to-pr-v1",
             "name": "qualified-work-to-merge-ready-pull-request",
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": nodes,
             "terminal_states": [state.value for state in Stage1TerminalState],
             "terminal_state_mapping": {"verify": Stage1TerminalState.MERGE_READY.value},
@@ -139,8 +165,9 @@ def _node(
     *,
     dependencies: tuple[str, ...] = (),
     side_effecting: bool = False,
+    check: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    node: dict[str, object] = {
         "kind": kind,
         "input_schema": {},
         "output_schema": {},
@@ -150,9 +177,36 @@ def _node(
         "reconciliation_operation": kind if side_effecting else None,
         "dependencies": list(dependencies),
     }
+    if check is not None:
+        node["check"] = check
+    return node
+
+
+def _check(
+    check_id: str,
+    subject: str,
+    *,
+    on_fail: str,
+    on_indeterminate: str,
+    command: dict[str, object] | None = None,
+    observer: str | None = None,
+) -> dict[str, object]:
+    check: dict[str, object] = {
+        "id": check_id,
+        "subject": subject,
+        "on_fail": on_fail,
+        "on_indeterminate": on_indeterminate,
+    }
+    if command is not None:
+        check["command"] = command
+    if observer is not None:
+        check["observer"] = observer
+    return check
 
 
 __all__ = [
+    "STAGE1_VALIDATE_CHECK_ID",
+    "STAGE1_VERIFY_CHECK_ID",
     "Stage1TerminalState",
     "WorkQualification",
     "WorkReadiness",
