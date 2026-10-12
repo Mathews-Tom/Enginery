@@ -169,8 +169,8 @@ def add_build_request_parser(
     parser.add_argument(
         "--strict-effective",
         action="store_true",
-        help="Hold the run unless every pinned control is observed as effective and equal. "
-        "Neither host reports effective effort, so a strict effort pin always holds.",
+        help="Modifier for --model: hold the run unless the host reports exactly the pinned "
+        "model. Rejected with --effort, since neither host reports effective effort.",
     )
     parser.add_argument("--artifact-root", required=True, type=Path)
 

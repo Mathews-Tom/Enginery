@@ -81,9 +81,9 @@ The request also carries an `execution_selection` block: the harness a run
 requested and, optionally, a model and a native effort, each recorded with
 the layer that supplied it, together with the digest of the packaged
 execution-control catalog it was resolved against. `build-request` binds the
-host's own default model and effort unless `--model`, `--effort` or
-`--strict-effective` are given (see
-[Execution selection and receipts](#execution-selection-and-receipts)). A request document is validated against the packaged catalog when a run
+host's own default model and effort unless `--model` or `--effort` is given (see
+[Execution selection and receipts](#execution-selection-and-receipts)); `--strict-effective`
+only modifies a pinned model and never changes what is bound. A request document is validated against the packaged catalog when a run
 starts, so an alias, an unpinnable effort, a different tested host version or
 a support tier the catalog does not assign is rejected. A run persisted
 before this block existed keeps its original request digest, decodes
@@ -384,13 +384,11 @@ controls at the run layer:
   `low`, `medium`, `high`, `xhigh`, `max`; `claude-code`: `low`, `medium`, `high`,
   `xhigh`, `max`). The vocabularies are not mapped onto each other, and OMP's
   `auto` cannot be pinned because it hands the choice to the host.
-- `--strict-effective` is a modifier, not a pin: it requires `--model` or
-  `--effort` and holds the run unless every pinned control is observed as
-  effective and equal to what was pinned. Neither host reports the effective
-  effort, so `build-request` rejects it together with `--effort` (exit code 2, no
-  file written, and the same check applies when a run starts) rather than spend a
-  worker session on a run that cannot pass. With `--model` alone it passes only
-  when the host reports exactly that model.
+- `--strict-effective` is a modifier for `--model`, not a pin: it requires `--model`
+  and holds the run unless the host reports exactly the pinned model. Neither host
+  reports the effective effort, so `build-request` rejects it together with `--effort`
+  (exit code 2, no file written, and the same check applies when a run starts) rather
+  than spend a worker session on a run that cannot pass.
 
 Unsupported pins are rejected by `build-request` itself, with exit code 2 and
 before any file is written. Omitted flags leave the host's own default, which is
@@ -416,7 +414,7 @@ depends on the reason, and `stage1 resume` does not clear a hold:
 
 | Hold reason | Cause | Recovery |
 |---|---|---|
-| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and resume, or start a new run from a rebuilt request. |
+| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and re-run `stage1 watch`, or start a new run from a rebuilt request. |
 | `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
 | `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
 | `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |

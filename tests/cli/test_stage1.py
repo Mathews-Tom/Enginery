@@ -551,6 +551,18 @@ def test_read_only_diagnostics_never_create_harness_state_and_never_crash_on_the
     assert blocker.read_text(encoding="utf-8").startswith("a file")
     assert not (tmp_path / "artifacts").exists()
 
+    capsys.readouterr()
+    assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
+    evidence = json.loads(capsys.readouterr().out)
+    if expected_hold is None:
+        assert evidence["hold"] is None
+    else:
+        assert evidence["hold"]["reason"] == expected_hold
+        assert evidence["execution"]["holds"] == [evidence["hold"]]
+    assert evidence["execution"]["selected"]["model"] == "openai/gpt-5.2"
+    assert blocker.read_text(encoding="utf-8").startswith("a file")
+    assert not (tmp_path / "artifacts").exists()
+
 
 def test_a_host_default_run_is_never_probed_by_read_only_diagnostics(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
