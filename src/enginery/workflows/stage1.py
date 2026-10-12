@@ -38,7 +38,8 @@ from enginery.domain.serialization import (
     workflow_manifest_from_dict,
     workflow_manifest_to_dict,
 )
-from enginery.domain.workflow.manifest import WorkflowManifest
+from enginery.domain.workflow.check import reject_shell_invocation
+from enginery.domain.workflow.manifest import CHECK_BINDING_SCHEMA_VERSION, WorkflowManifest
 from enginery.engine.runtime import (
     RUN_AGGREGATE_TYPE,
     RUNTIME_NODE_AGGREGATE_TYPE,
@@ -50,6 +51,7 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
+from enginery.evidence.acceptance_baseline import load_acceptance_baseline
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
 from enginery.workflows.issue_to_pr import WorkQualification
@@ -304,7 +306,21 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> Stage1Run:
-        """Persist an immutable run intent before any workflow side effect."""
+        """Persist an immutable run intent before any workflow side effect.
+
+        A new run must bind the current check contracts: its manifest must be at a
+        check-binding schema version, every check it binds must match the acceptance
+        baseline, and request-supplied validation commands cannot invoke a shell. A run
+        whose projection already exists is a restart and is read back unchanged, so a
+        persisted run from before check contracts keeps its original fingerprint.
+        """
+        if (
+            self.ledger.read_projection(
+                aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=str(request.run.id)
+            )
+            is None
+        ):
+            _require_current_check_contracts(request)
         self.runtime.register_run(
             run_id=str(request.run.id),
             initial_state=request.initial_state(),
@@ -1137,6 +1153,21 @@ def _fixture_dispatch(
         workflow_definition_id=request.manifest.id.value,
         retain_workspace=node_id == "implement",
     )
+
+
+def _require_current_check_contracts(request: Stage1RunRequest) -> None:
+    """Fail loudly unless a new run binds the current check contracts."""
+    manifest = request.manifest
+    if manifest.schema_version < CHECK_BINDING_SCHEMA_VERSION:
+        raise InvalidInputError(
+            "a new Stage 1 run must bind check contracts: its manifest declares "
+            f"schema_version {manifest.schema_version}, below {CHECK_BINDING_SCHEMA_VERSION}; "
+            "rebuild the request with the current `enginery stage1 build-request`",
+            details={"run_id": str(request.run.id)},
+        )
+    load_acceptance_baseline().require_manifest_checks(manifest)
+    for command in request.validation_commands:
+        reject_shell_invocation(command)
 
 
 def stage1_request_from_state(state: object) -> Stage1RunRequest:

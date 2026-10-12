@@ -1,10 +1,15 @@
 # Enginery acceptance baseline, version 1.
 #
-# Frozen: this file is verified against a SHA-256 registered in
-# enginery.evidence.acceptance_baseline. An in-place edit fails loudly; a change
-# is a new version file. The baseline covers CURRENT SUPPORTED BEHAVIOR ONLY.
-# Acceptance for a new feature is task acceptance owned by that task and never
-# belongs here.
+# Frozen: the loader verifies this file's bytes against a SHA-256 registered in
+# enginery.evidence.acceptance_baseline, so an in-place edit of this file alone
+# is detected and fails loudly. Changing a version's registered digest is a
+# reviewable source change; new behavior requires a new version file. The
+# baseline covers CURRENT SUPPORTED BEHAVIOR ONLY. Acceptance for a new feature
+# is task acceptance owned by that task and never belongs here.
+#
+# Every assertion declares a full typed check (subject, exactly one of a command
+# or a named observer, and the stop behavior for each non-pass result), parsed
+# by the same CheckDeclaration parser the workflow manifests use.
 
 baseline_version = "1"
 scope = "current_supported_behavior"
@@ -31,11 +36,21 @@ exercised_by = [
 
 [[journeys.assertions]]
 id = "stage1.validation_passes_at_workspace_head"
-check_id = "stage1.validate"
+[journeys.assertions.check]
+id = "stage1.validate"
+subject = "workspace_head"
+command = { source = "request" }
+on_fail = "stop"
+on_indeterminate = "stop"
 
 [[journeys.assertions]]
 id = "stage1.merge_ready_at_pull_request_head"
-check_id = "stage1.verify"
+[journeys.assertions.check]
+id = "stage1.verify"
+subject = "pull_request_head"
+observer = "pull_request_merge_readiness"
+on_fail = "stop"
+on_indeterminate = "hold"
 
 [[journeys]]
 id = "stage2_plan_to_verified_release"
@@ -47,7 +62,12 @@ exercised_by = [
 
 [[journeys.assertions]]
 id = "stage2.slices_merged_and_release_published"
-check_id = "stage2.release_gate"
+[journeys.assertions.check]
+id = "stage2.release_gate"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "python", "scripts/full_system_gate.py", "--stages", "2"] }
+on_fail = "stop"
+on_indeterminate = "hold"
 
 [[journeys]]
 id = "stage3_incident_to_hotfix_and_rollback"
@@ -59,7 +79,12 @@ exercised_by = [
 
 [[journeys.assertions]]
 id = "stage3.rollback_restores_base_revision"
-check_id = "stage3.rollback_gate"
+[journeys.assertions.check]
+id = "stage3.rollback_gate"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "python", "scripts/full_system_gate.py", "--stages", "3"] }
+on_fail = "stop"
+on_indeterminate = "hold"
 
 [[journeys]]
 id = "doctor_reports_local_prerequisites"
@@ -70,7 +95,12 @@ exercised_by = [
 
 [[journeys.assertions]]
 id = "doctor.prerequisites_ok"
-check_id = "doctor.prerequisites"
+[journeys.assertions.check]
+id = "doctor.prerequisites"
+subject = "source_revision"
+command = { source = "declared", argv = ["uv", "run", "enginery", "doctor"] }
+on_fail = "stop"
+on_indeterminate = "hold"
 
 [[journeys]]
 id = "g4_status_fails_closed"
@@ -81,4 +111,11 @@ exercised_by = [
 
 [[journeys.assertions]]
 id = "gate.g4_fails_closed_without_evidence"
-check_id = "gate.g4_fail_closed"
+[journeys.assertions.check]
+# The gate status command needs an operator-supplied ledger path, so this check
+# is a named observer rather than a fixed argv.
+id = "gate.g4_fail_closed"
+subject = "source_revision"
+observer = "g4_gate_fail_closed"
+on_fail = "stop"
+on_indeterminate = "hold"

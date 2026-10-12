@@ -2,11 +2,12 @@
 
 The baseline is package data owned by the evaluator, not by workers. Each
 version file is verified against a SHA-256 registered here before it is
-parsed, so an in-place edit of a frozen version fails loudly; a change
-requires a new version file and a new registration. The public file carries
-identities only: journeys, assertion identities mapped to check ids, the
-existing script or test that exercises each journey, the calibration
-categories, and the declared custody of private calibration scenarios.
+parsed, so an in-place edit of the file alone is detected and fails loudly.
+Changing a version's registered digest is a reviewable source change, and new
+behavior requires a new version file. The public file carries identities only:
+journeys, assertion identities each mapped to a full typed check, the existing
+script or test that exercises each journey, the calibration categories, and the
+declared custody of private calibration scenarios.
 """
 
 from __future__ import annotations
@@ -18,12 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.workflow.check import CheckDeclaration
 from enginery.domain.workflow.manifest import WorkflowManifest
 
 _CONFIG_DIRECTORY = Path(__file__).parent.parent / "config"
 
 REGISTERED_BASELINE_DIGESTS: Mapping[str, str] = {
-    "1": "537a50b96730347b0eb1ad9a2d8e6474a3d1868696b3fbb4f2f2950383667d9c",
+    "1": "5bf0a87358c4be23199f063dbc7f7962be746605b08e0cf5b7e0b158dfc4279b",
 }
 """SHA-256 of each frozen baseline file's bytes, keyed by ``baseline_version``."""
 
@@ -33,7 +35,7 @@ _TOP_LEVEL_KEYS = frozenset(
     {"baseline_version", "scope", "owner", "calibration", "scenario_custody", "journeys"}
 )
 _JOURNEY_KEYS = frozenset({"id", "summary", "exercised_by", "assertions"})
-_ASSERTION_KEYS = frozenset({"id", "check_id"})
+_ASSERTION_KEYS = frozenset({"id", "check"})
 _CUSTODY_KEYS = frozenset({"owner", "storage", "public_content"})
 
 
@@ -43,10 +45,14 @@ class AcceptanceBaselineError(InvalidInputError):
 
 @dataclass(frozen=True, slots=True)
 class BaselineAssertion:
-    """One assertion identity mapped to the check that decides it."""
+    """One assertion identity and the full typed check that decides it."""
 
     assertion_id: str
-    check_id: str
+    check: CheckDeclaration
+
+    @property
+    def check_id(self) -> str:
+        return self.check.check_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,18 +85,32 @@ class AcceptanceBaseline:
 
     @property
     def check_ids(self) -> frozenset[str]:
-        return frozenset(
-            assertion.check_id for journey in self.journeys for assertion in journey.assertions
-        )
+        return frozenset(a.check_id for journey in self.journeys for a in journey.assertions)
 
     def require_manifest_checks(self, manifest: WorkflowManifest) -> None:
-        """Reject a manifest binding a check the baseline does not reference."""
-        bound = {node.check.check_id for node in manifest.nodes.values() if node.check is not None}
-        missing = sorted(bound - self.check_ids)
+        """Reject a manifest check the baseline does not declare identically.
+
+        Every check a manifest binds must be one of the baseline's typed checks, with the
+        same subject, command or observer, and non-pass behavior; a manifest cannot weaken
+        a baseline check by redeclaring it.
+        """
+        declared = {
+            assertion.check_id: assertion.check
+            for journey in self.journeys
+            for assertion in journey.assertions
+        }
+        bound = [node.check for node in manifest.nodes.values() if node.check is not None]
+        missing = sorted(check.check_id for check in bound if check.check_id not in declared)
         if missing:
             raise AcceptanceBaselineError(
                 "manifest binds checks the acceptance baseline does not reference",
                 details={"missing_check_ids": missing},
+            )
+        differing = sorted(check.check_id for check in bound if declared[check.check_id] != check)
+        if differing:
+            raise AcceptanceBaselineError(
+                "manifest redeclares a baseline check differently from the baseline",
+                details={"differing_check_ids": differing},
             )
 
 
@@ -204,9 +224,13 @@ def _journey(raw: object) -> BaselineJourney:
         if not isinstance(item, dict):
             raise AcceptanceBaselineError("each assertion must be a table")
         _reject_unknown(item, _ASSERTION_KEYS, "assertion")
-        assertions.append(
-            BaselineAssertion(assertion_id=_string(item, "id"), check_id=_string(item, "check_id"))
-        )
+        try:
+            check = CheckDeclaration.from_mapping(item.get("check"))
+        except InvalidInputError as error:
+            raise AcceptanceBaselineError(
+                f"assertion {item.get('id')!r} declares an invalid typed check: {error}"
+            ) from error
+        assertions.append(BaselineAssertion(assertion_id=_string(item, "id"), check=check))
     return BaselineJourney(
         journey_id=_string(raw, "id"),
         summary=_string(raw, "summary"),

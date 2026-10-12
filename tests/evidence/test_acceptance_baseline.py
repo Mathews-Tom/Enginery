@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from enginery.domain.workflow.check import CheckDisposition, CheckObserver, CommandSource
 from enginery.evidence.acceptance_baseline import (
     AcceptanceBaselineError,
     load_acceptance_baseline,
@@ -21,6 +22,15 @@ from enginery.workflows.issue_to_pr import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASELINE_FILE = REPO_ROOT / "src" / "enginery" / "config" / "acceptance-baseline-v1.toml"
+
+# The frozen identity of baseline version 1: these journeys are the contract.
+V1_JOURNEY_IDS = (
+    "stage1_issue_to_merge_ready_pull_request",
+    "stage2_plan_to_verified_release",
+    "stage3_incident_to_hotfix_and_rollback",
+    "doctor_reports_local_prerequisites",
+    "g4_status_fails_closed",
+)
 
 
 def _text() -> str:
@@ -55,7 +65,37 @@ def test_an_unregistered_version_is_rejected() -> None:
         load_acceptance_baseline("2")
 
 
-def test_stage1_manifest_checks_resolve_in_the_baseline() -> None:
+def test_v1_journeys_are_exactly_the_frozen_set() -> None:
+    baseline = load_acceptance_baseline()
+
+    assert tuple(journey.journey_id for journey in baseline.journeys) == V1_JOURNEY_IDS
+
+
+def test_every_baseline_check_is_a_fully_typed_contract() -> None:
+    baseline = load_acceptance_baseline()
+    checks = [a.check for journey in baseline.journeys for a in journey.assertions]
+
+    assert {check.check_id for check in checks} == {
+        "stage1.validate",
+        "stage1.verify",
+        "stage2.release_gate",
+        "stage3.rollback_gate",
+        "doctor.prerequisites",
+        "gate.g4_fail_closed",
+    }
+    for check in checks:
+        assert (check.command is None) != (check.observer is None), check.check_id
+        assert check.on_fail in {CheckDisposition.STOP, CheckDisposition.REPAIR_OR_STOP}
+        assert check.on_indeterminate in {CheckDisposition.STOP, CheckDisposition.HOLD}
+    by_id = {check.check_id: check for check in checks}
+    stage2 = by_id["stage2.release_gate"].command
+    assert stage2 is not None
+    assert stage2.source is CommandSource.DECLARED
+    assert stage2.argv[-2:] == ("--stages", "2")
+    assert by_id["gate.g4_fail_closed"].observer is CheckObserver.G4_GATE_FAIL_CLOSED
+
+
+def test_stage1_manifest_checks_match_the_baseline_declarations() -> None:
     baseline = load_acceptance_baseline()
 
     baseline.require_manifest_checks(stage1_work_manifest())
@@ -64,11 +104,41 @@ def test_stage1_manifest_checks_resolve_in_the_baseline() -> None:
 
 
 def test_a_baseline_missing_a_bound_stage1_check_is_rejected() -> None:
-    without_verify = _text().replace('check_id = "stage1.verify"', 'check_id = "stage1.other"')
-    baseline = parse_baseline_document(without_verify)
+    renamed = _text().replace('id = "stage1.verify"', 'id = "stage1.other"')
+    baseline = parse_baseline_document(renamed)
 
     with pytest.raises(AcceptanceBaselineError, match="does not reference"):
         baseline.require_manifest_checks(stage1_work_manifest())
+
+
+def test_a_manifest_check_that_differs_from_the_baseline_declaration_is_rejected() -> None:
+    weakened = _text().replace(
+        'observer = "pull_request_merge_readiness"\non_fail = "stop"\non_indeterminate = "hold"',
+        'observer = "pull_request_merge_readiness"\non_fail = "stop"\non_indeterminate = "stop"',
+    )
+    baseline = parse_baseline_document(weakened)
+
+    with pytest.raises(AcceptanceBaselineError, match="differently"):
+        baseline.require_manifest_checks(stage1_work_manifest())
+
+
+def test_an_assertion_without_a_valid_typed_check_is_rejected() -> None:
+    both = _text().replace(
+        'observer = "g4_gate_fail_closed"',
+        'observer = "g4_gate_fail_closed"\ncommand = { source = "request" }',
+    )
+    with pytest.raises(AcceptanceBaselineError, match="exactly one"):
+        parse_baseline_document(both)
+
+    shell = _text().replace(
+        'argv = ["uv", "run", "enginery", "doctor"]', 'argv = ["bash", "-c", "enginery doctor"]'
+    )
+    with pytest.raises(AcceptanceBaselineError, match="shell"):
+        parse_baseline_document(shell)
+
+    unknown = _text().replace('subject = "workspace_head"', 'subject = "workspace_head"\nx = 1')
+    with pytest.raises(AcceptanceBaselineError, match="unknown keys"):
+        parse_baseline_document(unknown)
 
 
 def test_duplicate_assertion_ids_are_rejected() -> None:
@@ -92,7 +162,7 @@ def test_duplicate_journey_ids_are_rejected() -> None:
 
 
 def test_duplicate_check_ids_are_rejected() -> None:
-    text = _text().replace('check_id = "stage2.release_gate"', 'check_id = "stage1.validate"')
+    text = _text().replace('id = "stage2.release_gate"', 'id = "stage1.validate"')
 
     with pytest.raises(AcceptanceBaselineError, match="check ids must be unique"):
         parse_baseline_document(text)
@@ -129,14 +199,6 @@ def test_scenario_custody_cannot_move_scenarios_into_the_public_file() -> None:
 
     with pytest.raises(AcceptanceBaselineError, match="scenario custody"):
         parse_baseline_document(text)
-
-
-def test_baseline_lists_only_current_supported_behavior() -> None:
-    baseline = load_acceptance_baseline()
-
-    identities = {journey.journey_id for journey in baseline.journeys} | baseline.check_ids
-
-    assert not any("factory" in identity for identity in identities)
 
 
 def test_every_journey_names_an_existing_script_or_test() -> None:

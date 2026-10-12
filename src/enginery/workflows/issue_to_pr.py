@@ -105,7 +105,7 @@ def stage1_work_manifest() -> WorkflowManifest:
                 STAGE1_VALIDATE_CHECK_ID,
                 "workspace_head",
                 command={"source": "request"},
-                on_fail="repair_or_stop",
+                on_fail="stop",
                 on_indeterminate="stop",
             ),
         ),

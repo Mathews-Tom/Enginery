@@ -17,6 +17,7 @@ from enginery.domain.workflow.check import (
     CheckObserver,
     CheckSubjectKind,
     CommandSource,
+    reject_shell_invocation,
 )
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import NodeDeclaration
@@ -204,7 +205,7 @@ class TestStage1ManifestChecks:
         assert check.command is not None
         assert check.command.source is CommandSource.REQUEST
         assert check.observer is None
-        assert check.disposition(EvidenceResult.FAIL) is CheckDisposition.REPAIR_OR_STOP
+        assert check.disposition(EvidenceResult.FAIL) is CheckDisposition.STOP
         assert check.disposition(EvidenceResult.INDETERMINATE) is CheckDisposition.STOP
 
     def test_verify_binds_the_merge_readiness_observer_at_the_pull_request_head(self) -> None:
@@ -252,3 +253,45 @@ class TestStage1ManifestChecks:
     def test_node_declaration_rejects_a_check_on_a_non_executable_kind(self) -> None:
         with pytest.raises(InvalidInputError, match="only run_command and verify_evidence"):
             NodeDeclaration.from_mapping(NodeId("n"), _node("route", check=_command_check()))
+
+
+class TestShellInterpreterGuard:
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("bash", "-c", "x"),
+            ("/usr/bin/zsh", "-c", "x"),
+            ("BASH.EXE", "-c", "x"),
+            ("C:\\Windows\\System32\\cmd.exe", "/c", "x"),
+            ("env", "bash", "-c", "x"),
+            ("/usr/bin/env", "-i", "FOO=1", "BAR=2", "sh", "-c", "x"),
+            ("env", "-S", "bash -c x"),
+            ("busybox", "sh", "-c", "x"),
+            ("nice", "-n", "5", "dash", "-c", "x"),
+            ("nohup", "/bin/bash", "-c", "x"),
+            ("exec", "pwsh", "-Command", "x"),
+            ("timeout", "10", "sh", "-c", "x"),
+            ("sudo", "-u", "root", "sh", "-c", "x"),
+        ],
+    )
+    def test_direct_and_launcher_wrapped_shells_are_rejected(self, argv: tuple[str, ...]) -> None:
+        with pytest.raises(InvalidInputError, match="shell interpreter"):
+            reject_shell_invocation(argv)
+        with pytest.raises(InvalidInputError, match="shell interpreter"):
+            CheckDeclaration.from_mapping(
+                _command_check(command={"source": "declared", "argv": list(argv)})
+            )
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("uv", "run", "pytest", "-q"),
+            ("env", "FOO=1", "pytest", "-q"),
+            ("nice", "-n", "5", "python", "-m", "pytest"),
+            ("/usr/bin/python3", "script.py"),
+        ],
+    )
+    def test_ordinary_commands_and_wrapped_non_shells_are_accepted(
+        self, argv: tuple[str, ...]
+    ) -> None:
+        reject_shell_invocation(argv)

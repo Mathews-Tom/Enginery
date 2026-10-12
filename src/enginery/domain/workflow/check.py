@@ -25,6 +25,29 @@ _CHECK_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 _SHELL_INTERPRETERS = frozenset(
     {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "cmd", "powershell", "pwsh"}
 )
+_LAUNCHER_WRAPPERS = frozenset(
+    {
+        "env",
+        "busybox",
+        "toybox",
+        "nice",
+        "nohup",
+        "exec",
+        "command",
+        "builtin",
+        "time",
+        "timeout",
+        "stdbuf",
+        "setsid",
+        "ionice",
+        "chrt",
+        "sudo",
+        "doas",
+        "xargs",
+        "unbuffer",
+        "arch",
+    }
+)
 _CHECK_KEYS = frozenset({"id", "subject", "command", "observer", "on_fail", "on_indeterminate"})
 _COMMAND_KEYS = frozenset({"source", "argv"})
 
@@ -48,6 +71,7 @@ class CheckObserver(enum.Enum):
     """The closed set of named observer contracts."""
 
     PULL_REQUEST_MERGE_READINESS = "pull_request_merge_readiness"
+    G4_GATE_FAIL_CLOSED = "g4_gate_fail_closed"
 
 
 class CheckDisposition(enum.Enum):
@@ -84,8 +108,7 @@ class CommandContract:
             raise InvalidInputError(
                 "command argv[0] must be a single executable, not a shell string"
             )
-        if executable.rsplit("/", 1)[-1].lower() in _SHELL_INTERPRETERS:
-            raise InvalidInputError("a command contract cannot invoke a shell interpreter")
+        reject_shell_invocation(self.argv)
 
     @classmethod
     def from_mapping(cls, raw: object) -> CommandContract:
@@ -205,6 +228,35 @@ def _enum[E: enum.Enum](enum_type: type[E], value: object, label: str) -> E:
         raise InvalidInputError(f"{label} declares unknown value {value!r}") from error
 
 
+def _launcher_name(token: str) -> str:
+    """The lowercase program name of ``token`` with any directory and ``.exe`` removed."""
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name.removesuffix(".exe")
+
+
+def reject_shell_invocation(argv: tuple[str, ...]) -> None:
+    """Reject an argv that runs a shell interpreter, directly or through a launcher.
+
+    The program name is normalized (directory and ``.exe`` stripped). When it is a known
+    launcher wrapper (``env``, ``busybox``, ``nice``, ``nohup``, ``exec``, ...), every
+    remaining token is inspected too, including whitespace-separated words inside a single
+    token (``env -S "bash -c ..."``), so flags and ``VAR=value`` assignments cannot hide a
+    shell that the wrapper would execute.
+    """
+    if not argv:
+        return
+    if _launcher_name(argv[0]) in _SHELL_INTERPRETERS:
+        raise InvalidInputError("a command cannot invoke a shell interpreter")
+    if _launcher_name(argv[0]) not in _LAUNCHER_WRAPPERS:
+        return
+    for token in argv[1:]:
+        for word in token.split():
+            if _launcher_name(word) in _SHELL_INTERPRETERS:
+                raise InvalidInputError(
+                    "a command cannot invoke a shell interpreter through a launcher wrapper"
+                )
+
+
 __all__ = [
     "CheckDeclaration",
     "CheckDisposition",
@@ -212,4 +264,5 @@ __all__ = [
     "CheckSubjectKind",
     "CommandContract",
     "CommandSource",
+    "reject_shell_invocation",
 ]
