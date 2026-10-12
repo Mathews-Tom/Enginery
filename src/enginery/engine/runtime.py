@@ -632,21 +632,23 @@ class CoordinatorRuntime:
         return self._workspaces.read_reservation(repository_id)
 
     def cancel_node(self, *, run_id: str, node_id: str, epoch: int, now: datetime) -> None:
-        """Cancel a queued, running, or human-waiting node through durable state."""
+        """Cancel a queued, running, or human-waiting node through durable state.
+
+        ``epoch`` must be the active coordinator epoch of this runtime. A running node's
+        lease may have been issued by an earlier epoch (the coordinator restarted since); the
+        cancellation is then fenced by the current epoch while the worker is still identified
+        by the lease's own epoch, attempt and process identity.
+        """
         request = self._request_for(run_id, node_id)
         state = _runtime_state(self._ledger, request)
         status = state.get("status")
         transition_epoch = epoch
         if status == "running":
             lease = self._active_lease(request)
-            if epoch != lease.epoch:
-                raise ExternalConflictError(
-                    "cancellation epoch does not match the current node lease"
-                )
-            transition_epoch = lease.epoch
+            transition_epoch = self._require_cancellation_epoch(epoch=epoch, now=now)
             WorkerSupervisor(
                 self._ledger, self._coordinator, fault_hook=self._fault
-            ).cancel_persisted(lease=lease, now=now)
+            ).cancel_persisted(lease=lease, now=now, coordinator_epoch=transition_epoch)
             reservation = self._require_workspace(request)
             assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
                 lease=lease,
@@ -691,12 +693,8 @@ class CoordinatorRuntime:
         elif status == "awaiting_human":
             if _actor_type_from_state(state) is not ActorType.AGENT:
                 raise ExternalConflictError("cannot cancel a human-waiting non-agent node")
-            lease = self._active_lease(request)
-            if epoch != lease.epoch:
-                raise ExternalConflictError(
-                    "cancellation epoch does not match the current node lease"
-                )
-            transition_epoch = lease.epoch
+            self._active_lease(request)
+            transition_epoch = self._require_cancellation_epoch(epoch=epoch, now=now)
             self._workspaces.cleanup(
                 self._require_workspace(request), epoch=transition_epoch, now=now
             )
@@ -811,6 +809,20 @@ class CoordinatorRuntime:
                     "workflow node dependencies are not completed",
                     details={"run_id": run_id, "node_id": node_id},
                 )
+
+    def _require_cancellation_epoch(self, *, epoch: int, now: datetime) -> int:
+        current = self._coordinator.current_epoch()
+        if (
+            current is None
+            or current.epoch != epoch
+            or current.owner != self._coordinator.owner
+            or not current.active_at(now)
+        ):
+            raise ExternalConflictError(
+                "cancellation epoch does not match the active coordinator epoch",
+                details={"epoch": epoch},
+            )
+        return current.epoch
 
     def _require_owned_epoch(self, *, now: datetime) -> CoordinatorEpoch:
         epoch = self._coordinator.current_epoch()

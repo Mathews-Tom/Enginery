@@ -17,9 +17,10 @@ from enginery.engine.recovery import RecoveryCoordinator
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.runtime import CoordinatorRuntime, DispatchedFixture, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.supervisor import ProcessIdentity, WorkerSupervisor, probe_process
+from enginery.engine.supervisor import WorkerSupervisor, identity_from_state, probe_process
 from enginery.ledger.service import LedgerService
 from fault_injection.framework import FaultScenario, main_for
+from fault_injection.lifecycle import lifecycle_scenarios
 
 FAULT_POINTS = (
     "epoch_acquired",
@@ -171,7 +172,7 @@ def _takeover_and_reconcile(ledger: LedgerService, now: datetime, workspace_path
         except HumanActionRequiredError:
             return
         raise AssertionError("ambiguous launch was automatically re-leased")
-    identity = ProcessIdentity(pid, process_group_id, start_identity)
+    identity = identity_from_state(state)
     WorkerSupervisor(ledger, replacement).enforce_heartbeat(
         lease=lease,
         identity=identity,
@@ -311,6 +312,7 @@ def main() -> int:
         )
         for point in FAULT_POINTS
     )
+    scenarios.extend(lifecycle_scenarios())
     return main_for(tuple(scenarios))
 
 

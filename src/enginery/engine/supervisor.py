@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import os
 import signal
+import socket
 import subprocess
 import sys
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from enginery.domain.errors import (
     ExternalConflictError,
+    HumanActionRequiredError,
     InternalInvariantViolationError,
     InvalidInputError,
 )
@@ -28,11 +33,35 @@ from enginery.ledger.service import LedgerService
 _MANAGER = "worker-supervisor"
 
 
+IDENTITY_VERSION = 2
+"""Schema version of a persisted worker identity that is bound to its host.
+
+A record persisted before host binding carries no version and decodes as a legacy identity
+(``host is None``). It is compared under single-host semantics -- the only semantics that
+existed when it was written -- so an existing run is never stranded by the upgrade. Every new
+record binds the host and boot it was launched on.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class HostIdentity:
+    """The machine and boot a process belongs to: a pid is only meaningful within both."""
+
+    hostname: str
+    boot_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessIdentity:
     pid: int
     process_group_id: int
     start_identity: str
+    host: HostIdentity | None = None
+
+    @property
+    def legacy(self) -> bool:
+        """True for an identity persisted before host binding."""
+        return self.host is None
 
 
 class WorkerSupervisor:
@@ -113,7 +142,7 @@ class WorkerSupervisor:
 
     def identity_for(self, *, lease: FencedNodeLease) -> ProcessIdentity:
         """Read the persisted identity for a worker being reconciled."""
-        return _identity_from_state(self._require_supervisor_record(lease))
+        return identity_from_state(self._require_supervisor_record(lease).state)
 
     def _record_running(
         self,
@@ -156,8 +185,21 @@ class WorkerSupervisor:
             )
         )
 
-    def cancel(self, *, lease: FencedNodeLease, identity: ProcessIdentity, now: datetime) -> None:
-        """Request, observe, and durably record complete process-group termination."""
+    def cancel(
+        self,
+        *,
+        lease: FencedNodeLease,
+        identity: ProcessIdentity,
+        now: datetime,
+        coordinator_epoch: int | None = None,
+    ) -> None:
+        """Request, observe, and durably record complete process-group termination.
+
+        The transition is fenced by ``coordinator_epoch``, which defaults to the epoch that
+        issued the lease and must be the current epoch when a later coordinator cancels.
+        """
+        require_local(identity, action="terminate")
+        epoch = lease.epoch if coordinator_epoch is None else coordinator_epoch
         record = self._require_supervisor_record(lease)
         requested = _state(lease, identity=identity, status="termination_requested")
         requested_result = self._ledger.append(
@@ -165,7 +207,7 @@ class WorkerSupervisor:
                 correlation_id=f"worker-termination:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
                 events=(_event(self._ledger, lease, "worker.termination_requested", requested),),
                 process_manager_updates=(
-                    self._coordinator.epoch_guard(epoch=lease.epoch, now=now),
+                    self._coordinator.epoch_guard(epoch=epoch, now=now),
                     ProcessManagerStateWrite(
                         _MANAGER,
                         _key(lease),
@@ -180,22 +222,25 @@ class WorkerSupervisor:
         self._fault("process_exit_observed")
         self._record_exit(
             lease=lease,
-            coordinator_epoch=lease.epoch,
+            coordinator_epoch=epoch,
             identity=identity,
             now=now,
             event_type="worker.cancelled",
             expected_state_version=requested_result.process_manager_states[1].state_version,
         )
 
-    def cancel_persisted(self, *, lease: FencedNodeLease, now: datetime) -> None:
+    def cancel_persisted(
+        self, *, lease: FencedNodeLease, now: datetime, coordinator_epoch: int | None = None
+    ) -> None:
         """Terminate the current worker using only its durable supervisor record."""
         record = self._require_supervisor_record(lease)
         if record.state.get("status") != "running":
             raise ExternalConflictError("only a running worker can be cancelled")
         self.cancel(
             lease=lease,
-            identity=_identity_from_state(record),
+            identity=identity_from_state(record.state),
             now=now,
+            coordinator_epoch=coordinator_epoch,
         )
 
     def enforce_heartbeat(
@@ -205,6 +250,7 @@ class WorkerSupervisor:
         epoch = self._coordinator.current_epoch()
         if epoch is not None and epoch.epoch == lease.epoch and epoch.active_at(now):
             return False
+        require_local(identity, action="terminate")
         record = self._require_supervisor_record(lease)
         requested = _state(lease, identity=identity, status="termination_requested")
         requested["reason"] = "coordinator_heartbeat_expired"
@@ -234,7 +280,8 @@ class WorkerSupervisor:
         record = self._require_supervisor_record(lease)
         if record.state.get("status") == "exit_observed":
             return
-        identity = _identity_from_state(record)
+        identity = identity_from_state(record.state)
+        require_local(identity, action="observe")
         try:
             reaped_pid, _ = os.waitpid(identity.pid, os.WNOHANG)
         except ChildProcessError:
@@ -252,7 +299,7 @@ class WorkerSupervisor:
             return
         observed = probe_process(identity.pid)
         if observed is not None:
-            if observed != identity:
+            if not same_process(identity, observed):
                 raise ExternalConflictError(
                     "process identity changed; refusing result after PID reuse"
                 )
@@ -334,27 +381,57 @@ class WorkerSupervisor:
             self._fault_hook(point)
 
 
+_TERMINATION_GRACE_SECONDS = 10.0
+_EXIT_POLL_SECONDS = 0.02
+
+
 def _terminate_exact_group(identity: ProcessIdentity) -> None:
+    """Terminate the recorded worker's whole process group within a bounded time.
+
+    The worker may have been launched by an earlier coordinator process, so its exit cannot
+    be observed with ``waitpid`` alone: it is reaped when it is this process's child and
+    otherwise observed by re-probing its exact start identity. SIGTERM gets a grace period,
+    then SIGKILL; a group that survives both is reported instead of waited on forever.
+    """
+    require_local(identity, action="terminate")
     current = probe_process(identity.pid)
-    if current is not None and current != identity:
+    if current is not None and not same_process(identity, current):
         raise ExternalConflictError("process identity changed; refusing PID-reuse termination")
     if current is None:
         return
-    os.killpg(identity.process_group_id, signal.SIGTERM)
+    for termination in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(identity.process_group_id, termination)
+        if _await_group_exit(identity, timeout=_TERMINATION_GRACE_SECONDS):
+            return
+    raise InternalInvariantViolationError(
+        "worker process group remains present after termination; human reconciliation required"
+    )
+
+
+def _await_group_exit(identity: ProcessIdentity, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(identity.pid, os.WNOHANG)
+        observed = probe_process(identity.pid)
+        if (observed is None or not same_process(identity, observed)) and _group_is_empty(
+            identity.process_group_id
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_EXIT_POLL_SECONDS)
+
+
+def _group_is_empty(process_group_id: int) -> bool:
     try:
-        waited_pid, _ = os.waitpid(identity.pid, 0)
-    except ChildProcessError as error:
-        raise InternalInvariantViolationError(
-            "worker exit cannot be observed by this supervisor; human reconciliation required"
-        ) from error
-    if waited_pid != identity.pid:
-        raise InternalInvariantViolationError(
-            "worker supervisor observed an unexpected process exit"
-        )
-    if probe_process(identity.pid) is not None:
-        raise InternalInvariantViolationError(
-            "worker process remains present after process-group termination"
-        )
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
 
 
 def probe_process(pid: int) -> ProcessIdentity | None:
@@ -377,18 +454,88 @@ def probe_process(pid: int) -> ProcessIdentity | None:
         try:
             start_identity = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
         except (FileNotFoundError, IndexError) as error:
+            if not _pid_exists(pid):
+                return None
             raise InternalInvariantViolationError(
                 "cannot establish Linux process-start identity"
             ) from error
     else:
         raise InvalidInputError("worker supervision supports only macOS and Linux")
     if not start_identity:
+        # The process can exit between the existence check and the identity read.
+        if not _pid_exists(pid):
+            return None
         raise InternalInvariantViolationError("process-start identity was empty")
-    return ProcessIdentity(pid, process_group_id, start_identity)
+    return ProcessIdentity(pid, process_group_id, start_identity, probe_host())
 
 
-def _identity_from_state(record: ProcessManagerStateRecord) -> ProcessIdentity:
-    state = record.state
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@functools.cache
+def probe_host() -> HostIdentity:
+    """Identify this machine and boot: hostname plus the kernel's per-boot identity."""
+    hostname = socket.gethostname().strip()
+    if sys.platform == "darwin":
+        boot_id = subprocess.run(
+            ["sysctl", "-n", "kern.boottime"], text=True, capture_output=True, check=False
+        ).stdout.strip()
+    elif sys.platform.startswith("linux"):
+        try:
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise InternalInvariantViolationError("cannot establish Linux boot identity") from error
+    else:
+        raise InvalidInputError("worker supervision supports only macOS and Linux")
+    if not hostname or not boot_id:
+        raise InternalInvariantViolationError("host or boot identity was empty")
+    return HostIdentity(hostname, boot_id)
+
+
+def is_local(identity: ProcessIdentity) -> bool:
+    """Whether a recorded process can be probed here: legacy records assume this host."""
+    return identity.host is None or identity.host == probe_host()
+
+
+def require_local(identity: ProcessIdentity, *, action: str) -> None:
+    """Refuse to probe, signal or reap a pid recorded on another host or boot.
+
+    Such a process is neither provably alive nor provably dead from here: the same pid on
+    this machine names an unrelated process. The operator must reconcile it.
+    """
+    if not is_local(identity):
+        raise HumanActionRequiredError(
+            f"worker was launched on a different host or boot; it cannot be {action}d locally",
+            details={
+                "pid": identity.pid,
+                "recorded_host": None if identity.host is None else identity.host.hostname,
+                "recorded_boot_id": None if identity.host is None else identity.host.boot_id,
+                "current_host": probe_host().hostname,
+                "current_boot_id": probe_host().boot_id,
+            },
+        )
+
+
+def same_process(recorded: ProcessIdentity, observed: ProcessIdentity) -> bool:
+    """Compare a recorded process with the one now holding its pid on this host.
+
+    Callers establish locality first with ``require_local``; the host is therefore not part
+    of the comparison, which keeps legacy and host-bound records comparable.
+    """
+    return (
+        recorded.pid == observed.pid
+        and recorded.process_group_id == observed.process_group_id
+        and recorded.start_identity == observed.start_identity
+    )
+
+
+def identity_from_state(state: Mapping[str, object]) -> ProcessIdentity:
+    """Decode a persisted identity, accepting legacy records and failing on unknown versions."""
     pid = state.get("pid")
     process_group_id = state.get("process_group_id")
     start_identity = state.get("start_identity")
@@ -399,7 +546,23 @@ def _identity_from_state(record: ProcessManagerStateRecord) -> ProcessIdentity:
         or not start_identity
     ):
         raise InternalInvariantViolationError("stored supervisor process identity is invalid")
-    return ProcessIdentity(pid, process_group_id, start_identity)
+    version = state.get("identity_version")
+    if version is None:
+        return ProcessIdentity(pid, process_group_id, start_identity)
+    hostname = state.get("hostname")
+    boot_id = state.get("boot_id")
+    if (
+        version != IDENTITY_VERSION
+        or not isinstance(hostname, str)
+        or not hostname
+        or not isinstance(boot_id, str)
+        or not boot_id
+    ):
+        raise InternalInvariantViolationError(
+            "stored supervisor host identity is invalid or from an unsupported version",
+            details={"identity_version": str(version)},
+        )
+    return ProcessIdentity(pid, process_group_id, start_identity, HostIdentity(hostname, boot_id))
 
 
 def _key(lease: FencedNodeLease) -> str:
@@ -426,6 +589,14 @@ def _state(
                 "start_identity": identity.start_identity,
             }
         )
+        if identity.host is not None:
+            state.update(
+                {
+                    "identity_version": IDENTITY_VERSION,
+                    "hostname": identity.host.hostname,
+                    "boot_id": identity.host.boot_id,
+                }
+            )
     return state
 
 
@@ -444,4 +615,15 @@ def _event(
     )
 
 
-__all__ = ["ProcessIdentity", "WorkerSupervisor", "probe_process"]
+__all__ = [
+    "IDENTITY_VERSION",
+    "HostIdentity",
+    "ProcessIdentity",
+    "WorkerSupervisor",
+    "identity_from_state",
+    "is_local",
+    "probe_host",
+    "probe_process",
+    "require_local",
+    "same_process",
+]

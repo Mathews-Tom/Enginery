@@ -8,6 +8,8 @@ records every launch.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -19,9 +21,10 @@ import pytest
 
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
-from enginery.cli.stage1 import _harness_for
+from enginery.cli.stage1 import _harness_for, _worker_report
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.supervisor import probe_host
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
 from tests.cli.test_stage1_execution_cli import _build_argv, _Run
@@ -313,3 +316,39 @@ def test_a_legacy_run_whose_repair_id_would_overflow_fails_loudly_at_derivation(
     assert implementation_attempt_id("r" * 116, 0) == f"{'r' * 116}-implement-0"
     with pytest.raises(InvalidInputError, match="too long to derive"):
         implementation_attempt_id("r" * 116, 10)
+
+
+def test_worker_report_tells_a_live_worker_from_a_dead_one_with_identity_evidence(
+    tmp_path: Path, ledger_service: LedgerService
+) -> None:
+    runtime = CoordinatorRuntime(ledger_service, owner="op")
+    now = datetime.now(UTC)
+    (running,) = runtime.tick(
+        now=now,
+        heartbeat_window=_WINDOW,
+        lease_window=timedelta(minutes=10),
+        limits=_LIMITS,
+        requests=(_occupier(tmp_path),),
+    ).dispatched
+
+    alive = _worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
+    assert alive is not None
+    assert alive["liveness"] == "alive"
+    assert alive["pid"] == running.identity.pid
+    assert alive["start_identity"] == running.identity.start_identity
+    assert alive["identity_version"] == 2
+    assert alive["host"] == {
+        "hostname": probe_host().hostname,
+        "boot_id": probe_host().boot_id,
+    }
+    assert (alive["lease_epoch"], alive["coordinator_epoch"]) == (1, 1)
+    assert alive["coordinator_heartbeat_active"] is True
+
+    os.killpg(running.identity.process_group_id, signal.SIGKILL)
+    os.waitpid(running.identity.pid, 0)
+
+    dead = _worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
+    assert dead is not None
+    assert dead["liveness"] == "exited"
+    assert dead["coordinator_heartbeat_active"] is True
+    assert dead["pid"] == running.identity.pid
