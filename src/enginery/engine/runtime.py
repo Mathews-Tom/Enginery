@@ -20,6 +20,7 @@ from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.recovery import RecoveryCoordinator
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.scheduler import (
+    DeferralReason,
     NodeKey,
     ReadinessScheduler,
     SchedulableNode,
@@ -459,10 +460,14 @@ class CoordinatorRuntime:
 
         Readiness is re-derived from the ledger on every tick, so a queued node that was
         not selected earlier is dispatched on the first tick after its capacity or
-        dependencies are released, including after a coordinator restart. ``run_ids``
-        restricts dispatch to the named runs, so a caller that has verified only those runs'
-        execution bindings can never launch another run's node. Every queued node that was
-        evaluated and not selected has its blocking reason, first-evaluation time,
+        dependencies are released, including after a coordinator restart. Capacity is
+        granted by one fair round-robin plan over every run on the ledger. ``run_ids``
+        restricts which of the planned nodes this tick launches: a caller that has verified
+        only those runs' execution bindings never launches another run's node. A slot the
+        plan grants to a run outside ``run_ids`` stays reserved for that run's own advance,
+        and the advanced run's queued node records ``capacity_reserved_for_other_run`` and
+        which run holds the reservation. Every queued node of an advanced run that was
+        evaluated and not launched has its blocking reason, first-evaluation time,
         evaluation count and evaluating epoch recorded on its durable runtime node.
         """
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
@@ -485,14 +490,11 @@ class CoordinatorRuntime:
             _schedulable(request, state=_runtime_state(self._ledger, request))
             for request in requests_by_key.values()
         )
-        plan = ReadinessScheduler().plan(
-            nodes,
-            limits=limits,
-            last_run_id=self._last_run_id,
-            eligible_runs=run_ids,
-        )
+        plan = ReadinessScheduler().plan(nodes, limits=limits, last_run_id=self._last_run_id)
+        launch = tuple(key for key in plan.selected if run_ids is None or key.run_id in run_ids)
+        reserved = tuple(key for key in plan.selected if key not in launch)
         dispatched: list[DispatchedFixture] = []
-        for key in plan.selected:
+        for key in launch:
             request = requests_by_key[key]
             fixture = self._fixture_runtime.dispatch(
                 request=request,
@@ -512,13 +514,31 @@ class CoordinatorRuntime:
             )
             dispatched.append(fixture)
         for deferred in plan.deferred:
+            if run_ids is not None and deferred.key.run_id not in run_ids:
+                continue
+            request = requests_by_key[deferred.key]
+            reason = deferred.reason.value
+            holder: str | None = None
+            if deferred.reason in {
+                DeferralReason.GLOBAL_CAPACITY,
+                DeferralReason.REPOSITORY_CAPACITY,
+            }:
+                holder = next(
+                    (
+                        key.run_id
+                        for key in reserved
+                        if deferred.reason is DeferralReason.GLOBAL_CAPACITY
+                        or requests_by_key[key].repository_id == request.repository_id
+                    ),
+                    None,
+                )
+                if holder is not None:
+                    reason = DeferralReason.CAPACITY_RESERVED.value
             self._record_deferral(
-                requests_by_key[deferred.key],
-                reason=deferred.reason.value,
-                epoch=epoch.epoch,
-                now=now,
+                request, reason=reason, reserved_for=holder, epoch=epoch.epoch, now=now
             )
-        self._last_run_id = plan.next_run_id
+        if launch:
+            self._last_run_id = launch[-1].run_id
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
     def ingest_result(self, *, envelope: WorkerResultEnvelope, now: datetime) -> None:
@@ -870,7 +890,13 @@ class CoordinatorRuntime:
         )
 
     def _record_deferral(
-        self, request: FixtureDispatch, *, reason: str, epoch: int, now: datetime
+        self,
+        request: FixtureDispatch,
+        *,
+        reason: str,
+        reserved_for: str | None,
+        epoch: int,
+        now: datetime,
     ) -> None:
         """Persist why a still-queued node was not selected on this evaluation."""
         state = _runtime_state(self._ledger, request)
@@ -896,6 +922,7 @@ class CoordinatorRuntime:
                 "wakeup": {
                     "queued_since": queued_since,
                     "reason": reason,
+                    "reserved_for": reserved_for,
                     "evaluations": prior_evaluations + 1,
                     "last_evaluated_epoch": epoch,
                     "last_evaluated_at": now.isoformat(),

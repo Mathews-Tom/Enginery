@@ -120,24 +120,3 @@ def test_a_node_released_by_its_dependency_is_selected_with_no_deferral() -> Non
 
     assert plan.selected == (released.key,)
     assert plan.deferred == ()
-
-
-def test_eligible_runs_scope_selection_but_not_occupancy() -> None:
-    first = _node("run-a", "work")
-    second = _node("run-b", "work")
-
-    scoped = ReadinessScheduler().plan(
-        (first, second), limits=SchedulingLimits(1, 1), eligible_runs=("run-b",)
-    )
-    occupied = ReadinessScheduler().plan(
-        (_node("run-a", "work", state=SchedulableState.RUNNING), second),
-        limits=SchedulingLimits(1, 1),
-        eligible_runs=("run-b",),
-    )
-
-    assert scoped.selected == (second.key,)
-    assert scoped.deferred == ()
-    assert occupied.selected == ()
-    assert [(item.key, item.reason.value) for item in occupied.deferred] == [
-        (second.key, "global_capacity")
-    ]

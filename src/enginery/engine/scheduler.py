@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from collections import defaultdict, deque
-from collections.abc import Collection, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from enginery.domain.errors import InvalidInputError
@@ -72,6 +72,7 @@ class DeferralReason(enum.StrEnum):
     DEPENDENCIES = "dependencies"
     DEPENDENCY_FAILED = "dependency_failed"
     REQUIREMENTS = "requirements"
+    CAPACITY_RESERVED = "capacity_reserved_for_other_run"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +104,8 @@ class ReadinessScheduler:
         *,
         limits: SchedulingLimits,
         last_run_id: str | None = None,
-        eligible_runs: Collection[str] | None = None,
     ) -> SchedulingPlan:
-        """Return a stable round-robin selection within configured limits.
-
-        ``eligible_runs`` restricts which runs may be selected or reported as deferred;
-        every node still counts toward active occupancy and dependency resolution.
-        """
+        """Return a stable round-robin selection across every run within configured limits."""
         by_key = _index_nodes(nodes)
         active = tuple(
             node
@@ -120,8 +116,6 @@ class ReadinessScheduler:
         repository_load = _repository_load(active)
         ready_by_run: dict[str, deque[SchedulableNode]] = defaultdict(deque)
         for node in sorted(by_key.values(), key=lambda item: item.key):
-            if eligible_runs is not None and node.key.run_id not in eligible_runs:
-                continue
             if available_slots > 0 and _is_ready(node, by_key):
                 ready_by_run[node.key.run_id].append(node)
         run_order = _rotated_run_order(ready_by_run, last_run_id=last_run_id)
@@ -156,9 +150,7 @@ class ReadinessScheduler:
                 _deferral_reason(node, by_key, repository_load, limits=limits),
             )
             for node in sorted(by_key.values(), key=lambda item: item.key)
-            if node.state is SchedulableState.QUEUED
-            and node.key not in chosen
-            and (eligible_runs is None or node.key.run_id in eligible_runs)
+            if node.state is SchedulableState.QUEUED and node.key not in chosen
         )
         return SchedulingPlan(
             selected=tuple(selected),

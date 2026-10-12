@@ -433,7 +433,7 @@ def test_queued_implement_is_held_not_dispatched_while_the_catalog_has_drifted(
     )
 
 
-def test_redispatch_launches_only_the_advanced_runs_node(
+def test_an_older_queued_run_keeps_its_priority_and_the_newer_run_records_the_reservation(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
@@ -453,15 +453,17 @@ def test_redispatch_launches_only_the_advanced_runs_node(
         expected_attempt_version=0,
         operation_id="operation-foreign",
     )
-    # Sorts before the run under test, so an unscoped evaluation would launch it first.
-    registered = runtime.tick(
-        now=now + timedelta(seconds=1),
-        heartbeat_window=timedelta(seconds=60),
-        lease_window=timedelta(seconds=30),
-        limits=_LIMITS,
-        requests=(foreign,),
+    # Queued first, and first in fair order: it must win the freed slot.
+    assert (
+        runtime.tick(
+            now=now + timedelta(seconds=1),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=_LIMITS,
+            requests=(foreign,),
+        ).dispatched
+        == ()
     )
-    assert registered.dispatched == ()
     service.dispatch_implementation(
         request,
         now=now + timedelta(seconds=2),
@@ -471,20 +473,59 @@ def test_redispatch_launches_only_the_advanced_runs_node(
     )
     _release_occupier(runtime, occupier, now + timedelta(seconds=5))
 
-    assert _advance(service, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.WAIT
-
-    assert _implement_state(ledger_service)["status"] == "running"
+    # The newer run's advance cannot take the slot the fair plan granted to the older run,
+    # and it never launches the older run's node itself.
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.DISPATCH_QUEUED
+    )
+    waiting = _implement_state(ledger_service)
+    assert waiting["status"] == "queued"
+    wakeup = waiting["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "capacity_reserved_for_other_run"
+    assert wakeup["reserved_for"] == "run-aaa-foreign"
+    assert wakeup["evaluations"] == 2
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
     foreign_node = ledger_service.read_projection(
         aggregate_type="runtime_node", aggregate_id="run-aaa-foreign:work"
     )
     assert foreign_node is not None
     assert foreign_node.state["status"] == "queued"
-    epoch = runtime.claim_epoch(
-        now=now + timedelta(seconds=20), heartbeat_window=timedelta(seconds=60)
+    assert ledger_service.read_lease(run_id="run-aaa-foreign", node_id="work") is None
+
+    # The older run launches on its own advance; the newer one then waits for real capacity.
+    started = runtime.tick(
+        now=now + timedelta(seconds=11),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+        run_ids=("run-aaa-foreign",),
+    ).dispatched
+    assert [fixture.lease.run_id for fixture in started] == ["run-aaa-foreign"]
+    assert (
+        _advance(service, request, now + timedelta(seconds=12))
+        is Stage1ProgressionAction.DISPATCH_QUEUED
     )
+    blocked = _implement_state(ledger_service)["wakeup"]
+    assert isinstance(blocked, dict)
+    assert blocked["reason"] == "global_capacity"
+    assert blocked["reserved_for"] is None
+
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=13), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-aaa-foreign",
+        node_id="work",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=14),
+    )
+    assert _advance(service, request, now + timedelta(seconds=15)) is Stage1ProgressionAction.WAIT
+    assert _implement_state(ledger_service)["status"] == "running"
     runtime.cancel_node(
         run_id="run-fault",
         node_id="implement",
         epoch=epoch.epoch,
-        now=now + timedelta(seconds=21),
+        now=now + timedelta(seconds=16),
     )
