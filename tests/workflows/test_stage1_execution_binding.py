@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 from tests.support.execution import selection_for
-from tests.workflows.test_stage1_runtime import _check_disposition_fixture, _check_node_dispatch
+from tests.workflows.test_stage1_runtime import (
+    _check_disposition_fixture,
+    _check_node_dispatch,
+    _drive_check_to_non_pass,
+)
 
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.digests import Digest
@@ -22,12 +26,12 @@ from enginery.domain.ids import RunId
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.evidence import Stage1EvidenceBundle
+from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
 from enginery.workflows.pull_request import PullRequestOutcome
 from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
     Stage1RunRequest,
-    _decision_bound,
     stage1_request_from_state,
 )
 
@@ -248,19 +252,68 @@ def test_a_request_that_is_not_the_durable_binding_is_refused_as_stale(
         )
 
 
-def test_a_decision_recorded_under_another_selection_no_longer_authorizes_output(
+def test_a_run_whose_selection_differs_from_the_bound_one_cannot_reach_any_decision_or_output(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
-    request, *_ = _check_disposition_fixture(
+    request, service, _, _, now = _check_disposition_fixture(
         ledger_service, tmp_path, start=False, execution_selection=_PIN
     )
-    current = {"execution_selection_digest": str(_PIN.digest)}
-    stale = {"execution_selection_digest": str(selection_for("omp").digest)}
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    rebound = replace(request, execution_selection=selection_for("omp"))
 
-    assert _decision_bound(current, request)
-    assert not _decision_bound(stale, request)
-    assert not _decision_bound({}, request)
-    assert _decision_bound({}, _legacy(request))
+    for refused in (
+        lambda: service.review_implementation(
+            rebound,
+            ReviewReport(producer="omp", reviewer="human", findings=()),
+            repair_attempt=0,
+            now=now,
+            heartbeat_window=_WINDOW,
+        ),
+        lambda: service.validate_implementation(rebound, now=now, heartbeat_window=_WINDOW),
+        lambda: service.open_pull_request(rebound, now=now, heartbeat_window=_WINDOW),
+        lambda: service.wait_for_ci(rebound, now=now, heartbeat_window=_WINDOW),
+        lambda: service.verify_merge_ready(rebound, now=now, heartbeat_window=_WINDOW),
+    ):
+        with pytest.raises(StaleEvidenceError, match="durable run binding"):
+            refused()
+
+    assert service.read(request.run.id).request.execution_selection == _PIN
+
+
+def test_a_pinned_run_binds_its_selection_digest_into_the_verify_node_and_evidence_bundle(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    (tmp_path / "pinned").mkdir()
+    (tmp_path / "default").mkdir()
+    pinned_service, pinned_request, _ = _drive_check_to_non_pass(
+        ledger_service,
+        tmp_path / "pinned",
+        check_id=STAGE1_VERIFY_CHECK_ID,
+        result="pass",
+        execution_selection=_PIN,
+    )
+    other = LedgerService.open(tmp_path / "default.db")
+    try:
+        default_service, _, _ = _drive_check_to_non_pass(
+            other, tmp_path / "default", check_id=STAGE1_VERIFY_CHECK_ID, result="pass"
+        )
+
+        pinned_node = pinned_service.ledger.read_projection(
+            aggregate_type="runtime_node", aggregate_id="run-check:verify"
+        )
+        default_node = default_service.ledger.read_projection(
+            aggregate_type="runtime_node", aggregate_id="run-check:verify"
+        )
+    finally:
+        other.close()
+
+    assert pinned_node is not None and default_node is not None
+    assert pinned_node.state["status"] == "passed"
+    assert pinned_node.state["execution_selection_digest"] == str(_PIN.digest)
+    assert pinned_request.execution_selection.digest == _PIN.digest
+    assert default_node.state["execution_selection_digest"] == str(selection_for("omp").digest)
+    assert default_node.state["execution_selection_digest"] != str(_PIN.digest)
+    assert pinned_node.state["evidence_digest"] != default_node.state["evidence_digest"]
 
 
 def test_evidence_is_superseded_by_any_change_to_the_bound_selection() -> None:

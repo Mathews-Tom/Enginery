@@ -386,6 +386,18 @@ def resolve_execution_selection(
                         "resolved_harness": harness_name,
                     },
                 )
+        if item.strict_effective is True:
+            raise InvalidInputError(
+                f"the {item.layer.value} layer requires strict effective controls for harness "
+                f"{item.harness!r}, but this run resolves harness {harness_name!r}; a strict "
+                "requirement is host-specific and is never carried across hosts",
+                details={
+                    "layer": item.layer.value,
+                    "control": "strict_effective",
+                    "layer_harness": str(item.harness),
+                    "resolved_harness": harness_name,
+                },
+            )
 
     model = _pick(eligible, "model")
     effort = _pick(eligible, "effort")
@@ -404,6 +416,7 @@ def resolve_execution_selection(
         )
 
     strict = any(item.strict_effective is True for item in eligible)
+    _require_strict_satisfiable(host, effort=effort.value, strict=strict)
     pinned = model.pinned or effort.pinned
     mode = (
         SelectionMode.MANUAL_PIN
@@ -490,7 +503,25 @@ def validate_against_catalog(
         host.require_model_pin(selection.selected_model)
     if selection.selected_effort is not None:
         host.require_effort_level(selection.selected_effort)
+    _require_strict_satisfiable(
+        host, effort=selection.selected_effort, strict=selection.strict_effective
+    )
     return host
+
+
+def _require_strict_satisfiable(host: HostCapability, *, effort: str | None, strict: bool) -> None:
+    """Reject a strict requirement that can never pass, before any worker session is spent.
+
+    A host whose catalog entry reports no evidence of the effective effort can never
+    demonstrate an effort pin, so a strict effort pin would always hold after a full run.
+    """
+    if strict and effort is not None and not host.effort.effective_evidence:
+        raise InvalidInputError(
+            f"{host.harness} does not report its effective effort, so a strict effective-control "
+            "requirement cannot be satisfied for an effort pin; pin only the model, or drop the "
+            "strict requirement",
+            details={"harness": host.harness, "control": "effort"},
+        )
 
 
 def _pick(eligible: Sequence[LayerControls], control: str) -> RequestedControl:

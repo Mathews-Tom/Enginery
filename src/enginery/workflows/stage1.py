@@ -451,11 +451,7 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
         review_state = self._node_state_optional(run_id, "review")
-        if (
-            review_state is None
-            or _generation(_string(review_state, "attempt_id")) != generation
-            or not _decision_bound(review_state, run.request)
-        ):
+        if review_state is None or _generation(_string(review_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if self._review_outcome(run_id) is not ReviewOutcome.APPROVED:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
@@ -1254,17 +1250,6 @@ def _require_bound_selection(request: Stage1RunRequest) -> None:
 def _selection_digest(request: Stage1RunRequest) -> Digest | None:
     """Return the digest decisions and evidence bind to, or None for a pre-selection run."""
     return None if request.execution_selection.legacy else request.execution_selection.digest
-
-
-def _decision_bound(state: Mapping[str, object], request: Stage1RunRequest) -> bool:
-    """Return whether a recorded decision names the run's bound execution selection.
-
-    A decision recorded under a different selection no longer authorizes this run's
-    output. A pre-selection run has no selection to name, so its decisions stand.
-    """
-    if request.execution_selection.legacy:
-        return True
-    return state.get("execution_selection_digest") == str(request.execution_selection.digest)
 
 
 def _selection_from_state(

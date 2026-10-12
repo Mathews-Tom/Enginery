@@ -149,6 +149,63 @@ def test_strict_effective_combines_with_or_across_eligible_layers() -> None:
     assert _resolve(*layers).strict_effective
 
 
+def test_strict_effective_from_a_layer_naming_another_harness_is_rejected_not_carried() -> None:
+    with pytest.raises(InvalidInputError, match="user layer requires strict effective controls"):
+        _resolve(
+            LayerControls(layer=SelectionLayer.USER, harness="omp", strict_effective=True),
+            LayerControls(layer=SelectionLayer.RUN, harness="claude-code", model=CLAUDE_MODEL),
+        )
+    relaxed = _resolve(
+        LayerControls(layer=SelectionLayer.USER, harness="omp", strict_effective=False),
+        LayerControls(layer=SelectionLayer.RUN, harness="claude-code", model=CLAUDE_MODEL),
+    )
+    assert not relaxed.strict_effective
+
+
+@pytest.mark.parametrize(
+    ("harness", "model", "effort"),
+    [("omp", OMP_MODEL, "high"), ("claude-code", CLAUDE_MODEL, "high")],
+)
+def test_a_strict_effort_pin_is_rejected_because_no_host_reports_effective_effort(
+    harness: str, model: str, effort: str
+) -> None:
+    with pytest.raises(InvalidInputError, match="does not report its effective effort"):
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.RUN,
+                harness=harness,
+                model=model,
+                model_pinned=True,
+                effort=effort,
+                effort_pinned=True,
+                strict_effective=True,
+            )
+        )
+    allowed = _resolve(
+        LayerControls(
+            layer=SelectionLayer.RUN,
+            harness=harness,
+            model=model,
+            model_pinned=True,
+            strict_effective=True,
+        )
+    )
+    assert allowed.strict_effective
+    crafted = replace(
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.RUN,
+                harness=harness,
+                effort=effort,
+                effort_pinned=True,
+            )
+        ),
+        strict_effective=True,
+    )
+    with pytest.raises(InvalidInputError, match="does not report its effective effort"):
+        validate_against_catalog(crafted, catalog=CATALOG)
+
+
 def test_a_tampered_selection_is_rejected_by_catalog_validation() -> None:
     good = _resolve(
         LayerControls(layer=SelectionLayer.RUN, harness="omp", model=OMP_MODEL, model_pinned=True)
@@ -401,9 +458,9 @@ def test_the_selection_round_trips_and_rejects_an_unknown_schema_version() -> No
             model_pinned=True,
             effort="high",
             effort_pinned=True,
-            strict_effective=True,
         )
     )
+    selection = replace(selection, strict_effective=True)
 
     assert ExecutionSelection.from_state(selection.to_state()) == selection
 

@@ -2126,16 +2126,23 @@ def _complete_check_node(
 
 
 def _drive_check_to_non_pass(
-    ledger_service: LedgerService, tmp_path: Path, *, check_id: str, result: str
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    *,
+    check_id: str,
+    result: str,
+    execution_selection: ExecutionSelection | None = None,
 ) -> tuple[Stage1RunService, Stage1RunRequest, int]:
     """Drive the real Stage 1 executors until ``check_id`` yields a ``result`` non-pass.
 
-    Returns the service, the request, and the repair budget remaining at that point.
+    Returns the service, the request, and the repair budget remaining at that point. A
+    ``result`` of ``pass`` drives the run through merge-ready verification unmodified.
     """
     request, service, runtime, pull_requests, now = _check_disposition_fixture(
         ledger_service,
         tmp_path,
         source_drift=check_id == STAGE1_VERIFY_CHECK_ID and result == "fail",
+        execution_selection=execution_selection,
     )
     heartbeat = timedelta(seconds=60)
     _complete_check_node(runtime, request, "qualify", now)
