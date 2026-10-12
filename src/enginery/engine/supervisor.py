@@ -5,15 +5,17 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import re
 import signal
 import socket
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 from enginery.domain.errors import (
     ExternalConflictError,
@@ -45,10 +47,14 @@ record binds the host and boot it was launched on.
 
 @dataclass(frozen=True, slots=True)
 class HostIdentity:
-    """The machine and boot a process belongs to: a pid is only meaningful within both."""
+    """The machine and boot a process belongs to: a pid is only meaningful within both.
 
-    hostname: str
+    Only ``machine_id`` and ``boot_id`` are compared; ``hostname`` is display text.
+    """
+
+    machine_id: str
     boot_id: str
+    hostname: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +91,12 @@ class WorkerSupervisor:
         command: tuple[str, ...],
         cwd: Path,
         now: datetime,
+        stderr_log: Path | None = None,
     ) -> ProcessIdentity:
         """Persist launch intent before spawning so crash recovery fails closed."""
         if not command:
             raise InvalidInputError("worker command must not be empty")
+        probe_host()  # fail closed before launch if this host cannot be identified
         prior = self._ledger.read_process_manager_state(
             process_manager_name=_MANAGER,
             state_key=_key(lease),
@@ -118,15 +126,27 @@ class WorkerSupervisor:
         try:
             # The worker must not hold the coordinator's stdio: an operator piping a
             # lifecycle command to a reader would otherwise block until the worker exits.
-            # Its output is captured by the adapter's protocol file, not by these streams.
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            # Its output is captured by the adapter's protocol file; only the wrapper's own
+            # stderr (for example a crash trace) goes to a per-attempt log when one is given.
+            stderr: int | IO[bytes] = subprocess.DEVNULL
+            log_handle = None
+            if stderr_log is not None:
+                stderr_log.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(stderr_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                log_handle = os.fdopen(descriptor, "ab")
+                stderr = log_handle
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr,
+                )
+            finally:
+                if log_handle is not None:
+                    log_handle.close()
         except OSError as error:
             self._record_launch_failure(
                 lease=lease,
@@ -207,27 +227,43 @@ class WorkerSupervisor:
 
         The transition is fenced by ``coordinator_epoch``, which defaults to the epoch that
         issued the lease and must be the current epoch when a later coordinator cancels.
+        Safe to retry after an interruption: a recorded termination request resumes at the
+        exact-identity termination (which returns if the group is already gone), and an
+        already observed exit is left as recorded.
         """
         require_local(identity, action="terminate")
         epoch = lease.epoch if coordinator_epoch is None else coordinator_epoch
         record = self._require_supervisor_record(lease)
-        requested = _state(lease, identity=identity, status="termination_requested")
-        requested_result = self._ledger.append(
-            AppendCommand(
-                correlation_id=f"worker-termination:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
-                events=(_event(self._ledger, lease, "worker.termination_requested", requested),),
-                process_manager_updates=(
-                    self._coordinator.epoch_guard(epoch=epoch, now=now),
-                    ProcessManagerStateWrite(
-                        _MANAGER,
-                        _key(lease),
-                        record.state_version,
-                        requested,
+        status = record.state.get("status")
+        if status in {"exit_observed", "exit_reconciled"}:
+            return
+        if status == "running":
+            requested = _state(lease, identity=identity, status="termination_requested")
+            requested_result = self._ledger.append(
+                AppendCommand(
+                    correlation_id=(
+                        f"worker-termination:{lease.run_id}:{lease.node_id}:{lease.fencing_token}"
                     ),
-                ),
+                    events=(
+                        _event(self._ledger, lease, "worker.termination_requested", requested),
+                    ),
+                    process_manager_updates=(
+                        self._coordinator.epoch_guard(epoch=epoch, now=now),
+                        ProcessManagerStateWrite(
+                            _MANAGER, _key(lease), record.state_version, requested
+                        ),
+                    ),
+                )
             )
-        )
-        self._fault("termination_requested")
+            state_version = requested_result.process_manager_states[1].state_version
+            self._fault("termination_requested")
+        elif status == "termination_requested":
+            state_version = record.state_version
+        else:
+            raise ExternalConflictError(
+                "only a running or terminating worker can be cancelled",
+                details={"status": str(status)},
+            )
         _terminate_exact_group(identity)
         self._fault("process_exit_observed")
         self._record_exit(
@@ -236,7 +272,7 @@ class WorkerSupervisor:
             identity=identity,
             now=now,
             event_type="worker.cancelled",
-            expected_state_version=requested_result.process_manager_states[1].state_version,
+            expected_state_version=state_version,
         )
 
     def cancel_persisted(
@@ -244,8 +280,6 @@ class WorkerSupervisor:
     ) -> None:
         """Terminate the current worker using only its durable supervisor record."""
         record = self._require_supervisor_record(lease)
-        if record.state.get("status") != "running":
-            raise ExternalConflictError("only a running worker can be cancelled")
         self.cancel(
             lease=lease,
             identity=identity_from_state(record.state),
@@ -395,19 +429,31 @@ _TERMINATION_GRACE_SECONDS = 10.0
 _EXIT_POLL_SECONDS = 0.02
 
 
+def _probe_for_termination(identity: ProcessIdentity) -> ProcessIdentity | None:
+    try:
+        return probe_process(identity.pid)
+    except PermissionError as error:
+        # The pid is held by a process this user cannot signal, so it is not our worker.
+        raise ExternalConflictError(
+            "process identity changed; refusing PID-reuse termination"
+        ) from error
+
+
 def _terminate_exact_group(identity: ProcessIdentity) -> None:
     """Terminate the recorded worker's whole process group within a bounded time.
 
     The worker may have been launched by an earlier coordinator process, so its exit cannot
     be observed with ``waitpid`` alone: it is reaped when it is this process's child and
-    otherwise observed by re-probing its exact start identity. SIGTERM gets a grace period,
-    then SIGKILL; a group that survives both is reported instead of waited on forever.
+    otherwise observed by re-probing its exact start identity. The group is only treated as
+    gone when the leader and every member have exited, so a leader that died while a
+    descendant kept running is still terminated. SIGTERM gets a grace period, then SIGKILL; a
+    group that survives both is reported instead of waited on forever. Safe to repeat.
     """
     require_local(identity, action="terminate")
-    current = probe_process(identity.pid)
+    current = _probe_for_termination(identity)
     if current is not None and not same_process(identity, current):
         raise ExternalConflictError("process identity changed; refusing PID-reuse termination")
-    if current is None:
+    if current is None and _group_is_empty(identity.process_group_id):
         return
     for termination in (signal.SIGTERM, signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError):
@@ -487,24 +533,58 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+_BOOT_TIME = re.compile(r"sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)")
+_PLATFORM_UUID = re.compile(r'"IOPlatformUUID"\s*=\s*"([^"]+)"')
+
+
+def _command_output(command: list[str]) -> str:
+    try:
+        return subprocess.run(command, text=True, capture_output=True, check=False).stdout.strip()
+    except OSError:
+        return ""
+
+
+def _first_file_text(*paths: str) -> str:
+    for path in paths:
+        try:
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return ""
+
+
 @functools.cache
 def probe_host() -> HostIdentity:
-    """Identify this machine and boot: hostname plus the kernel's per-boot identity."""
+    """Identify this machine and boot from ids that are stable across processes.
+
+    The machine id is the platform UUID (macOS ``IOPlatformUUID``, Linux ``/etc/machine-id``)
+    and the boot id the kernel's per-boot identity (macOS ``kern.bootsessionuuid``, falling
+    back to the numeric ``sec.usec`` of ``kern.boottime``, never its time-zone formatted text;
+    Linux ``boot_id``). The hostname is recorded for display only and is never compared.
+    An id that cannot be read fails closed rather than being guessed.
+    """
     hostname = socket.gethostname().strip()
     if sys.platform == "darwin":
-        boot_id = subprocess.run(
-            ["sysctl", "-n", "kern.boottime"], text=True, capture_output=True, check=False
-        ).stdout.strip()
+        found = _PLATFORM_UUID.search(
+            _command_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])
+        )
+        machine_id = found.group(1) if found else ""
+        boot_id = _command_output(["sysctl", "-n", "kern.bootsessionuuid"])
+        if not boot_id:
+            boot_time = _BOOT_TIME.search(_command_output(["sysctl", "-n", "kern.boottime"]))
+            boot_id = f"{boot_time.group(1)}.{boot_time.group(2)}" if boot_time else ""
     elif sys.platform.startswith("linux"):
-        try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-        except OSError as error:
-            raise InternalInvariantViolationError("cannot establish Linux boot identity") from error
+        machine_id = _first_file_text("/etc/machine-id", "/var/lib/dbus/machine-id")
+        boot_id = _first_file_text("/proc/sys/kernel/random/boot_id")
     else:
         raise InvalidInputError("worker supervision supports only macOS and Linux")
-    if not hostname or not boot_id:
-        raise InternalInvariantViolationError("host or boot identity was empty")
-    return HostIdentity(hostname, boot_id)
+    if not machine_id or not boot_id:
+        raise InternalInvariantViolationError(
+            "cannot establish this host's machine or boot identity; refusing to guess"
+        )
+    return HostIdentity(machine_id, boot_id, hostname)
 
 
 def is_local(identity: ProcessIdentity) -> bool:
@@ -523,10 +603,12 @@ def require_local(identity: ProcessIdentity, *, action: str) -> None:
             f"worker was launched on a different host or boot; it cannot be {action}d locally",
             details={
                 "pid": identity.pid,
-                "recorded_host": None if identity.host is None else identity.host.hostname,
+                "recorded_machine_id": None if identity.host is None else identity.host.machine_id,
                 "recorded_boot_id": None if identity.host is None else identity.host.boot_id,
-                "current_host": probe_host().hostname,
+                "recorded_hostname": None if identity.host is None else identity.host.hostname,
+                "current_machine_id": probe_host().machine_id,
                 "current_boot_id": probe_host().boot_id,
+                "current_hostname": probe_host().hostname,
             },
         )
 
@@ -559,20 +641,24 @@ def identity_from_state(state: Mapping[str, object]) -> ProcessIdentity:
     version = state.get("identity_version")
     if version is None:
         return ProcessIdentity(pid, process_group_id, start_identity)
-    hostname = state.get("hostname")
+    machine_id = state.get("machine_id")
     boot_id = state.get("boot_id")
+    hostname = state.get("hostname", "")
     if (
         version != IDENTITY_VERSION
-        or not isinstance(hostname, str)
-        or not hostname
+        or not isinstance(machine_id, str)
+        or not machine_id
         or not isinstance(boot_id, str)
         or not boot_id
+        or not isinstance(hostname, str)
     ):
         raise InternalInvariantViolationError(
             "stored supervisor host identity is invalid or from an unsupported version",
             details={"identity_version": str(version)},
         )
-    return ProcessIdentity(pid, process_group_id, start_identity, HostIdentity(hostname, boot_id))
+    return ProcessIdentity(
+        pid, process_group_id, start_identity, HostIdentity(machine_id, boot_id, hostname)
+    )
 
 
 def _key(lease: FencedNodeLease) -> str:
@@ -603,8 +689,9 @@ def _state(
             state.update(
                 {
                     "identity_version": IDENTITY_VERSION,
-                    "hostname": identity.host.hostname,
+                    "machine_id": identity.host.machine_id,
                     "boot_id": identity.host.boot_id,
+                    "hostname": identity.host.hostname,
                 }
             )
     return state

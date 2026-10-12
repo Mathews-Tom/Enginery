@@ -33,6 +33,7 @@ from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
     ExecutionHold,
     ExecutionSelection,
+    HoldReason,
     detect_catalog_drift,
     detect_host_drift,
     validate_against_catalog,
@@ -50,6 +51,7 @@ from enginery.domain.serialization import (
 )
 from enginery.domain.workflow.manifest import CHECK_BINDING_SCHEMA_VERSION, WorkflowManifest
 from enginery.domain.workflow.shell_guard import reject_shell_invocation
+from enginery.engine.recovery import WorkerLiveness, assess_worker
 from enginery.engine.runtime import (
     RUN_AGGREGATE_TYPE,
     RUNTIME_NODE_AGGREGATE_TYPE,
@@ -285,6 +287,7 @@ class Stage1ProgressionAction(StrEnum):
     QUALIFY = "qualify"
     IMPLEMENT = "implement"
     DISPATCH_QUEUED = "dispatch_queued"
+    RECONCILE_WORKER = "reconcile_worker"
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
@@ -377,14 +380,14 @@ class Stage1RunService:
             )
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
 
-    def next_action(self, run_id: RunId) -> Stage1Progression:
+    def next_action(self, run_id: RunId, *, now: datetime | None = None) -> Stage1Progression:
         """Derive at most one safe action, reporting a drifted catalog binding as a hold.
 
         A hold never rebinds the run: its original selection and catalog digest stay as
         recorded. A drifted run's advancing actions become HOLD; a human wait or idle
         observation keeps its action but still carries the hold diagnostic so it is shown.
         """
-        progression = self._derive_progression(run_id)
+        progression = self._derive_progression(run_id, now)
         hold = self._binding_hold(progression.run.request)
         if hold is None:
             return progression
@@ -472,7 +475,7 @@ class Stage1RunService:
         if not durable.execution_selection.legacy:
             validate_against_catalog(durable.execution_selection, catalog=self._current_catalog())
 
-    def _derive_progression(self, run_id: RunId) -> Stage1Progression:
+    def _derive_progression(self, run_id: RunId, now: datetime | None) -> Stage1Progression:
         run = self.read(run_id)
         qualification_status = self._node_status(run_id, "qualify")
         if qualification_status is None:
@@ -500,12 +503,11 @@ class Stage1RunService:
             result_path = _implementation_result_path(
                 run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
             )
-            action = (
-                Stage1ProgressionAction.COLLECT_IMPLEMENTATION
-                if result_path.is_file()
-                else Stage1ProgressionAction.WAIT
-            )
-            return Stage1Progression(action, run)
+            if result_path.is_file():
+                return Stage1Progression(Stage1ProgressionAction.COLLECT_IMPLEMENTATION, run)
+            if implementation_status == "running":
+                return self._running_worker_progression(run, now=now)
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
         generation = _generation(_string(implement_state, "attempt_id"))
 
         validate_state = self._node_state_optional(run_id, "validate")
@@ -586,7 +588,7 @@ class Stage1RunService:
         limits: SchedulingLimits,
     ) -> Stage1Progression:
         """Perform at most one externally observable action selected from durable state."""
-        progression = self.next_action(run_id)
+        progression = self.next_action(run_id, now=now)
         request = progression.run.request
         if progression.action is Stage1ProgressionAction.QUALIFY:
             self.qualify(
@@ -612,6 +614,8 @@ class Stage1RunService:
                 lease_window=lease_window,
                 limits=limits,
             )
+        elif progression.action is Stage1ProgressionAction.RECONCILE_WORKER:
+            self.reconcile_exited_worker(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
             self.collect_implementation(
                 request,
@@ -628,7 +632,7 @@ class Stage1RunService:
             self.verify_merge_ready(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION:
             self.register_outcome_observation(request, now=now)
-        return self.next_action(run_id)
+        return self.next_action(run_id, now=now)
 
     def qualify(
         self,
@@ -796,6 +800,72 @@ class Stage1RunService:
             run_id=request.run.id,
             attempt_id=_string(queued, "attempt_id"),
             operation_id=OperationId(_string(queued, "operation_id")),
+        )
+
+    def _running_worker_progression(
+        self, run: Stage1Run, *, now: datetime | None
+    ) -> Stage1Progression:
+        """Decide what a running implementation node with no result file is waiting on.
+
+        Only a worker proven dead on this host and boot is reconciled; a worker that is alive
+        keeps the run waiting. Whatever cannot be proven -- another host or boot, a pid taken
+        by another process, an unreadable identity, or a live worker whose launching
+        coordinator epoch lapsed (judged only when the caller supplies a clock) -- is an
+        explicit hold with its reason, never a silent wait.
+        """
+        run_id = str(run.request.run.id)
+        record = self.ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run_id}:implement"
+        )
+        if record is None:
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
+        assessment = assess_worker(record.state)
+        liveness = assessment.liveness
+        if liveness is WorkerLiveness.EXITED:
+            return Stage1Progression(Stage1ProgressionAction.RECONCILE_WORKER, run)
+        if liveness is WorkerLiveness.ALIVE:
+            if (
+                now is not None
+                and self.runtime.lease_epoch_active(run_id=run_id, node_id="implement", now=now)
+                is False
+            ):
+                return Stage1Progression(
+                    Stage1ProgressionAction.HOLD,
+                    run,
+                    ExecutionHold(
+                        reason=HoldReason.WORKER_COORDINATOR_LAPSED,
+                        message=(
+                            "the implementation worker is still running but the coordinator "
+                            "epoch that launched it has lapsed; wait for its result, or "
+                            "cancel the node to stop it"
+                        ),
+                        details={"liveness": liveness.value},
+                    ),
+                )
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
+        return Stage1Progression(
+            Stage1ProgressionAction.HOLD,
+            run,
+            ExecutionHold(
+                reason=HoldReason.WORKER_IDENTITY_UNPROVABLE,
+                message=(
+                    "the implementation worker's liveness cannot be proven from this host "
+                    f"({liveness.value}); reconcile it manually, then cancel the node"
+                ),
+                details={"liveness": liveness.value},
+            ),
+        )
+
+    def reconcile_exited_worker(
+        self, request: Stage1RunRequest, *, now: datetime, heartbeat_window: timedelta
+    ) -> None:
+        """Record a provably dead implementation worker that left no result as a failed node."""
+        self._require_executable(request)
+        self.runtime.fail_exited_worker(
+            run_id=str(request.run.id),
+            node_id="implement",
+            now=now,
+            heartbeat_window=heartbeat_window,
         )
 
     def _queued_wakeup(self, run_id: RunId) -> Mapping[str, object] | None:
@@ -1392,6 +1462,11 @@ def _fixture_dispatch(
         dependencies=dependencies,
         workflow_definition_id=request.manifest.id.value,
         retain_workspace=node_id == "implement",
+        log_directory=(
+            request.execution_configuration.artifact_root / "worker-logs"
+            if node_id == "implement"
+            else None
+        ),
     )
 
 

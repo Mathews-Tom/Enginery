@@ -17,7 +17,7 @@ from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.coordinator import CommandConsumption, Coordinator, CoordinatorEpoch
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
-from enginery.engine.recovery import RecoveryCoordinator
+from enginery.engine.recovery import RecoveryCoordinator, WorkerLiveness, assess_worker
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.scheduler import (
     DeferralReason,
@@ -53,6 +53,7 @@ class FixtureDispatch:
     dependencies: tuple[tuple[str, str], ...] = ()
     workflow_definition_id: str | None = None
     retain_workspace: bool = False
+    log_directory: Path | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -186,6 +187,12 @@ class FixtureRuntime:
             command=request.command,
             cwd=reservation.workspace_path,
             now=now,
+            stderr_log=(
+                None
+                if request.log_directory is None
+                else request.log_directory
+                / f"{request.run_id}-{request.node_id}-{request.attempt_id}.stderr.log"
+            ),
         )
         return DispatchedFixture(lease=lease, identity=identity, workspace=reservation)
 
@@ -234,6 +241,19 @@ class CoordinatorRuntime:
     def claim_epoch(self, *, now: datetime, heartbeat_window: timedelta) -> CoordinatorEpoch:
         """Acquire or renew the coordinator epoch for an operator lifecycle command."""
         return self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+
+    def lease_epoch_active(self, *, run_id: str, node_id: str, now: datetime) -> bool | None:
+        """Whether the coordinator epoch that issued a node's lease is still active.
+
+        This is about the lease's own epoch, not whichever coordinator owns the ledger now:
+        a newer owner does not make a lapsed launching epoch active. ``None`` when the node
+        has no lease.
+        """
+        lease = self._ledger.read_lease(run_id=run_id, node_id=node_id)
+        if lease is None:
+            return None
+        epoch = self._coordinator.current_epoch()
+        return epoch is not None and epoch.epoch == lease.epoch and epoch.active_at(now)
 
     def read_node_request(self, *, run_id: str, node_id: str) -> FixtureDispatch:
         """Return the current durable request for one runtime node."""
@@ -661,23 +681,24 @@ class CoordinatorRuntime:
             )
             if attempt is None:
                 raise InternalInvariantViolationError("cancellation has no durable node attempt")
-            self._leases.ingest_result(
-                envelope=WorkerResultEnvelope(
-                    run_id=run_id,
-                    node_id=node_id,
-                    attempt_id=request.attempt_id,
-                    epoch=lease.epoch,
-                    fencing_token=lease.fencing_token,
-                    operation_id=request.operation_id,
-                    terminal_result="cancelled",
-                    artifact_references=(),
-                    result={"cancellation": "operator_requested"},
-                ),
-                coordinator_epoch=transition_epoch,
-                now=now,
-                expected_attempt_version=attempt.aggregate_version,
-                allow_expired_cancellation=True,
-            )
+            if attempt.state.get("terminal_result") is None:
+                self._leases.ingest_result(
+                    envelope=WorkerResultEnvelope(
+                        run_id=run_id,
+                        node_id=node_id,
+                        attempt_id=request.attempt_id,
+                        epoch=lease.epoch,
+                        fencing_token=lease.fencing_token,
+                        operation_id=request.operation_id,
+                        terminal_result="cancelled",
+                        artifact_references=(),
+                        result={"cancellation": "operator_requested"},
+                    ),
+                    coordinator_epoch=transition_epoch,
+                    now=now,
+                    expected_attempt_version=attempt.aggregate_version,
+                    allow_expired_cancellation=True,
+                )
             if not assessment.ready_to_release:
                 self._set_status(
                     request=request,
@@ -710,6 +731,104 @@ class CoordinatorRuntime:
             now=now,
         )
         self._fault("node_cancelled")
+
+    def fail_exited_worker(
+        self, *, run_id: str, node_id: str, now: datetime, heartbeat_window: timedelta
+    ) -> None:
+        """Record a provably dead worker that left no result as a failed node.
+
+        Only a worker whose exact start identity is absent on this host and boot qualifies;
+        anything else is refused so that nothing unprovable is treated as dead. The exit is
+        observed, reconciled through the recovery path, and the failure is ingested under a
+        freshly claimed epoch even though the dead worker's lease may have expired. The
+        workspace is retained or cleaned as for any other terminal result, and the identity
+        evidence stays in the supervisor record and on the node.
+        """
+        request = self._request_for(run_id, node_id)
+        state = _runtime_state(self._ledger, request)
+        _require_agent_node(state)
+        if state.get("status") != "running":
+            raise ExternalConflictError(
+                "only a running node can be failed for a dead worker",
+                details={"status": str(state.get("status"))},
+            )
+        lease = self._active_lease(request)
+        record = self._ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run_id}:{node_id}"
+        )
+        if record is None:
+            raise InternalInvariantViolationError("running node has no supervisor record")
+        assessment = assess_worker(record.state)
+        if assessment.liveness is not WorkerLiveness.EXITED or assessment.identity is None:
+            raise ExternalConflictError(
+                "the worker is not provably exited on this host and boot",
+                details={"liveness": assessment.liveness.value},
+            )
+        epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+        WorkerSupervisor(self._ledger, self._coordinator, fault_hook=self._fault_hook).observe_exit(
+            lease=lease, coordinator_epoch=epoch.epoch, now=now
+        )
+        reservation = self._require_workspace(request)
+        reconciled = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+            lease=lease, workspace_path=reservation.workspace_path, epoch=epoch.epoch, now=now
+        )
+        attempt = self._ledger.read_projection(
+            aggregate_type="node_attempt", aggregate_id=request.attempt_id
+        )
+        if attempt is None:
+            raise InternalInvariantViolationError("worker failure has no durable node attempt")
+        evidence: dict[str, object] = {
+            "pid": assessment.identity.pid,
+            "process_group_id": assessment.identity.process_group_id,
+            "start_identity": assessment.identity.start_identity,
+        }
+        if attempt.state.get("terminal_result") is None:
+            self._leases.ingest_result(
+                envelope=WorkerResultEnvelope(
+                    run_id=run_id,
+                    node_id=node_id,
+                    attempt_id=request.attempt_id,
+                    epoch=lease.epoch,
+                    fencing_token=lease.fencing_token,
+                    operation_id=request.operation_id,
+                    terminal_result="failed",
+                    artifact_references=(),
+                    result={"failure": "worker_exited_without_result", "worker": evidence},
+                ),
+                coordinator_epoch=epoch.epoch,
+                now=now,
+                expected_attempt_version=attempt.aggregate_version,
+                allow_expired_failure=True,
+            )
+        if not reconciled.ready_to_release:
+            self._set_status(
+                request=request,
+                status="awaiting_human",
+                event_type="runtime_node.worker_exited_cleanup_pending",
+                epoch=epoch.epoch,
+                now=now,
+                extra={
+                    "failure_reason": "worker_exited_without_result",
+                    "cancellation_cleanup_reason": reconciled.reason,
+                    "worker_exit_evidence": evidence,
+                },
+            )
+            return
+        if request.retain_workspace:
+            self._workspaces.retain(reservation, epoch=epoch.epoch, now=now)
+        else:
+            self._workspaces.cleanup(reservation, epoch=epoch.epoch, now=now)
+        self._set_status(
+            request=request,
+            status="failed",
+            event_type="runtime_node.worker_exited",
+            epoch=epoch.epoch,
+            now=now,
+            extra={
+                "failure_reason": "worker_exited_without_result",
+                "worker_exit_evidence": evidence,
+            },
+        )
 
     def enter_human_wait(
         self,
@@ -1147,6 +1266,7 @@ def _request_state(
         "dependencies": [[run_id, node_id] for run_id, node_id in request.dependencies],
         "workflow_definition_id": request.workflow_definition_id,
         "retain_workspace": request.retain_workspace,
+        "log_directory": None if request.log_directory is None else str(request.log_directory),
         "actor_type": actor_type.value,
         "status": status,
     }
@@ -1169,6 +1289,9 @@ def _request_from_state(state: object) -> FixtureDispatch:
     retain_workspace = state.get("retain_workspace", False)
     if not isinstance(retain_workspace, bool):
         raise InternalInvariantViolationError("runtime node state has invalid workspace retention")
+    log_directory = state.get("log_directory")
+    if log_directory is not None and (not isinstance(log_directory, str) or not log_directory):
+        raise InternalInvariantViolationError("runtime node state has invalid log directory")
     workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
@@ -1208,6 +1331,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
         dependencies=tuple(parsed_dependencies),
         workflow_definition_id=workflow_definition_id,
         retain_workspace=retain_workspace,
+        log_directory=Path(log_directory) if log_directory is not None else None,
     )
 
 

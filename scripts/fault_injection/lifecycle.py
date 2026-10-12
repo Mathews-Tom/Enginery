@@ -454,7 +454,7 @@ def _cancel_queued_and_running() -> None:
 
 
 def _host_boot_mismatch_hold() -> None:
-    for difference in ("boot_id", "hostname"):
+    for difference in ("boot_id", "machine_id"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ledger = LedgerService.open(root / "ledger.db")
@@ -504,6 +504,58 @@ def _host_boot_mismatch_hold() -> None:
                 ledger.close()
 
 
+def _worker_death_bounded_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger_path = root / "ledger.db"
+        dead = _node(root, "dead", command=_SLEEP)
+        waiting = _node(root, "waiting", command=_SLEEP)
+        first = _run_child(
+            root,
+            _REGISTER_SCRIPT,
+            str(ledger_path),
+            _T0.isoformat(),
+            _encode(dead),
+            _encode(waiting),
+        )
+        worker_pid = int(first[0][0])  # type: ignore[index]
+        ledger = LedgerService.open(ledger_path)
+        pids = [worker_pid]
+        try:
+            os.killpg(os.getpgid(worker_pid), 9)
+            deadline = time.monotonic() + 15
+            while probe_process(worker_pid) is not None:
+                _expect(time.monotonic() < deadline, "the killed worker never vanished")
+                time.sleep(0.02)
+            runtime = CoordinatorRuntime(ledger, owner="operator")
+            later = _T0 + timedelta(seconds=120)
+            runtime.fail_exited_worker(
+                run_id="run-dead", node_id="work", now=later, heartbeat_window=_WINDOW
+            )
+            _expect(_status(ledger, "dead") == "failed", "the dead worker was not failed")
+            record = ledger.read_process_manager_state(
+                process_manager_name="worker-supervisor", state_key="run-dead:work"
+            )
+            _expect(record is not None, "supervisor evidence was lost")
+            assert record is not None
+            _expect(
+                identity_from_state(record.state).pid == worker_pid,
+                "the dead worker's identity was not retained",
+            )
+            started = _tick(runtime, later + timedelta(seconds=1))
+            _expect(
+                [item.lease.run_id for item in started] == ["run-waiting"],
+                "the freed slot did not go to the queued run",
+            )
+            pids.append(started[0].identity.pid)
+            _expect(_tick(runtime, later + timedelta(seconds=2)) == (), "a tick launched again")
+            _expect(_launches(ledger, "dead") == 1, "the dead worker was launched again")
+            _expect(_launches(ledger, "waiting") == 1, "the queued run launched more than once")
+        finally:
+            _stop_leftovers(pids)
+            ledger.close()
+
+
 def lifecycle_scenarios() -> tuple[FaultScenario, ...]:
     cases: tuple[tuple[str, str, Callable[[], None]], ...] = (
         (
@@ -530,6 +582,11 @@ def lifecycle_scenarios() -> tuple[FaultScenario, ...]:
             "host_boot_mismatch_hold",
             "a worker record from another host or boot is held and never signalled",
             _host_boot_mismatch_hold,
+        ),
+        (
+            "worker_death_bounded_state",
+            "a SIGKILLed worker is failed with identity evidence and frees its slot once",
+            _worker_death_bounded_state,
         ),
     )
     return tuple(FaultScenario(name, description, run) for name, description, run in cases)

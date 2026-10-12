@@ -338,11 +338,12 @@ def test_worker_report_tells_a_live_worker_from_a_dead_one_with_identity_evidenc
     assert alive["start_identity"] == running.identity.start_identity
     assert alive["identity_version"] == 2
     assert alive["host"] == {
-        "hostname": probe_host().hostname,
+        "machine_id": probe_host().machine_id,
         "boot_id": probe_host().boot_id,
+        "hostname": probe_host().hostname,
     }
     assert (alive["lease_epoch"], alive["coordinator_epoch"]) == (1, 1)
-    assert alive["coordinator_heartbeat_active"] is True
+    assert alive["lease_epoch_active"] is True
 
     os.killpg(running.identity.process_group_id, signal.SIGKILL)
     os.waitpid(running.identity.pid, 0)
@@ -350,5 +351,5 @@ def test_worker_report_tells_a_live_worker_from_a_dead_one_with_identity_evidenc
     dead = _worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
     assert dead is not None
     assert dead["liveness"] == "exited"
-    assert dead["coordinator_heartbeat_active"] is True
+    assert dead["lease_epoch_active"] is True
     assert dead["pid"] == running.identity.pid

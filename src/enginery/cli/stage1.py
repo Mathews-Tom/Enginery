@@ -100,7 +100,7 @@ def _watch(args: argparse.Namespace) -> None:
             if args.advance
             else _read_only_service(runtime=runtime, ledger=ledger, request=request)
         )
-        previous = service.next_action(RunId(args.run_id))
+        previous = service.next_action(RunId(args.run_id), now=_now())
         if args.advance:
             progression = service.advance(
                 RunId(args.run_id),
@@ -334,7 +334,7 @@ def _evidence(args: argparse.Namespace) -> None:
         run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id))
         progression = _read_only_service(
             runtime=runtime, ledger=ledger, request=run.request
-        ).next_action(RunId(args.run_id))
+        ).next_action(RunId(args.run_id), now=_now())
         _print(
             {
                 "run_id": str(run.request.run.id),
@@ -385,7 +385,8 @@ def _worker_report(
     """Report what the persisted worker identity proves, read-only.
 
     ``liveness`` separates a dead worker (``exited``/``pid_reused``) from a live worker whose
-    coordinator lapsed (``alive`` with ``coordinator_heartbeat_active`` false); a record from
+    coordinator lapsed (``alive`` with ``lease_epoch_active`` false: the epoch that launched
+    the worker, not whichever coordinator owns the ledger now); a record from
     another host or boot is ``foreign_host`` and is never probed locally.
     """
     record = ledger.read_process_manager_state(
@@ -407,13 +408,19 @@ def _worker_report(
         "host": (
             None
             if identity is None or identity.host is None
-            else {"hostname": identity.host.hostname, "boot_id": identity.host.boot_id}
+            else {
+                "machine_id": identity.host.machine_id,
+                "boot_id": identity.host.boot_id,
+                "hostname": identity.host.hostname,
+            }
         ),
         "identity_version": record.state.get("identity_version", 1),
         "lease_epoch": None if lease is None else lease.epoch,
         "lease_expires_at": None if lease is None else lease.expires_at,
         "coordinator_epoch": None if epoch is None else epoch.epoch,
-        "coordinator_heartbeat_active": None if epoch is None else epoch.active_at(_now()),
+        "lease_epoch_active": runtime.lease_epoch_active(
+            run_id=run_id, node_id=node_id, now=_now()
+        ),
     }
 
 

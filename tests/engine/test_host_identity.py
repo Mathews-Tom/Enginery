@@ -126,8 +126,9 @@ def test_a_new_worker_record_binds_the_host_and_boot(
         state = _record(ledger_service).state
         host = probe_host()
         assert state["identity_version"] == IDENTITY_VERSION
-        assert state["hostname"] == host.hostname
+        assert state["machine_id"] == host.machine_id
         assert state["boot_id"] == host.boot_id
+        assert state["hostname"] == host.hostname
         decoded = identity_from_state(state)
         assert decoded == identity
         assert not decoded.legacy
@@ -142,7 +143,7 @@ def test_a_record_persisted_before_host_binding_is_judged_by_single_host_semanti
     coordinator, lease, identity, _ = _start(ledger_service, tmp_path)
 
     def strip_host(state: dict[str, object]) -> None:
-        for key in ("identity_version", "hostname", "boot_id"):
+        for key in ("identity_version", "machine_id", "boot_id", "hostname"):
             del state[key]
 
     _rewrite(ledger_service, strip_host)
@@ -166,7 +167,7 @@ def test_a_record_persisted_before_host_binding_is_judged_by_single_host_semanti
     assert probe_process(identity.pid) is None
 
 
-@pytest.mark.parametrize("difference", ["boot", "host"])
+@pytest.mark.parametrize("difference", ["boot", "machine"])
 def test_a_record_from_another_host_or_boot_is_held_and_its_pid_is_never_signalled(
     ledger_service: LedgerService, tmp_path: Path, difference: str
 ) -> None:
@@ -174,7 +175,7 @@ def test_a_record_from_another_host_or_boot_is_held_and_its_pid_is_never_signall
     try:
 
         def foreign(state: dict[str, object]) -> None:
-            state["hostname" if difference == "host" else "boot_id"] = f"another-{difference}"
+            state["machine_id" if difference == "machine" else "boot_id"] = f"another-{difference}"
 
         _rewrite(ledger_service, foreign)
         recorded = _record(ledger_service)
@@ -319,3 +320,96 @@ def test_terminating_a_foreign_identity_directly_refuses_and_leaves_the_process_
     finally:
         bystander.kill()
         bystander.wait()
+
+
+_PROBE = (
+    "import json; from enginery.engine.supervisor import probe_host; h = probe_host(); "
+    "print(json.dumps([h.machine_id, h.boot_id]))"
+)
+
+
+def _identity_under_timezone(timezone: str) -> list[str]:
+    env = {**os.environ, "TZ": timezone}
+    completed = subprocess.run(
+        [sys.executable, "-c", _PROBE], env=env, text=True, capture_output=True, check=True
+    )
+    return list(json.loads(completed.stdout))
+
+
+def test_host_and_boot_identity_is_stable_across_processes_and_time_zones() -> None:
+    first = _identity_under_timezone("UTC")
+    second = _identity_under_timezone("Pacific/Kiritimati")
+    third = _identity_under_timezone("America/Los_Angeles")
+
+    assert first == second == third
+    assert all(value and "UTC" not in value for value in first)
+    local = probe_host()
+    assert first == [local.machine_id, local.boot_id]
+
+
+def test_a_hostname_change_does_not_change_whether_a_worker_is_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from enginery.engine.supervisor import HostIdentity, is_local
+
+    recorded = probe_process(os.getpid())
+    assert recorded is not None and recorded.host is not None
+    renamed = ProcessIdentity(
+        recorded.pid,
+        recorded.process_group_id,
+        recorded.start_identity,
+        HostIdentity(recorded.host.machine_id, recorded.host.boot_id, "renamed-laptop"),
+    )
+    monkeypatch.setattr("socket.gethostname", lambda: "a-third-name")
+    probe_host.cache_clear()
+    try:
+        assert probe_host().hostname == "a-third-name"
+        assert probe_host() == recorded.host
+        assert is_local(renamed)
+        assert renamed == recorded
+    finally:
+        monkeypatch.undo()
+        probe_host.cache_clear()
+
+
+def test_an_unreadable_host_id_fails_closed_instead_of_being_guessed(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from enginery.domain.errors import InternalInvariantViolationError
+
+    coordinator, lease, identity, repository = _start(ledger_service, tmp_path)
+    try:
+        state = dict(_record(ledger_service).state)
+        monkeypatch.setattr("enginery.engine.supervisor._command_output", lambda _command: "")
+        monkeypatch.setattr("enginery.engine.supervisor._first_file_text", lambda *_paths: "")
+        probe_host.cache_clear()
+        with pytest.raises(InternalInvariantViolationError, match="refusing to guess"):
+            probe_host()
+        assert assess_worker(state).liveness is WorkerLiveness.UNVERIFIABLE
+        with pytest.raises(InternalInvariantViolationError, match="refusing to guess"):
+            WorkerSupervisor(ledger_service, coordinator).start(
+                lease=lease,
+                command=(sys.executable, "-c", "pass"),
+                cwd=repository,
+                now=_NOW,
+            )
+    finally:
+        monkeypatch.undo()
+        probe_host.cache_clear()
+        _terminate(identity)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root may signal pid 1")
+def test_a_pid_held_by_another_users_process_is_pid_reused_and_never_crashes() -> None:
+    host = probe_host()
+    state: dict[str, object] = {
+        "pid": 1,
+        "process_group_id": 1,
+        "start_identity": "recorded long ago",
+        "identity_version": IDENTITY_VERSION,
+        "machine_id": host.machine_id,
+        "boot_id": host.boot_id,
+        "hostname": host.hostname,
+    }
+
+    assert assess_worker(state).liveness is WorkerLiveness.PID_REUSED

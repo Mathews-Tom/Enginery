@@ -106,6 +106,8 @@ class RecoveryCoordinator:
             return RecoveryAssessment(False, "supervisor_state_missing")
         if record.state.get("attempt_id") != lease.attempt_id:
             return RecoveryAssessment(False, "worker_attempt_identity_mismatch")
+        if record.state.get("status") == "exit_reconciled":
+            return RecoveryAssessment(True, "already_reconciled")
         assessment = assess_orphan(process_state=record, workspace_path=workspace_path)
         if not assessment.ready_to_release:
             return assessment
@@ -153,9 +155,18 @@ def assess_worker(state: Mapping[str, object]) -> WorkerAssessment:
         identity = identity_from_state(state)
     except InternalInvariantViolationError:
         return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, None)
-    if not is_local(identity):
+    try:
+        local = is_local(identity)
+    except InternalInvariantViolationError:
+        # This host's own identity cannot be established, so nothing can be proven.
+        return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, identity)
+    if not local:
         return WorkerAssessment(WorkerLiveness.FOREIGN_HOST, identity)
-    observed = probe_process(identity.pid)
+    try:
+        observed = probe_process(identity.pid)
+    except PermissionError:
+        # A pid this user cannot signal is held by someone else's process, not our worker.
+        return WorkerAssessment(WorkerLiveness.PID_REUSED, identity)
     if observed is None:
         return WorkerAssessment(WorkerLiveness.EXITED, identity)
     if not same_process(identity, observed):

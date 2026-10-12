@@ -9,6 +9,9 @@ composition against a real SQLite ledger and real worker subprocesses.
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 import subprocess
 import sys
 from dataclasses import replace
@@ -28,6 +31,7 @@ from enginery.domain.errors import HumanActionRequiredError
 from enginery.domain.execution_catalog import ExecutionCatalog
 from enginery.domain.execution_selection import (
     ExecutionSelection,
+    HoldReason,
     LayerControls,
     SelectionLayer,
     resolve_execution_selection,
@@ -38,6 +42,7 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.supervisor import probe_process
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
@@ -718,4 +723,170 @@ def test_stage1_wiring_a_drifted_older_run_does_not_strand_a_current_newer_run(
     )
     runtime.cancel_node(
         run_id="run-aaa", node_id="implement", epoch=epoch.epoch, now=now + timedelta(seconds=22)
+    )
+
+
+def _dispatch_running_implementation(
+    ledger: LedgerService, tmp_path: Path, now: datetime
+) -> tuple[CoordinatorRuntime, Stage1RunService, Stage1RunRequest, int]:
+    runtime = CoordinatorRuntime(ledger, owner="operator")
+    request = _qualified_request(tmp_path)
+    service = _service(ledger, runtime, request, tmp_path)
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+    service.qualify(
+        request,
+        external_reference=request.work_snapshot.work_item.external_reference,
+        applicable_criteria=request.applicable_criteria,
+        now=now + timedelta(seconds=1),
+        heartbeat_window=timedelta(seconds=60),
+    )
+    dispatched = service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(minutes=30),
+        limits=_LIMITS,
+    )
+    assert dispatched.fixture is not None
+    return runtime, service, request, dispatched.fixture.identity.pid
+
+
+def _supervisor_record(ledger: LedgerService) -> dict[str, object]:
+    record = ledger.read_process_manager_state(
+        process_manager_name="worker-supervisor", state_key="run-fault:implement"
+    )
+    assert record is not None
+    return dict(record.state)
+
+
+def test_a_killed_worker_reaches_a_bounded_state_and_frees_the_slot_without_a_relaunch(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, pid = _dispatch_running_implementation(ledger_service, tmp_path, now)
+    repository, base_revision = _repository(tmp_path, "waiting-repository")
+    waiting = FixtureDispatch(
+        run_id="run-zzz-waiting",
+        node_id="work",
+        attempt_id="attempt-waiting",
+        repository_id="repository-waiting",
+        repository_path=repository,
+        workspace_path=tmp_path / "workspace-waiting",
+        base_revision=base_revision,
+        command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        expected_attempt_version=0,
+        operation_id="operation-waiting",
+    )
+    assert (
+        runtime.tick(
+            now=now + timedelta(seconds=3),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=_LIMITS,
+            requests=(waiting,),
+            run_ids=("run-zzz-waiting",),
+        ).dispatched
+        == ()
+    )
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.WAIT
+    identity = _supervisor_record(ledger_service)
+    os.killpg(int(identity["process_group_id"]), signal.SIGKILL)  # type: ignore[call-overload]
+    os.waitpid(pid, 0)
+
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.RECONCILE_WORKER
+    # The first advance reconciles the dead worker to a terminal node; it never relaunches it.
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+    failed = _implement_state(ledger_service)
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "worker_exited_without_result"
+    assert failed["worker_exit_evidence"]["pid"] == pid  # type: ignore[index]
+    for _ in range(3):
+        assert (
+            _advance(service, request, now + timedelta(seconds=11))
+            is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+        )
+    assert (
+        _event_count(
+            ledger_service, event_type="worker.launch_intended", aggregate_id="run-fault:implement"
+        )
+        == 1
+    )
+    started = runtime.tick(
+        now=now + timedelta(seconds=12),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+        run_ids=("run-zzz-waiting",),
+    ).dispatched
+    assert [fixture.lease.run_id for fixture in started] == ["run-zzz-waiting"]
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=13), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-zzz-waiting",
+        node_id="work",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=14),
+    )
+
+
+@pytest.mark.parametrize("difference", ["boot_id", "machine_id"])
+def test_a_worker_that_cannot_be_proven_dead_is_held_with_its_reason_never_waited_on(
+    ledger_service: LedgerService, tmp_path: Path, difference: str
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    state = _supervisor_record(ledger_service)
+    state[difference] = f"another-{difference}"
+    ledger_service.connection.execute(
+        "UPDATE process_manager_state SET state_json = ? "
+        "WHERE process_manager_name = 'worker-supervisor' AND state_key = 'run-fault:implement'",
+        (json.dumps(state),),
+    )
+    ledger_service.connection.commit()
+
+    progression = service.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.WORKER_IDENTITY_UNPROVABLE
+    assert progression.hold.details["liveness"] == "foreign_host"
+    assert _advance(service, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.HOLD
+    assert _implement_state(ledger_service)["status"] == "running"
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+
+
+def test_a_live_worker_whose_launching_epoch_lapsed_is_held_only_when_a_clock_is_given(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, pid = _dispatch_running_implementation(ledger_service, tmp_path, now)
+
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.WAIT
+    assert (
+        service.next_action(request.run.id, now=now + timedelta(seconds=10)).action
+        is Stage1ProgressionAction.WAIT
+    )
+    lapsed = service.next_action(request.run.id, now=now + timedelta(minutes=10))
+    assert lapsed.action is Stage1ProgressionAction.HOLD
+    assert lapsed.hold is not None
+    assert lapsed.hold.reason is HoldReason.WORKER_COORDINATOR_LAPSED
+    assert lapsed.hold.details["liveness"] == "alive"
+    # The worker is untouched: the hold is a diagnostic, not a termination.
+    assert probe_process(pid) is not None
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(minutes=11), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-fault",
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now + timedelta(minutes=11, seconds=5),
     )
