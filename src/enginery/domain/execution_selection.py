@@ -4,13 +4,15 @@ A selection is bound before any worker launches and records, separately, what wa
 requested (with the layer that supplied each value), what was selected, how the
 selection was made, and the exact catalog revision it was resolved against. What a
 host was actually *sent* and what it *effectively ran* are runtime observations kept
-in ``ExecutionReceipt``; they are never derived from, or defaulted to, the request.
+apart from the selection; they are never derived from, or defaulted to, the request.
 
-Precedence is run > project > user > workflow > factory. A manual pin is an exact
-identifier: it is never fuzzy-matched, aliased, or replaced, so a pinned control
-outranks every unpinned default at any layer, and ties between pins fall to the
-higher layer. An unspecified control means "host default" and is never labeled with
-a level or model the run did not request.
+Precedence is run > project > user > workflow > factory: the highest layer that
+specifies a control wins. A manual pin marks the winning value exact: it is never
+fuzzy-matched, aliased, or replaced, and a pin at a lower layer that disagrees with
+a higher layer's value is rejected rather than resolved either way. Model and effort
+are host-specific, so a layer that names another harness contributes neither, and a
+pin from such a layer is rejected. An unspecified control means "host default" and is
+never labeled with a level or model the run did not request.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.execution_catalog import ExecutionCatalog, SupportTier
+from enginery.domain.execution_catalog import ExecutionCatalog, HostCapability, SupportTier
 
 EXECUTION_SELECTION_SCHEMA_VERSION = 1
 
@@ -364,19 +366,44 @@ def resolve_execution_selection(
     host = catalog.host(harness_name)
     host.require_usable()
 
-    model = _pick(ordered, "model")
-    effort = _pick(ordered, "effort")
+    # Model and effort vocabularies are host-specific, so a layer that names another
+    # harness contributes neither. Quietly dropping its pin would break the pin, so a
+    # pin from such a layer is rejected instead.
+    eligible = [item for item in ordered if item.harness in (None, harness_name)]
+    for item in ordered:
+        if item in eligible:
+            continue
+        for pinned, name in ((item.model_pinned, "model"), (item.effort_pinned, "effort")):
+            if pinned:
+                raise InvalidInputError(
+                    f"the {item.layer.value} layer pins the {name} for harness "
+                    f"{item.harness!r}, but this run resolves harness {harness_name!r}; "
+                    "model and effort pins are host-specific and are never carried across hosts",
+                    details={
+                        "layer": item.layer.value,
+                        "control": name,
+                        "layer_harness": str(item.harness),
+                        "resolved_harness": harness_name,
+                    },
+                )
+
+    model = _pick(eligible, "model")
+    effort = _pick(eligible, "effort")
     if model.value is not None:
         host.require_model_pin(model.value)
     if effort.value is not None:
         host.require_effort_level(effort.value)
 
     for item in ordered:
-        _enforce_constraints(item, harness=harness_name, model=model.value, effort=effort.value)
+        _enforce_constraints(
+            item,
+            harness=harness_name,
+            model=model.value,
+            effort=effort.value,
+            applies_to_harness=item in eligible,
+        )
 
-    strict = next(
-        (item.strict_effective for item in ordered if item.strict_effective is not None), False
-    )
+    strict = any(item.strict_effective is True for item in eligible)
     pinned = model.pinned or effort.pinned
     mode = (
         SelectionMode.MANUAL_PIN
@@ -428,27 +455,94 @@ def detect_catalog_drift(
     )
 
 
-def _pick(ordered: Sequence[LayerControls], control: str) -> RequestedControl:
+def validate_against_catalog(
+    selection: ExecutionSelection, *, catalog: ExecutionCatalog
+) -> HostCapability:
+    """Reject a bound selection that is not exactly what the catalog supports.
+
+    The selection must name this catalog's version and digest, its host's tested
+    fingerprint and tier, and every selected control must still be an exact pin in the
+    host's own vocabulary. Nothing is repaired or defaulted, so a hand-edited request
+    cannot smuggle in an alias, an unpinnable level, a higher tier or another version.
+    """
+    if selection.legacy:
+        raise InvalidInputError("a legacy execution selection names no catalog to validate")
+    if selection.catalog_digest != catalog.digest or selection.catalog_version != catalog.version:
+        raise InvalidInputError(
+            "the execution selection was bound to a different catalog than the one in use",
+            details={
+                "bound_catalog_digest": str(selection.catalog_digest),
+                "current_catalog_digest": str(catalog.digest),
+            },
+        )
+    host = catalog.host(selection.harness)
+    host.require_usable()
+    if (
+        selection.host_executable_version != host.executable_version
+        or selection.host_protocol_fingerprint != host.protocol_fingerprint
+        or selection.support_tier is not host.support_tier
+    ):
+        raise InvalidInputError(
+            "the execution selection does not match the catalog's tested host entry",
+            details={"harness": selection.harness},
+        )
+    if selection.selected_model is not None:
+        host.require_model_pin(selection.selected_model)
+    if selection.selected_effort is not None:
+        host.require_effort_level(selection.selected_effort)
+    return host
+
+
+def _pick(eligible: Sequence[LayerControls], control: str) -> RequestedControl:
+    """Pick one control by plain layer precedence; a pin only marks it exact.
+
+    The highest-precedence layer that specifies the control wins. A lower layer that pins
+    a different value is a conflict and is rejected, never resolved silently in either
+    direction. A lower pin equal to the winner confirms it and makes it exact.
+    """
     candidates: list[tuple[SelectionLayer, str, bool]] = []
-    for item in ordered:
+    for item in eligible:
         value = item.model if control == "model" else item.effort
         pinned = item.model_pinned if control == "model" else item.effort_pinned
         if value is not None:
             candidates.append((item.layer, value, pinned))
     if not candidates:
         return _UNSPECIFIED
-    pins = [candidate for candidate in candidates if candidate[2]]
-    layer, value, pinned = (pins or candidates)[0]
+    layer, value, pinned = candidates[0]
+    for lower_layer, lower_value, lower_pinned in candidates[1:]:
+        if not lower_pinned:
+            continue
+        if lower_value != value:
+            raise InvalidInputError(
+                f"the {lower_layer.value} layer pins {control} {lower_value!r}, but the "
+                f"{layer.value} layer sets {value!r}; a pin is never overridden or chosen "
+                "between silently, so remove one of them",
+                details={
+                    "control": control,
+                    "pinned_layer": lower_layer.value,
+                    "pinned_value": lower_value,
+                    "higher_layer": layer.value,
+                    "higher_value": value,
+                },
+            )
+        pinned = True
     return RequestedControl(value=value, source=layer, pinned=pinned)
 
 
 def _enforce_constraints(
-    item: LayerControls, *, harness: str, model: str | None, effort: str | None
+    item: LayerControls,
+    *,
+    harness: str,
+    model: str | None,
+    effort: str | None,
+    applies_to_harness: bool,
 ) -> None:
+    # A layer that names a different harness constrains that harness's models and
+    # efforts, not this one's; only the harness constraint is universal.
     for allowed, value, name in (
         (item.allowed_harnesses, harness, "harness"),
-        (item.allowed_models, model, "model"),
-        (item.allowed_efforts, effort, "effort"),
+        (item.allowed_models if applies_to_harness else None, model, "model"),
+        (item.allowed_efforts if applies_to_harness else None, effort, "effort"),
     ):
         if allowed is None:
             continue
@@ -518,4 +612,5 @@ __all__ = [
     "SelectionMode",
     "detect_catalog_drift",
     "resolve_execution_selection",
+    "validate_against_catalog",
 ]

@@ -17,6 +17,7 @@ from enginery.domain.execution_selection import (
     SelectionMode,
     detect_catalog_drift,
     resolve_execution_selection,
+    validate_against_catalog,
 )
 
 CATALOG = load_execution_catalog()
@@ -61,29 +62,121 @@ def test_unpinned_layers_resolve_by_precedence_run_project_user_workflow_factory
     assert selection.mode is SelectionMode.CONFIGURED_DEFAULT
 
 
-def test_a_manual_pin_is_never_overwritten_by_an_unpinned_default_at_any_layer() -> None:
-    selection = _resolve(
+def test_a_lower_pin_never_beats_a_higher_explicit_value_and_the_conflict_is_rejected() -> None:
+    with pytest.raises(InvalidInputError, match=r"user layer pins model .* run layer sets"):
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.USER, harness="omp", model=OMP_MODEL, model_pinned=True
+            ),
+            LayerControls(layer=SelectionLayer.RUN, model=OMP_OTHER_MODEL),
+        )
+    with pytest.raises(InvalidInputError, match="project layer pins model"):
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.PROJECT,
+                harness="omp",
+                model=OMP_OTHER_MODEL,
+                model_pinned=True,
+            ),
+            LayerControls(layer=SelectionLayer.RUN, model=OMP_MODEL, model_pinned=True),
+        )
+
+
+def test_a_pin_is_exact_at_the_winning_layer_and_a_lower_agreeing_pin_confirms_it() -> None:
+    winner = _resolve(
+        LayerControls(layer=SelectionLayer.USER, harness="omp", model=OMP_MODEL, model_pinned=True)
+    )
+    confirmed = _resolve(
         LayerControls(layer=SelectionLayer.USER, harness="omp", model=OMP_MODEL, model_pinned=True),
+        LayerControls(layer=SelectionLayer.RUN, model=OMP_MODEL),
+    )
+    unpinned = _resolve(
+        LayerControls(layer=SelectionLayer.USER, harness="omp", model=OMP_MODEL),
         LayerControls(layer=SelectionLayer.RUN, model=OMP_OTHER_MODEL),
-        LayerControls(layer=SelectionLayer.PROJECT, model="project/model"),
     )
 
-    assert selection.selected_model == OMP_MODEL
-    assert selection.model.pinned
-    assert selection.model.source is SelectionLayer.USER
-    assert selection.mode is SelectionMode.MANUAL_PIN
+    assert winner.model.pinned and winner.mode is SelectionMode.MANUAL_PIN
+    assert confirmed.model.pinned and confirmed.model.source is SelectionLayer.RUN
+    assert unpinned.selected_model == OMP_OTHER_MODEL and not unpinned.model.pinned
 
 
-def test_competing_pins_fall_to_the_higher_layer_and_are_never_blended() -> None:
+def test_a_pin_from_a_layer_naming_another_harness_is_rejected_not_carried_across() -> None:
+    with pytest.raises(InvalidInputError, match="user layer pins the effort for harness 'omp'"):
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.USER, harness="omp", effort="high", effort_pinned=True
+            ),
+            LayerControls(layer=SelectionLayer.RUN, harness="claude-code"),
+        )
+    with pytest.raises(InvalidInputError, match="project layer pins the model for harness"):
+        _resolve(
+            LayerControls(
+                layer=SelectionLayer.PROJECT,
+                harness="claude-code",
+                model=CLAUDE_MODEL,
+                model_pinned=True,
+            ),
+            LayerControls(layer=SelectionLayer.RUN, harness="omp"),
+        )
+
+
+def test_unpinned_values_and_constraints_from_another_harnesss_layer_are_ignored() -> None:
     selection = _resolve(
         LayerControls(
-            layer=SelectionLayer.PROJECT, harness="omp", model=OMP_OTHER_MODEL, model_pinned=True
+            layer=SelectionLayer.USER,
+            harness="omp",
+            model=OMP_MODEL,
+            effort="high",
+            allowed_models=(OMP_MODEL,),
+            allowed_efforts=("high",),
         ),
-        LayerControls(layer=SelectionLayer.RUN, model=OMP_MODEL, model_pinned=True),
+        LayerControls(layer=SelectionLayer.RUN, harness="claude-code", effort="max"),
     )
 
-    assert selection.selected_model == OMP_MODEL
-    assert selection.model.source is SelectionLayer.RUN
+    assert selection.harness == "claude-code"
+    assert selection.selected_effort == "max"
+    assert selection.selected_model is None
+
+
+def test_strict_effective_combines_with_or_across_eligible_layers() -> None:
+    layers = (
+        LayerControls(layer=SelectionLayer.USER, harness="omp", strict_effective=True),
+        LayerControls(
+            layer=SelectionLayer.RUN, model=OMP_MODEL, model_pinned=True, strict_effective=False
+        ),
+    )
+
+    assert _resolve(*layers).strict_effective
+
+
+def test_a_tampered_selection_is_rejected_by_catalog_validation() -> None:
+    good = _resolve(
+        LayerControls(layer=SelectionLayer.RUN, harness="omp", model=OMP_MODEL, model_pinned=True)
+    )
+    assert validate_against_catalog(good, catalog=CATALOG).harness == "omp"
+    alias = replace(
+        good,
+        model=RequestedControl(value="opus", source=SelectionLayer.RUN, pinned=True),
+        selected_model="opus",
+    )
+    auto = replace(
+        good,
+        effort=RequestedControl(value="auto", source=SelectionLayer.RUN, pinned=True),
+        selected_effort="auto",
+    )
+    for tampered, match in (
+        (alias, "not an exact omp model pin"),
+        (auto, "cannot be pinned"),
+        (replace(good, support_tier=SupportTier.QUALIFIED), "tested host entry"),
+        (replace(good, host_executable_version="9.9.9"), "tested host entry"),
+        (replace(good, host_protocol_fingerprint="json-protocol=9"), "tested host entry"),
+        (replace(good, catalog_version="9"), "different catalog"),
+        (replace(good, catalog_digest=Digest.of_bytes(b"x")), "different catalog"),
+    ):
+        with pytest.raises(InvalidInputError, match=match):
+            validate_against_catalog(tampered, catalog=CATALOG)
+    with pytest.raises(InvalidInputError, match="names no catalog"):
+        validate_against_catalog(ExecutionSelection.legacy_host_default("omp"), catalog=CATALOG)
 
 
 def test_a_selection_cannot_replace_a_pinned_control_with_a_different_selected_value() -> None:

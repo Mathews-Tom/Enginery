@@ -6,17 +6,24 @@ from pathlib import Path
 
 import pytest
 from tests.support.execution import selection_for
-from tests.workflows.test_stage1_runtime import _check_disposition_fixture
+from tests.workflows.test_stage1_runtime import _check_disposition_fixture, _check_node_dispatch
 
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
-from enginery.domain.execution_catalog import ExecutionCatalog
-from enginery.domain.execution_selection import ExecutionSelection, HoldReason
+from enginery.domain.execution_catalog import ExecutionCatalog, SupportTier
+from enginery.domain.execution_selection import (
+    ExecutionSelection,
+    HoldReason,
+    RequestedControl,
+    SelectionLayer,
+)
+from enginery.domain.ids import RunId
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.pull_request import PullRequestOutcome
+from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
     Stage1RunRequest,
@@ -282,3 +289,120 @@ def test_evidence_is_superseded_by_any_change_to_the_bound_selection() -> None:
     )
     assert not pinned.current_for(**subjects)
     assert legacy.current_for(**subjects)
+
+
+def test_a_hold_is_attached_to_waiting_and_human_review_progressions_too(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    drifted = replace(service, execution_catalog=_drifted_catalog())
+    epoch = runtime.register_node(
+        dispatch=_check_node_dispatch(request, "qualify"), now=now, heartbeat_window=_WINDOW
+    )
+
+    waiting = drifted.next_action(request.run.id)
+
+    assert waiting.action is Stage1ProgressionAction.WAIT
+    assert waiting.hold is not None and waiting.hold.reason is HoldReason.CATALOG_DRIFT
+    assert service.next_action(request.run.id).hold is None
+
+    runtime.complete_node(
+        run_id=str(request.run.id),
+        node_id="qualify",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="failed",
+    )
+    reviewing = drifted.next_action(request.run.id)
+
+    assert reviewing.action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    assert reviewing.hold is not None and reviewing.hold.reason is HoldReason.CATALOG_DRIFT
+
+
+def test_a_review_is_refused_while_the_catalog_has_drifted(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    drifted = replace(service, execution_catalog=_drifted_catalog())
+
+    with pytest.raises(HumanActionRequiredError, match="catalog changed"):
+        drifted.review_implementation(
+            request,
+            ReviewReport(producer="omp", reviewer="human", findings=()),
+            repair_attempt=0,
+            now=now,
+            heartbeat_window=_WINDOW,
+        )
+
+
+def _tampered(selection: ExecutionSelection) -> list[tuple[ExecutionSelection, str]]:
+    return [
+        (
+            replace(
+                selection,
+                model=RequestedControl(value="opus", source=SelectionLayer.RUN, pinned=True),
+                selected_model="opus",
+            ),
+            "not an exact omp model pin",
+        ),
+        (
+            replace(
+                selection,
+                effort=RequestedControl(value="auto", source=SelectionLayer.RUN, pinned=True),
+                selected_effort="auto",
+            ),
+            "cannot be pinned",
+        ),
+        (replace(selection, support_tier=SupportTier.QUALIFIED), "tested host entry"),
+        (replace(selection, host_executable_version="9.9.9"), "tested host entry"),
+    ]
+
+
+def test_a_tampered_selection_cannot_start_a_new_run(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+
+    for tampered, match in _tampered(_PIN):
+        with pytest.raises(InvalidInputError, match=match):
+            service.start(
+                replace(request, execution_selection=tampered), now=now, heartbeat_window=_WINDOW
+            )
+
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
+
+
+def test_a_tampered_persisted_selection_is_refused_wherever_executability_is_required(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    for index, (tampered, match) in enumerate(_tampered(_PIN)):
+        forged = replace(
+            request,
+            run=replace(request.run, id=RunId(f"forged-{index}")),
+            execution_selection=tampered,
+        )
+        runtime.register_run(
+            run_id=str(forged.run.id),
+            initial_state=forged.initial_state(),
+            now=now,
+            heartbeat_window=_WINDOW,
+        )
+
+        with pytest.raises(InvalidInputError, match=match):
+            service.dispatch_implementation(
+                forged, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
+            )

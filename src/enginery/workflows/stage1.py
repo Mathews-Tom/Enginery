@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -34,6 +34,7 @@ from enginery.domain.execution_selection import (
     ExecutionHold,
     ExecutionSelection,
     detect_catalog_drift,
+    validate_against_catalog,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
@@ -347,6 +348,7 @@ class Stage1RunService:
         ):
             _require_current_check_contracts(request)
             _require_bound_selection(request)
+            validate_against_catalog(request.execution_selection, catalog=self._current_catalog())
         self.runtime.register_run(
             run_id=str(request.run.id),
             initial_state=request.initial_state(),
@@ -367,18 +369,21 @@ class Stage1RunService:
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
 
     def next_action(self, run_id: RunId) -> Stage1Progression:
-        """Derive at most one safe action, or hold a run whose catalog binding drifted.
+        """Derive at most one safe action, reporting a drifted catalog binding as a hold.
 
         A hold never rebinds the run: its original selection and catalog digest stay as
-        recorded, and only human waits and idle observation continue to be reported.
+        recorded. A drifted run's advancing actions become HOLD; a human wait or idle
+        observation keeps its action but still carries the hold diagnostic so it is shown.
         """
         progression = self._derive_progression(run_id)
         hold = self._catalog_hold(progression.run.request)
-        if hold is None or progression.action in {
+        if hold is None:
+            return progression
+        if progression.action in {
             Stage1ProgressionAction.WAIT,
             Stage1ProgressionAction.AWAIT_HUMAN_REVIEW,
         }:
-            return progression
+            return replace(progression, hold=hold)
         return Stage1Progression(Stage1ProgressionAction.HOLD, progression.run, hold)
 
     def _current_catalog(self) -> ExecutionCatalog:
@@ -402,6 +407,8 @@ class Stage1RunService:
         hold = self._catalog_hold(durable)
         if hold is not None:
             raise HumanActionRequiredError(hold.message, details=dict(hold.details))
+        if not durable.execution_selection.legacy:
+            validate_against_catalog(durable.execution_selection, catalog=self._current_catalog())
 
     def _derive_progression(self, run_id: RunId) -> Stage1Progression:
         run = self.read(run_id)
