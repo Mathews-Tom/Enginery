@@ -418,6 +418,7 @@ depends on the reason, and `stage1 resume` does not clear a hold:
 | `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
 | `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
 | `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
+| `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine or boot, its pid is held by another process, or its identity is unreadable. | Check the worker where it was launched, reconcile by hand, then `stage1 cancel --node-id implement` (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |
 
 ## Recovery semantics
 
@@ -473,27 +474,175 @@ worktree. Always run `--dry-run` first and review its output before
 running the real release, especially in an unattended or scripted
 context.
 
-### A queued node not selected on its registering tick
+### Queued work, wakeups and worker recovery
 
 `stage1`'s scheduler enforces one global concurrency slot and one
 per-repository slot by default (matching every documented `stage1`
-invocation above). If the `implement` node's registering
-`dispatch_implementation` tick finds no free slot -- another run
-already occupies the sole global slot -- the node is still durably
-registered as `queued`, but `dispatch_implementation` raises rather
-than silently leaving the run to retry later. Confirmed by fault
-injection (`tests/engine/test_queued_node_fault.py`): once this
-happens, `stage1 watch --advance`'s `next_action` reports `wait`
-forever and never re-attempts scheduling, even after the slot that
-blocked it genuinely frees up. This is the accepted, precisely
-documented limit `docs/pitch.md`'s pilot named -- not a bug this
-release fixes with a dedicated retry mechanism, because none is
-needed beyond the path already documented above:
-`stage1 cancel --node-id implement` cancels the stuck queued node
-(no active lease is required to cancel a `queued` node), after which
-`next_action` routes to `await_human_review` -- the same repair path
-an actionable review finding already takes, letting `stage1 review`
-start a fresh implementation attempt within the run's `repair_limit`.
+invocation above). When the `implement` node is registered while
+another run holds the slot, it is a durable, visible `queued` state,
+not an error.
+
+**What `stage1 watch` shows.** The run's `next_action` is
+`dispatch_queued`, the `implement` node's `status` is `queued`, and its
+`wakeup` record says why it is waiting:
+
+| `wakeup` field | Meaning |
+| --- | --- |
+| `reason` | `global_capacity`, `repository_capacity`, `dependencies`, `dependency_failed`, `requirements`, `capacity_reserved_for_other_run`, or `execution_hold` |
+| `reserved_for` | the run that holds the reservation when `reason` is `capacity_reserved_for_other_run`, otherwise `null` |
+| `queued_since` | when the node entered the queue (set when it was registered); the oldest value is granted capacity first |
+| `evaluations` | how many times a coordinator evaluated it |
+| `last_evaluated_epoch`, `last_evaluated_at` | the coordinator epoch and time of the latest evaluation |
+
+Once the node is dispatched, `reason` becomes `null` and the record
+gains `dispatched_at` and `dispatched_epoch`. The record lives on the
+durable runtime node, so any coordinator process reads the same
+answer after a restart.
+
+**How redispatch happens, and its bound.** There is no daemon or
+timer. Readiness is re-derived from the ledger on every
+`stage1 watch --advance`: the first advance of a queued node's own run
+after its capacity or dependency is released dispatches that same
+operation exactly once (same operation identity, no second lease or
+worker). Capacity is granted by one fair plan over every run on the
+ledger: oldest queued first, by the durable `queued_since` time kept on
+each runtime node, with run id as the tie-break. The order comes only
+from persisted state, so every CLI invocation derives the same one and
+a later-arriving run never overtakes an older queued run, whatever its
+run id. A freed slot therefore goes to the oldest queued run rather than
+to whichever run
+advances first. Each command launches only its own run's node, behind
+that run's own binding checks. A slot granted to another run stays
+reserved for it: the waiting run shows
+`capacity_reserved_for_other_run` and the `reserved_for` run id. With
+no daemon, a fair winner that is never advanced keeps its reservation;
+recovery is to run `stage1 watch --advance` on that run, or cancel its
+node so the reservation is released.
+
+**Holds.** A run whose execution catalog binding has drifted has
+`next_action` `hold`, and its queued node is never dispatched. Because
+a held run could otherwise be the oldest fair winner and keep a slot
+reserved that no command may use, queued nodes of runs held for catalog
+drift are left out of the fair plan: another run can take the slot, and
+the held node records `reason: execution_hold` with the hold message in
+`detail`, not a reservation. This is decided from the ledger's durable
+run requests and the current catalog alone. A host-fingerprint hold
+(`host_fingerprint_drift`) needs a probe of the installed host and is
+not applied to other runs' planning, so a run held that way and queued
+as the oldest winner still keeps its reservation until the host is
+restored or the node is cancelled. That is a remaining manual case.
+
+**Worker liveness.** For a `running` node, `watch` and `evidence`
+report a `worker` object built from the persisted identity: `pid`,
+`process_group_id`, `start_identity`, `host` (`machine_id`, `boot_id`
+and the display-only `hostname`), `identity_version`, `attempt_id`, the
+lease epoch, the current coordinator epoch and `lease_epoch_active`.
+`lease_epoch_active` is true only while the coordinator epoch that
+launched the worker (the epoch of its lease) is still active; a newer
+coordinator owning the ledger does not make it true. `liveness` is:
+
+- `alive`: the exact process (same start identity) still holds its pid
+  on this host and boot. With `lease_epoch_active: false` the worker is
+  running but the coordinator that launched it has lapsed.
+- `exited`: the pid is gone. This is worker death, independent of the
+  coordinator heartbeat.
+- `pid_reused`: the pid now belongs to a different process, including
+  one owned by another user that this user cannot signal. The worker is
+  gone, but the pid is not its own: it is held, never terminated.
+- `foreign_host`: the record was written on another machine or boot.
+- `unverifiable`: the record has no usable identity (for example a
+  launch that never recorded one, or an unknown identity version), or
+  this host's own identity could not be read.
+
+The host is identified by a stable machine id and boot id, never by
+hostname: on macOS the platform UUID (`IOPlatformUUID`) and
+`kern.bootsessionuuid` (falling back to the numeric `sec.usec` of
+`kern.boottime`, never its time-zone formatted text); on Linux
+`/etc/machine-id` (or `/var/lib/dbus/machine-id`) and
+`/proc/sys/kernel/random/boot_id`. Renaming the machine or changing the
+time zone does not change the identity, and an id that cannot be read
+fails closed rather than being guessed. Records written before host
+binding carry no host or version; they decode unchanged and are judged
+under single-host semantics, as they always were.
+
+**When a worker dies.** If a `running` implementation has no result
+file and its worker is `exited`, the next `stage1 watch --advance`
+(`next_action: reconcile_worker`) observes the exit, reconciles it
+through the recovery path and records the node as `failed` with
+`failure_reason: worker_exited_without_result` and the worker's pid,
+process group and start identity in `worker_exit_evidence`. The
+workspace is retained, the slot is freed for the next queued run, and
+the worker is never launched again. If a result file exists it is
+collected first. A worker that is alive on this host and boot keeps the
+run at `wait`, including after the 60 second coordinator window: with
+no daemon the epoch that launched it has always lapsed between
+`watch --advance` calls, and that shows only as `lease_epoch_active:
+false` in the worker report. A worker that cannot be proven dead is
+never failed: `next_action` is `hold` with `worker_identity_unprovable`
+and the `liveness` that blocked it (`foreign_host`, `pid_reused`,
+`unverifiable`).
+
+**Manual holds.** A `foreign_host` worker is neither provably alive nor
+provably dead from here, because its pid names an unrelated process on
+this machine. Recovery refuses automatic resume, and `stage1 cancel` on
+it fails with a human-action error without signalling anything. Check
+the worker on the machine that launched it, then reconcile by hand.
+`pid_reused` and `unverifiable` records also block automatic recovery.
+
+**Cancel semantics.** `stage1 cancel --node-id implement` is fenced by
+the current coordinator epoch, so it works from a later process or
+after a restart, when the worker's lease was issued by an earlier
+epoch.
+
+- A *queued* node becomes `cancelled`; its `wakeup` record is kept, it
+  never holds a lease, and releasing capacity later cannot revive it.
+- A *running* node has its whole process group terminated (SIGTERM,
+  then SIGKILL after a 10 second grace, waiting until the leader and
+  every member have exited), the worker identity and termination events
+  are recorded, and the node becomes `cancelled`. If the workspace is
+  quiescent it is cleaned. If it is not (for example a git lock is
+  held), the node stays `awaiting_human` with
+  `cancellation_cleanup_reason`, and `next_action` is `wait`: make the
+  workspace quiescent, then run `stage1 cancel --node-id implement`
+  again.
+- Cancel is safe to repeat. An interruption after the termination
+  request, before the exit was recorded, or inside workspace cleanup
+  resumes from the recorded state: the exact identity is terminated
+  again (a no-op if it is already gone), an interrupted cleanup resumes
+  and a workspace already recorded as cleaned is not cleaned again, and
+  the single cancellation is recorded once.
+
+A cancelled `implement` node leaves the run at `await_human_review`
+with its evidence kept. There is no supported re-implementation inside
+that run: start a new run from a rebuilt request. (`stage1 review` can
+start a fresh implementation attempt only after a failed required CI
+check, within the run's `repair_limit`.)
+
+**Worker output.** A launched worker does not inherit the coordinator's
+stdin, stdout or stderr, so piping `stage1 watch --advance` to a reader
+returns when the command does. The OMP result is read from the worker's
+protocol file. The worker wrapper's own stderr (for example a crash
+trace) is appended to a private file, mode 0600, at
+`<artifact-root>/worker-logs/<run-id>-implement-<attempt-id>.stderr.log`,
+and its stdout is discarded.
+
+**Remaining manual cases.**
+
+- A queued run that is never advanced is never dispatched, and a fair
+  winner that is never advanced holds its reservation (see above).
+- A run held for host-fingerprint drift that is the oldest winner
+  (see Holds).
+- Workers on another host or boot, `pid_reused` and `unverifiable`
+  records (see above), and a non-quiescent workspace after cancel.
+- Attempt ids are ledger-wide, so `build-request` defaults the
+  implementation attempt id to `<run-id>-implement-0` and repair
+  attempts are derived as `<run-id>-implement-N`; runs sharing one
+  ledger need no extra flag. A run id too long to carry the suffix
+  within the 128 character identifier limit is rejected at
+  `build-request` with exit code 2. An explicit
+  `--implementation-attempt-id` is honored and must be unique on the
+  ledger. A run persisted with the older `implement-0` default keeps
+  that id.
 
 ### Cumulative restart/replay evidence
 
