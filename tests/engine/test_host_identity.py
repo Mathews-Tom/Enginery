@@ -289,3 +289,33 @@ def test_reconcile_holds_a_worker_record_that_belongs_to_a_different_attempt(
         False,
         "worker_attempt_identity_mismatch",
     )
+
+
+def test_terminating_a_foreign_identity_directly_refuses_and_leaves_the_process_alone(
+    tmp_path: Path,
+) -> None:
+    from enginery.engine.supervisor import HostIdentity, _terminate_exact_group
+
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+    )
+    try:
+        local = probe_process(bystander.pid)
+        assert local is not None
+        foreign = ProcessIdentity(
+            local.pid,
+            local.process_group_id,
+            local.start_identity,
+            HostIdentity("another-host", "another-boot"),
+        )
+
+        with pytest.raises(HumanActionRequiredError, match="different host or boot"):
+            _terminate_exact_group(foreign)
+
+        assert bystander.poll() is None
+        assert probe_process(bystander.pid) == local
+    finally:
+        bystander.kill()
+        bystander.wait()

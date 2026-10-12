@@ -116,7 +116,17 @@ class WorkerSupervisor:
         )
         self._fault("worker_launch_intended")
         try:
-            process = subprocess.Popen(command, cwd=cwd, start_new_session=True)
+            # The worker must not hold the coordinator's stdio: an operator piping a
+            # lifecycle command to a reader would otherwise block until the worker exits.
+            # Its output is captured by the adapter's protocol file, not by these streams.
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except OSError as error:
             self._record_launch_failure(
                 lease=lease,

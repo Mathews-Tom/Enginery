@@ -416,3 +416,68 @@ def test_repeated_ticks_and_recovery_never_duplicate_a_launch(
     runtime.cancel_node(
         run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=11)
     )
+
+
+def test_a_launching_process_returns_promptly_while_its_worker_keeps_running(
+    tmp_path: Path, ledger_path: Path
+) -> None:
+    node = _node(tmp_path, "work", command=_SLEEP)
+    launcher = textwrap.dedent(
+        """
+        import sys
+        from datetime import UTC, datetime, timedelta
+        from pathlib import Path
+        from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
+        from enginery.engine.scheduler import SchedulingLimits
+        from enginery.ledger.service import LedgerService
+
+        ledger_path, repository, workspace, revision = sys.argv[1:5]
+        ledger = LedgerService.open(Path(ledger_path))
+        request = FixtureDispatch(
+            run_id="run-work", node_id="work", attempt_id="attempt-work",
+            repository_id="repository-work", repository_path=Path(repository),
+            workspace_path=Path(workspace), base_revision=revision,
+            command=(sys.executable, "-c", "import time; time.sleep(120)"),
+            expected_attempt_version=0, operation_id="operation-work",
+        )
+        tick = CoordinatorRuntime(ledger, owner="operator").tick(
+            now=datetime.now(UTC), heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(minutes=10), limits=SchedulingLimits(1, 1),
+            requests=(request,),
+        )
+        print(tick.dispatched[0].identity.pid)
+        ledger.close()
+        """
+    )
+    started = time.monotonic()
+    # Piped stdout, as in `stage1 watch --advance | jq`: EOF must arrive when the
+    # launcher exits, not when the worker it started exits.
+    launched = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            launcher,
+            str(ledger_path),
+            str(node.repository_path),
+            str(node.workspace_path),
+            node.base_revision,
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+    elapsed = time.monotonic() - started
+    pid = int(launched.stdout.strip())
+    try:
+        assert elapsed < 30
+        assert probe_process(pid) is not None
+    finally:
+        ledger = LedgerService.open(ledger_path)
+        try:
+            runtime = CoordinatorRuntime(ledger, owner="operator")
+            now = datetime.now(UTC)
+            epoch = runtime.claim_epoch(now=now, heartbeat_window=_WINDOW)
+            runtime.cancel_node(run_id="run-work", node_id="work", epoch=epoch.epoch, now=now)
+        finally:
+            ledger.close()
