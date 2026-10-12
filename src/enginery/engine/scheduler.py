@@ -75,6 +75,7 @@ class DeferralReason(enum.StrEnum):
     DEPENDENCY_FAILED = "dependency_failed"
     REQUIREMENTS = "requirements"
     CAPACITY_RESERVED = "capacity_reserved_for_other_run"
+    EXECUTION_HOLD = "execution_hold"
 
 
 @dataclass(frozen=True, slots=True)

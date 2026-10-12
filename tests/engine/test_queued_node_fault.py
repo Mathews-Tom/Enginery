@@ -529,3 +529,82 @@ def test_an_older_queued_run_keeps_its_priority_and_the_newer_run_records_the_re
         epoch=epoch.epoch,
         now=now + timedelta(seconds=16),
     )
+
+
+def test_a_held_older_run_does_not_strand_capacity_a_current_newer_run_can_use(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, occupier = _queue_implement_behind_occupier(
+        ledger_service, tmp_path, now
+    )
+    service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+    repository, base_revision = _repository(tmp_path, "newer-repository")
+    newer = FixtureDispatch(
+        run_id="run-newer",
+        node_id="work",
+        attempt_id="attempt-newer",
+        repository_id="repository-newer",
+        repository_path=repository,
+        workspace_path=tmp_path / "workspace-newer",
+        base_revision=base_revision,
+        command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        expected_attempt_version=0,
+        operation_id="operation-newer",
+    )
+    assert (
+        runtime.tick(
+            now=now + timedelta(seconds=3),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=_LIMITS,
+            requests=(newer,),
+            run_ids=("run-newer",),
+        ).dispatched
+        == ()
+    )
+    _release_occupier(runtime, occupier, now + timedelta(seconds=5))
+    drifted = replace(
+        service,
+        execution_catalog=replace(
+            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+        ),
+    )
+
+    # The older run's binding is held, so the fair plan skips it and the newer run launches.
+    held = drifted._held_runs()
+    assert list(held) == ["run-fault"]
+    started = runtime.tick(
+        now=now + timedelta(seconds=6),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+        run_ids=("run-newer",),
+        held_runs=held,
+    ).dispatched
+    assert [fixture.lease.run_id for fixture in started] == ["run-newer"]
+    waiting = _implement_state(ledger_service)
+    assert waiting["status"] == "queued"
+    wakeup = waiting["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "execution_hold"
+    assert wakeup["reserved_for"] is None
+    assert "catalog changed" in str(wakeup["detail"])
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
+
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=7), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-newer", node_id="work", epoch=epoch.epoch, now=now + timedelta(seconds=8)
+    )
+    assert _advance(service, request, now + timedelta(seconds=9)) is Stage1ProgressionAction.WAIT
+    runtime.cancel_node(
+        run_id="run-fault", node_id="implement", epoch=epoch.epoch, now=now + timedelta(seconds=10)
+    )

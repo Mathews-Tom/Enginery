@@ -401,6 +401,27 @@ class Stage1RunService:
     def _catalog_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
         return detect_catalog_drift(request.execution_selection, current=self._current_catalog())
 
+    def _held_runs(self) -> dict[str, str]:
+        """Map every Stage 1 run whose catalog binding has drifted to its hold message.
+
+        Computed from durable run requests and the current catalog only, never from a host
+        probe, so queued nodes of a held run are left out of the fair plan and cannot strand
+        capacity another run could use. Host-fingerprint holds need a probe and stay a
+        manual case. A run projection that is not a Stage 1 request has no catalog binding.
+        """
+        held: dict[str, str] = {}
+        for projection in self.ledger.list_projections(aggregate_type=RUN_AGGREGATE_TYPE):
+            try:
+                run = _run_from_state(
+                    projection.state, aggregate_version=projection.aggregate_version
+                )
+            except (InvalidInputError, InternalInvariantViolationError):
+                continue
+            hold = self._catalog_hold(run.request)
+            if hold is not None:
+                held[projection.aggregate_id] = hold.message
+        return held
+
     def _binding_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
         """Return a catalog drift hold, else a host fingerprint drift hold, else None.
 
@@ -687,7 +708,7 @@ class Stage1RunService:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
                 )
-            attempt_id = f"{request.run.id}-implement-{generation}"
+            attempt_id = implementation_attempt_id(str(request.run.id), generation)
             operation_id = OperationId.derive(
                 run_id=request.run.id,
                 node_id=NodeId("implement"),
@@ -721,6 +742,7 @@ class Stage1RunService:
             limits=limits,
             requests=(dispatch,),
             run_ids=(str(request.run.id),),
+            held_runs=self._held_runs(),
         )
         return Stage1ImplementationDispatch(
             task=task,
@@ -766,6 +788,7 @@ class Stage1RunService:
             lease_window=lease_window,
             limits=limits,
             run_ids=(str(request.run.id),),
+            held_runs=self._held_runs(),
         )
         return _scheduled_implementation(
             tick.dispatched,
@@ -1257,6 +1280,24 @@ def _implementation_task(
     )
 
 
+def implementation_attempt_id(run_id: str, generation: int) -> str:
+    """Derive ``<run-id>-implement-<generation>``, failing loudly if it is not a valid id.
+
+    Attempt ids are ledger-wide aggregate ids with a bounded length. A run id too long to
+    carry the suffix is rejected rather than truncated, which could collide with another run.
+    """
+    attempt_id = f"{run_id}-implement-{generation}"
+    try:
+        NodeAttemptId(attempt_id)
+    except InvalidInputError as error:
+        raise InvalidInputError(
+            "run id is too long to derive a valid implementation attempt id; "
+            "use a shorter run id or pass --implementation-attempt-id",
+            details={"run_id": run_id, "attempt_id": attempt_id},
+        ) from error
+    return attempt_id
+
+
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
     return request.workspace_path / (
         f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
@@ -1585,5 +1626,6 @@ __all__ = [
     "Stage1Run",
     "Stage1RunRequest",
     "Stage1RunService",
+    "implementation_attempt_id",
     "stage1_request_from_state",
 ]

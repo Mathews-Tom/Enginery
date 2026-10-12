@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -111,7 +112,12 @@ def _launches(ledger: LedgerService, run_id: str) -> int:
     return int(row[0])
 
 
-def _complete(runtime: CoordinatorRuntime, dispatched: DispatchedFixture, now: datetime) -> None:
+def _complete(
+    runtime: CoordinatorRuntime,
+    dispatched: DispatchedFixture,
+    now: datetime,
+    result: str = "passed",
+) -> None:
     lease = dispatched.lease
     envelope = WorkerResultEnvelope(
         run_id=lease.run_id,
@@ -120,7 +126,7 @@ def _complete(runtime: CoordinatorRuntime, dispatched: DispatchedFixture, now: d
         epoch=lease.epoch,
         fencing_token=lease.fencing_token,
         operation_id=lease.operation_id,
-        terminal_result="passed",
+        terminal_result=result,
         artifact_references=(),
         result={},
     )
@@ -341,3 +347,82 @@ def test_the_oldest_queued_run_wins_across_separate_coordinator_invocations(
         )
     finally:
         ledger.close()
+
+
+def test_a_replaced_node_is_queued_and_ordered_by_its_replacement_time(
+    tmp_path: Path, ledger_service: LedgerService
+) -> None:
+    runtime = CoordinatorRuntime(ledger_service, owner="operator")
+    first = replace(_node(tmp_path, "aaa", command=_EXIT), retain_workspace=True)
+    holder = _node(tmp_path, "holder", command=_SLEEP)
+    rival = _node(tmp_path, "zzz", command=_SLEEP)
+    replacement = replace(
+        first,
+        attempt_id="attempt-aaa-2",
+        operation_id="operation-aaa-2",
+        command=_SLEEP,
+        expected_attempt_version=0,
+    )
+
+    (running,) = _tick(runtime, _T0, first)
+    _complete(runtime, running, _T0 + timedelta(seconds=2), result="failed")
+    epoch = runtime.claim_epoch(now=_T0 + timedelta(seconds=2), heartbeat_window=_WINDOW)
+    assert running.lease.run_id == "run-aaa"
+    (held,) = _tick(runtime, _T0 + timedelta(seconds=3), holder)
+    assert _tick(runtime, _T0 + timedelta(seconds=5), replacement) == ()
+    replaced = _state(ledger_service, "aaa")
+    assert replaced["status"] == "queued"
+    assert replaced["queued_at"] == (_T0 + timedelta(seconds=5)).isoformat()
+    assert _tick(runtime, _T0 + timedelta(seconds=6), rival) == ()
+
+    runtime.cancel_node(
+        run_id="run-holder", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=7)
+    )
+    assert held.lease.run_id == "run-holder"
+    # Replaced at t+5, before the rival queued at t+6, so it wins although it ran earlier.
+    winner = _tick(runtime, _T0 + timedelta(seconds=8))
+    assert [fixture.lease.run_id for fixture in winner] == ["run-aaa"]
+    assert _state(ledger_service, "zzz")["status"] == "queued"
+    runtime.cancel_node(
+        run_id="run-aaa", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=9)
+    )
+
+
+def test_a_repository_limit_is_not_reported_as_a_reservation_for_another_repository(
+    tmp_path: Path, ledger_service: LedgerService
+) -> None:
+    runtime = CoordinatorRuntime(ledger_service, owner="operator")
+    two_slots = SchedulingLimits(global_concurrency=2, per_repository_concurrency=1)
+    active = _node(tmp_path, "active", command=_SLEEP)
+    blocked = _node(tmp_path, "blocked", command=_SLEEP)
+    blocked = replace(
+        blocked,
+        repository_id=active.repository_id,
+        repository_path=active.repository_path,
+        base_revision=active.base_revision,
+    )
+    other = _node(tmp_path, "other", command=_SLEEP)
+    (running,) = _tick(runtime, _T0, active, limits=two_slots)
+    assert _tick(runtime, _T0 + timedelta(seconds=1), blocked, limits=two_slots) == ()
+    # A fair winner in a different repository holds the remaining slot, queued while the
+    # blocked run is advanced alone.
+    runtime.tick(
+        now=_T0 + timedelta(seconds=2),
+        heartbeat_window=_WINDOW,
+        lease_window=_LEASE,
+        limits=two_slots,
+        requests=(other,),
+        run_ids=("run-blocked",),
+    )
+    assert _state(ledger_service, "other")["status"] == "queued"
+
+    wakeup = _wakeup(ledger_service, "blocked")
+    assert wakeup["reason"] == "repository_capacity"
+    assert wakeup["reserved_for"] is None
+    epoch = runtime.claim_epoch(now=_T0 + timedelta(seconds=3), heartbeat_window=_WINDOW)
+    runtime.cancel_node(
+        run_id=running.lease.run_id,
+        node_id="work",
+        epoch=epoch.epoch,
+        now=_T0 + timedelta(seconds=4),
+    )

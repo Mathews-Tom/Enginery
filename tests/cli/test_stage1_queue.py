@@ -241,3 +241,48 @@ def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledg
             )
     finally:
         ledger.close()
+
+
+def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "long.json"
+    long_run_id = "r" * 117  # "<run-id>-implement-0" is then 129 characters; the limit is 128
+
+    code = main(_build_argv(tmp_path, "--run-id", long_run_id, output=output))
+
+    assert code == 2
+    assert not output.exists()
+    assert (
+        "run id is too long to derive a valid implementation attempt id" in capsys.readouterr().err
+    )
+
+    # The default id fits at 116, but the longest repair id does not once repairs are allowed.
+    borderline = "r" * 116
+    code = main(
+        _build_argv(tmp_path, "--run-id", borderline, "--repair-limit", "10", output=output)
+    )
+    assert code == 2
+    assert not output.exists()
+    # An explicit id is the operator's choice and bypasses derivation.
+    code = main(
+        _build_argv(
+            tmp_path,
+            "--run-id",
+            long_run_id,
+            "--implementation-attempt-id",
+            "short-attempt",
+            output=output,
+        )
+    )
+    assert code == 0
+    assert output.exists()
+
+
+def test_a_legacy_run_whose_repair_id_would_overflow_fails_loudly_at_derivation() -> None:
+    from enginery.domain.errors import InvalidInputError
+    from enginery.workflows.stage1 import implementation_attempt_id
+
+    assert implementation_attempt_id("r" * 116, 0) == f"{'r' * 116}-implement-0"
+    with pytest.raises(InvalidInputError, match="too long to derive"):
+        implementation_attempt_id("r" * 116, 10)

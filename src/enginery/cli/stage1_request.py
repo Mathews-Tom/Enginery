@@ -47,6 +47,7 @@ from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
+    implementation_attempt_id,
 )
 
 _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
@@ -236,6 +237,12 @@ def _harness_executable(args: argparse.Namespace, harness: str) -> str:
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     """Construct one durable Stage 1 request from ``build-request`` flags."""
     run_id = args.run_id
+    if args.implementation_attempt_id is None:
+        attempt_id = implementation_attempt_id(run_id, 0)
+        # Validate the longest repair id now, so a run that could never repair fails here.
+        implementation_attempt_id(run_id, args.repair_limit)
+    else:
+        attempt_id = args.implementation_attempt_id
     work_item_id = args.work_item_id or f"work-{run_id}"
     head_branch = args.head_branch or f"enginery/{run_id}"
     implementation_operation_id = OperationId(
@@ -319,7 +326,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         else ("CI",),
         repair_limit=args.repair_limit,
         implementation=Stage1ImplementationRequest(
-            attempt_id=args.implementation_attempt_id or f"{run_id}-implement-0",
+            attempt_id=attempt_id,
             operation_id=implementation_operation_id,
             time_budget_seconds=args.implementation_time_budget_seconds,
             cost_budget=_cost_budget(args),

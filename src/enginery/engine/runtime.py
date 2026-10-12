@@ -454,18 +454,24 @@ class CoordinatorRuntime:
         limits: SchedulingLimits,
         requests: tuple[FixtureDispatch | WorkflowDispatch, ...] = (),
         run_ids: Collection[str] | None = None,
+        held_runs: Mapping[str, str] | None = None,
     ) -> RuntimeTickResult:
         """Consume commands, derive durable readiness, and launch a fair batch.
 
         Readiness is re-derived from the ledger on every tick, so a queued node that was
         not selected earlier is dispatched on the first tick after its capacity or
         dependencies are released, including after a coordinator restart. Capacity is
-        granted by one fair round-robin plan over every run on the ledger. ``run_ids``
-        restricts which of the planned nodes this tick launches: a caller that has verified
-        only those runs' execution bindings never launches another run's node. A slot the
-        plan grants to a run outside ``run_ids`` stays reserved for that run's own advance,
-        and the advanced run's queued node records ``capacity_reserved_for_other_run`` and
-        which run holds the reservation. Every queued node of an advanced run that was
+        planned oldest-queued-first over every run on the ledger, by the persisted queue
+        time. A node launches on the first tick of its own run after capacity is released,
+        provided it is the fair winner. ``run_ids`` restricts which of the planned nodes
+        this tick launches: a caller that has verified only those runs' execution bindings
+        never launches another run's node. A slot the plan grants to a run outside
+        ``run_ids`` stays reserved for that run's own advance, and the advanced run's queued
+        node records ``capacity_reserved_for_other_run`` and which run holds the
+        reservation. ``held_runs`` maps run ids whose execution binding is held (decided by
+        the caller from durable state) to the reason: their queued nodes are left out of the
+        fair plan so a held run cannot strand the ledger, and each records
+        ``execution_hold`` with that reason. Every queued node of an advanced run that was
         evaluated and not launched has its blocking reason, first-evaluation time,
         evaluation count and evaluating epoch recorded on its durable runtime node.
         """
@@ -485,9 +491,13 @@ class CoordinatorRuntime:
                 now=now,
             )
         requests_by_key = self._requests_from_ledger()
+        held = held_runs or {}
         nodes = tuple(
-            _schedulable(request, state=_runtime_state(self._ledger, request))
-            for request in requests_by_key.values()
+            replace(node, requirements_satisfied=False) if node.key.run_id in held else node
+            for node in (
+                _schedulable(request, state=_runtime_state(self._ledger, request))
+                for request in requests_by_key.values()
+            )
         )
         plan = ReadinessScheduler().plan(nodes, limits=limits)
         launch = tuple(key for key in plan.selected if run_ids is None or key.run_id in run_ids)
@@ -513,9 +523,13 @@ class CoordinatorRuntime:
             )
             dispatched.append(fixture)
         for deferred in plan.deferred:
+            request = requests_by_key[deferred.key]
+            hold_detail = held.get(deferred.key.run_id)
+            if hold_detail is not None:
+                self._record_hold_deferral(request, detail=hold_detail, epoch=epoch.epoch, now=now)
+                continue
             if run_ids is not None and deferred.key.run_id not in run_ids:
                 continue
-            request = requests_by_key[deferred.key]
             reason = deferred.reason.value
             holder: str | None = None
             if deferred.reason in {
@@ -534,7 +548,12 @@ class CoordinatorRuntime:
                 if holder is not None:
                     reason = DeferralReason.CAPACITY_RESERVED.value
             self._record_deferral(
-                request, reason=reason, reserved_for=holder, epoch=epoch.epoch, now=now
+                request,
+                reason=reason,
+                reserved_for=holder,
+                detail=None,
+                epoch=epoch.epoch,
+                now=now,
             )
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
@@ -893,6 +912,7 @@ class CoordinatorRuntime:
         *,
         reason: str,
         reserved_for: str | None,
+        detail: str | None,
         epoch: int,
         now: datetime,
     ) -> None:
@@ -922,11 +942,32 @@ class CoordinatorRuntime:
                     "queued_since": queued_since,
                     "reason": reason,
                     "reserved_for": reserved_for,
+                    "detail": detail,
                     "evaluations": prior_evaluations + 1,
                     "last_evaluated_epoch": epoch,
                     "last_evaluated_at": now.isoformat(),
                 }
             },
+        )
+
+    def _record_hold_deferral(
+        self, request: FixtureDispatch, *, detail: str, epoch: int, now: datetime
+    ) -> None:
+        """Record that a held run's queued node was left out of the plan, once per change."""
+        wakeup = _runtime_state(self._ledger, request).get("wakeup")
+        if (
+            isinstance(wakeup, dict)
+            and wakeup.get("reason") == DeferralReason.EXECUTION_HOLD.value
+            and wakeup.get("detail") == detail
+        ):
+            return
+        self._record_deferral(
+            request,
+            reason=DeferralReason.EXECUTION_HOLD.value,
+            reserved_for=None,
+            detail=detail,
+            epoch=epoch,
+            now=now,
         )
 
     def _replace_request(
