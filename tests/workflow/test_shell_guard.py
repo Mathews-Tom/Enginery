@@ -61,6 +61,35 @@ REJECTED = [
     ("env", "nice", "uv", "run", "bash", "-c", "x"),
     ("nohup", "timeout", "10", "env", "FOO=1", "sudo", "-u", "root", "sh"),
     ("caffeinate", "-i", "uvx", "--from", "pkg", "bash"),
+    # package-runner global options before the subcommand, and aliases
+    ("uv", "-q", "run", "bash"),
+    ("uv", "--directory", "d", "run", "sh"),
+    ("poetry", "-C", "d", "run", "bash"),
+    ("npm", "--prefix", "d", "exec", "sh"),
+    ("pnpm", "--filter", "a", "exec", "sh"),
+    ("npm", "x", "sh"),
+    ("pnpm", "dlx", "sh"),
+    ("uv", "tool", "run", "--from", "pkg", "bash"),
+    ("uvx", "--from", "pkg", "zsh"),
+    # xargs -i/-l/-e take only attached values, so a bare one is a flag
+    ("xargs", "-i", "bash", "script.sh"),
+    ("xargs", "-l", "zsh", "f"),
+    ("xargs", "-e", "sh"),
+    ("xargs", "-i{}", "bash", "-c", "x"),
+    ("xargs", "-n", "1", "sh"),
+    # less common and versioned shells
+    ("mksh", "-c", "x"),
+    ("yash", "-c", "x"),
+    ("oksh", "-c", "x"),
+    ("posh", "-c", "x"),
+    ("nu", "-c", "x"),
+    ("xonsh", "-c", "x"),
+    ("elvish", "-c", "x"),
+    ("bash5.2", "-c", "x"),
+    ("zsh-5.9", "-c", "x"),
+    ("/usr/local/bin/ksh93", "-c", "x"),
+    ("pwsh-7.4", "-Command", "x"),
+    ("env", "bash5.2", "-c", "x"),
 ]
 
 ACCEPTED = [
@@ -80,6 +109,18 @@ ACCEPTED = [
     ("npx", "prettier", "--check", "bash"),
     ("pnpm", "exec", "vitest", "run", "sh"),
     ("python", "-c", "import subprocess"),
+    ("uvx", "--from", "ruff", "ruff", "check", "."),
+    ("uv", "tool", "run", "--from", "ruff", "ruff", "check", "."),
+    ("uv", "--version"),
+    ("uv", "-q", "run", "pytest", "-q"),
+    ("uv", "--directory", "d", "sync"),
+    ("npm", "--prefix", "d", "exec", "prettier", "--check", "."),
+    ("pnpm", "--filter", "a", "exec", "vitest"),
+    ("xargs", "-I", "{}", "echo", "{}"),
+    ("xargs", "-n", "1", "-0", "wc"),
+    ("xargs", "-i{}", "echo", "{}"),
+    ("shellcheck", "script.sh"),
+    ("bash-completion-helper", "x"),
     ("env",),
 ]
 
@@ -95,7 +136,7 @@ def test_a_command_that_only_mentions_a_shell_name_is_accepted(argv: tuple[str, 
     reject_shell_invocation(argv)
 
 
-@pytest.mark.parametrize("argv", REJECTED[:6] + REJECTED[19:22])
+@pytest.mark.parametrize("argv", REJECTED, ids=lambda argv: " ".join(argv))
 def test_the_same_guard_applies_to_declared_check_commands(argv: tuple[str, ...]) -> None:
     with pytest.raises(InvalidInputError, match="shell interpreter"):
         CheckDeclaration.from_mapping(
@@ -115,12 +156,17 @@ def test_the_same_guard_applies_to_declared_check_commands(argv: tuple[str, ...]
         ("timeout", "--unheard-of", "10", "bash"),
         ("nice", "--mystery", "bash"),
         ("uv", "run", "--made-up-flag", "bash"),
+        ("uv", "--made-up", "run", "bash"),
+        ("npm", "--weird", "exec", "sh"),
+        ("poetry", "--odd", "run", "bash"),
         ("env", "--chdir"),
     ],
 )
 def test_an_unknown_option_on_a_known_launcher_fails_closed(argv: tuple[str, ...]) -> None:
-    with pytest.raises(InvalidInputError, match=r"unrecognized option|needs a value"):
+    with pytest.raises(InvalidInputError, match=r"unrecognized option|needs a value") as raised:
         reject_shell_invocation(argv)
+    # Failing closed on an unknown option must not masquerade as shell detection.
+    assert "shell interpreter" not in str(raised.value)
 
 
 def test_launchers_nested_beyond_the_resolution_limit_are_rejected() -> None:
