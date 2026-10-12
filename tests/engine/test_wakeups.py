@@ -252,3 +252,92 @@ def test_a_node_waiting_on_a_cancelled_dependency_reports_it_instead_of_waiting_
     assert _wakeup(ledger_service, "dependent")["reason"] == "dependency_failed"
     assert _state(ledger_service, "dependent")["status"] == "queued"
     assert _launches(ledger_service, "dependent") == 0
+
+
+def test_the_oldest_queued_run_wins_across_separate_coordinator_invocations(
+    tmp_path: Path, ledger_path: Path
+) -> None:
+    occupier = _node(tmp_path, "occupier", command=_SLEEP)
+    older = _node(tmp_path, "zzz", command=_SLEEP)  # queued first, but the higher run id
+    newer = _node(tmp_path, "aaa", command=_SLEEP)  # queued later, but the lower run id
+
+    def invocation(
+        now: datetime, *requests: FixtureDispatch, runs: tuple[str, ...] | None = None
+    ) -> tuple[DispatchedFixture, ...]:
+        # A fresh process: a freshly opened ledger and a fresh coordinator, no shared memory.
+        ledger = LedgerService.open(ledger_path)
+        try:
+            return (
+                CoordinatorRuntime(ledger, owner="operator")
+                .tick(
+                    now=now,
+                    heartbeat_window=_WINDOW,
+                    lease_window=_LEASE,
+                    limits=_ONE_SLOT,
+                    requests=requests,
+                    run_ids=runs,
+                )
+                .dispatched
+            )
+        finally:
+            ledger.close()
+
+    (held,) = invocation(_T0, occupier)
+    assert invocation(_T0 + timedelta(seconds=1), older, runs=("run-zzz",)) == ()
+    assert invocation(_T0 + timedelta(seconds=2), newer, runs=("run-aaa",)) == ()
+    ledger = LedgerService.open(ledger_path)
+    try:
+        runtime = CoordinatorRuntime(ledger, owner="operator")
+        epoch = runtime.claim_epoch(now=_T0 + timedelta(seconds=3), heartbeat_window=_WINDOW)
+        runtime.cancel_node(
+            run_id="run-occupier",
+            node_id="work",
+            epoch=epoch.epoch,
+            now=_T0 + timedelta(seconds=4),
+        )
+    finally:
+        ledger.close()
+    assert held.lease.run_id == "run-occupier"
+
+    # The lower run id advances first, but the older queued run keeps the freed slot.
+    assert invocation(_T0 + timedelta(seconds=5), runs=("run-aaa",)) == ()
+    ledger = LedgerService.open(ledger_path)
+    try:
+        reservation = _wakeup(ledger, "aaa")
+        assert reservation["reason"] == "capacity_reserved_for_other_run"
+        assert reservation["reserved_for"] == "run-zzz"
+        assert _launches(ledger, "aaa") == 0
+    finally:
+        ledger.close()
+
+    winner = invocation(_T0 + timedelta(seconds=6), runs=("run-zzz",))
+    assert [fixture.lease.run_id for fixture in winner] == ["run-zzz"]
+    ledger = LedgerService.open(ledger_path)
+    try:
+        assert _state(ledger, "aaa")["status"] == "queued"
+        runtime = CoordinatorRuntime(ledger, owner="operator")
+        runtime.cancel_node(
+            run_id="run-zzz",
+            node_id="work",
+            epoch=runtime.claim_epoch(
+                now=_T0 + timedelta(seconds=7), heartbeat_window=_WINDOW
+            ).epoch,
+            now=_T0 + timedelta(seconds=8),
+        )
+    finally:
+        ledger.close()
+    runner_up = invocation(_T0 + timedelta(seconds=9), runs=("run-aaa",))
+    assert [fixture.lease.run_id for fixture in runner_up] == ["run-aaa"]
+    ledger = LedgerService.open(ledger_path)
+    try:
+        runtime = CoordinatorRuntime(ledger, owner="operator")
+        runtime.cancel_node(
+            run_id="run-aaa",
+            node_id="work",
+            epoch=runtime.claim_epoch(
+                now=_T0 + timedelta(seconds=10), heartbeat_window=_WINDOW
+            ).epoch,
+            now=_T0 + timedelta(seconds=11),
+        )
+    finally:
+        ledger.close()

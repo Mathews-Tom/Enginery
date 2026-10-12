@@ -226,7 +226,6 @@ class CoordinatorRuntime:
         self._leases = FencedNodeLeases(ledger, self._coordinator)
         self._workspaces = GitWorktreeBackend(ledger, self._coordinator, fault_hook=fault_hook)
         self._fault_hook = fault_hook
-        self._last_run_id: str | None = None
 
     @property
     def coordinator(self) -> Coordinator:
@@ -490,7 +489,7 @@ class CoordinatorRuntime:
             _schedulable(request, state=_runtime_state(self._ledger, request))
             for request in requests_by_key.values()
         )
-        plan = ReadinessScheduler().plan(nodes, limits=limits, last_run_id=self._last_run_id)
+        plan = ReadinessScheduler().plan(nodes, limits=limits)
         launch = tuple(key for key in plan.selected if run_ids is None or key.run_id in run_ids)
         reserved = tuple(key for key in plan.selected if key not in launch)
         dispatched: list[DispatchedFixture] = []
@@ -537,8 +536,6 @@ class CoordinatorRuntime:
             self._record_deferral(
                 request, reason=reason, reserved_for=holder, epoch=epoch.epoch, now=now
             )
-        if launch:
-            self._last_run_id = launch[-1].run_id
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
     def ingest_result(self, *, envelope: WorkerResultEnvelope, now: datetime) -> None:
@@ -872,6 +869,7 @@ class CoordinatorRuntime:
             self._fault("node_retried")
             return
         state = _request_state(request, status="queued", actor_type=actor_type)
+        state["queued_at"] = now.isoformat()
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"runtime-node-register:{_node_id(request)}",
@@ -904,7 +902,8 @@ class CoordinatorRuntime:
             return
         prior = state.get("wakeup")
         prior_evaluations = 0
-        queued_since = now.isoformat()
+        queued_at = state.get("queued_at")
+        queued_since = queued_at if isinstance(queued_at, str) else now.isoformat()
         if isinstance(prior, dict):
             count = prior.get("evaluations")
             since = prior.get("queued_since")
@@ -943,6 +942,7 @@ class CoordinatorRuntime:
             status="queued",
             actor_type=_actor_type_from_state(projection.state),
         )
+        state["queued_at"] = now.isoformat()
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"{event_type}:{_node_id(request)}:{request.attempt_id}",
@@ -1250,7 +1250,25 @@ def _schedulable(request: FixtureDispatch, *, state: dict[str, object]) -> Sched
         dependencies=tuple(NodeKey(run_id, node_id) for run_id, node_id in request.dependencies),
         state=states[status],
         repository_id=request.repository_id,
+        queued_since=_queued_since(state),
     )
+
+
+def _queued_since(state: dict[str, object]) -> datetime | None:
+    """The persisted time a node entered the queue, or None for a record that predates it."""
+    wakeup = state.get("wakeup")
+    for candidate in (
+        state.get("queued_at"),
+        wakeup.get("queued_since") if isinstance(wakeup, dict) else None,
+    ):
+        if isinstance(candidate, str):
+            try:
+                return datetime.fromisoformat(candidate)
+            except ValueError as error:
+                raise InternalInvariantViolationError(
+                    "runtime node queue time is invalid", details={"queued_at": candidate}
+                ) from error
+    return None
 
 
 __all__ = [

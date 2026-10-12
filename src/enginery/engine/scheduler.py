@@ -6,6 +6,7 @@ import enum
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
 
@@ -42,6 +43,7 @@ class SchedulableNode:
     state: SchedulableState = SchedulableState.QUEUED
     repository_id: str | None = None
     requirements_satisfied: bool = True
+    queued_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.key in self.dependencies:
@@ -86,7 +88,6 @@ class DeferredNode:
 @dataclass(frozen=True, slots=True)
 class SchedulingPlan:
     selected: tuple[NodeKey, ...]
-    next_run_id: str | None
     deferred: tuple[DeferredNode, ...] = ()
 
 
@@ -103,9 +104,8 @@ class ReadinessScheduler:
         nodes: Iterable[SchedulableNode],
         *,
         limits: SchedulingLimits,
-        last_run_id: str | None = None,
     ) -> SchedulingPlan:
-        """Return a stable round-robin selection across every run within configured limits."""
+        """Select ready nodes across every run, oldest queued run first, within the limits."""
         by_key = _index_nodes(nodes)
         active = tuple(
             node
@@ -118,7 +118,7 @@ class ReadinessScheduler:
         for node in sorted(by_key.values(), key=lambda item: item.key):
             if available_slots > 0 and _is_ready(node, by_key):
                 ready_by_run[node.key.run_id].append(node)
-        run_order = _rotated_run_order(ready_by_run, last_run_id=last_run_id)
+        run_order = _oldest_first_run_order(ready_by_run)
         selected: list[NodeKey] = []
         while available_slots > 0 and run_order:
             progressed = False
@@ -152,11 +152,7 @@ class ReadinessScheduler:
             for node in sorted(by_key.values(), key=lambda item: item.key)
             if node.state is SchedulableState.QUEUED and node.key not in chosen
         )
-        return SchedulingPlan(
-            selected=tuple(selected),
-            next_run_id=selected[-1].run_id if selected else last_run_id,
-            deferred=deferred,
-        )
+        return SchedulingPlan(selected=tuple(selected), deferred=deferred)
 
 
 def _deferral_reason(
@@ -218,14 +214,22 @@ def _repository_load(active: tuple[SchedulableNode, ...]) -> dict[str, int]:
     return load
 
 
-def _rotated_run_order(
-    ready_by_run: dict[str, deque[SchedulableNode]], *, last_run_id: str | None
-) -> deque[str]:
-    ordered = sorted(ready_by_run)
-    if last_run_id is not None and last_run_id in ordered:
-        start = (ordered.index(last_run_id) + 1) % len(ordered)
-        ordered = ordered[start:] + ordered[:start]
-    return deque(ordered)
+def _oldest_first_run_order(ready_by_run: dict[str, deque[SchedulableNode]]) -> deque[str]:
+    """Order runs by how long their oldest ready node has been queued, then by run id.
+
+    The order depends only on persisted queue times, so every coordinator process derives
+    the same one: a later-arriving run never overtakes an older queued run, whatever its id.
+    A node with no recorded queue time (a record from before queue times were kept) ranks
+    after every timed node.
+    """
+
+    def rank(run_id: str) -> tuple[bool, datetime, str]:
+        times = [
+            node.queued_since for node in ready_by_run[run_id] if node.queued_since is not None
+        ]
+        return (not times, min(times) if times else datetime.max.replace(tzinfo=UTC), run_id)
+
+    return deque(sorted(ready_by_run, key=rank))
 
 
 def _next_allowed_candidate(
