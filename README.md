@@ -10,8 +10,9 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.5.0` is the current release candidate. `v0.1.0`, `v0.2.0`, `v0.3.0`, and
-`v0.4.0` are published on PyPI and GitHub Releases. Enginery ships three of its four planned
+`v0.5.0` is the current published release (PyPI and GitHub Release, 2026-08-11).
+`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are also published on PyPI and
+GitHub Releases. Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered
@@ -25,6 +26,32 @@ factory self-improvement) is gate-deferred with no committed date; run
 `enginery gate status --gate G4` to see exactly which entry conditions
 are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
+
+### Proposed factory direction (not shipped)
+
+Everything above describes shipped behavior. A manual-first software-factory
+layer on top of the shipped substrate is **proposed and not shipped**. The
+current CLI has no `enginery factory ...` command; the proposed command
+family (`init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`,
+`drain`, `review`, `watch`, `evidence`) does not exist yet and must not be
+scripted against. The proposal keeps the same boundary the shipped substrate
+already has: control is manual-first, local-first, and deterministic. Models
+never poll, schedule, keep books, or decide whether a check is complete;
+routine control uses no model. Harness, model, session, and worker machine are
+separate axes and none implies another.
+
+### Licensing and security limits
+
+No upstream skills, prompts, or code from reference projects are vendored;
+any pattern learned from them is independently re-implemented under this
+repository's Apache-2.0 license. Trusted-local operation is not containment:
+a worker process can reach the operator's account, filesystem, network, and
+keychain, and Enginery makes no claim of safety against hostile code.
+Stage 1 never merges. A Stage 2 pull-request merge is policy-gated: the
+shipped default rules allow low- and medium-risk merges once current-head
+merge-ready evidence passes, and deny high-risk merges by default. Release
+publication, deployment, and rollback always require a current interactive
+human approval. Enginery never triggers external reviewer bots.
 
 ## Recovery demonstration
 

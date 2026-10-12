@@ -23,8 +23,9 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are published to PyPI. `v0.5.0`
-is the current release candidate. Install the current local build with:
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are published to PyPI
+and GitHub Releases; `v0.5.0` (2026-08-11) is the current release. Install
+the published package with:
 
 ```bash
 pip install enginery
@@ -485,6 +486,14 @@ implemented.
   network, keychain, or other host processes. A stronger execution-
   containment claim requires a separately designed container or VM backend,
   which does not exist in this release.
+- **Trusted-local is not containment, and no hostile-code safety claim is
+  made.** Run Enginery only against repositories, issues, and harness
+  sessions you trust. Stage 1 never merges. A Stage 2 pull-request merge is
+  policy-gated: the shipped default rules allow low- and medium-risk merges
+  once current-head merge-ready evidence passes, and deny high-risk merges by
+  default. Release publication, deployment, and rollback always require a
+  current interactive human approval. Enginery never triggers external
+  reviewer bots.
 - **Credential references, not credentials, cross the Stage 1 boundary.**
   Stage 1 never merges, publishes, or deploys, so it never needs
   production or publication credentials in the first place. The GitHub and
@@ -539,12 +548,15 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0` are all published. Together they
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are all published
+(`v0.5.0` on 2026-08-11 to PyPI and GitHub Releases). Together they
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
 capture pipeline. `v0.4.0` adds gate, request-builder, workspace, and adapter
-diagnostic commands but no workflow stage. Stage 4 (governed factory self-improvement) is the only remaining stage;
+diagnostic commands and `v0.5.0` adds measurable G4 evidence, source
+classification, and authority verification; neither adds a workflow stage.
+Stage 4 (governed factory self-improvement) is the only remaining stage;
 it is a separate, unversioned, gate-deferred train with its own milestones,
 gate, and operator documentation once it starts. In particular:
 
@@ -561,6 +573,38 @@ gate, and operator documentation once it starts. In particular:
 or additional harness/work-ledger providers beyond OMP, Claude Code, and
 GitHub. None of those exist yet. `stage2 status` remains the only Stage 2 CLI
 surface; Stage 3 has no CLI surface at all (library-level only, see above).
+
+### Proposed factory commands (not shipped)
+
+Nothing in this subsection exists in the shipped CLI. `enginery --help` lists
+exactly `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`,
+`outcome`, `gate`, `workspace`, and `capability`; there is no
+`enginery factory` command. `gate status` accepts `--gate G4` only, and
+`stage1` provides `start`, `watch`, `review`, `approve`, `reject`, `cancel`,
+`resume`, `evidence`, and `build-request`.
+
+A manual-first factory layer is proposed with this command family:
+`factory init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`,
+`drain`, `review`, `watch`, and `evidence`. Do not script against these names;
+they are a proposal, not a compatibility promise. The proposed boundary:
+
+- **Manual first.** An operator starts, pauses, drains, and resumes work;
+  nothing is scheduled implicitly.
+- **Local first.** State lives in the local ledger and artifact store; no
+  hosted control plane is required.
+- **Deterministic control plane.** Models never poll, schedule, keep books,
+  or decide whether a check is complete. Routine control uses no model; a
+  model only does the bounded work a workflow node assigns it, and check
+  results come from the evaluator's declared command or observer contract.
+- **Separate axes.** The harness (OMP, Claude Code), the model it reports, the
+  session, and the worker machine are separate identities; recording or
+  configuring one does not imply another.
+
+### Licensing, attribution, and reference projects
+
+No upstream skills, prompts, or source from reference projects are vendored
+into this repository. Where a published project informed a pattern, the
+pattern is independently re-implemented under Apache-2.0.
 
 ## See also
 

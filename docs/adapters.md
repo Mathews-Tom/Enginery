@@ -129,6 +129,10 @@ shared running-worker identity type (`HarnessSession`) carries a
 provider-named field. A third harness adapter should pass the same shared
 fixture before being considered complete.
 
+### Current support and what it does not claim
+
+Supported harness providers are `omp` and `claude-code`, selected one per run. The shared adapter fixture and the real Stage 1/Stage 2 runs recorded in the release evidence are the extent of what is demonstrated; this guide makes no qualification, certification, or hosted-session guarantee beyond what those tests and recorded runs show. A harness, the model it reports, the session it opens, and the machine it runs on are four separate axes, and an adapter never infers one from another. Today the Claude Code adapter records the model reported in its own output; the OMP adapter records no model; and worker-machine identity is not recorded. A harness is a worker, not a trust boundary: trusted-local operation is not containment. No upstream skill or source is vendored into the adapters, and reference projects are independently re-implemented patterns only.
+
 ## Worked example: writing a new `WorkLedgerPort` adapter
 
 Sketch (eliding validation and error handling already covered above; see

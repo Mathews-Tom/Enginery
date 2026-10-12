@@ -1,6 +1,6 @@
 # Enginery Workflow Examples: Using Existing Coding Agents and Models
 
-- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped in `v0.1.0`–`v0.4.0`; `v0.4.0` adds operator commands, not a workflow stage. The concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior.
+- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped in `v0.1.0`–`v0.5.0`; `v0.4.0` and `v0.5.0` add operator commands and gate evidence, not a workflow stage. The concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior. A manual-first factory command family is proposed and not shipped; nothing here depends on it.
 - **Audience:** Engineers choosing how existing coding agents and models participate in an Enginery workflow.
 
 > **Core rule:** Users choose their preferred coding agents and models. Enginery coordinates the workflow around them; it does not replace their reasoning loop or silently select a different worker.
@@ -363,6 +363,10 @@ The planned credential model runs production and publication actions through fix
 ### Evidence is revision-bound
 
 The evidence contract requires every test result to apply to the exact current subject. It rejects stale CI, an old PR head, a changed issue acceptance criterion, or a superseded approval. This is why an evidence-complete terminal claim is stronger than a generic “tests passed” statement.
+
+### Proposed factory direction (not shipped)
+
+Harness, model, session, and worker machine are separate axes in every example above. A proposed manual-first factory layer would keep control deterministic and local: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. This is not shipped behavior. No upstream skills or code are vendored; reference projects are independently re-implemented patterns only, and trusted-local operation is not containment.
 
 ## 8. Source grounding
 

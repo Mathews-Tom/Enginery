@@ -208,3 +208,35 @@ def test_missing_canonical_version_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(DocsCurrencyError, match="version"):
         run_check(repo_root=repo)
+
+
+_STATUS_FORMS = (
+    "`v{version}` is the current release candidate.",
+    "`v{version}` is the current published release (PyPI and GitHub Release).",
+    "`v0.1.0` and `v{version}` are published to PyPI and GitHub Releases; "
+    "`v{version}` (2026-08-11) is the current release.",
+    "- **Status:** `v{version}` published on PyPI and GitHub Releases",
+    "Stages 1, 2, and 3 are shipped in `v0.1.0`\u2013`v{version}`.",
+    "The shipped `v{version}` substrate exposes the CLI.",
+    "`v0.1.0`, `v0.2.0`, and `v{version}` are all published.",
+)
+
+
+@pytest.mark.parametrize("form", _STATUS_FORMS)
+def test_each_current_release_status_form_is_guarded(tmp_path: Path, form: str) -> None:
+    (tmp_path / "stale").mkdir()
+    (tmp_path / "current").mkdir()
+    stale = _init_fixture_repo(
+        tmp_path / "stale",
+        version="0.9.0",
+        docs={"docs/status.md": form.format(version="0.5.0") + "\n"},
+    )
+    current = _init_fixture_repo(
+        tmp_path / "current",
+        version="0.5.0",
+        docs={"docs/status.md": form.format(version="0.5.0") + "\n"},
+    )
+
+    with pytest.raises(DocsCurrencyError, match=r"docs/status\.md:1.*v0\.5\.0.*v0\.9\.0"):
+        run_check(repo_root=stale)
+    run_check(repo_root=current)

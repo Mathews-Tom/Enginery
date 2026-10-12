@@ -64,8 +64,12 @@ def _is_public_documentation_path(name: str) -> bool:
 # is a stale self-declaration.
 STALE_SELF_VERSION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Enginery is `v(\d+\.\d+\.\d+)`"),
-    re.compile(r"`v(\d+\.\d+\.\d+)` is the current release candidate"),
+    re.compile(r"`v(\d+\.\d+\.\d+)` is the current (?:published )?release(?: candidate)?"),
     re.compile(r"`v(\d+\.\d+\.\d+)`, published on PyPI(?: and GitHub Releases)?"),
+    re.compile(r"\*\*Status:\*\* `v(\d+\.\d+\.\d+)` published"),
+    re.compile(r"`v\d+\.\d+\.\d+`\u2013`v(\d+\.\d+\.\d+)`"),
+    re.compile(r"[Tt]he shipped `v(\d+\.\d+\.\d+)` substrate"),
+    re.compile(r"and `v(\d+\.\d+\.\d+)` are (?:all )?published"),
     re.compile(r"package_metadata: enginery (\d+\.\d+\.\d+) installed"),
 )
 # Literal phrases describing Enginery as an unimplemented product concept.
