@@ -9,13 +9,16 @@ from tests.support.execution import selection_for
 from tests.workflows.test_stage1_runtime import (
     _check_disposition_fixture,
     _check_node_dispatch,
+    _complete_check_node,
     _drive_check_to_non_pass,
 )
 
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.execution_controls import build_receipt
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
-from enginery.domain.execution_catalog import ExecutionCatalog, SupportTier
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost, SupportTier
+from enginery.domain.execution_receipt import evaluate_effective_requirement
 from enginery.domain.execution_selection import (
     ExecutionSelection,
     HoldReason,
@@ -24,6 +27,7 @@ from enginery.domain.execution_selection import (
 )
 from enginery.domain.ids import RunId
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
@@ -459,3 +463,192 @@ def test_a_tampered_persisted_selection_is_refused_wherever_executability_is_req
             service.dispatch_implementation(
                 forged, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
             )
+
+
+class _StubHarness:
+    """A harness stand-in whose installed host is whatever the test says it is."""
+
+    def __init__(self, installed: InstalledHost | None) -> None:
+        self.installed = installed
+        self.artifact_store = None
+
+    def installed_host(self) -> InstalledHost | None:
+        return self.installed
+
+    def supervised_command(self, task: object, *, result_path: Path) -> tuple[str, ...]:
+        raise AssertionError("no worker command may be built while the host is held")
+
+
+_BOUND_HOST = InstalledHost("18.10.2", "json-protocol=3")
+
+
+@pytest.mark.parametrize(
+    "installed",
+    [InstalledHost("18.10.3", "json-protocol=3"), None],
+    ids=["changed", "unobservable"],
+)
+def test_a_changed_or_unobservable_host_holds_a_run_with_native_controls(
+    ledger_service: LedgerService, tmp_path: Path, installed: InstalledHost | None
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    healthy = replace(service, harness=_StubHarness(_BOUND_HOST))  # type: ignore[arg-type]
+    drifted = replace(service, harness=_StubHarness(installed))  # type: ignore[arg-type]
+
+    assert healthy.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+    progression = drifted.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
+    with pytest.raises(HumanActionRequiredError, match="not the executable"):
+        drifted.dispatch_implementation(
+            request, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
+        )
+    assert drifted.read(request.run.id).request.execution_selection == _PIN
+
+
+def test_a_host_default_run_never_depends_on_the_installed_host_version(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(ledger_service, tmp_path, start=False)
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    other = replace(service, harness=_StubHarness(InstalledHost("0.0.1", "other")))  # type: ignore[arg-type]
+
+    assert other.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+
+
+def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    forged = replace(
+        request,
+        execution_selection=replace(_PIN, host_executable_version="0.0.1"),
+    )
+
+    with pytest.raises(InvalidInputError, match="tested host entry"):
+        service.start(forged, now=now, heartbeat_window=_WINDOW)
+
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
+
+
+def test_a_recorded_execution_hold_makes_the_next_action_hold_with_that_hold(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    strict = selection_for("omp", model="openai/gpt-5.2", strict_effective=True)
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, execution_selection=strict
+    )
+    _complete_check_node(runtime, request, "qualify", now)
+    unverified = evaluate_effective_requirement(
+        strict,
+        build_receipt(
+            strict,
+            harness="omp",
+            catalog=load_execution_catalog(),
+            launched_command=("omp", "--model", "openai/gpt-5.2"),
+            models=(),
+        ),
+    )
+    assert unverified is not None
+    epoch = runtime.register_node(
+        dispatch=_check_node_dispatch(request, "implement"), now=now, heartbeat_window=_WINDOW
+    )
+    runtime.complete_node(
+        run_id=str(request.run.id),
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="failed",
+    )
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="execution-hold",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id=request.implementation.attempt_id,
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"result": {"execution_hold": unverified.to_state()}},
+                ),
+            ),
+        )
+    )
+
+    progression = service.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold == unverified
+    assert progression.hold.reason is HoldReason.EFFECTIVE_CONTROL_UNVERIFIED
+    # Without a recorded hold the same failed implementation waits for a human instead.
+    other = LedgerService.open(tmp_path / "plain.db")
+    try:
+        (tmp_path / "plain").mkdir()
+        plain_request, plain_service, plain_runtime, _, plain_now = _check_disposition_fixture(
+            other, tmp_path / "plain", execution_selection=strict
+        )
+        _complete_check_node(plain_runtime, plain_request, "qualify", plain_now)
+        plain_epoch = plain_runtime.register_node(
+            dispatch=_check_node_dispatch(plain_request, "implement"),
+            now=plain_now,
+            heartbeat_window=_WINDOW,
+        )
+        plain_runtime.complete_node(
+            run_id=str(plain_request.run.id),
+            node_id="implement",
+            epoch=plain_epoch.epoch,
+            now=plain_now,
+            outcome="failed",
+        )
+        plain = plain_service.next_action(plain_request.run.id)
+    finally:
+        other.close()
+    assert plain.action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    assert plain.hold is None
+
+
+def test_collect_implementation_gives_the_executor_the_services_own_catalog(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, execution_selection=_PIN
+    )
+    injected = replace(load_execution_catalog())
+    service = replace(
+        service,
+        harness=_StubHarness(InstalledHost("18.10.2", "json-protocol=3")),  # type: ignore[arg-type]
+        execution_catalog=injected,
+    )
+    _complete_check_node(runtime, request, "qualify", now)
+    runtime.register_node(
+        dispatch=_check_node_dispatch(request, "implement"), now=now, heartbeat_window=_WINDOW
+    )
+    captured: list[ExecutionCatalog] = []
+
+    class _Spy:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs["catalog"])  # type: ignore[arg-type]
+
+        def collect(self, **kwargs: object) -> str:
+            return "collected"
+
+    monkeypatch.setattr("enginery.workflows.stage1.Stage1ImplementationExecutor", _Spy)
+    monkeypatch.setattr(
+        "enginery.engine.runtime.CoordinatorRuntime.recover_dispatched",
+        lambda self, **kwargs: None,
+    )
+
+    result = service.collect_implementation(request, now=now, heartbeat_window=_WINDOW)
+
+    assert result == "collected"
+    assert len(captured) == 1 and captured[0] is injected

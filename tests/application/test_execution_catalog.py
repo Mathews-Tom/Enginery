@@ -12,8 +12,8 @@ from enginery.application.execution_catalog import (
     load_execution_catalog,
 )
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError
-from enginery.domain.execution_catalog import SupportTier, catalog_from_mapping
+from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
+from enginery.domain.execution_catalog import InstalledHost, SupportTier, catalog_from_mapping
 
 
 def test_the_packaged_catalog_binds_the_digest_of_its_exact_bytes() -> None:
@@ -46,15 +46,14 @@ def test_each_host_records_its_tested_executable_and_protocol_fingerprint() -> N
         "2.1.296",
         "stream-json-schema=1",
     )
-    assert omp.matches_installed(
-        executable_version="18.10.2", protocol_fingerprint="json-protocol=3"
-    )
-    assert not omp.matches_installed(
-        executable_version="18.10.3", protocol_fingerprint="json-protocol=3"
-    )
-    assert not omp.matches_installed(
-        executable_version="18.10.2", protocol_fingerprint="json-protocol=4"
-    )
+    assert omp.matches(InstalledHost("18.10.2", "json-protocol=3"))
+    assert not omp.matches(InstalledHost("18.10.3", "json-protocol=3"))
+    assert not omp.matches(InstalledHost("18.10.2", "json-protocol=4"))
+    with pytest.raises(MissingPrerequisiteError, match="native controls are unsupported"):
+        omp.require_installed(InstalledHost("18.10.3", "json-protocol=3"))
+    with pytest.raises(MissingPrerequisiteError, match="could not be probed"):
+        omp.require_installed(None)
+    omp.require_installed(InstalledHost("18.10.2", "json-protocol=3"))
 
 
 def test_each_host_maps_controls_to_its_own_native_flags_and_vocabulary() -> None:

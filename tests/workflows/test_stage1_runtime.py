@@ -1822,6 +1822,9 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
                 credential_reference="test-keyring", executable=str(_fake_omp(tmp_path))
             ),
             ArtifactStore(tmp_path / "artifacts"),
+            command_runner=lambda arguments: subprocess.CompletedProcess(
+                arguments, 0, stdout="omp v18.10.2\n", stderr=""
+            ),
         ),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))

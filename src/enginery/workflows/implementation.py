@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
 from enginery.application.adapter_types import NormalizedAdapterEvent
+from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.execution_controls import expected_native_arguments
 from enginery.application.work_ports import HarnessResult, HarnessTask
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
+from enginery.domain.execution_receipt import ExecutionReceipt, evaluate_effective_requirement
+from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.runtime import (
@@ -31,9 +36,14 @@ class SupervisedHarness(Protocol):
     artifact_store: ArtifactStore
 
     def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]: ...
+    def installed_host(self) -> InstalledHost | None: ...
 
     def collect_supervised(
-        self, task: HarnessTask, *, result_path: Path
+        self,
+        task: HarnessTask,
+        *,
+        result_path: Path,
+        launched_command: tuple[str, ...] | None = None,
     ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]: ...
 
 
@@ -45,6 +55,7 @@ class Stage1ImplementationExecutor:
     harness: SupervisedHarness
     manifest: WorkflowManifest
     head_branch: str | None = None
+    catalog: ExecutionCatalog = field(default_factory=load_execution_catalog)
 
     def dispatch(self, request: FixtureDispatch, task: HarnessTask) -> WorkflowDispatch:
         """Bind one implementation task to the existing fenced runtime dispatch path."""
@@ -59,13 +70,28 @@ class Stage1ImplementationExecutor:
         task: HarnessTask,
         now: datetime,
         result_path: Path | None = None,
+        launched_command: tuple[str, ...] | None = None,
     ) -> HarnessResult:
         """Ingest a completed supervised implementation result through the coordinator."""
         _require_matching_dispatch(dispatched, task)
         path = _result_path(task) if result_path is None else result_path
-        _, result = self.harness.collect_supervised(task, result_path=path)
-        terminal_result = "passed" if result.terminal_status == "succeeded" else "failed"
-        result_details: dict[str, str] = {"harness_status": result.terminal_status}
+        _, result = self.harness.collect_supervised(
+            task, result_path=path, launched_command=launched_command
+        )
+        receipt = result.execution_receipt
+        hold = _execution_hold(
+            task, receipt, expected_native_arguments(task.selection, catalog=self.catalog)
+        )
+        terminal_result = (
+            "passed" if result.terminal_status == "succeeded" and hold is None else "failed"
+        )
+        result_details: dict[str, object] = {"harness_status": result.terminal_status}
+        if receipt is not None:
+            result_details["execution_receipt"] = receipt.to_state()
+        if not task.selection.legacy:
+            result_details["execution_selection_digest"] = str(task.selection.digest)
+        if hold is not None:
+            result_details["execution_hold"] = hold.to_state()
         if terminal_result == "passed" and self.head_branch is not None:
             try:
                 result_details["head_revision"] = self.runtime.verify_implementation_branch(
@@ -95,6 +121,32 @@ def _result_path(task: HarnessTask) -> Path:
     return (
         task.workspace_path / ".enginery" / "implementation-results" / f"{task.operation_id}.json"
     )
+
+
+def _execution_hold(
+    task: HarnessTask, receipt: ExecutionReceipt | None, expected: tuple[str, ...]
+) -> ExecutionHold | None:
+    """Hold when the launched controls are not exactly the selected ones, or a strict
+    effective-control requirement is unmet.
+
+    The receipt's submitted tokens are extracted from the command that was actually
+    launched, so a missing or extra control token (an unexpected fallback model, a dropped
+    pin) differs from the expectation derived from the selection and holds the run.
+    """
+    submitted = () if receipt is None else receipt.submitted_arguments
+    if submitted != expected:
+        return ExecutionHold(
+            reason=HoldReason.SUBMITTED_CONTROLS_MISMATCH,
+            message=(
+                "the controls in the launched command are not exactly the selected controls; "
+                "the run is held, not passed"
+            ),
+            details={
+                "expected_arguments": " ".join(expected),
+                "submitted_arguments": " ".join(submitted),
+            },
+        )
+    return evaluate_effective_requirement(task.selection, receipt)
 
 
 def _require_matching_request(request: FixtureDispatch, task: HarnessTask) -> None:

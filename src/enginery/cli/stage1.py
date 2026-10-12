@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from enginery.adapters.claude_code import ClaudeCodeAdapterConfig, ClaudeCodeHarness
+from enginery.adapters.claude_code import probe_installed_host as probe_installed_claude
 from enginery.adapters.github import (
     GitHubAdapterConfig,
     GitHubPullRequests,
     GitHubWorkLedger,
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
+from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.stage1_request import run_build_request
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
@@ -88,12 +92,14 @@ def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
-        service = Stage1RunService(runtime=runtime, ledger=ledger)
+        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
+        service = (
+            _advancing_service(runtime=runtime, ledger=ledger, request=request)
+            if args.advance
+            else _read_only_service(runtime=runtime, ledger=ledger, request=request)
+        )
         previous = service.next_action(RunId(args.run_id))
         if args.advance:
-            service = _advancing_service(
-                runtime=runtime, ledger=ledger, request=previous.run.request
-            )
             progression = service.advance(
                 RunId(args.run_id),
                 now=_now(),
@@ -140,6 +146,31 @@ def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarne
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
         details={"harness_provider": configuration.harness_provider},
+    )
+
+
+def _host_probe_for(
+    configuration: Stage1ExecutionConfiguration,
+) -> Callable[[], InstalledHost | None]:
+    """Return a probe that only runs the host's identity command: no artifact store, no files."""
+    if configuration.harness_provider == "omp":
+        return lambda: probe_installed_omp(configuration.harness_executable)
+    if configuration.harness_provider == "claude-code":
+        return lambda: probe_installed_claude(configuration.harness_executable)
+    raise InvalidInputError(
+        "Stage 1 harness_provider is not a configured harness",
+        details={"harness_provider": configuration.harness_provider},
+    )
+
+
+def _read_only_service(
+    *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
+) -> Stage1RunService:
+    """A service for diagnostics and decisions that must never create harness state."""
+    return Stage1RunService(
+        runtime=runtime,
+        ledger=ledger,
+        host_probe=_host_probe_for(request.execution_configuration),
     )
 
 
@@ -203,7 +234,13 @@ def _review(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
-        service = Stage1RunService(runtime=runtime, ledger=ledger)
+        service = _read_only_service(
+            runtime=runtime,
+            ledger=ledger,
+            request=Stage1RunService(runtime=runtime, ledger=ledger)
+            .read(RunId(args.run_id))
+            .request,
+        )
         run = service.read(RunId(args.run_id))
         result = service.review_implementation(
             run.request,

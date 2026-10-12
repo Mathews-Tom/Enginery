@@ -23,7 +23,12 @@ from dataclasses import dataclass, field
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.execution_catalog import ExecutionCatalog, HostCapability, SupportTier
+from enginery.domain.execution_catalog import (
+    ExecutionCatalog,
+    HostCapability,
+    InstalledHost,
+    SupportTier,
+)
 
 EXECUTION_SELECTION_SCHEMA_VERSION = 1
 
@@ -56,6 +61,7 @@ class HoldReason(enum.Enum):
     HOST_FINGERPRINT_DRIFT = "host_fingerprint_drift"
     EFFECTIVE_CONTROL_UNVERIFIED = "effective_control_unverified"
     EFFECTIVE_CONTROL_MISMATCH = "effective_control_mismatch"
+    SUBMITTED_CONTROLS_MISMATCH = "submitted_controls_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,6 +474,43 @@ def detect_catalog_drift(
     )
 
 
+def detect_host_drift(
+    selection: ExecutionSelection, *, installed: InstalledHost | None
+) -> ExecutionHold | None:
+    """Return a hold when the installed host is not the fingerprint a selection was bound to.
+
+    Only a selection that needs native controls depends on the host's tested flags, so a
+    bare host default never holds on the installed version.
+    """
+    if selection.legacy or not selection.requires_native_controls:
+        return None
+    bound = InstalledHost(
+        executable_version=str(selection.host_executable_version),
+        protocol_fingerprint=str(selection.host_protocol_fingerprint),
+    )
+    if installed == bound:
+        return None
+    return ExecutionHold(
+        reason=HoldReason.HOST_FINGERPRINT_DRIFT,
+        message=(
+            f"the installed {selection.harness} is not the executable this run's controls were "
+            "bound to; the run is held and its original binding is retained. Restore the "
+            "bound host version, or start a new run from a rebuilt request"
+        ),
+        details={
+            "harness": selection.harness,
+            "bound_executable_version": bound.executable_version,
+            "bound_protocol_fingerprint": bound.protocol_fingerprint,
+            "installed_executable_version": (
+                "unobservable" if installed is None else installed.executable_version
+            ),
+            "installed_protocol_fingerprint": (
+                "unobservable" if installed is None else installed.protocol_fingerprint
+            ),
+        },
+    )
+
+
 def validate_against_catalog(
     selection: ExecutionSelection, *, catalog: ExecutionCatalog
 ) -> HostCapability:
@@ -642,6 +685,7 @@ __all__ = [
     "SelectionLayer",
     "SelectionMode",
     "detect_catalog_drift",
+    "detect_host_drift",
     "resolve_execution_selection",
     "validate_against_catalog",
 ]

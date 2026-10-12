@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -29,11 +29,12 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
     StaleEvidenceError,
 )
-from enginery.domain.execution_catalog import ExecutionCatalog
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
     ExecutionHold,
     ExecutionSelection,
     detect_catalog_drift,
+    detect_host_drift,
     validate_against_catalog,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
@@ -323,6 +324,7 @@ class Stage1RunService:
     harness: SupervisedHarness | None = None
     outcomes: OutcomeCaptureService | None = None
     execution_catalog: ExecutionCatalog | None = None
+    host_probe: Callable[[], InstalledHost | None] | None = None
 
     def start(
         self,
@@ -376,7 +378,7 @@ class Stage1RunService:
         observation keeps its action but still carries the hold diagnostic so it is shown.
         """
         progression = self._derive_progression(run_id)
-        hold = self._catalog_hold(progression.run.request)
+        hold = self._binding_hold(progression.run.request)
         if hold is None:
             return progression
         if progression.action in {
@@ -392,8 +394,39 @@ class Stage1RunService:
     def _catalog_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
         return detect_catalog_drift(request.execution_selection, current=self._current_catalog())
 
+    def _binding_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
+        """Return a catalog drift hold, else a host fingerprint drift hold, else None.
+
+        The host is only probed when the run selected a native control, so a host-default
+        run never depends on the installed version.
+        """
+        hold = self._catalog_hold(request)
+        if hold is not None:
+            return hold
+        selection = request.execution_selection
+        if selection.legacy or not selection.requires_native_controls:
+            return None
+        probe = self.host_probe
+        if probe is None and self.harness is not None:
+            probe = self.harness.installed_host
+        if probe is None:
+            return None
+        return detect_host_drift(selection, installed=probe())
+
+    def _recorded_execution_hold(
+        self, implement_state: Mapping[str, object]
+    ) -> ExecutionHold | None:
+        attempt = self.ledger.read_projection(
+            aggregate_type="node_attempt", aggregate_id=_string(implement_state, "attempt_id")
+        )
+        if attempt is None:
+            return None
+        result = attempt.state.get("result")
+        raw = result.get("execution_hold") if isinstance(result, Mapping) else None
+        return None if raw is None else ExecutionHold.from_state(raw)
+
     def _require_executable(self, request: Stage1RunRequest) -> None:
-        """Reject a request that is not the durable binding or whose catalog drifted."""
+        """Reject a request that is not the durable binding or whose binding drifted."""
         durable = self.read(request.run.id).request
         if durable.digest != request.digest:
             raise StaleEvidenceError(
@@ -404,7 +437,7 @@ class Stage1RunService:
                     "supplied_request_digest": str(request.digest),
                 },
             )
-        hold = self._catalog_hold(durable)
+        hold = self._binding_hold(durable)
         if hold is not None:
             raise HumanActionRequiredError(hold.message, details=dict(hold.details))
         if not durable.execution_selection.legacy:
@@ -428,6 +461,9 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
         implementation_status = implement_state.get("status")
         if implementation_status in {"failed", "cancelled", "blocked"}:
+            recorded = self._recorded_execution_hold(implement_state)
+            if recorded is not None:
+                return Stage1Progression(Stage1ProgressionAction.HOLD, run, recorded)
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if implementation_status != "passed":
             result_path = _implementation_result_path(
@@ -712,6 +748,7 @@ class Stage1RunService:
             harness=self._require_harness(),
             manifest=request.manifest,
             head_branch=request.head_branch,
+            catalog=self._current_catalog(),
         ).collect(
             dispatched=self.runtime.recover_dispatched(
                 run_id=str(request.run.id),
@@ -720,6 +757,9 @@ class Stage1RunService:
             task=task,
             now=now,
             result_path=result_path,
+            launched_command=self.runtime.read_node_request(
+                run_id=str(request.run.id), node_id="implement"
+            ).command,
         )
 
     def validate_implementation(
