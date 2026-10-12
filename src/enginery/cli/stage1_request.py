@@ -127,7 +127,11 @@ def add_build_request_parser(
     )
     parser.add_argument("--required-check", dest="required_checks", action="append", default=None)
     parser.add_argument("--repair-limit", type=int, default=1)
-    parser.add_argument("--implementation-attempt-id", default="implement-0")
+    parser.add_argument(
+        "--implementation-attempt-id",
+        default=None,
+        help="Defaults to <run-id>-implement-0, unique per run on a shared ledger.",
+    )
     parser.add_argument(
         "--implementation-operation-id", default=None, help="Defaults to implement:<run-id>."
     )
@@ -315,7 +319,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         else ("CI",),
         repair_limit=args.repair_limit,
         implementation=Stage1ImplementationRequest(
-            attempt_id=args.implementation_attempt_id,
+            attempt_id=args.implementation_attempt_id or f"{run_id}-implement-0",
             operation_id=implementation_operation_id,
             time_budget_seconds=args.implementation_time_budget_seconds,
             cost_budget=_cost_budget(args),

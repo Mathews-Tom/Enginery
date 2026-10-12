@@ -17,11 +17,15 @@ from typing import cast
 
 import pytest
 
+from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
+from enginery.cli.stage1 import _harness_for
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from tests.cli.test_stage1_execution_cli import _Run
+from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
+from tests.cli.test_stage1_execution_cli import _build_argv, _Run
+from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
 
 _WINDOW = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
@@ -150,3 +154,90 @@ def test_watch_advance_dispatches_queued_work_once_after_capacity_is_released(
     after = _watch(capsys, run, advance=False)
     assert after["next_action"] in {"wait", "collect_implementation"}
     assert len(run.launches()) == 1
+
+
+def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledger(
+    tmp_path: Path,
+) -> None:
+    first_path, second_path = tmp_path / "first.json", tmp_path / "second.json"
+    assert main(_build_argv(tmp_path, output=first_path)) == 0
+    second = _occupier(tmp_path)  # a second repository with a commit, reused as run 2's
+    assert (
+        main(
+            _build_argv(
+                tmp_path,
+                "--run-id",
+                "run-2",
+                "--repository",
+                "owner/other",
+                "--external-reference",
+                "owner/other#1",
+                "--repository-path",
+                str(second.repository_path),
+                "--base-revision",
+                second.base_revision,
+                "--workspace-path",
+                str(tmp_path / "workspace-2"),
+                "--artifact-root",
+                str(tmp_path / "artifacts-2"),
+                output=second_path,
+            )
+        )
+        == 0
+    )
+    database = tmp_path / "shared.db"
+    for path in (first_path, second_path):
+        assert (
+            main(
+                [
+                    "stage1",
+                    "start",
+                    "--database",
+                    str(database),
+                    "--owner",
+                    "op",
+                    "--request",
+                    str(path),
+                ]
+            )
+            == 0
+        )
+    first = stage1_request_from_state(json.loads(first_path.read_text()))
+    other = stage1_request_from_state(json.loads(second_path.read_text()))
+    assert first.implementation.attempt_id == "run-1-implement-0"
+    assert other.implementation.attempt_id == "run-2-implement-0"
+
+    ledger = LedgerService.open(database)
+    try:
+        runtime = CoordinatorRuntime(ledger, owner="op")
+        for request in (first, other):
+            service = Stage1RunService(
+                runtime=runtime,
+                ledger=ledger,
+                work_ledger=cast(WorkLedgerPort, TerminalWorkLedger(request.work_snapshot)),
+                pull_requests=cast(PullRequestPort, RecordingPullRequests()),
+                harness=_harness_for(request.execution_configuration),
+            )
+            now = datetime.now(UTC)
+            service.qualify(
+                request,
+                external_reference=request.work_snapshot.work_item.external_reference,
+                applicable_criteria=request.applicable_criteria,
+                now=now,
+                heartbeat_window=_WINDOW,
+            )
+            dispatched = service.dispatch_implementation(
+                request,
+                now=now,
+                heartbeat_window=_WINDOW,
+                lease_window=timedelta(minutes=10),
+                limits=_LIMITS,
+            )
+            assert dispatched.fixture is not None
+            assert dispatched.fixture.lease.attempt_id == request.implementation.attempt_id
+            epoch = runtime.claim_epoch(now=now, heartbeat_window=_WINDOW)
+            runtime.cancel_node(
+                run_id=str(request.run.id), node_id="implement", epoch=epoch.epoch, now=now
+            )
+    finally:
+        ledger.close()

@@ -1905,8 +1905,8 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
             lease_window=timedelta(seconds=60),
             limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
         )
-        assert dispatch.task.attempt_id.value == "implement-1"
-        assert dispatch.fixture.lease.attempt_id == "implement-1"
+        assert dispatch.task.attempt_id.value == f"{request.run.id}-implement-1"
+        assert dispatch.fixture.lease.attempt_id == f"{request.run.id}-implement-1"
         # A repair generation after a failure is bound to the run's original pins; nothing
         # re-resolves, downgrades, or substitutes a model or effort.
         assert dispatch.task.selection == request.execution_selection

@@ -687,7 +687,7 @@ class Stage1RunService:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
                 )
-            attempt_id = f"implement-{generation}"
+            attempt_id = f"{request.run.id}-implement-{generation}"
             operation_id = OperationId.derive(
                 run_id=request.run.id,
                 node_id=NodeId("implement"),
