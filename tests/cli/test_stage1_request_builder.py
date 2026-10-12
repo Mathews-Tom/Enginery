@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.capabilities.lock import (
     CapabilityLock,
     LockedCapability,
@@ -21,6 +22,7 @@ from enginery.cli.stage1_request import (
     _NO_CAPABILITY_LOCK_DIGEST,
 )
 from enginery.domain.digests import Digest
+from enginery.domain.execution_catalog import SupportTier
 from enginery.workflows.stage1 import stage1_request_from_state
 
 
@@ -109,6 +111,38 @@ def test_build_request_output_round_trips_through_stage1_start_unmodified(
     )
 
     assert start_exit == 0
+
+
+@pytest.mark.parametrize("harness", ["omp", "claude-code"])
+def test_build_request_binds_a_host_default_selection_against_the_packaged_catalog(
+    tmp_path: Path, harness: str
+) -> None:
+    repository, base_revision = _repository(tmp_path)
+    output = tmp_path / "request.json"
+
+    exit_code = main(
+        [
+            *_minimal_argv(
+                tmp_path=tmp_path,
+                repository=repository,
+                base_revision=base_revision,
+                output=output,
+            ),
+            "--harness-provider",
+            harness,
+        ]
+    )
+
+    assert exit_code == 0
+    request = stage1_request_from_state(json.loads(output.read_text(encoding="utf-8")))
+    selection = request.execution_selection
+    assert selection.harness == harness
+    assert not selection.legacy
+    assert selection.mode.value == "host_default"
+    assert selection.selected_model is None
+    assert selection.selected_effort is None
+    assert selection.catalog_digest == load_execution_catalog().digest
+    assert selection.support_tier is SupportTier.EXPERIMENTAL
 
 
 def test_build_request_defaults_match_documented_example(tmp_path: Path) -> None:

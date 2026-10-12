@@ -14,6 +14,7 @@ from enginery.cli.stage1 import _lease_window
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -26,6 +27,7 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     stage1_request_from_state,
 )
+from tests.support.execution import selection_for
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -149,6 +151,72 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
     assert json.loads(capsys.readouterr().out)["status"] == "passed"
 
 
+@pytest.mark.parametrize("command", ["approve", "reject"])
+def test_stage1_human_decisions_on_a_pinned_run_record_its_selection_digest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    pinned = selection_for("omp", model="openai/gpt-5.2", effort="high")
+    database = tmp_path / "ledger.db"
+    request = _start_request(database, tmp_path, selection=pinned)
+    capsys.readouterr()
+    _register_qualify_and_human_node(database, request, node_id="no_change_confirmation")
+
+    assert (
+        _lifecycle(
+            database,
+            command,
+            "--run-id",
+            "run-stage1",
+            "--node-id",
+            "no_change_confirmation",
+            "--reason",
+            "operator decision",
+        )
+        == 0
+    )
+
+    state = _node_state(database, "no_change_confirmation")
+    assert state["execution_selection_digest"] == str(pinned.digest)
+    assert state["status"] == ("passed" if command == "approve" else "failed")
+
+
+def test_stage1_human_decisions_on_a_pre_selection_run_record_no_selection_digest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    legacy = replace(
+        _request(tmp_path), execution_selection=ExecutionSelection.legacy_host_default("omp")
+    )
+    ledger = LedgerService.open(database)
+    try:
+        CoordinatorRuntime(ledger, owner="stage1-cli").register_run(
+            run_id="run-stage1",
+            initial_state=legacy.initial_state(),
+            now=datetime.now(tz=UTC),
+            heartbeat_window=timedelta(seconds=60),
+        )
+    finally:
+        ledger.close()
+    capsys.readouterr()
+    _register_qualify_and_human_node(database, legacy, node_id="no_change_confirmation")
+
+    assert (
+        _lifecycle(
+            database,
+            "approve",
+            "--run-id",
+            "run-stage1",
+            "--node-id",
+            "no_change_confirmation",
+            "--reason",
+            "operator decision",
+        )
+        == 0
+    )
+
+    assert "execution_selection_digest" not in _node_state(database, "no_change_confirmation")
+
+
 def test_stage1_cancel_rejects_human_wait_without_worker_lease(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -206,12 +274,28 @@ def test_stage1_rejects_human_wait_and_invalid_request(
     assert "UTF-8" in capsys.readouterr().err
 
 
-def _start_request(database: Path, tmp_path: Path) -> Stage1RunRequest:
+def _start_request(
+    database: Path, tmp_path: Path, *, selection: ExecutionSelection | None = None
+) -> Stage1RunRequest:
     request = _request(tmp_path)
+    if selection is not None:
+        request = replace(request, execution_selection=selection)
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
     assert _start(database, request_path) == 0
     return request
+
+
+def _node_state(database: Path, node_id: str) -> dict[str, object]:
+    ledger = LedgerService.open(database)
+    try:
+        projection = ledger.read_projection(
+            aggregate_type="runtime_node", aggregate_id=f"run-stage1:{node_id}"
+        )
+        assert projection is not None
+        return dict(projection.state)
+    finally:
+        ledger.close()
 
 
 def _start(database: Path, request_path: Path) -> int:
@@ -353,6 +437,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         repository_id="Mathews-Tom/Enginery",
         repository_path=tmp_path.resolve(),
         workspace_path=(tmp_path / "workspace").resolve(),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/Enginery",
             github_credential_reference="test-github-keyring",

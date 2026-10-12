@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.application.work_ports import (
     ChangeSet,
@@ -56,6 +57,7 @@ def _task(**overrides: object) -> HarnessTask:
         "constraints": ("no network",),
         "permitted_capabilities": ("repository-read",),
         "evidence_requirements": ("test report",),
+        "selection": selection_for("omp"),
         "time_budget_seconds": 300,
         "cost_budget": Decimal("1.50"),
     }

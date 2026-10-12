@@ -141,9 +141,15 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.execution_selection import (
+    LayerControls,
+    SelectionLayer,
+    resolve_execution_selection,
+)
 from enginery.domain.ids import RunId, WorkItemId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -215,6 +221,10 @@ request = Stage1RunRequest(
         cost_budget=Decimal("5.0"),
         permitted_capabilities=("git",),
         evidence_requirements=("redacted harness transcript",),
+    ),
+    execution_selection=resolve_execution_selection(
+        (LayerControls(layer=SelectionLayer.RUN, harness="omp"),),  # same harness as below
+        catalog=load_execution_catalog(),
     ),
     execution_configuration=Stage1ExecutionConfiguration(
         github_repository="<owner>/<repository>",

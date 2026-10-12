@@ -112,6 +112,7 @@ from enginery.adapters.local_service import (
 )
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
 from enginery.application.delivery_ports import DeploymentRequest
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -125,6 +126,11 @@ from enginery.application.work_ports import (
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
+from enginery.domain.execution_selection import (
+    LayerControls,
+    SelectionLayer,
+    resolve_execution_selection,
+)
 from enginery.domain.ids import (
     NodeId,
     OperationId,
@@ -352,6 +358,10 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
             cost_budget=Decimal("1.0"),
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
+        ),
+        execution_selection=resolve_execution_selection(
+            (LayerControls(layer=SelectionLayer.RUN, harness="omp"),),
+            catalog=load_execution_catalog(),
         ),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="local/full-system-gate-fixture",

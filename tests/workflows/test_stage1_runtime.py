@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import (
@@ -30,6 +31,7 @@ from enginery.domain.errors import (
     InvalidInputError,
     MissingPrerequisiteError,
 )
+from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.node_attempt import EvidenceResult, ReconciliationResult
 from enginery.domain.observation import ObservationState
@@ -318,6 +320,7 @@ def test_review_persists_human_wait_and_independent_decision(
         report=report,
         repair_attempt=0,
         repair_limit=1,
+        execution_selection_digest=None,
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
@@ -333,6 +336,7 @@ def test_review_persists_human_wait_and_independent_decision(
         report=report,
         repair_attempt=1,
         repair_limit=1,
+        execution_selection_digest=None,
         now=now + timedelta(seconds=1),
         heartbeat_window=timedelta(seconds=60),
     )
@@ -648,6 +652,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         manifest=manifest,
         repository_id="repository-1",
         repository_path=repository,
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/Enginery",
             github_credential_reference="test-github-keyring",
@@ -726,6 +731,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         "Create and work only on branch 'enginery/stage1' from "
         f"{base_revision!r}; commit and push the completed change to origin."
     )
+    assert implementation.task.selection == request.execution_selection
     assert service.next_action(request.run.id).action.value == "wait"
     deadline = time.monotonic() + 5
     while not implementation.result_path.is_file():
@@ -918,6 +924,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1119,6 +1126,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1260,6 +1268,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1453,6 +1462,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1636,6 +1646,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1787,6 +1798,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp", model="openai/gpt-5.2", effort="high"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -1892,6 +1904,11 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         )
         assert dispatch.task.attempt_id.value == "implement-1"
         assert dispatch.fixture.lease.attempt_id == "implement-1"
+        # A repair generation after a failure is bound to the run's original pins; nothing
+        # re-resolves, downgrades, or substitutes a model or effort.
+        assert dispatch.task.selection == request.execution_selection
+        assert dispatch.task.selection.selected_model == "openai/gpt-5.2"
+        assert dispatch.task.selection.selected_effort == "high"
         assert dispatch.fixture.lease.operation_id != str(request.implementation.operation_id)
         assert any("failed exact-head CI" in constraint for constraint in dispatch.task.constraints)
         assert any(
@@ -1982,6 +1999,7 @@ def _check_disposition_fixture(
     start: bool = True,
     manifest_transform: Callable[[WorkflowManifest], WorkflowManifest] | None = None,
     validation_commands: tuple[tuple[str, ...], ...] = (("uv", "run", "pytest", "-q"),),
+    execution_selection: ExecutionSelection | None = None,
 ) -> tuple[Stage1RunRequest, Stage1RunService, CoordinatorRuntime, RecordingPullRequests, datetime]:
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
     repository = tmp_path / "repository"
@@ -2036,6 +2054,7 @@ def _check_disposition_fixture(
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=execution_selection or selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",
@@ -2107,16 +2126,23 @@ def _complete_check_node(
 
 
 def _drive_check_to_non_pass(
-    ledger_service: LedgerService, tmp_path: Path, *, check_id: str, result: str
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    *,
+    check_id: str,
+    result: str,
+    execution_selection: ExecutionSelection | None = None,
 ) -> tuple[Stage1RunService, Stage1RunRequest, int]:
     """Drive the real Stage 1 executors until ``check_id`` yields a ``result`` non-pass.
 
-    Returns the service, the request, and the repair budget remaining at that point.
+    Returns the service, the request, and the repair budget remaining at that point. A
+    ``result`` of ``pass`` drives the run through merge-ready verification unmodified.
     """
     request, service, runtime, pull_requests, now = _check_disposition_fixture(
         ledger_service,
         tmp_path,
         source_drift=check_id == STAGE1_VERIFY_CHECK_ID and result == "fail",
+        execution_selection=execution_selection,
     )
     heartbeat = timedelta(seconds=60)
     _complete_check_node(runtime, request, "qualify", now)

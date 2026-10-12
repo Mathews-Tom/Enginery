@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import HarnessTask
@@ -113,6 +114,7 @@ def test_stage1_implementation_records_the_declared_workspace_lifecycle(
         evidence_requirements=("test report",),
         time_budget_seconds=30,
         cost_budget=Decimal("1.00"),
+        selection=selection_for("omp"),
     )
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     harness = OmpHarness(
@@ -263,6 +265,7 @@ def test_stage1_implementation_retries_a_terminal_agent_node_with_a_fresh_attemp
             evidence_requirements=("test report",),
             time_budget_seconds=30,
             cost_budget=Decimal("1.00"),
+            selection=selection_for("omp"),
         )
         dispatch = executor.dispatch(
             FixtureDispatch(
@@ -360,6 +363,7 @@ def test_stage1_implementation_rejects_a_second_dispatch_while_the_first_is_stil
         evidence_requirements=("test report",),
         time_budget_seconds=30,
         cost_budget=Decimal("1.00"),
+        selection=selection_for("omp"),
     )
     dispatch = executor.dispatch(
         FixtureDispatch(
@@ -398,6 +402,7 @@ def test_stage1_implementation_rejects_a_second_dispatch_while_the_first_is_stil
         evidence_requirements=("test report",),
         time_budget_seconds=30,
         cost_budget=Decimal("1.00"),
+        selection=selection_for("omp"),
     )
     retry_dispatch = executor.dispatch(
         FixtureDispatch(

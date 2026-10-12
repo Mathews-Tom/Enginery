@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.application.work_ports import DeclaredWorkClassification, WorkLedgerSnapshot
 from enginery.cli.main import main
@@ -96,6 +97,7 @@ def _stage1_request(
         repository_id=repository,
         repository_path=(root / "repository").resolve(),
         workspace_path=(root / "workspace").resolve(),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository=repository,
             github_credential_reference="test-github-keyring",

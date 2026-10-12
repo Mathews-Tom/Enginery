@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.claude_code import ClaudeCodeAdapterConfig, ClaudeCodeHarness
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
@@ -129,7 +130,7 @@ _PROVIDERS = (
 )
 
 
-def _task(workspace: Path, *, operation_id: str = "contract-start-1") -> HarnessTask:
+def _task(workspace: Path, *, harness: str, operation_id: str = "contract-start-1") -> HarnessTask:
     return HarnessTask(
         run_id=RunId("run-1"),
         node_id=NodeId("implement"),
@@ -143,6 +144,7 @@ def _task(workspace: Path, *, operation_id: str = "contract-start-1") -> Harness
         evidence_requirements=("test report",),
         time_budget_seconds=60,
         cost_budget=Decimal("1.00"),
+        selection=selection_for(harness),
     )
 
 
@@ -164,7 +166,7 @@ def test_malformed_output_raises_the_same_normalized_failure_class(
 ) -> None:
     """A line that is not JSON is a WorkerFailureError, not a silently dropped event."""
     harness = provider.build(tmp_path, process=_RecordedProcess("not json"))
-    session = harness.start(_task(tmp_path))  # type: ignore[attr-defined]
+    session = harness.start(_task(tmp_path, harness=provider.name))  # type: ignore[attr-defined]
 
     with pytest.raises(WorkerFailureError):
         tuple(harness.events(session))  # type: ignore[attr-defined]
@@ -176,7 +178,7 @@ def test_a_started_run_reaches_a_terminal_succeeded_status(
 ) -> None:
     """Both adapters normalize a clean run into started ... terminal / succeeded."""
     harness = provider.build(tmp_path, process=_RecordedProcess(provider.success_output()))
-    session = harness.start(_task(tmp_path))  # type: ignore[attr-defined]
+    session = harness.start(_task(tmp_path, harness=provider.name))  # type: ignore[attr-defined]
 
     events = tuple(harness.events(session))  # type: ignore[attr-defined]
     result = harness.result(session)  # type: ignore[attr-defined]
@@ -198,7 +200,7 @@ def test_cancellation_and_a_coordinator_triggered_timeout_share_one_code_path(
     process = _RecordedProcess(provider.success_output(), returncode=-15)
     terminated: list[int] = []
     harness = provider.build(tmp_path, process=process, terminator=terminated.append)
-    session = harness.start(_task(tmp_path))  # type: ignore[attr-defined]
+    session = harness.start(_task(tmp_path, harness=provider.name))  # type: ignore[attr-defined]
     process.running = True
 
     outcome = harness.cancel(session, operation_id=OperationId("contract-start-1"))  # type: ignore[attr-defined]
@@ -226,7 +228,7 @@ def test_no_provider_named_field_appears_on_the_shared_task_or_session_types(
     providers -- carry no omp_*/claude_code_* attribute; only the adapter module
     each provider lives in is provider-named, never the shared contract surface."""
     session = HarnessSession(session_id="s", operation_id=OperationId("op"))
-    task_fields = {field.name for field in fields(_task(tmp_path))}
+    task_fields = {field.name for field in fields(_task(tmp_path, harness=provider.name))}
     session_fields = {field.name for field in fields(session)}
 
     for field_names in (task_fields, session_fields):

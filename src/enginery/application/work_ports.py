@@ -11,6 +11,7 @@ from typing import Protocol
 from enginery.application.adapter_types import AdapterStatus, NormalizedAdapterEvent
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.digests import Digest
+from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.work_item import WorkItem
@@ -140,6 +141,7 @@ class HarnessTask:
     evidence_requirements: tuple[str, ...]
     time_budget_seconds: int
     cost_budget: Decimal | None
+    selection: ExecutionSelection
 
     def __post_init__(self) -> None:
         if not self.workspace_path.is_absolute():

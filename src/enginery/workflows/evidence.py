@@ -22,6 +22,7 @@ class Stage1EvidenceBundle:
     verification_artifacts: tuple[Digest, ...]
     outcome: PullRequestOutcome
     observed_at: datetime
+    execution_selection_digest: Digest | None = None
 
     def __post_init__(self) -> None:
         if any(
@@ -42,24 +43,35 @@ class Stage1EvidenceBundle:
 
     @property
     def digest(self) -> Digest:
-        return Digest.of_json(
-            {
-                "base_revision": self.base_revision,
-                "head_revision": self.head_revision,
-                "implementation_artifacts": [str(item) for item in self.implementation_artifacts],
-                "issue_revision": self.issue_revision,
-                "outcome": self.outcome.value,
-                "pull_request_number": self.pull_request_number,
-                "verification_artifacts": [str(item) for item in self.verification_artifacts],
-            }
-        )
+        payload: dict[str, object] = {
+            "base_revision": self.base_revision,
+            "head_revision": self.head_revision,
+            "implementation_artifacts": [str(item) for item in self.implementation_artifacts],
+            "issue_revision": self.issue_revision,
+            "outcome": self.outcome.value,
+            "pull_request_number": self.pull_request_number,
+            "verification_artifacts": [str(item) for item in self.verification_artifacts],
+        }
+        if self.execution_selection_digest is not None:
+            # Evidence produced under a bound execution selection is superseded by any
+            # change to it. Evidence from a run that predates selections keeps its digest.
+            payload["execution_selection_digest"] = str(self.execution_selection_digest)
+        return Digest.of_json(payload)
 
-    def current_for(self, *, issue_revision: str, base_revision: str, head_revision: str) -> bool:
-        """Return whether every terminal subject still matches this bundle."""
+    def current_for(
+        self,
+        *,
+        issue_revision: str,
+        base_revision: str,
+        head_revision: str,
+        execution_selection_digest: Digest | None = None,
+    ) -> bool:
+        """Return whether every terminal subject, including the execution selection, matches."""
         return (
             issue_revision == self.issue_revision
             and base_revision == self.base_revision
             and head_revision == self.head_revision
+            and execution_selection_digest == self.execution_selection_digest
         )
 
 
