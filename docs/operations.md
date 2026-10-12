@@ -327,6 +327,12 @@ sentinels the documented manual script uses. The command never
 contacts GitHub, OMP, or any external provider — it only writes a
 local file.
 
+A new `stage1 start` accepts only a request whose manifest binds the current check
+contracts. Requests written by `v0.5.0`'s `stage1 build-request` (manifest schema 1)
+are rejected at start and must be rebuilt with the current `enginery stage1 build-request`.
+A run already started from such a request is read and resumed unchanged. A validation
+command that launches a shell interpreter is also rejected at start.
+
 Every step after `stage1 start` runs through `enginery stage1 watch
 --advance`, which performs **at most one durable next action** derived
 purely from the ledger and returns the next action still pending:

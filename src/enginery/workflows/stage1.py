@@ -38,8 +38,8 @@ from enginery.domain.serialization import (
     workflow_manifest_from_dict,
     workflow_manifest_to_dict,
 )
-from enginery.domain.workflow.check import reject_shell_invocation
 from enginery.domain.workflow.manifest import CHECK_BINDING_SCHEMA_VERSION, WorkflowManifest
+from enginery.domain.workflow.shell_guard import reject_shell_invocation
 from enginery.engine.runtime import (
     RUN_AGGREGATE_TYPE,
     RUNTIME_NODE_AGGREGATE_TYPE,
