@@ -123,6 +123,7 @@ def _request(snapshot: WorkLedgerSnapshot) -> Stage1VerificationRequest:
         ),
         implementation_artifacts=(Digest.of_bytes(b"implementation"),),
         verification_artifacts=(Digest.of_bytes(b"verification"),),
+        execution_selection_digest=None,
     )
 
 

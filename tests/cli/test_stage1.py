@@ -26,6 +26,7 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     stage1_request_from_state,
 )
+from tests.support.execution import selection_for
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -353,6 +354,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         repository_id="Mathews-Tom/Enginery",
         repository_path=tmp_path.resolve(),
         workspace_path=(tmp_path / "workspace").resolve(),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/Enginery",
             github_credential_reference="test-github-keyring",

@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.claude_code import ClaudeCodeAdapterConfig, ClaudeCodeHarness
 from enginery.application.work_ports import HarnessTask
@@ -45,6 +46,7 @@ def _task(workspace: Path, *, operation_id: str = "claude-code-start-1") -> Harn
         evidence_requirements=("test report",),
         time_budget_seconds=60,
         cost_budget=Decimal("1.00"),
+        selection=selection_for("claude-code"),
     )
 
 

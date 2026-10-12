@@ -37,6 +37,7 @@ class Stage1VerificationRequest:
     requirements: PullRequestRequirements
     implementation_artifacts: tuple[Digest, ...]
     verification_artifacts: tuple[Digest, ...]
+    execution_selection_digest: Digest | None
 
     def __post_init__(self) -> None:
         if any(
@@ -105,6 +106,7 @@ class Stage1VerificationExecutor:
             verification_artifacts=request.verification_artifacts,
             outcome=PullRequestOutcome.MERGE_READY,
             observed_at=observed_at,
+            execution_selection_digest=request.execution_selection_digest,
         )
         published = self.work_ledger.publish_lifecycle(
             LifecycleProjection(

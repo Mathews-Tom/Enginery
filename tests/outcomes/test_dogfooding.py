@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.execution import selection_for
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger, _snapshot
 
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
@@ -105,6 +106,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="Mathews-Tom/enginery-provider-smoke",
             github_credential_reference="test-github-keyring",

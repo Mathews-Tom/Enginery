@@ -112,6 +112,7 @@ def _watch(args: argparse.Namespace) -> None:
                 "action_taken": previous.action.value if args.advance else None,
                 "next_action": progression.action.value,
                 "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
+                "hold": None if progression.hold is None else progression.hold.to_state(),
             }
         )
     finally:
@@ -166,17 +167,25 @@ def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        selection = (
+            Stage1RunService(runtime=runtime, ledger=ledger)
+            .read(RunId(args.run_id))
+            .request.execution_selection
+        )
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=_HEARTBEAT_WINDOW)
+        extra: dict[str, object] = {
+            "operator_decision": "approved" if approved else "rejected",
+            "reason": args.reason,
+        }
+        if not selection.legacy:
+            extra["execution_selection_digest"] = str(selection.digest)
         runtime.resolve_human_wait(
             run_id=args.run_id,
             node_id=args.node_id,
             epoch=epoch.epoch,
             now=_now(),
             outcome="passed" if approved else "failed",
-            extra={
-                "operator_decision": "approved" if approved else "rejected",
-                "reason": args.reason,
-            },
+            extra=extra,
         )
         _print(
             {

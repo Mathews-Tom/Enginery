@@ -28,11 +28,17 @@ import shlex
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.capabilities.serialization import read_lock
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.execution_selection import (
+    LayerControls,
+    SelectionLayer,
+    resolve_execution_selection,
+)
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
 from enginery.domain.work_item import WorkItem, WorkItemState
@@ -289,6 +295,10 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             harness_credential_reference=args.harness_credential_reference,
             harness_executable=_harness_executable(args),
             artifact_root=args.artifact_root.resolve(),
+        ),
+        execution_selection=resolve_execution_selection(
+            (LayerControls(layer=SelectionLayer.RUN, harness=args.harness_provider),),
+            catalog=load_execution_catalog(),
         ),
     )
 

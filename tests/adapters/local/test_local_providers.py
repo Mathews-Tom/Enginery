@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tests.support.execution import selection_for
+
 from enginery.adapters.local import (
     LocalCapabilitySource,
     LocalDeploymentFixture,
@@ -55,6 +57,7 @@ def test_scripted_harness_streams_normalized_events_and_reconciles() -> None:
         evidence_requirements=("test report",),
         time_budget_seconds=60,
         cost_budget=None,
+        selection=selection_for("omp"),
     )
 
     session = harness.start(task)

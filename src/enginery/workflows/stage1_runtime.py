@@ -152,6 +152,7 @@ class Stage1ReviewExecutor:
         report: ReviewReport,
         repair_attempt: int,
         repair_limit: int,
+        execution_selection_digest: Digest | None,
         now: datetime,
         heartbeat_window: timedelta,
     ) -> Stage1ReviewResult:
@@ -184,6 +185,11 @@ class Stage1ReviewExecutor:
                 "reviewer": report.reviewer,
                 "producer": report.producer,
                 "finding_ids": [finding.finding_id for finding in report.findings],
+                **(
+                    {}
+                    if execution_selection_digest is None
+                    else {"execution_selection_digest": str(execution_selection_digest)}
+                ),
             },
         )
         return Stage1ReviewResult(outcome=outcome)

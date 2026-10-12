@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import HarnessTask
@@ -45,6 +46,7 @@ def _task(workspace: Path) -> HarnessTask:
         evidence_requirements=("test report",),
         time_budget_seconds=60,
         cost_budget=Decimal("1.00"),
+        selection=selection_for("omp"),
     )
 
 

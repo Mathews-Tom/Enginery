@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.support.execution import selection_for
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests, GitHubWorkLedger
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
@@ -180,6 +181,7 @@ def test_github_and_omp_provider_smoke(tmp_path: Path) -> None:
                 evidence_requirements=("terminal JSON event",),
                 time_budget_seconds=60,
                 cost_budget=Decimal("1.00"),
+                selection=selection_for("omp"),
             )
         )
         assert tuple(harness.events(session))

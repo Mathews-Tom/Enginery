@@ -77,6 +77,19 @@ configured harness CLI (`omp` or `claude`) each resolve their own
 already-authenticated local session; Enginery never reads, stores, or
 serializes a literal secret value.
 
+The request also carries an `execution_selection` block: the harness a run
+requested and, optionally, a model and a native effort, each recorded with
+the layer that supplied it, together with the digest of the packaged
+execution-control catalog it was resolved against. `build-request` binds the
+host's own default model and effort unless told otherwise. A run persisted
+before this block existed keeps its original request digest, decodes
+unchanged, and runs as a host default with unknown effective controls;
+Enginery never invents a selection for it. If the packaged catalog differs
+from the one a run was bound to (for example after upgrading Enginery),
+`enginery stage1 watch` reports the run as held with a diagnostic and
+refuses to advance it; the run's original binding is retained, never
+rebound.
+
 The layered repository/user/workflow-profile TOML configuration model
 described in the system design is a forward design target for a later
 milestone, not present-state behavior. Do not write a `.toml` configuration

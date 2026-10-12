@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import (
     DeclaredWorkClassification,
     HarnessResult,
@@ -22,10 +23,17 @@ from enginery.application.work_ports import (
 from enginery.domain.digests import Digest
 from enginery.domain.errors import (
     ExternalConflictError,
+    HumanActionRequiredError,
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
     StaleEvidenceError,
+)
+from enginery.domain.execution_catalog import ExecutionCatalog
+from enginery.domain.execution_selection import (
+    ExecutionHold,
+    ExecutionSelection,
+    detect_catalog_drift,
 )
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
@@ -93,6 +101,7 @@ class Stage1RunRequest:
     repair_limit: int
     implementation: Stage1ImplementationRequest
     execution_configuration: Stage1ExecutionConfiguration
+    execution_selection: ExecutionSelection
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -131,6 +140,14 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 requires non-blank exact-head checks")
         if self.repair_limit < 0:
             raise InvalidInputError("Stage 1 repair_limit cannot be negative")
+        if self.execution_selection.harness != self.execution_configuration.harness_provider:
+            raise InvalidInputError(
+                "Stage 1 execution selection harness must match the configured harness provider",
+                details={
+                    "selection_harness": self.execution_selection.harness,
+                    "harness_provider": self.execution_configuration.harness_provider,
+                },
+            )
 
     @property
     def digest(self) -> Digest:
@@ -187,6 +204,10 @@ class Stage1RunRequest:
             state["classification_provenance"] = (
                 self.work_snapshot.classification_provenance.to_state()
             )
+        if not self.execution_selection.legacy:
+            # A run persisted before execution selections existed has no selection key, so
+            # its state, and therefore its request digest, is exactly what it was.
+            state["execution_selection"] = self.execution_selection.to_state()
         return state
 
 
@@ -269,6 +290,7 @@ class Stage1ProgressionAction(StrEnum):
     VERIFY = "verify"
     REGISTER_OUTCOME_OBSERVATION = "register_outcome_observation"
     WAIT = "wait"
+    HOLD = "hold"
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +299,7 @@ class Stage1Progression:
 
     action: Stage1ProgressionAction
     run: Stage1Run
+    hold: ExecutionHold | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +321,7 @@ class Stage1RunService:
     pull_requests: PullRequestPort | None = None
     harness: SupervisedHarness | None = None
     outcomes: OutcomeCaptureService | None = None
+    execution_catalog: ExecutionCatalog | None = None
 
     def start(
         self,
@@ -310,9 +334,10 @@ class Stage1RunService:
 
         A new run must bind the current check contracts: its manifest must be at a
         check-binding schema version, every check it binds must match the acceptance
-        baseline, and request-supplied validation commands cannot invoke a shell. A run
-        whose projection already exists is a restart and is read back unchanged, so a
-        persisted run from before check contracts keeps its original fingerprint.
+        baseline, and request-supplied validation commands cannot invoke a shell. It must
+        also bind an explicit execution selection. A run whose projection already exists is
+        a restart and is read back unchanged, so a persisted run from before check
+        contracts or execution selections keeps its original fingerprint and binding.
         """
         if (
             self.ledger.read_projection(
@@ -321,6 +346,7 @@ class Stage1RunService:
             is None
         ):
             _require_current_check_contracts(request)
+            _require_bound_selection(request)
         self.runtime.register_run(
             run_id=str(request.run.id),
             initial_state=request.initial_state(),
@@ -341,7 +367,43 @@ class Stage1RunService:
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
 
     def next_action(self, run_id: RunId) -> Stage1Progression:
-        """Derive at most one safe action from the durable run and node projections."""
+        """Derive at most one safe action, or hold a run whose catalog binding drifted.
+
+        A hold never rebinds the run: its original selection and catalog digest stay as
+        recorded, and only human waits and idle observation continue to be reported.
+        """
+        progression = self._derive_progression(run_id)
+        hold = self._catalog_hold(progression.run.request)
+        if hold is None or progression.action in {
+            Stage1ProgressionAction.WAIT,
+            Stage1ProgressionAction.AWAIT_HUMAN_REVIEW,
+        }:
+            return progression
+        return Stage1Progression(Stage1ProgressionAction.HOLD, progression.run, hold)
+
+    def _current_catalog(self) -> ExecutionCatalog:
+        return self.execution_catalog or load_execution_catalog()
+
+    def _catalog_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
+        return detect_catalog_drift(request.execution_selection, current=self._current_catalog())
+
+    def _require_executable(self, request: Stage1RunRequest) -> None:
+        """Reject a request that is not the durable binding or whose catalog drifted."""
+        durable = self.read(request.run.id).request
+        if durable.digest != request.digest:
+            raise StaleEvidenceError(
+                "Stage 1 request does not match the durable run binding",
+                details={
+                    "run_id": str(request.run.id),
+                    "bound_request_digest": str(durable.digest),
+                    "supplied_request_digest": str(request.digest),
+                },
+            )
+        hold = self._catalog_hold(durable)
+        if hold is not None:
+            raise HumanActionRequiredError(hold.message, details=dict(hold.details))
+
+    def _derive_progression(self, run_id: RunId) -> Stage1Progression:
         run = self.read(run_id)
         qualification_status = self._node_status(run_id, "qualify")
         if qualification_status is None:
@@ -382,7 +444,11 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
         review_state = self._node_state_optional(run_id, "review")
-        if review_state is None or _generation(_string(review_state, "attempt_id")) != generation:
+        if (
+            review_state is None
+            or _generation(_string(review_state, "attempt_id")) != generation
+            or not _decision_bound(review_state, run.request)
+        ):
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if self._review_outcome(run_id) is not ReviewOutcome.APPROVED:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
@@ -511,6 +577,7 @@ class Stage1RunService:
                 },
             )
         self.start(request, now=now, heartbeat_window=heartbeat_window)
+        self._require_executable(request)
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
                 request,
@@ -539,6 +606,7 @@ class Stage1RunService:
         limits: SchedulingLimits,
     ) -> Stage1ImplementationDispatch:
         """Launch one OMP attempt only after durable successful qualification."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "qualify")
         existing = self._node_state_optional(request.run.id, "implement")
         if existing is None:
@@ -627,6 +695,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> HarnessResult:
         """Claim the current epoch, then ingest a completed supervised OMP result."""
+        self._require_executable(request)
         self.runtime.claim_epoch(now=now, heartbeat_window=heartbeat_window)
         implement_state = self._node_state(request.run.id, "implement")
         attempt_id = _string(implement_state, "attempt_id")
@@ -658,6 +727,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> Stage1ValidationResult:
         """Run configured focused validation after the OMP result is durable."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "implement")
         generation = self._implement_generation(request.run.id)
         return Stage1ValidationExecutor(
@@ -698,6 +768,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> Stage1ReviewResult:
         """Record an independent review only after passed validation."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "validate")
         return Stage1ReviewExecutor(self.runtime).review(
             dispatch=WorkflowNodeDispatch(
@@ -722,6 +793,7 @@ class Stage1RunService:
             report=report,
             repair_attempt=repair_attempt,
             repair_limit=request.repair_limit,
+            execution_selection_digest=_selection_digest(request),
             now=now,
             heartbeat_window=heartbeat_window,
         )
@@ -734,6 +806,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> None:
         """Persist a PR intent, then create or reconcile exactly one source-host PR."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "review")
         if self._review_outcome(request.run.id) is not ReviewOutcome.APPROVED:
             raise MissingPrerequisiteError("Stage 1 requires an approved independent review")
@@ -844,6 +917,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> PullRequestOutcome:
         """Observe exact-head CI until it passes or produces a terminal failure."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "open_pr")
         open_pr = self._node_state(request.run.id, "open_pr")
         generation = self._implement_generation(request.run.id)
@@ -902,6 +976,7 @@ class Stage1RunService:
         heartbeat_window: timedelta,
     ) -> Stage1VerificationResult:
         """Double-read current subjects before recording a merge-ready evidence bundle."""
+        self._require_executable(request)
         self._require_passed_node(request.run.id, "wait_for_ci")
         open_pr = self._node_state(request.run.id, "open_pr")
         generation = self._implement_generation(request.run.id)
@@ -932,6 +1007,7 @@ class Stage1RunService:
             verification_artifacts=(
                 _digest_from_string(_string(validation, "validation_artifact_digest")),
             ),
+            execution_selection_digest=_selection_digest(request),
         )
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
@@ -956,6 +1032,8 @@ class Stage1RunService:
         extra: dict[str, object] = {"pull_request_outcome": result.outcome.value}
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
+        if not request.execution_selection.legacy:
+            extra["execution_selection_digest"] = str(request.execution_selection.digest)
         self.runtime.complete_node(
             run_id=str(request.run.id),
             node_id="verify",
@@ -1079,6 +1157,7 @@ def _implementation_task(
         evidence_requirements=execution.evidence_requirements,
         time_budget_seconds=execution.time_budget_seconds,
         cost_budget=execution.cost_budget,
+        selection=request.execution_selection,
     )
 
 
@@ -1155,6 +1234,41 @@ def _fixture_dispatch(
     )
 
 
+def _require_bound_selection(request: Stage1RunRequest) -> None:
+    """Fail loudly unless a new run binds an explicit execution selection."""
+    if request.execution_selection.legacy:
+        raise InvalidInputError(
+            "a new Stage 1 run must bind an execution selection; rebuild the request with "
+            "the current `enginery stage1 build-request`",
+            details={"run_id": str(request.run.id)},
+        )
+
+
+def _selection_digest(request: Stage1RunRequest) -> Digest | None:
+    """Return the digest decisions and evidence bind to, or None for a pre-selection run."""
+    return None if request.execution_selection.legacy else request.execution_selection.digest
+
+
+def _decision_bound(state: Mapping[str, object], request: Stage1RunRequest) -> bool:
+    """Return whether a recorded decision names the run's bound execution selection.
+
+    A decision recorded under a different selection no longer authorizes this run's
+    output. A pre-selection run has no selection to name, so its decisions stand.
+    """
+    if request.execution_selection.legacy:
+        return True
+    return state.get("execution_selection_digest") == str(request.execution_selection.digest)
+
+
+def _selection_from_state(
+    state: Mapping[str, object], *, harness_provider: str
+) -> ExecutionSelection:
+    raw = state.get("execution_selection")
+    if raw is None:
+        return ExecutionSelection.legacy_host_default(harness_provider)
+    return ExecutionSelection.from_state(raw)
+
+
 def _require_current_check_contracts(request: Stage1RunRequest) -> None:
     """Fail loudly unless a new run binds the current check contracts."""
     manifest = request.manifest
@@ -1222,6 +1336,9 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         ),
         applicable_criteria=tuple(applicable_criteria_value),
         execution_configuration=execution_configuration,
+        execution_selection=_selection_from_state(
+            state, harness_provider=execution_configuration.harness_provider
+        ),
         required_checks=tuple(required_checks_value),
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,

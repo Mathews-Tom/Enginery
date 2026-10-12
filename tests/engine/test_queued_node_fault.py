@@ -40,6 +40,7 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     Stage1RunService,
 )
+from tests.support.execution import selection_for
 
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
 
@@ -144,6 +145,7 @@ def _qualified_request(tmp_path: Path) -> Stage1RunRequest:
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
+        execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="owner/repo",
             github_credential_reference="unused-fixture",
