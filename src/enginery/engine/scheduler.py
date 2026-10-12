@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
 from enginery.domain.errors import InvalidInputError
@@ -64,10 +64,34 @@ class SchedulingLimits:
             raise InvalidInputError("per_repository_concurrency must be positive")
 
 
+class DeferralReason(enum.StrEnum):
+    """Why a queued node was evaluated but not selected for dispatch."""
+
+    GLOBAL_CAPACITY = "global_capacity"
+    REPOSITORY_CAPACITY = "repository_capacity"
+    DEPENDENCIES = "dependencies"
+    DEPENDENCY_FAILED = "dependency_failed"
+    REQUIREMENTS = "requirements"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredNode:
+    """One evaluated, still-queued node and the single reason it was not selected."""
+
+    key: NodeKey
+    reason: DeferralReason
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulingPlan:
     selected: tuple[NodeKey, ...]
     next_run_id: str | None
+    deferred: tuple[DeferredNode, ...] = ()
+
+
+_DEAD_DEPENDENCY_STATES = frozenset(
+    {SchedulableState.FAILED, SchedulableState.CANCELLED, SchedulableState.BLOCKED}
+)
 
 
 class ReadinessScheduler:
@@ -79,8 +103,13 @@ class ReadinessScheduler:
         *,
         limits: SchedulingLimits,
         last_run_id: str | None = None,
+        eligible_runs: Collection[str] | None = None,
     ) -> SchedulingPlan:
-        """Return a stable round-robin selection within configured limits."""
+        """Return a stable round-robin selection within configured limits.
+
+        ``eligible_runs`` restricts which runs may be selected or reported as deferred;
+        every node still counts toward active occupancy and dependency resolution.
+        """
         by_key = _index_nodes(nodes)
         active = tuple(
             node
@@ -88,12 +117,12 @@ class ReadinessScheduler:
             if node.state in {SchedulableState.LEASED, SchedulableState.RUNNING}
         )
         available_slots = limits.global_concurrency - len(active)
-        if available_slots <= 0:
-            return SchedulingPlan(selected=(), next_run_id=last_run_id)
         repository_load = _repository_load(active)
         ready_by_run: dict[str, deque[SchedulableNode]] = defaultdict(deque)
         for node in sorted(by_key.values(), key=lambda item: item.key):
-            if _is_ready(node, by_key):
+            if eligible_runs is not None and node.key.run_id not in eligible_runs:
+                continue
+            if available_slots > 0 and _is_ready(node, by_key):
                 ready_by_run[node.key.run_id].append(node)
         run_order = _rotated_run_order(ready_by_run, last_run_id=last_run_id)
         selected: list[NodeKey] = []
@@ -120,10 +149,44 @@ class ReadinessScheduler:
                     break
             if not progressed:
                 break
+        chosen = frozenset(selected)
+        deferred = tuple(
+            DeferredNode(
+                node.key,
+                _deferral_reason(node, by_key, repository_load, limits=limits),
+            )
+            for node in sorted(by_key.values(), key=lambda item: item.key)
+            if node.state is SchedulableState.QUEUED
+            and node.key not in chosen
+            and (eligible_runs is None or node.key.run_id in eligible_runs)
+        )
         return SchedulingPlan(
             selected=tuple(selected),
             next_run_id=selected[-1].run_id if selected else last_run_id,
+            deferred=deferred,
         )
+
+
+def _deferral_reason(
+    node: SchedulableNode,
+    nodes: dict[NodeKey, SchedulableNode],
+    repository_load: dict[str, int],
+    *,
+    limits: SchedulingLimits,
+) -> DeferralReason:
+    if not node.requirements_satisfied:
+        return DeferralReason.REQUIREMENTS
+    dependency_states = [nodes[dependency].state for dependency in node.dependencies]
+    if any(state in _DEAD_DEPENDENCY_STATES for state in dependency_states):
+        return DeferralReason.DEPENDENCY_FAILED
+    if any(state is not SchedulableState.SUCCEEDED for state in dependency_states):
+        return DeferralReason.DEPENDENCIES
+    if (
+        node.repository_id is not None
+        and repository_load.get(node.repository_id, 0) >= limits.per_repository_concurrency
+    ):
+        return DeferralReason.REPOSITORY_CAPACITY
+    return DeferralReason.GLOBAL_CAPACITY
 
 
 def _index_nodes(nodes: Iterable[SchedulableNode]) -> dict[NodeKey, SchedulableNode]:
@@ -190,6 +253,8 @@ def _next_allowed_candidate(
 
 
 __all__ = [
+    "DeferralReason",
+    "DeferredNode",
     "NodeKey",
     "ReadinessScheduler",
     "SchedulableNode",

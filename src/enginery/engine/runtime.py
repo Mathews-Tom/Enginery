@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -453,8 +453,18 @@ class CoordinatorRuntime:
         lease_window: timedelta,
         limits: SchedulingLimits,
         requests: tuple[FixtureDispatch | WorkflowDispatch, ...] = (),
+        run_ids: Collection[str] | None = None,
     ) -> RuntimeTickResult:
-        """Consume commands, derive durable readiness, and launch a fair batch."""
+        """Consume commands, derive durable readiness, and launch a fair batch.
+
+        Readiness is re-derived from the ledger on every tick, so a queued node that was
+        not selected earlier is dispatched on the first tick after its capacity or
+        dependencies are released, including after a coordinator restart. ``run_ids``
+        restricts dispatch to the named runs, so a caller that has verified only those runs'
+        execution bindings can never launch another run's node. Every queued node that was
+        evaluated and not selected has its blocking reason, first-evaluation time,
+        evaluation count and evaluating epoch recorded on its durable runtime node.
+        """
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
         self._fault("epoch_acquired")
         consumed = self._coordinator.consume_pending(
@@ -479,6 +489,7 @@ class CoordinatorRuntime:
             nodes,
             limits=limits,
             last_run_id=self._last_run_id,
+            eligible_runs=run_ids,
         )
         dispatched: list[DispatchedFixture] = []
         for key in plan.selected:
@@ -495,8 +506,18 @@ class CoordinatorRuntime:
                 event_type="runtime_node.started",
                 epoch=epoch.epoch,
                 now=now,
+                extra=_dispatched_wakeup(
+                    _runtime_state(self._ledger, request), epoch=epoch.epoch, now=now
+                ),
             )
             dispatched.append(fixture)
+        for deferred in plan.deferred:
+            self._record_deferral(
+                requests_by_key[deferred.key],
+                reason=deferred.reason.value,
+                epoch=epoch.epoch,
+                now=now,
+            )
         self._last_run_id = plan.next_run_id
         return RuntimeTickResult(epoch, consumed, tuple(dispatched))
 
@@ -848,6 +869,40 @@ class CoordinatorRuntime:
             )
         )
 
+    def _record_deferral(
+        self, request: FixtureDispatch, *, reason: str, epoch: int, now: datetime
+    ) -> None:
+        """Persist why a still-queued node was not selected on this evaluation."""
+        state = _runtime_state(self._ledger, request)
+        if state.get("status") != "queued":
+            return
+        prior = state.get("wakeup")
+        prior_evaluations = 0
+        queued_since = now.isoformat()
+        if isinstance(prior, dict):
+            count = prior.get("evaluations")
+            since = prior.get("queued_since")
+            if isinstance(count, int) and not isinstance(count, bool):
+                prior_evaluations = count
+            if isinstance(since, str):
+                queued_since = since
+        self._set_status(
+            request=request,
+            status="queued",
+            event_type="runtime_node.wakeup_deferred",
+            epoch=epoch,
+            now=now,
+            extra={
+                "wakeup": {
+                    "queued_since": queued_since,
+                    "reason": reason,
+                    "evaluations": prior_evaluations + 1,
+                    "last_evaluated_epoch": epoch,
+                    "last_evaluated_at": now.isoformat(),
+                }
+            },
+        )
+
     def _replace_request(
         self, *, request: FixtureDispatch, epoch: int, now: datetime, event_type: str
     ) -> None:
@@ -1126,6 +1181,23 @@ def _runtime_state(ledger: LedgerService, request: FixtureDispatch) -> dict[str,
     if projection is None:
         return {"status": "queued"}
     return dict(projection.state)
+
+
+def _dispatched_wakeup(
+    state: Mapping[str, object], *, epoch: int, now: datetime
+) -> dict[str, object] | None:
+    """Close a deferred node's wakeup record when it is finally dispatched."""
+    prior = state.get("wakeup")
+    if not isinstance(prior, dict):
+        return None
+    return {
+        "wakeup": {
+            **prior,
+            "reason": None,
+            "dispatched_at": now.isoformat(),
+            "dispatched_epoch": epoch,
+        }
+    }
 
 
 def _schedulable(request: FixtureDispatch, *, state: dict[str, object]) -> SchedulableNode:

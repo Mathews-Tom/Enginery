@@ -364,6 +364,7 @@ def _nodes(ledger: LedgerService, *, run_id: str) -> list[dict[str, object]]:
                 "operation_id": state.get("operation_id"),
                 "status": state.get("status"),
                 "artifacts": state.get("artifact_references", []),
+                "wakeup": state.get("wakeup"),
             }
         )
     return sorted(nodes, key=lambda node: str(node["node_id"]))

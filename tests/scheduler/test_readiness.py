@@ -74,3 +74,70 @@ def test_human_wait_does_not_consume_concurrency() -> None:
     plan = ReadinessScheduler().plan((human_wait, ready), limits=SchedulingLimits(1, 1))
 
     assert plan.selected == (ready.key,)
+
+
+def test_every_unselected_queued_node_reports_its_single_blocking_reason() -> None:
+    active = _node("run-0", "active", state=SchedulableState.RUNNING, repository_id="repo-a")
+    capacity = _node("run-1", "capacity", repository_id="repo-b")
+    repository = _node("run-2", "repository", repository_id="repo-a")
+    prerequisite = _node("run-3", "prepare", state=SchedulableState.RUNNING, repository_id="repo-c")
+    waiting = _node("run-3", "execute", dependencies=(prerequisite.key,), repository_id="repo-c")
+    failed = _node("run-4", "build", state=SchedulableState.FAILED)
+    orphaned = _node("run-4", "ship", dependencies=(failed.key,))
+
+    plan = ReadinessScheduler().plan(
+        (active, capacity, repository, prerequisite, waiting, failed, orphaned),
+        limits=SchedulingLimits(2, 1),
+    )
+
+    assert plan.selected == ()
+    assert {deferred.key: deferred.reason.value for deferred in plan.deferred} == {
+        capacity.key: "global_capacity",
+        repository.key: "repository_capacity",
+        waiting.key: "dependencies",
+        orphaned.key: "dependency_failed",
+    }
+
+
+def test_repository_limit_is_reported_when_global_capacity_remains() -> None:
+    active = _node("run-0", "active", state=SchedulableState.RUNNING, repository_id="repo-a")
+    blocked = _node("run-1", "work", repository_id="repo-a")
+    other = _node("run-2", "work", repository_id="repo-b")
+
+    plan = ReadinessScheduler().plan((active, blocked, other), limits=SchedulingLimits(4, 1))
+
+    assert plan.selected == (other.key,)
+    assert [(item.key, item.reason.value) for item in plan.deferred] == [
+        (blocked.key, "repository_capacity")
+    ]
+
+
+def test_a_node_released_by_its_dependency_is_selected_with_no_deferral() -> None:
+    done = _node("run-1", "prepare", state=SchedulableState.SUCCEEDED)
+    released = _node("run-1", "execute", dependencies=(done.key,))
+
+    plan = ReadinessScheduler().plan((done, released), limits=SchedulingLimits(1, 1))
+
+    assert plan.selected == (released.key,)
+    assert plan.deferred == ()
+
+
+def test_eligible_runs_scope_selection_but_not_occupancy() -> None:
+    first = _node("run-a", "work")
+    second = _node("run-b", "work")
+
+    scoped = ReadinessScheduler().plan(
+        (first, second), limits=SchedulingLimits(1, 1), eligible_runs=("run-b",)
+    )
+    occupied = ReadinessScheduler().plan(
+        (_node("run-a", "work", state=SchedulableState.RUNNING), second),
+        limits=SchedulingLimits(1, 1),
+        eligible_runs=("run-b",),
+    )
+
+    assert scoped.selected == (second.key,)
+    assert scoped.deferred == ()
+    assert occupied.selected == ()
+    assert [(item.key, item.reason.value) for item in occupied.deferred] == [
+        (second.key, "global_capacity")
+    ]
