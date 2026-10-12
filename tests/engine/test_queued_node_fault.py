@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -202,16 +203,34 @@ def _occupy_global_capacity(
     return occupier.run_id, occupier.node_id
 
 
-def _sleeping_harness(tmp_path: Path) -> str:
+def _sleeping_harness(tmp_path: Path, seconds: int = 120) -> str:
     """A real executable that stays alive until its process group is terminated."""
-    script = tmp_path / "harness-sleep"
-    script.write_text("#!/bin/sh\nexec sleep 120\n", encoding="utf-8")
+    script = tmp_path / f"harness-sleep-{seconds}"
+    if seconds < 120:
+        script.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in --help|--version) echo "omp v18.10.2"; exit 0;; esac\n'
+            f"sleep {seconds}\n"
+            'echo \'{"type":"session"}\'\n'
+            'echo \'{"type":"agent_start"}\'\n'
+            'echo \'{"type":"message_end","message":{"role":"assistant",'
+            '"provider":"openai","model":"gpt-5.2"}}\'\n'
+            'echo \'{"type":"agent_end"}\'\n',
+            encoding="utf-8",
+        )
+    else:
+        script.write_text(f"#!/bin/sh\nexec sleep {seconds}\n", encoding="utf-8")
     script.chmod(0o755)
     return str(script)
 
 
 def _service(
-    ledger: LedgerService, runtime: CoordinatorRuntime, request: Stage1RunRequest, tmp_path: Path
+    ledger: LedgerService,
+    runtime: CoordinatorRuntime,
+    request: Stage1RunRequest,
+    tmp_path: Path,
+    *,
+    seconds: int = 120,
 ) -> Stage1RunService:
     return Stage1RunService(
         runtime=runtime,
@@ -219,7 +238,8 @@ def _service(
         work_ledger=_FixedWorkLedger(request.work_snapshot),
         harness=OmpHarness(
             OmpAdapterConfig(
-                credential_reference="unused-fixture", executable=_sleeping_harness(tmp_path)
+                credential_reference="unused-fixture",
+                executable=_sleeping_harness(tmp_path, seconds),
             ),
             ArtifactStore(request.execution_configuration.artifact_root),
         ),
@@ -727,11 +747,11 @@ def test_stage1_wiring_a_drifted_older_run_does_not_strand_a_current_newer_run(
 
 
 def _dispatch_running_implementation(
-    ledger: LedgerService, tmp_path: Path, now: datetime
+    ledger: LedgerService, tmp_path: Path, now: datetime, *, seconds: int = 120
 ) -> tuple[CoordinatorRuntime, Stage1RunService, Stage1RunRequest, int]:
     runtime = CoordinatorRuntime(ledger, owner="operator")
     request = _qualified_request(tmp_path)
-    service = _service(ledger, runtime, request, tmp_path)
+    service = _service(ledger, runtime, request, tmp_path, seconds=seconds)
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
     service.qualify(
         request,
@@ -863,30 +883,41 @@ def test_a_worker_that_cannot_be_proven_dead_is_held_with_its_reason_never_waite
     os.waitpid(pid, 0)
 
 
-def test_a_live_worker_whose_launching_epoch_lapsed_is_held_only_when_a_clock_is_given(
+def test_a_live_worker_after_the_coordinator_window_waits_and_is_collected_normally(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
-    runtime, service, request, pid = _dispatch_running_implementation(ledger_service, tmp_path, now)
+    runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now, seconds=6
+    )
+    later = now + timedelta(minutes=10)  # far past the 60 second coordinator window
+    assert runtime.lease_epoch_active(run_id="run-fault", node_id="implement", now=now) is True
+    assert runtime.lease_epoch_active(run_id="run-fault", node_id="implement", now=later) is False
 
-    assert service.next_action(request.run.id).action is Stage1ProgressionAction.WAIT
+    # The launching epoch has lapsed, as it always does between `watch --advance` calls.
+    # The worker is alive on this host and boot, so the run simply waits: no hold.
+    # Advancing right away, with the worker certainly still running, changes nothing.
+    assert _advance(service, request, later) is Stage1ProgressionAction.WAIT
+    assert _implement_state(ledger_service)["status"] == "running"
+    deadline = time.monotonic() + 30
+    while True:
+        progression = service.next_action(request.run.id)
+        if progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
+            break
+        # Between the worker's start and its result, the run only waits: never a hold.
+        assert progression.action is Stage1ProgressionAction.WAIT
+        assert progression.hold is None
+        assert time.monotonic() < deadline, "the worker never produced its result"
+        time.sleep(0.05)
+
+    # Once it exits, the next advance collects the result through the normal path.
+    collected = _advance(service, request, later)
+    assert collected is not Stage1ProgressionAction.HOLD
+    assert _implement_state(ledger_service)["status"] != "running"
     assert (
-        service.next_action(request.run.id, now=now + timedelta(seconds=10)).action
-        is Stage1ProgressionAction.WAIT
+        _event_count(
+            ledger_service, event_type="worker.launch_intended", aggregate_id="run-fault:implement"
+        )
+        == 1
     )
-    lapsed = service.next_action(request.run.id, now=now + timedelta(minutes=10))
-    assert lapsed.action is Stage1ProgressionAction.HOLD
-    assert lapsed.hold is not None
-    assert lapsed.hold.reason is HoldReason.WORKER_COORDINATOR_LAPSED
-    assert lapsed.hold.details["liveness"] == "alive"
-    # The worker is untouched: the hold is a diagnostic, not a termination.
-    assert probe_process(pid) is not None
-    epoch = runtime.claim_epoch(
-        now=now + timedelta(minutes=11), heartbeat_window=timedelta(seconds=60)
-    )
-    runtime.cancel_node(
-        run_id="run-fault",
-        node_id="implement",
-        epoch=epoch.epoch,
-        now=now + timedelta(minutes=11, seconds=5),
-    )
+    assert probe_process(pid) is None

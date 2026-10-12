@@ -63,7 +63,6 @@ class HoldReason(enum.Enum):
     EFFECTIVE_CONTROL_MISMATCH = "effective_control_mismatch"
     SUBMITTED_CONTROLS_MISMATCH = "submitted_controls_mismatch"
     WORKER_IDENTITY_UNPROVABLE = "worker_identity_unprovable"
-    WORKER_COORDINATOR_LAPSED = "worker_coordinator_lapsed"
 
 
 @dataclass(frozen=True, slots=True)

@@ -380,14 +380,14 @@ class Stage1RunService:
             )
         return _run_from_state(projection.state, aggregate_version=projection.aggregate_version)
 
-    def next_action(self, run_id: RunId, *, now: datetime | None = None) -> Stage1Progression:
+    def next_action(self, run_id: RunId) -> Stage1Progression:
         """Derive at most one safe action, reporting a drifted catalog binding as a hold.
 
         A hold never rebinds the run: its original selection and catalog digest stay as
         recorded. A drifted run's advancing actions become HOLD; a human wait or idle
         observation keeps its action but still carries the hold diagnostic so it is shown.
         """
-        progression = self._derive_progression(run_id, now)
+        progression = self._derive_progression(run_id)
         hold = self._binding_hold(progression.run.request)
         if hold is None:
             return progression
@@ -475,7 +475,7 @@ class Stage1RunService:
         if not durable.execution_selection.legacy:
             validate_against_catalog(durable.execution_selection, catalog=self._current_catalog())
 
-    def _derive_progression(self, run_id: RunId, now: datetime | None) -> Stage1Progression:
+    def _derive_progression(self, run_id: RunId) -> Stage1Progression:
         run = self.read(run_id)
         qualification_status = self._node_status(run_id, "qualify")
         if qualification_status is None:
@@ -506,7 +506,7 @@ class Stage1RunService:
             if result_path.is_file():
                 return Stage1Progression(Stage1ProgressionAction.COLLECT_IMPLEMENTATION, run)
             if implementation_status == "running":
-                return self._running_worker_progression(run, now=now)
+                return self._running_worker_progression(run)
             return Stage1Progression(Stage1ProgressionAction.WAIT, run)
         generation = _generation(_string(implement_state, "attempt_id"))
 
@@ -588,7 +588,7 @@ class Stage1RunService:
         limits: SchedulingLimits,
     ) -> Stage1Progression:
         """Perform at most one externally observable action selected from durable state."""
-        progression = self.next_action(run_id, now=now)
+        progression = self.next_action(run_id)
         request = progression.run.request
         if progression.action is Stage1ProgressionAction.QUALIFY:
             self.qualify(
@@ -632,7 +632,7 @@ class Stage1RunService:
             self.verify_merge_ready(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION:
             self.register_outcome_observation(request, now=now)
-        return self.next_action(run_id, now=now)
+        return self.next_action(run_id)
 
     def qualify(
         self,
@@ -802,16 +802,15 @@ class Stage1RunService:
             operation_id=OperationId(_string(queued, "operation_id")),
         )
 
-    def _running_worker_progression(
-        self, run: Stage1Run, *, now: datetime | None
-    ) -> Stage1Progression:
+    def _running_worker_progression(self, run: Stage1Run) -> Stage1Progression:
         """Decide what a running implementation node with no result file is waiting on.
 
-        Only a worker proven dead on this host and boot is reconciled; a worker that is alive
-        keeps the run waiting. Whatever cannot be proven -- another host or boot, a pid taken
-        by another process, an unreadable identity, or a live worker whose launching
-        coordinator epoch lapsed (judged only when the caller supplies a clock) -- is an
-        explicit hold with its reason, never a silent wait.
+        Only a worker proven dead on this host and boot is reconciled. A worker that is alive
+        keeps the run waiting, including after the coordinator epoch that launched it lapsed:
+        with no daemon that is the normal state between ``watch --advance`` calls, and it is
+        only reported as ``lease_epoch_active: false`` in the worker report. Whatever cannot
+        be proven -- another host or boot, a pid taken by another process, or an unreadable
+        identity -- is an explicit hold with its reason, never a silent wait.
         """
         run_id = str(run.request.run.id)
         record = self.ledger.read_process_manager_state(
@@ -824,24 +823,6 @@ class Stage1RunService:
         if liveness is WorkerLiveness.EXITED:
             return Stage1Progression(Stage1ProgressionAction.RECONCILE_WORKER, run)
         if liveness is WorkerLiveness.ALIVE:
-            if (
-                now is not None
-                and self.runtime.lease_epoch_active(run_id=run_id, node_id="implement", now=now)
-                is False
-            ):
-                return Stage1Progression(
-                    Stage1ProgressionAction.HOLD,
-                    run,
-                    ExecutionHold(
-                        reason=HoldReason.WORKER_COORDINATOR_LAPSED,
-                        message=(
-                            "the implementation worker is still running but the coordinator "
-                            "epoch that launched it has lapsed; wait for its result, or "
-                            "cancel the node to stop it"
-                        ),
-                        details={"liveness": liveness.value},
-                    ),
-                )
             return Stage1Progression(Stage1ProgressionAction.WAIT, run)
         return Stage1Progression(
             Stage1ProgressionAction.HOLD,

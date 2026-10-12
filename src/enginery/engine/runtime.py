@@ -710,15 +710,16 @@ class CoordinatorRuntime:
                 )
                 self._fault("node_cancellation_cleanup_pending")
                 return
-            self._workspaces.cleanup(reservation, epoch=transition_epoch, now=now)
+            if reservation.status != "cleaned":
+                self._workspaces.cleanup(reservation, epoch=transition_epoch, now=now)
         elif status == "awaiting_human":
             if _actor_type_from_state(state) is not ActorType.AGENT:
                 raise ExternalConflictError("cannot cancel a human-waiting non-agent node")
             self._active_lease(request)
             transition_epoch = self._require_cancellation_epoch(epoch=epoch, now=now)
-            self._workspaces.cleanup(
-                self._require_workspace(request), epoch=transition_epoch, now=now
-            )
+            parked = self._require_workspace(request)
+            if parked.status != "cleaned":
+                self._workspaces.cleanup(parked, epoch=transition_epoch, now=now)
         elif status != "queued":
             raise ExternalConflictError(
                 "only queued, running, or human-waiting nodes can be cancelled"

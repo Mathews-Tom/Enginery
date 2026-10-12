@@ -373,3 +373,71 @@ def test_termination_waits_for_a_term_ignoring_descendant_after_the_leader_dies(
 
     assert leader.poll() is not None
     assert not _alive(grandchild)
+
+
+@pytest.mark.parametrize("point", ["workspace_cleanup_started", "workspace_cleanup_recorded"])
+def test_a_cancel_interrupted_inside_workspace_cleanup_completes_on_retry(
+    tmp_path: Path, ledger_service: LedgerService, point: str
+) -> None:
+    hook = _FireOnce(point)
+    runtime = CoordinatorRuntime(ledger_service, owner="operator", fault_hook=hook)
+    node = _node(tmp_path, "work")
+    (running,) = _tick(runtime, _T0, node)
+    epoch = runtime.claim_epoch(now=_T0 + timedelta(seconds=1), heartbeat_window=_WINDOW)
+
+    with pytest.raises(RuntimeError, match=point):
+        runtime.cancel_node(
+            run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=2)
+        )
+    assert hook.fired
+    assert _state(ledger_service, "work")["status"] == "running"
+    assert probe_process(running.identity.pid) is None
+
+    runtime.cancel_node(
+        run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=3)
+    )
+
+    assert _state(ledger_service, "work")["status"] == "cancelled"
+    reservation = runtime.read_workspace_reservation("repository-work")
+    assert reservation is not None and reservation.status == "cleaned"
+    assert not node.workspace_path.exists()
+    results = ledger_service.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type = 'node_attempt.result_ingested' "
+        "AND aggregate_id = ?",
+        (running.lease.attempt_id,),
+    ).fetchone()
+    assert int(results[0]) == 1
+    assert _events(ledger_service, "worker.cancelled", "work") == 1
+    # Repeating the cancel after completion is refused, not silently repeated.
+    with pytest.raises(ExternalConflictError, match="only queued, running"):
+        runtime.cancel_node(
+            run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=4)
+        )
+
+
+def test_a_cancel_retry_completes_when_the_interrupted_cleanup_already_removed_the_directory(
+    tmp_path: Path, ledger_service: LedgerService
+) -> None:
+    import shutil
+
+    hook = _FireOnce("workspace_cleanup_started")
+    runtime = CoordinatorRuntime(ledger_service, owner="operator", fault_hook=hook)
+    node = _node(tmp_path, "work")
+    _tick(runtime, _T0, node)
+    epoch = runtime.claim_epoch(now=_T0 + timedelta(seconds=1), heartbeat_window=_WINDOW)
+    with pytest.raises(RuntimeError, match="workspace_cleanup_started"):
+        runtime.cancel_node(
+            run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=2)
+        )
+    # The interrupted cleanup got as far as deleting the directory; git still lists it.
+    shutil.rmtree(node.workspace_path)
+
+    runtime.cancel_node(
+        run_id="run-work", node_id="work", epoch=epoch.epoch, now=_T0 + timedelta(seconds=3)
+    )
+
+    assert _state(ledger_service, "work")["status"] == "cancelled"
+    reservation = runtime.read_workspace_reservation("repository-work")
+    assert reservation is not None and reservation.status == "cleaned"
+    listed = _git("worktree", "list", "--porcelain", cwd=node.repository_path)
+    assert str(node.workspace_path) not in listed

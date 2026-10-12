@@ -100,7 +100,7 @@ def _watch(args: argparse.Namespace) -> None:
             if args.advance
             else _read_only_service(runtime=runtime, ledger=ledger, request=request)
         )
-        previous = service.next_action(RunId(args.run_id), now=_now())
+        previous = service.next_action(RunId(args.run_id))
         if args.advance:
             progression = service.advance(
                 RunId(args.run_id),
@@ -334,7 +334,7 @@ def _evidence(args: argparse.Namespace) -> None:
         run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id))
         progression = _read_only_service(
             runtime=runtime, ledger=ledger, request=run.request
-        ).next_action(RunId(args.run_id), now=_now())
+        ).next_action(RunId(args.run_id))
         _print(
             {
                 "run_id": str(run.request.run.id),
