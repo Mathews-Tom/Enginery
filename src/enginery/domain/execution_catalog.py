@@ -68,6 +68,18 @@ class EffortControl:
 
 
 @dataclass(frozen=True, slots=True)
+class InstalledHost:
+    """The executable version and protocol fingerprint an adapter probe observed."""
+
+    executable_version: str
+    protocol_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.executable_version.strip() or not self.protocol_fingerprint.strip():
+            raise InvalidInputError("installed host identity must be non-blank")
+
+
+@dataclass(frozen=True, slots=True)
 class HostCapability:
     """One host's tested fingerprint, support tier, and native controls."""
 
@@ -85,12 +97,40 @@ class HostCapability:
         ):
             raise InvalidInputError("host capability identity must be non-blank")
 
-    def matches_installed(self, *, executable_version: str, protocol_fingerprint: str) -> bool:
+    def matches(self, installed: InstalledHost) -> bool:
         """Return whether an observed host is exactly the tested executable and protocol."""
         return (
-            executable_version == self.executable_version
-            and protocol_fingerprint == self.protocol_fingerprint
+            installed.executable_version == self.executable_version
+            and installed.protocol_fingerprint == self.protocol_fingerprint
         )
+
+    def require_installed(self, installed: InstalledHost | None) -> None:
+        """Reject native controls against a host that is not the tested executable.
+
+        An unobservable or different host makes every mandatory control unsupported: the
+        flags and level vocabularies were only tested against the recorded fingerprint,
+        so nothing is guessed.
+        """
+        if installed is None:
+            raise MissingPrerequisiteError(
+                f"the installed {self.harness} could not be probed, so its native controls "
+                "are unsupported",
+                details={"harness": self.harness},
+            )
+        if not self.matches(installed):
+            raise MissingPrerequisiteError(
+                f"the installed {self.harness} ({installed.executable_version}, "
+                f"{installed.protocol_fingerprint}) differs from the tested "
+                f"{self.executable_version} ({self.protocol_fingerprint}), so its native "
+                "controls are unsupported",
+                details={
+                    "harness": self.harness,
+                    "installed_executable_version": installed.executable_version,
+                    "installed_protocol_fingerprint": installed.protocol_fingerprint,
+                    "tested_executable_version": self.executable_version,
+                    "tested_protocol_fingerprint": self.protocol_fingerprint,
+                },
+            )
 
     def require_model_pin(self, value: str) -> None:
         """Reject any model value that is not the host's exact-identifier form."""
@@ -223,6 +263,7 @@ __all__ = [
     "EffortControl",
     "ExecutionCatalog",
     "HostCapability",
+    "InstalledHost",
     "ModelControl",
     "SupportTier",
     "catalog_from_mapping",

@@ -24,6 +24,12 @@ from enginery.application.adapter_types import (
     NormalizedAdapterEvent,
     ProviderKind,
 )
+from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.execution_controls import (
+    distinct_model,
+    prepare_native_controls,
+    submitted_arguments,
+)
 from enginery.application.work_ports import (
     HarnessOutput,
     HarnessResult,
@@ -32,12 +38,15 @@ from enginery.application.work_ports import (
 )
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
+from enginery.domain.execution_receipt import EffectiveControl, ExecutionReceipt
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
 
 _CLAUDE_CODE_EVENT_SCHEMA_VERSION = 1
+_HARNESS_ID = "claude-code"
 _KNOWN_EVENT_TYPES = frozenset({"system", "assistant", "user", "rate_limit_event", "result"})
 
 
@@ -54,14 +63,14 @@ class _ClaudeCodeProcess(Protocol):
 class ClaudeCodeAdapterConfig:
     """Opaque Claude Code CLI configuration without credential material.
 
-    ``model`` is an optional override; when blank, no ``--model`` flag is
-    passed and Claude Code resolves its own configured default. The
-    actually-selected model is read back from harness output, never assumed.
+    The model and effort a run requests come from its per-task execution selection,
+    never from this configuration. When the selection names none, no flag is passed and
+    Claude Code resolves its own default; the model actually used is read back from
+    harness output, never assumed.
     """
 
     credential_reference: str
     executable: str = "claude"
-    model: str = ""
     event_schema_version: int = _CLAUDE_CODE_EVENT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -103,6 +112,8 @@ class ClaudeCodeHarness:
         )
     )
     terminator: Callable[[int], None] = field(default=lambda pid: os.killpg(pid, signal.SIGTERM))
+    catalog: ExecutionCatalog = field(default_factory=load_execution_catalog)
+    _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _processes: dict[str, _ClaudeCodeProcess] = field(default_factory=dict, init=False)
     _collected: dict[str, tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]] = field(
@@ -148,6 +159,16 @@ class ClaudeCodeHarness:
             detail="Claude Code harness is available",
         )
 
+    def installed_host(self) -> InstalledHost | None:
+        """Return the probed executable version and protocol fingerprint, if observable."""
+        fingerprint = self.probe().fingerprint
+        if fingerprint is None:
+            return None
+        version, _, protocol = fingerprint.provider_version.partition(";")
+        return InstalledHost(
+            executable_version=version.split(" ")[0].strip(), protocol_fingerprint=protocol
+        )
+
     def start(self, task: HarnessTask) -> HarnessSession:
         session = HarnessSession(
             session_id=f"claude-code-{task.operation_id}", operation_id=task.operation_id
@@ -157,6 +178,7 @@ class ClaudeCodeHarness:
         process = self.process_factory(self.command_for(task), task.workspace_path)
         self._sessions[session.session_id] = session
         self._processes[session.session_id] = process
+        self._tasks[session.session_id] = task
         self._outcomes[str(task.operation_id)] = ReconciliationResult.FOUND_MATCHING
         return session
 
@@ -195,6 +217,7 @@ class ClaudeCodeHarness:
             session_id=session.session_id,
             terminal_status=status,
             outputs=(HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),),
+            execution_receipt=self._receipt(self._tasks[session.session_id], events),
         )
         collected = (events, result)
         self._collected[session.session_id] = collected
@@ -217,9 +240,33 @@ class ClaudeCodeHarness:
             "--permission-mode",
             "bypassPermissions",
         ]
-        if self.config.model:
-            arguments += ["--model", self.config.model]
+        arguments += prepare_native_controls(
+            task.selection,
+            harness=_HARNESS_ID,
+            catalog=self.catalog,
+            probe_installed_host=self.installed_host,
+        )
         return tuple(arguments)
+
+    def _receipt(
+        self, task: HarnessTask, events: tuple[NormalizedAdapterEvent, ...]
+    ) -> ExecutionReceipt:
+        selection = task.selection
+        return ExecutionReceipt(
+            selection_digest=None if selection.legacy else selection.digest,
+            harness=_HARNESS_ID,
+            submitted_arguments=submitted_arguments(
+                selection, harness=_HARNESS_ID, catalog=self.catalog
+            ),
+            effective_model=distinct_model(
+                (event.attributes["model"] for event in events if "model" in event.attributes),
+                source="assistant.message.model",
+                reason="no assistant message reported a model",
+            ),
+            effective_effort=EffectiveControl.unknown(
+                reason="Claude Code stream-json does not report the effective effort level"
+            ),
+        )
 
     def _require_session(self, session: HarnessSession) -> None:
         if self._sessions.get(session.session_id) != session:
@@ -298,6 +345,7 @@ class ClaudeCodeHarness:
                 outputs=(
                     HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),
                 ),
+                execution_receipt=self._receipt(task, events),
             ),
         )
 

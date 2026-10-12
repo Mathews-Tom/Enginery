@@ -88,12 +88,18 @@ def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
-        service = Stage1RunService(runtime=runtime, ledger=ledger)
+        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
+        service = (
+            _advancing_service(runtime=runtime, ledger=ledger, request=request)
+            if args.advance
+            else Stage1RunService(
+                runtime=runtime,
+                ledger=ledger,
+                harness=_harness_for(request.execution_configuration),
+            )
+        )
         previous = service.next_action(RunId(args.run_id))
         if args.advance:
-            service = _advancing_service(
-                runtime=runtime, ledger=ledger, request=previous.run.request
-            )
             progression = service.advance(
                 RunId(args.run_id),
                 now=_now(),

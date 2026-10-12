@@ -11,6 +11,7 @@ from typing import Protocol
 from enginery.application.adapter_types import AdapterStatus, NormalizedAdapterEvent
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.digests import Digest
+from enginery.domain.execution_receipt import ExecutionReceipt
 from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -189,6 +190,7 @@ class HarnessResult:
     session_id: str
     terminal_status: str
     outputs: tuple[HarnessOutput, ...]
+    execution_receipt: ExecutionReceipt | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.terminal_status.strip():

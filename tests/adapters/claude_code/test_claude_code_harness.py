@@ -195,21 +195,6 @@ def test_start_launches_a_scoped_headless_command(tmp_path: Path) -> None:
     )
 
 
-def test_start_passes_a_configured_model_override(tmp_path: Path) -> None:
-    harness = ClaudeCodeHarness(
-        ClaudeCodeAdapterConfig(
-            credential_reference="operator-oauth-profile", model="claude-opus-4-8"
-        ),
-        ArtifactStore(tmp_path / "artifacts"),
-        process_factory=lambda arguments, workspace: RecordedProcess(_events()),
-    )
-
-    command = harness.command_for(_task(tmp_path))
-
-    assert "--model" in command
-    assert command[command.index("--model") + 1] == "claude-opus-4-8"
-
-
 def test_start_rejects_a_duplicate_session_for_the_same_operation(tmp_path: Path) -> None:
     harness = _harness(tmp_path, process=RecordedProcess(_events()))
     harness.start(_task(tmp_path))

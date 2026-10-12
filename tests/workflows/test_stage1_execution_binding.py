@@ -15,7 +15,7 @@ from tests.workflows.test_stage1_runtime import (
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
-from enginery.domain.execution_catalog import ExecutionCatalog, SupportTier
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost, SupportTier
 from enginery.domain.execution_selection import (
     ExecutionSelection,
     HoldReason,
@@ -459,3 +459,78 @@ def test_a_tampered_persisted_selection_is_refused_wherever_executability_is_req
             service.dispatch_implementation(
                 forged, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
             )
+
+
+class _StubHarness:
+    """A harness stand-in whose installed host is whatever the test says it is."""
+
+    def __init__(self, installed: InstalledHost | None) -> None:
+        self.installed = installed
+        self.artifact_store = None
+
+    def installed_host(self) -> InstalledHost | None:
+        return self.installed
+
+    def supervised_command(self, task: object, *, result_path: Path) -> tuple[str, ...]:
+        raise AssertionError("no worker command may be built while the host is held")
+
+
+_BOUND_HOST = InstalledHost("18.10.2", "json-protocol=3")
+
+
+@pytest.mark.parametrize(
+    "installed",
+    [InstalledHost("18.10.3", "json-protocol=3"), None],
+    ids=["changed", "unobservable"],
+)
+def test_a_changed_or_unobservable_host_holds_a_run_with_native_controls(
+    ledger_service: LedgerService, tmp_path: Path, installed: InstalledHost | None
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    healthy = replace(service, harness=_StubHarness(_BOUND_HOST))  # type: ignore[arg-type]
+    drifted = replace(service, harness=_StubHarness(installed))  # type: ignore[arg-type]
+
+    assert healthy.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+    progression = drifted.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
+    with pytest.raises(HumanActionRequiredError, match="not the executable"):
+        drifted.dispatch_implementation(
+            request, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
+        )
+    assert drifted.read(request.run.id).request.execution_selection == _PIN
+
+
+def test_a_host_default_run_never_depends_on_the_installed_host_version(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(ledger_service, tmp_path, start=False)
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    other = replace(service, harness=_StubHarness(InstalledHost("0.0.1", "other")))  # type: ignore[arg-type]
+
+    assert other.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+
+
+def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    forged = replace(
+        request,
+        execution_selection=replace(_PIN, host_executable_version="0.0.1"),
+    )
+
+    with pytest.raises(InvalidInputError, match="tested host entry"):
+        service.start(forged, now=now, heartbeat_window=_WINDOW)
+
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
