@@ -615,3 +615,40 @@ def test_a_recorded_execution_hold_makes_the_next_action_hold_with_that_hold(
         other.close()
     assert plain.action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
     assert plain.hold is None
+
+
+def test_collect_implementation_gives_the_executor_the_services_own_catalog(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, execution_selection=_PIN
+    )
+    injected = replace(load_execution_catalog())
+    service = replace(
+        service,
+        harness=_StubHarness(InstalledHost("18.10.2", "json-protocol=3")),  # type: ignore[arg-type]
+        execution_catalog=injected,
+    )
+    _complete_check_node(runtime, request, "qualify", now)
+    runtime.register_node(
+        dispatch=_check_node_dispatch(request, "implement"), now=now, heartbeat_window=_WINDOW
+    )
+    captured: list[ExecutionCatalog] = []
+
+    class _Spy:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs["catalog"])  # type: ignore[arg-type]
+
+        def collect(self, **kwargs: object) -> str:
+            return "collected"
+
+    monkeypatch.setattr("enginery.workflows.stage1.Stage1ImplementationExecutor", _Spy)
+    monkeypatch.setattr(
+        "enginery.engine.runtime.CoordinatorRuntime.recover_dispatched",
+        lambda self, **kwargs: None,
+    )
+
+    result = service.collect_implementation(request, now=now, heartbeat_window=_WINDOW)
+
+    assert result == "collected"
+    assert len(captured) == 1 and captured[0] is injected

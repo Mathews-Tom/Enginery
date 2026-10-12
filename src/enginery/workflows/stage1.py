@@ -748,6 +748,7 @@ class Stage1RunService:
             harness=self._require_harness(),
             manifest=request.manifest,
             head_branch=request.head_branch,
+            catalog=self._current_catalog(),
         ).collect(
             dispatched=self.runtime.recover_dispatched(
                 run_id=str(request.run.id),

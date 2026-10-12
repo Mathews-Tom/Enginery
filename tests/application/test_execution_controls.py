@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from tests.support.execution import selection_for
@@ -12,8 +15,11 @@ from enginery.application.execution_controls import (
     expected_native_arguments,
     extract_native_arguments,
 )
-from enginery.domain.execution_catalog import InstalledHost
+from enginery.application.work_ports import HarnessTask
+from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_receipt import EffectiveState
+from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
+from enginery.ledger.artifact_store import ArtifactStore
 
 CATALOG = load_execution_catalog()
 OMP = CATALOG.host("omp")
@@ -112,3 +118,118 @@ def test_the_claude_probe_observes_the_version_and_declares_the_protocol() -> No
 )
 def test_the_claude_probe_reports_an_unidentifiable_host_as_unobservable(runner: object) -> None:
     assert claude_code.probe_installed_host("claude", runner) is None  # type: ignore[arg-type]
+
+
+def _task_for(harness_name: str, operation_id: str, *, model: str | None) -> HarnessTask:
+    return HarnessTask(
+        run_id=RunId("run-1"),
+        node_id=NodeId("implement"),
+        attempt_id=NodeAttemptId("attempt-1"),
+        operation_id=OperationId(operation_id),
+        workspace_path=Path("/tmp/workspace"),
+        objective="Change one bounded behavior.",
+        acceptance_criteria=("tests pass",),
+        constraints=("none",),
+        permitted_capabilities=("repository-write",),
+        evidence_requirements=("test report",),
+        time_budget_seconds=60,
+        cost_budget=Decimal("1.00"),
+        selection=selection_for(harness_name, model=model),
+    )
+
+
+@pytest.mark.parametrize(
+    ("harness_name", "pin", "banner"),
+    [
+        ("omp", "openai/gpt-5.2", "omp v18.10.2\n"),
+        ("claude-code", "claude-opus-4-8", "2.1.296 (Claude Code)\n"),
+    ],
+)
+def test_an_operation_id_spelled_like_a_flag_is_not_read_as_a_launched_control(
+    tmp_path: Path, harness_name: str, pin: str, banner: str
+) -> None:
+    store = ArtifactStore(tmp_path / "artifacts")
+    config_kwargs: dict[str, object] = {"credential_reference": "profile"}
+    if harness_name == "omp":
+        harness: omp.OmpHarness | claude_code.ClaudeCodeHarness = omp.OmpHarness(
+            omp.OmpAdapterConfig(**config_kwargs),  # type: ignore[arg-type]
+            store,
+            command_runner=_runner(banner),
+        )
+    else:
+        harness = claude_code.ClaudeCodeHarness(
+            claude_code.ClaudeCodeAdapterConfig(**config_kwargs),  # type: ignore[arg-type]
+            store,
+            command_runner=_runner(banner),
+        )
+    host = CATALOG.host(harness_name)
+    result_path = tmp_path / "result.json"
+
+    hostile = harness.supervised_command(
+        _task_for(harness_name, "--model", model=pin), result_path=result_path
+    )
+    default = harness.supervised_command(
+        _task_for(harness_name, "--model", model=None), result_path=result_path
+    )
+
+    assert "--model" in hostile[: hostile.index("--")]
+    assert extract_native_arguments(hostile, host=host) == ("--model", pin)
+    assert extract_native_arguments(default, host=host) == ()
+
+
+def _catalog_with_model_evidence(evidence: str) -> ExecutionCatalog:
+    return replace(
+        CATALOG,
+        hosts=tuple(
+            replace(host, model=replace(host.model, effective_evidence=evidence))
+            for host in CATALOG.hosts
+        ),
+    )
+
+
+@pytest.mark.parametrize("harness_name", ["omp", "claude-code"])
+def test_the_receipt_source_is_exactly_the_catalogs_effective_model_evidence(
+    harness_name: str,
+) -> None:
+    pin = "openai/gpt-5.2" if harness_name == "omp" else "claude-opus-4-8"
+
+    receipt = build_receipt(
+        selection_for(harness_name, model=pin),
+        harness=harness_name,
+        catalog=CATALOG,
+        launched_command=None,
+        models=(pin,),
+    )
+
+    assert receipt.effective_model.state is EffectiveState.OBSERVED
+    assert receipt.effective_model.source == CATALOG.host(harness_name).model.effective_evidence
+    custom = _catalog_with_model_evidence("a custom evidence description")
+    assert (
+        build_receipt(
+            selection_for(harness_name, model=pin),
+            harness=harness_name,
+            catalog=custom,
+            launched_command=None,
+            models=(pin,),
+        ).effective_model.source
+        == "a custom evidence description"
+    )
+
+
+@pytest.mark.parametrize("harness_name", ["omp", "claude-code"])
+def test_a_catalog_without_effective_model_evidence_leaves_the_effective_model_unknown(
+    harness_name: str,
+) -> None:
+    pin = "openai/gpt-5.2" if harness_name == "omp" else "claude-opus-4-8"
+
+    receipt = build_receipt(
+        selection_for(harness_name, model=pin),
+        harness=harness_name,
+        catalog=_catalog_with_model_evidence(""),
+        launched_command=None,
+        models=(pin,),
+    )
+
+    assert receipt.effective_model.state is EffectiveState.UNKNOWN
+    assert receipt.effective_model.value is None
+    assert "no effective-model evidence" in receipt.effective_model.source

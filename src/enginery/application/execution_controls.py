@@ -77,12 +77,15 @@ def extract_native_arguments(command: tuple[str, ...], *, host: HostCapability) 
     """Return the model-steering flag/value pairs actually present in a launched command.
 
     The catalog's model and effort flags and the known model-steering flags are read from
-    the command itself, in order, skipping the prompt that follows ``-p``. This is evidence
-    of what was launched, not of what was intended.
+    the host command itself, in order, skipping the prompt that follows ``-p`` and, for a
+    supervised command, everything before the first ``--`` separator. This is evidence of
+    what was launched, not of what was intended.
     """
     flags = {host.model.flag, host.effort.flag, *_STEERING_FLAGS}
     found: list[str] = []
-    index = 0
+    # A supervised command is the worker wrapper, its own arguments (an operation id may be
+    # spelled like a flag), ``--``, then the host command; only the host command is evidence.
+    index = command.index("--") + 1 if "--" in command else 0
     while index < len(command):
         token = command[index]
         if token == "-p":
