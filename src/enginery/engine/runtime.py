@@ -17,7 +17,7 @@ from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.coordinator import CommandConsumption, Coordinator, CoordinatorEpoch
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
-from enginery.engine.recovery import RecoveryCoordinator, WorkerLiveness, assess_worker
+from enginery.engine.recovery import GONE, RecoveryCoordinator, WorkerLiveness, assess_worker
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.scheduler import (
     DeferralReason,
@@ -736,14 +736,17 @@ class CoordinatorRuntime:
     def fail_exited_worker(
         self, *, run_id: str, node_id: str, now: datetime, heartbeat_window: timedelta
     ) -> None:
-        """Record a provably dead worker that left no result as a failed node.
+        """Record a provably gone worker that left no result as a failed node.
 
-        Only a worker whose exact start identity is absent on this host and boot qualifies;
-        anything else is refused so that nothing unprovable is treated as dead. The exit is
-        observed, reconciled through the recovery path, and the failure is ingested under a
-        freshly claimed epoch even though the dead worker's lease may have expired. The
-        workspace is retained or cleaned as for any other terminal result, and the identity
-        evidence stays in the supervisor record and on the node.
+        A worker qualifies when its exact start identity is absent, its pid is held by a
+        different process, or its host rebooted since it launched (``worker_lost_to_reboot``).
+        Anything unprovable (another machine, an unreadable identity, a live process) is
+        refused. The exit is observed or inferred without signalling anything, reconciled
+        through the recovery path, and the failure is ingested under a freshly claimed epoch
+        even though the dead worker's lease may have expired. The workspace is retained or
+        cleaned as for any other terminal result, and the identity evidence stays in the
+        supervisor record and on the node. A cancel interrupted after its termination request
+        is finished as a cancellation instead.
         """
         request = self._request_for(run_id, node_id)
         state = _runtime_state(self._ledger, request)
@@ -760,9 +763,17 @@ class CoordinatorRuntime:
         if record is None:
             raise InternalInvariantViolationError("running node has no supervisor record")
         assessment = assess_worker(record.state)
-        if assessment.liveness is not WorkerLiveness.EXITED or assessment.identity is None:
+        if record.state.get("status") == "termination_requested" and (
+            assessment.liveness is WorkerLiveness.ALIVE or assessment.liveness in GONE
+        ):
+            # An operator cancel was interrupted after the termination request: finish it as
+            # a cancellation, never record it as the worker dying on its own.
+            epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
+            self.cancel_node(run_id=run_id, node_id=node_id, epoch=epoch.epoch, now=now)
+            return
+        if assessment.liveness not in GONE or assessment.identity is None:
             raise ExternalConflictError(
-                "the worker is not provably exited on this host and boot",
+                "the worker is not provably gone on this host and boot",
                 details={"liveness": assessment.liveness.value},
             )
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
@@ -778,11 +789,20 @@ class CoordinatorRuntime:
         )
         if attempt is None:
             raise InternalInvariantViolationError("worker failure has no durable node attempt")
+        failure_reason = (
+            "worker_lost_to_reboot"
+            if assessment.liveness is WorkerLiveness.REBOOTED
+            else "worker_exited_without_result"
+        )
         evidence: dict[str, object] = {
             "pid": assessment.identity.pid,
             "process_group_id": assessment.identity.process_group_id,
             "start_identity": assessment.identity.start_identity,
+            "liveness": assessment.liveness.value,
         }
+        if assessment.identity.host is not None:
+            evidence["machine_id"] = assessment.identity.host.machine_id
+            evidence["boot_id"] = assessment.identity.host.boot_id
         if attempt.state.get("terminal_result") is None:
             self._leases.ingest_result(
                 envelope=WorkerResultEnvelope(
@@ -794,7 +814,7 @@ class CoordinatorRuntime:
                     operation_id=request.operation_id,
                     terminal_result="failed",
                     artifact_references=(),
-                    result={"failure": "worker_exited_without_result", "worker": evidence},
+                    result={"failure": failure_reason, "worker": evidence},
                 ),
                 coordinator_epoch=epoch.epoch,
                 now=now,
@@ -809,7 +829,7 @@ class CoordinatorRuntime:
                 epoch=epoch.epoch,
                 now=now,
                 extra={
-                    "failure_reason": "worker_exited_without_result",
+                    "failure_reason": failure_reason,
                     "cancellation_cleanup_reason": reconciled.reason,
                     "worker_exit_evidence": evidence,
                 },
@@ -826,7 +846,7 @@ class CoordinatorRuntime:
             epoch=epoch.epoch,
             now=now,
             extra={
-                "failure_reason": "worker_exited_without_result",
+                "failure_reason": failure_reason,
                 "worker_exit_evidence": evidence,
             },
         )

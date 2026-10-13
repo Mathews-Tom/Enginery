@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -53,6 +54,7 @@ from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,
+    _implementation_result_path,
 )
 from tests.support.execution import selection_for
 
@@ -747,9 +749,14 @@ def test_stage1_wiring_a_drifted_older_run_does_not_strand_a_current_newer_run(
 
 
 def _dispatch_running_implementation(
-    ledger: LedgerService, tmp_path: Path, now: datetime, *, seconds: int = 120
+    ledger: LedgerService,
+    tmp_path: Path,
+    now: datetime,
+    *,
+    seconds: int = 120,
+    fault_hook: Callable[[str], None] | None = None,
 ) -> tuple[CoordinatorRuntime, Stage1RunService, Stage1RunRequest, int]:
-    runtime = CoordinatorRuntime(ledger, owner="operator")
+    runtime = CoordinatorRuntime(ledger, owner="operator", fault_hook=fault_hook)
     request = _qualified_request(tmp_path)
     service = _service(ledger, runtime, request, tmp_path, seconds=seconds)
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -854,7 +861,7 @@ def test_a_killed_worker_reaches_a_bounded_state_and_frees_the_slot_without_a_re
     )
 
 
-@pytest.mark.parametrize("difference", ["boot_id", "machine_id"])
+@pytest.mark.parametrize("difference", ["machine_id", "unverifiable"])
 def test_a_worker_that_cannot_be_proven_dead_is_held_with_its_reason_never_waited_on(
     ledger_service: LedgerService, tmp_path: Path, difference: str
 ) -> None:
@@ -863,7 +870,10 @@ def test_a_worker_that_cannot_be_proven_dead_is_held_with_its_reason_never_waite
         ledger_service, tmp_path, now
     )
     state = _supervisor_record(ledger_service)
-    state[difference] = f"another-{difference}"
+    if difference == "unverifiable":
+        state["identity_version"] = 99
+    else:
+        state[difference] = f"another-{difference}"
     ledger_service.connection.execute(
         "UPDATE process_manager_state SET state_json = ? "
         "WHERE process_manager_name = 'worker-supervisor' AND state_key = 'run-fault:implement'",
@@ -876,7 +886,10 @@ def test_a_worker_that_cannot_be_proven_dead_is_held_with_its_reason_never_waite
     assert progression.action is Stage1ProgressionAction.HOLD
     assert progression.hold is not None
     assert progression.hold.reason is HoldReason.WORKER_IDENTITY_UNPROVABLE
-    assert progression.hold.details["liveness"] == "foreign_host"
+    assert progression.hold.details["liveness"] == (
+        "unverifiable" if difference == "unverifiable" else "foreign_host"
+    )
+    assert "no supported release" in progression.hold.message
     assert _advance(service, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.HOLD
     assert _implement_state(ledger_service)["status"] == "running"
     os.killpg(pid, signal.SIGKILL)
@@ -921,3 +934,238 @@ def test_a_live_worker_after_the_coordinator_window_waits_and_is_collected_norma
         == 1
     )
     assert probe_process(pid) is None
+
+
+def _rewrite_worker_record(
+    ledger: LedgerService, change: Callable[[dict[str, object]], None]
+) -> None:
+    state = _supervisor_record(ledger)
+    change(state)
+    ledger.connection.execute(
+        "UPDATE process_manager_state SET state_json = ? "
+        "WHERE process_manager_name = 'worker-supervisor' AND state_key = 'run-fault:implement'",
+        (json.dumps(state),),
+    )
+    ledger.connection.commit()
+
+
+def _stop(pid: int) -> None:
+    if probe_process(pid) is not None:
+        os.killpg(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+
+
+def test_pid_reuse_is_reconciled_by_advance_without_signalling_the_unrelated_process(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    # Same machine and boot, but the pid is now held by a process with another start time.
+    _rewrite_worker_record(
+        ledger_service, lambda state: state.update(start_identity="a different start")
+    )
+
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.RECONCILE_WORKER
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+    failed = _implement_state(ledger_service)
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "worker_exited_without_result"
+    assert failed["worker_exit_evidence"]["liveness"] == "pid_reused"  # type: ignore[index]
+    assert _supervisor_record(ledger_service)["exit_reason"] == "start_identity_mismatch"
+    assert probe_process(pid) is not None  # the process holding the pid was never signalled
+    _stop(pid)
+
+
+def test_a_host_reboot_is_reconciled_to_a_failed_state_with_evidence_and_no_signal(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    # Same machine, different boot: the host rebooted, so the worker cannot have survived.
+    _rewrite_worker_record(ledger_service, lambda state: state.update(boot_id="an earlier boot"))
+
+    progression = service.next_action(request.run.id)
+    assert progression.action is Stage1ProgressionAction.RECONCILE_WORKER
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+    failed = _implement_state(ledger_service)
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "worker_lost_to_reboot"
+    evidence = failed["worker_exit_evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["liveness"] == "rebooted"
+    assert evidence["boot_id"] == "an earlier boot"
+    assert _supervisor_record(ledger_service)["exit_reason"] == "worker_lost_to_reboot"
+    assert probe_process(pid) is not None  # never signalled
+    _stop(pid)
+
+
+def test_cancel_on_a_rebooted_worker_reaches_a_bounded_state_without_signalling(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, _service, _request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    _rewrite_worker_record(ledger_service, lambda state: state.update(boot_id="an earlier boot"))
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
+    )
+
+    runtime.cancel_node(
+        run_id="run-fault",
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=6),
+    )
+
+    assert _implement_state(ledger_service)["status"] == "cancelled"
+    assert _supervisor_record(ledger_service)["exit_reason"] == "worker_lost_to_reboot"
+    assert probe_process(pid) is not None
+    _stop(pid)
+
+
+def _assert_collected_not_death(ledger: LedgerService) -> None:
+    state = _implement_state(ledger)
+    assert state["status"] != "running"
+    assert state.get("failure_reason") is None
+    assert "worker_exit_evidence" not in state
+    assert _supervisor_record(ledger).get("exit_reason") is None
+    attempt_id = str(state["attempt_id"])
+    row = ledger.connection.execute(
+        "SELECT payload FROM events WHERE event_type = 'node_attempt.result_ingested' "
+        "AND aggregate_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    assert row is not None
+    assert "worker_exited_without_result" not in row[0]
+
+
+def _write_result(request: Stage1RunRequest) -> None:
+    operation_id = OperationId("implement:run-fault")
+    events = [
+        {"type": "session"},
+        {"type": "agent_start"},
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "provider": "openai", "model": "gpt-5.2"},
+        },
+        {"type": "agent_end"},
+    ]
+    path = _implementation_result_path(request, operation_id=operation_id)
+    path.write_text(
+        json.dumps(
+            {
+                "operation_id": str(operation_id),
+                "terminal_status": "succeeded",
+                "output": "\n".join(json.dumps(event) for event in events),
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_result_written_after_progression_was_derived_is_collected_not_failed(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    # Progression is derived while no result exists: the worker looks dead without one.
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.RECONCILE_WORKER
+    # The result lands before the reconcile step runs, as it can between derive and act.
+    _write_result(request)
+
+    service.reconcile_exited_worker(
+        request, now=now + timedelta(seconds=10), heartbeat_window=timedelta(seconds=60)
+    )
+
+    _assert_collected_not_death(ledger_service)
+
+
+def test_a_dead_worker_that_left_a_result_has_it_collected_by_advance(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    _write_result(request)
+
+    assert (
+        service.next_action(request.run.id).action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+    )
+    assert (
+        _advance(service, request, now + timedelta(seconds=10)) is not Stage1ProgressionAction.HOLD
+    )
+    _assert_collected_not_death(ledger_service)
+
+
+class _FireOnce:
+    def __init__(self, point: str) -> None:
+        self.point = point
+        self.fired = False
+
+    def __call__(self, point: str) -> None:
+        if point == self.point and not self.fired:
+            self.fired = True
+            raise RuntimeError(f"injected fault at {point}")
+
+
+@pytest.mark.parametrize("worker_state", ["alive", "gone"])
+def test_a_cancel_interrupted_after_its_termination_request_is_finished_as_a_cancellation(
+    ledger_service: LedgerService, tmp_path: Path, worker_state: str
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    hook = _FireOnce("termination_requested")
+    runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now, fault_hook=hook
+    )
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
+    )
+    with pytest.raises(RuntimeError, match="termination_requested"):
+        runtime.cancel_node(
+            run_id="run-fault",
+            node_id="implement",
+            epoch=epoch.epoch,
+            now=now + timedelta(seconds=6),
+        )
+    assert _supervisor_record(ledger_service)["status"] == "termination_requested"
+    if worker_state == "gone":
+        os.killpg(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.RECONCILE_WORKER
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+    state = _implement_state(ledger_service)
+    assert state["status"] == "cancelled"
+    assert state.get("failure_reason") is None
+    assert probe_process(pid) is None
+    assert (
+        _event_count(
+            ledger_service, event_type="worker.cancelled", aggregate_id="run-fault:implement"
+        )
+        == 1
+    )

@@ -13,10 +13,11 @@ from enginery.domain.errors import HumanActionRequiredError, InternalInvariantVi
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.supervisor import (
+    Locality,
     ProcessIdentity,
+    classify_locality,
     identity_from_state,
-    is_local,
-    probe_process,
+    probe_like,
     same_process,
 )
 from enginery.ledger.events import AppendCommand, EventWrite
@@ -32,6 +33,7 @@ class WorkerLiveness(StrEnum):
     ALIVE = "alive"
     EXITED = "exited"
     PID_REUSED = "pid_reused"
+    REBOOTED = "rebooted"
     FOREIGN_HOST = "foreign_host"
     UNVERIFIABLE = "unverifiable"
 
@@ -148,22 +150,26 @@ def assess_worker(state: Mapping[str, object]) -> WorkerAssessment:
 
     A worker that is gone (death) and a worker that is still running while its coordinator
     lapsed (heartbeat loss) are different facts: only a process whose recorded start identity
-    still holds its pid on this host and boot is ``ALIVE``. A record from another host or
-    boot is neither alive nor dead from here, so it is never classified by a local probe.
+    still holds its pid on this host and boot is ``ALIVE``. ``EXITED``, ``PID_REUSED`` (same
+    machine and boot, the pid now belongs to another process) and ``REBOOTED`` (same machine,
+    different boot) all prove the recorded worker is gone. A record from a different machine,
+    or one that cannot be read, proves nothing and is never classified by a local probe.
     """
     try:
         identity = identity_from_state(state)
     except InternalInvariantViolationError:
         return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, None)
     try:
-        local = is_local(identity)
+        locality = classify_locality(identity)
     except InternalInvariantViolationError:
         # This host's own identity cannot be established, so nothing can be proven.
         return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, identity)
-    if not local:
+    if locality is Locality.FOREIGN:
         return WorkerAssessment(WorkerLiveness.FOREIGN_HOST, identity)
+    if locality is Locality.REBOOTED:
+        return WorkerAssessment(WorkerLiveness.REBOOTED, identity)
     try:
-        observed = probe_process(identity.pid)
+        observed = probe_like(identity)
     except PermissionError:
         # A pid this user cannot signal is held by someone else's process, not our worker.
         return WorkerAssessment(WorkerLiveness.PID_REUSED, identity)
@@ -174,21 +180,24 @@ def assess_worker(state: Mapping[str, object]) -> WorkerAssessment:
     return WorkerAssessment(WorkerLiveness.ALIVE, identity)
 
 
+GONE = frozenset({WorkerLiveness.EXITED, WorkerLiveness.PID_REUSED, WorkerLiveness.REBOOTED})
+"""Liveness values that prove the recorded worker is no longer running."""
+
+
 def assess_orphan(
     *, process_state: ProcessManagerStateRecord, workspace_path: Path
 ) -> RecoveryAssessment:
     """Prove a prior worker is absent and its workspace is quiescent.
 
-    Any malformed process state, foreign host or boot, PID reuse, live process, Git failure,
-    or in-progress Git lock blocks automatic recovery.
+    A worker is absent when its pid is free, held by a different process, or its host has
+    rebooted since it launched. A malformed or foreign-machine record, a live process, a Git
+    failure or an in-progress Git lock blocks automatic recovery.
     """
     liveness = assess_worker(process_state.state).liveness
     if liveness is WorkerLiveness.UNVERIFIABLE:
         return RecoveryAssessment(False, "supervisor_identity_missing_or_invalid")
     if liveness is WorkerLiveness.FOREIGN_HOST:
         return RecoveryAssessment(False, "worker_host_identity_differs")
-    if liveness is WorkerLiveness.PID_REUSED:
-        return RecoveryAssessment(False, "process_identity_changed")
     if liveness is WorkerLiveness.ALIVE:
         return RecoveryAssessment(False, "process_still_running")
     return assess_workspace_quiescence(workspace_path)
@@ -223,6 +232,7 @@ def assess_workspace_quiescence(workspace_path: Path) -> RecoveryAssessment:
 
 
 __all__ = [
+    "GONE",
     "RecoveryAssessment",
     "RecoveryCoordinator",
     "WorkerAssessment",

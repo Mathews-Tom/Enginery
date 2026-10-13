@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from enginery.domain.errors import ExternalConflictError, HumanActionRequiredError
+from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.recovery import (
@@ -147,12 +147,16 @@ def test_a_record_persisted_before_host_binding_is_judged_by_single_host_semanti
             del state[key]
 
     _rewrite(ledger_service, strip_host)
+    # A genuine legacy record carries the start time as the inherited environment formatted it.
+    inherited = probe_process(identity.pid, inherited_environment=True)
+    assert inherited is not None
+    _rewrite(ledger_service, lambda state: state.update(start_identity=inherited.start_identity))
     legacy = identity_from_state(_record(ledger_service).state)
     assert legacy.legacy
     assert (legacy.pid, legacy.process_group_id, legacy.start_identity) == (
         identity.pid,
         identity.process_group_id,
-        identity.start_identity,
+        inherited.start_identity,
     )
     assert assess_worker(_record(ledger_service).state).liveness is WorkerLiveness.ALIVE
 
@@ -167,7 +171,7 @@ def test_a_record_persisted_before_host_binding_is_judged_by_single_host_semanti
     assert probe_process(identity.pid) is None
 
 
-@pytest.mark.parametrize("difference", ["boot", "machine"])
+@pytest.mark.parametrize("difference", ["machine"])
 def test_a_record_from_another_host_or_boot_is_held_and_its_pid_is_never_signalled(
     ledger_service: LedgerService, tmp_path: Path, difference: str
 ) -> None:
@@ -251,10 +255,17 @@ def test_worker_death_pid_reuse_and_heartbeat_loss_are_classified_apart(
     reused = _record(ledger_service)
     assert assess_worker(reused.state).liveness is WorkerLiveness.PID_REUSED
     refusal = assess_orphan(process_state=reused, workspace_path=repository)
-    assert (refusal.ready_to_release, refusal.reason) == (False, "process_identity_changed")
-    with pytest.raises(ExternalConflictError, match="PID-reuse"):
-        supervisor.cancel_persisted(lease=lease, now=_NOW)
+    assert (refusal.ready_to_release, refusal.reason) == (
+        True,
+        "process_absent_workspace_quiescent",
+    )
+    # The recorded worker is provably gone, so cancel reaches a bounded state without
+    # signalling the unrelated process that now holds the pid.
+    supervisor.cancel_persisted(lease=lease, now=_NOW)
     assert probe_process(identity.pid) == identity
+    assert _record(ledger_service).state["status"] == "exit_observed"
+    assert _record(ledger_service).state["exit_reason"] == "start_identity_mismatch"
+    assert _event_count(ledger_service, "worker.cancelled") == 1
     _rewrite(ledger_service, lambda state: state.update(start_identity=original["start_identity"]))
 
     # Death: the worker is killed outright; no coordinator expiry is involved.

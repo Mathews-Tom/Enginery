@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import functools
 import os
 import re
@@ -231,7 +232,9 @@ class WorkerSupervisor:
         exact-identity termination (which returns if the group is already gone), and an
         already observed exit is left as recorded.
         """
-        require_local(identity, action="terminate")
+        locality = classify_locality(identity)
+        if locality is Locality.FOREIGN:
+            require_local(identity, action="terminate")
         epoch = lease.epoch if coordinator_epoch is None else coordinator_epoch
         record = self._require_supervisor_record(lease)
         status = record.state.get("status")
@@ -264,7 +267,12 @@ class WorkerSupervisor:
                 "only a running or terminating worker can be cancelled",
                 details={"status": str(status)},
             )
-        _terminate_exact_group(identity)
+        # A rebooted host cannot still be running the worker, so nothing is signalled.
+        reason = (
+            "worker_lost_to_reboot"
+            if locality is Locality.REBOOTED
+            else _terminate_exact_group(identity)
+        )
         self._fault("process_exit_observed")
         self._record_exit(
             lease=lease,
@@ -273,6 +281,7 @@ class WorkerSupervisor:
             now=now,
             event_type="worker.cancelled",
             expected_state_version=state_version,
+            reason=reason,
         )
 
     def cancel_persisted(
@@ -320,36 +329,47 @@ class WorkerSupervisor:
     def observe_exit(
         self, *, lease: FencedNodeLease, coordinator_epoch: int, now: datetime
     ) -> None:
-        """Record a naturally exited worker after exact identity re-probing."""
+        """Record that a worker is no longer running, without ever signalling it.
+
+        A naturally exited worker is confirmed by exact identity re-probing. A worker whose
+        pid is now held by a different process, or whose host rebooted since it launched,
+        cannot still be running: that is recorded as an inferred exit with its reason. A
+        worker recorded on a different machine proves nothing and is refused. Repeating the
+        call after an exit was recorded changes nothing.
+        """
         record = self._require_supervisor_record(lease)
-        if record.state.get("status") == "exit_observed":
+        if record.state.get("status") in {"exit_observed", "exit_reconciled"}:
             return
         identity = identity_from_state(record.state)
-        require_local(identity, action="observe")
+        locality = classify_locality(identity)
+        if locality is Locality.FOREIGN:
+            require_local(identity, action="observe")
+        if locality is Locality.REBOOTED:
+            self._record_inferred_exit(
+                lease, record, identity, coordinator_epoch, now, "worker_lost_to_reboot"
+            )
+            return
         try:
             reaped_pid, _ = os.waitpid(identity.pid, os.WNOHANG)
         except ChildProcessError:
             reaped_pid = 0
-        if reaped_pid == identity.pid:
-            self._fault("process_exit_observed")
-            self._record_exit(
-                lease=lease,
-                coordinator_epoch=coordinator_epoch,
-                identity=identity,
-                now=now,
-                event_type="worker.process_exit_observed",
-                expected_state_version=record.state_version,
-            )
-            return
-        observed = probe_process(identity.pid)
-        if observed is not None:
-            if not same_process(identity, observed):
-                raise ExternalConflictError(
-                    "process identity changed; refusing result after PID reuse"
+        if reaped_pid != identity.pid:
+            try:
+                observed = probe_like(identity)
+            except PermissionError:
+                self._record_inferred_exit(
+                    lease, record, identity, coordinator_epoch, now, MISMATCH
                 )
-            raise ExternalConflictError(
-                "worker result arrived before supervised process exit was observed"
-            )
+                return
+            if observed is not None:
+                if not same_process(identity, observed):
+                    self._record_inferred_exit(
+                        lease, record, identity, coordinator_epoch, now, MISMATCH
+                    )
+                    return
+                raise ExternalConflictError(
+                    "worker result arrived before supervised process exit was observed"
+                )
         self._fault("process_exit_observed")
         self._record_exit(
             lease=lease,
@@ -358,6 +378,26 @@ class WorkerSupervisor:
             now=now,
             event_type="worker.process_exit_observed",
             expected_state_version=record.state_version,
+        )
+
+    def _record_inferred_exit(
+        self,
+        lease: FencedNodeLease,
+        record: ProcessManagerStateRecord,
+        identity: ProcessIdentity,
+        coordinator_epoch: int,
+        now: datetime,
+        reason: str,
+    ) -> None:
+        self._fault("process_exit_observed")
+        self._record_exit(
+            lease=lease,
+            coordinator_epoch=coordinator_epoch,
+            identity=identity,
+            now=now,
+            event_type="worker.exit_inferred",
+            expected_state_version=record.state_version,
+            reason=reason,
         )
 
     def _record_exit(
@@ -369,8 +409,11 @@ class WorkerSupervisor:
         now: datetime,
         event_type: str,
         expected_state_version: int,
+        reason: str | None = None,
     ) -> None:
         state = _state(lease, identity=identity, status="exit_observed")
+        if reason is not None:
+            state["exit_reason"] = reason
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"{event_type}:{lease.run_id}:{lease.node_id}:{lease.fencing_token}",
@@ -429,17 +472,10 @@ _TERMINATION_GRACE_SECONDS = 10.0
 _EXIT_POLL_SECONDS = 0.02
 
 
-def _probe_for_termination(identity: ProcessIdentity) -> ProcessIdentity | None:
-    try:
-        return probe_process(identity.pid)
-    except PermissionError as error:
-        # The pid is held by a process this user cannot signal, so it is not our worker.
-        raise ExternalConflictError(
-            "process identity changed; refusing PID-reuse termination"
-        ) from error
+MISMATCH = "start_identity_mismatch"
 
 
-def _terminate_exact_group(identity: ProcessIdentity) -> None:
+def _terminate_exact_group(identity: ProcessIdentity) -> str | None:
     """Terminate the recorded worker's whole process group within a bounded time.
 
     The worker may have been launched by an earlier coordinator process, so its exit cannot
@@ -448,18 +484,25 @@ def _terminate_exact_group(identity: ProcessIdentity) -> None:
     gone when the leader and every member have exited, so a leader that died while a
     descendant kept running is still terminated. SIGTERM gets a grace period, then SIGKILL; a
     group that survives both is reported instead of waited on forever. Safe to repeat.
+
+    When the pid is now held by a different process (a different start identity, or one this
+    user cannot signal) the recorded worker is provably gone and nothing may be signalled:
+    ``MISMATCH`` is returned so the caller records it as evidence.
     """
     require_local(identity, action="terminate")
-    current = _probe_for_termination(identity)
+    try:
+        current = probe_like(identity)
+    except PermissionError:
+        return MISMATCH
     if current is not None and not same_process(identity, current):
-        raise ExternalConflictError("process identity changed; refusing PID-reuse termination")
+        return MISMATCH
     if current is None and _group_is_empty(identity.process_group_id):
-        return
+        return None
     for termination in (signal.SIGTERM, signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(identity.process_group_id, termination)
         if _await_group_exit(identity, timeout=_TERMINATION_GRACE_SECONDS):
-            return
+            return None
     raise InternalInvariantViolationError(
         "worker process group remains present after termination; human reconciliation required"
     )
@@ -470,7 +513,10 @@ def _await_group_exit(identity: ProcessIdentity, *, timeout: float) -> bool:
     while True:
         with contextlib.suppress(ChildProcessError):
             os.waitpid(identity.pid, os.WNOHANG)
-        observed = probe_process(identity.pid)
+        try:
+            observed = probe_like(identity)
+        except PermissionError:
+            observed = None  # held by another user's process: no longer our worker
         if (observed is None or not same_process(identity, observed)) and _group_is_empty(
             identity.process_group_id
         ):
@@ -490,7 +536,17 @@ def _group_is_empty(process_group_id: int) -> bool:
     return False
 
 
-def probe_process(pid: int) -> ProcessIdentity | None:
+_STABLE_ENVIRONMENT = {"TZ": "UTC0", "LC_ALL": "C"}
+
+
+def probe_process(pid: int, *, inherited_environment: bool = False) -> ProcessIdentity | None:
+    """Identify the process holding ``pid``, or None if there is none.
+
+    On macOS the start time comes from ``ps`` and is formatted by the caller's time zone and
+    locale, so new records probe under a fixed environment and compare equal from any
+    process. ``inherited_environment`` reproduces the old probe for a record written before
+    that, which has to be compared the way it was recorded.
+    """
     if pid < 1:
         raise InvalidInputError("pid must be positive")
     try:
@@ -504,6 +560,7 @@ def probe_process(pid: int) -> ProcessIdentity | None:
             text=True,
             capture_output=True,
             check=False,
+            env=None if inherited_environment else {**os.environ, **_STABLE_ENVIRONMENT},
         )
         start_identity = completed.stdout.strip()
     elif sys.platform.startswith("linux"):
@@ -523,6 +580,11 @@ def probe_process(pid: int) -> ProcessIdentity | None:
             return None
         raise InternalInvariantViolationError("process-start identity was empty")
     return ProcessIdentity(pid, process_group_id, start_identity, probe_host())
+
+
+def probe_like(recorded: ProcessIdentity) -> ProcessIdentity | None:
+    """Probe a recorded worker's pid the way that record was made (legacy: as inherited)."""
+    return probe_process(recorded.pid, inherited_environment=recorded.legacy)
 
 
 def _pid_exists(pid: int) -> bool:
@@ -587,9 +649,33 @@ def probe_host() -> HostIdentity:
     return HostIdentity(machine_id, boot_id, hostname)
 
 
+class Locality(enum.Enum):
+    """Where a recorded worker's pid is meaningful relative to this host and boot."""
+
+    LOCAL = "local"
+    REBOOTED = "rebooted"
+    FOREIGN = "foreign"
+
+
+def classify_locality(identity: ProcessIdentity) -> Locality:
+    """Place a recorded identity: legacy records assume this host.
+
+    The same machine id with a different boot id means the host rebooted, so the worker
+    cannot have survived; a different machine id says nothing about this host's processes.
+    """
+    if identity.host is None:
+        return Locality.LOCAL
+    here = probe_host()
+    if identity.host.machine_id != here.machine_id:
+        return Locality.FOREIGN
+    if identity.host.boot_id != here.boot_id:
+        return Locality.REBOOTED
+    return Locality.LOCAL
+
+
 def is_local(identity: ProcessIdentity) -> bool:
     """Whether a recorded process can be probed here: legacy records assume this host."""
-    return identity.host is None or identity.host == probe_host()
+    return classify_locality(identity) is Locality.LOCAL
 
 
 def require_local(identity: ProcessIdentity, *, action: str) -> None:
@@ -715,11 +801,14 @@ def _event(
 __all__ = [
     "IDENTITY_VERSION",
     "HostIdentity",
+    "Locality",
     "ProcessIdentity",
     "WorkerSupervisor",
+    "classify_locality",
     "identity_from_state",
     "is_local",
     "probe_host",
+    "probe_like",
     "probe_process",
     "require_local",
     "same_process",

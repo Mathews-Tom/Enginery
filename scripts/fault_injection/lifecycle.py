@@ -454,7 +454,7 @@ def _cancel_queued_and_running() -> None:
 
 
 def _host_boot_mismatch_hold() -> None:
-    for difference in ("boot_id", "machine_id"):
+    for difference in ("machine_id",):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ledger = LedgerService.open(root / "ledger.db")
@@ -502,6 +502,55 @@ def _host_boot_mismatch_hold() -> None:
             finally:
                 _stop_leftovers(pids)
                 ledger.close()
+
+
+def _reboot_reconciled() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        ledger = LedgerService.open(root / "ledger.db")
+        pids: list[int] = []
+        try:
+            runtime = CoordinatorRuntime(ledger, owner="operator")
+            node = _node(root, "worker", command=_SLEEP)
+            (running,) = _tick(runtime, _T0, node)
+            pids.append(running.identity.pid)
+            record = ledger.read_process_manager_state(
+                process_manager_name="worker-supervisor", state_key="run-worker:work"
+            )
+            assert record is not None
+            state = dict(record.state)
+            state["boot_id"] = "an earlier boot"
+            ledger.connection.execute(
+                "UPDATE process_manager_state SET state_json = ? "
+                "WHERE process_manager_name = 'worker-supervisor' AND state_key = ?",
+                (json.dumps(state), "run-worker:work"),
+            )
+            ledger.connection.commit()
+            _expect(
+                assess_worker(state).liveness is WorkerLiveness.REBOOTED,
+                "a different boot on the same machine was not classified as a reboot",
+            )
+            later = _T0 + timedelta(seconds=120)
+            runtime.fail_exited_worker(
+                run_id="run-worker", node_id="work", now=later, heartbeat_window=_WINDOW
+            )
+            _expect(_status(ledger, "worker") == "failed", "a rebooted worker was not failed")
+            node_state = ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id="run-worker:work"
+            )
+            _expect(node_state is not None, "node state is missing")
+            assert node_state is not None
+            _expect(
+                node_state.state["failure_reason"] == "worker_lost_to_reboot",
+                "the reboot was not recorded as its own failure reason",
+            )
+            _expect(
+                probe_process(running.identity.pid) == running.identity,
+                "a rebooted worker's pid was signalled",
+            )
+        finally:
+            _stop_leftovers(pids)
+            ledger.close()
 
 
 def _worker_death_bounded_state() -> None:
@@ -582,6 +631,11 @@ def lifecycle_scenarios() -> tuple[FaultScenario, ...]:
             "host_boot_mismatch_hold",
             "a worker record from another host or boot is held and never signalled",
             _host_boot_mismatch_hold,
+        ),
+        (
+            "reboot_reconciled_not_signalled",
+            "a worker recorded under an earlier boot is failed as lost to reboot, never signalled",
+            _reboot_reconciled,
         ),
         (
             "worker_death_bounded_state",
