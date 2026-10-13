@@ -10,9 +10,9 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.6.0` is the current release candidate; it is not yet published.
-`v0.5.0` is the latest published release (PyPI and GitHub Release, 2026-08-11),
-alongside the published `v0.1.0`, `v0.2.0`, `v0.3.0`, and `v0.4.0`. Enginery ships three of its four planned
+`v0.6.0` is the current release candidate. `v0.1.0`, `v0.2.0`, `v0.3.0`,
+`v0.4.0`, and `v0.5.0` (2026-08-11) are published on PyPI and GitHub
+Releases. Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered

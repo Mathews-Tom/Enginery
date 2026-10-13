@@ -23,11 +23,10 @@ gate-deferred — see
 
 ## Installation
 
-The published releases are `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0`
-(the latest, 2026-08-11) on PyPI and GitHub Releases. `v0.6.0` is the current
-release candidate and is not yet published; until it is, `pip install enginery`
-installs `v0.5.0`, so run the release candidate from a source checkout. Install
-the latest published package with:
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (2026-08-11) are
+published to PyPI and GitHub Releases, and `v0.6.0` is the current release
+candidate. To run the release candidate itself, use a source checkout (below).
+Install the published package with:
 
 ```bash
 pip install enginery
@@ -803,9 +802,9 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-The published releases are `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0`
-(`v0.5.0` on 2026-08-11 to PyPI and GitHub Releases); `v0.6.0` is the current
-release candidate and is not yet published. Together the published releases
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (`v0.5.0` on 2026-08-11)
+are published to PyPI and GitHub Releases; `v0.6.0` is the current release
+candidate. Together the published releases
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
