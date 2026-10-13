@@ -73,13 +73,82 @@ def test_a_missing_sdist_is_rejected_before_anything_is_installed(tmp_path: Path
         release_consumer_smoke.main(["--sdist", str(tmp_path / "enginery-0.6.0.tar.gz")])
 
 
-def test_the_real_consumer_surface_passes(tmp_path: Path) -> None:
+def test_the_real_consumer_surface_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     release_consumer_smoke.exercise_surface(
         executable=_EXECUTABLE, python=_PYTHON, root=tmp_path, version=_version()
     )
     assert (tmp_path / "request-claude-code.json").is_file()
     assert (tmp_path / "request-omp.json").is_file()
     assert not (tmp_path / "rejected-request.json").exists()
+    observed = [line for line in capsys.readouterr().out.splitlines() if line.startswith("ok ")]
+    expected_fragments = [
+        "enginery --version",
+        "enginery doctor",
+        "help",
+        "unsupported pins exit 2",
+        "packaged execution catalog",
+        "valid pins write requests",
+        "gate status --gate G4 remains fail-closed",
+    ]
+    assert len(observed) == len(expected_fragments)
+    for line, fragment in zip(observed, expected_fragments, strict=True):
+        assert fragment in line
+
+
+def test_a_doctor_reporting_another_version_fails_the_doctor_check(tmp_path: Path) -> None:
+    launcher = _launcher(
+        tmp_path,
+        'case "$1" in\n'
+        "  --version) echo 'enginery 1.2.3' ;;\n"
+        "  doctor) echo '[ok] package_metadata: enginery 0.0.1 installed' ;;\n"
+        "esac\n"
+        "exit 0",
+    )
+    release_consumer_smoke._check_version(launcher, root=tmp_path, version="1.2.3")
+    with pytest.raises(ConsumerSmokeError, match="did not report"):
+        release_consumer_smoke._check_doctor(launcher, root=tmp_path, version="1.2.3")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'echo \'{"overall": "fail"}\'; exit 0',
+        'echo \'{"overall": "pass"}\'; exit 3',
+        "exit 3",
+    ],
+)
+def test_a_g4_status_must_both_exit_3_and_report_fail(tmp_path: Path, body: str) -> None:
+    launcher = _launcher(tmp_path, body)
+    with pytest.raises(ConsumerSmokeError, match="G4 did not remain fail-closed"):
+        release_consumer_smoke._check_g4_fail_closed(launcher, root=tmp_path)
+
+
+def test_a_g4_status_that_exits_3_and_reports_fail_is_accepted(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, 'echo \'{"overall": "fail"}\'; exit 3')
+    release_consumer_smoke._check_g4_fail_closed(launcher, root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"hosts": {"omp": "supported", "claude-code": "experimental"}},
+        {"hosts": {"omp": "experimental"}},
+        {"baseline_version": "2"},
+        {"journeys": 0},
+        {"check_ids": []},
+    ],
+)
+def test_unexpected_packaged_data_fails_the_packaged_data_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: dict[str, object]
+) -> None:
+    real = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)
+    monkeypatch.setattr(
+        release_consumer_smoke, "_packaged_data", lambda python, *, root: {**real, **override}
+    )
+    with pytest.raises(ConsumerSmokeError):
+        release_consumer_smoke._check_packaged_data(_PYTHON, root=tmp_path)
 
 
 def test_a_wrong_expected_version_fails_the_surface(tmp_path: Path) -> None:
