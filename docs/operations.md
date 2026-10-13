@@ -7,7 +7,7 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.6.0`, a release candidate. The Stage 1
+[`README.md`](../README.md#status). Enginery is `v0.6.0`. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `stage2 status` remains the only Stage 2 CLI command (a
@@ -23,9 +23,8 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (2026-08-11) are
-published to PyPI and GitHub Releases, and `v0.6.0` is the current release
-candidate. To run the release candidate itself, use a source checkout (below).
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0` (2026-08-11), and `v0.6.0`
+(2026-10-13, the current release) are published to PyPI and GitHub Releases.
 Install the published package with:
 
 ```bash
@@ -802,15 +801,14 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (`v0.5.0` on 2026-08-11)
-are published to PyPI and GitHub Releases; `v0.6.0` is the current release
-candidate. Together the published releases
+`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0` (2026-08-11), and `v0.6.0`
+(2026-10-13) are all published to PyPI and GitHub Releases. Together they
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
 capture pipeline. `v0.4.0` adds gate, request-builder, workspace, and adapter
 diagnostic commands and `v0.5.0` adds measurable G4 evidence, source
-classification, and authority verification; the `v0.6.0` release candidate adds
+classification, and authority verification; `v0.6.0` adds
 reconciled public contracts, per-run execution selection with receipts, and
 queued-work and worker-liveness recovery; none of them adds a workflow stage.
 Stage 4 (governed factory self-improvement) is the only remaining stage;

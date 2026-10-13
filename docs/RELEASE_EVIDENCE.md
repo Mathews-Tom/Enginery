@@ -8,6 +8,47 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.6.0`
+
+Post-publication evidence for the M27b release-preparation pass on 2026-10-13.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#188](https://github.com/Mathews-Tom/Enginery/pull/188) | `build(release): prepare coherent metadata and consumer gates` | `4ee346e2e7c9671a35c27a3864e724b45ecc0552` |
+| [#189](https://github.com/Mathews-Tom/Enginery/pull/189) | `test(release): prove clean platform consumer workflows` | `3243d5b9e3f34171768800c52448da5f5d16cf8e` |
+| [#190](https://github.com/Mathews-Tom/Enginery/pull/190) | `docs(release): finalize truthful release notes` | `eb009583909bfbe92f7ebaaeaad0779297e09520` |
+
+The tagged release commit passed `uv run python scripts/release_gate.py --version 0.6.0` (docs currency, version consistency, `uv build`, `twine check`, and a clean wheel install smoke) and `uv run python scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` (`stage1_runs=2 stage2_evidence=yes stage3_evidence=yes`, evidence digest `sha256:50d83adb5b7c954d87ddb7a6484c306da73cb791557670af918433e2c7b6882d`). The `main` CI run [38342582774](https://github.com/Mathews-Tom/Enginery/actions/runs/38342582774) for that commit concluded `success`. Before the tag, the built wheel and sdist were installed into fresh environments on macOS and in clean `ubuntu:24.04` containers (wheel and sdist on each), and `scripts/release_consumer_smoke.py` passed on all four: `enginery --version`, `enginery doctor`, the `--model`/`--effort`/`--strict-effective` options, rejection of unsupported pins with exit code 2 and no file written, requests whose execution selection is bound to the packaged catalog, the packaged acceptance baseline and execution catalog, and fail-closed `enginery gate status --gate G4 --json`.
+
+### Tag and artifacts
+
+Annotated tag `v0.6.0` (object `54473f4b76ff86f421e7615c8490472369770e2a`) targets `eb009583909bfbe92f7ebaaeaad0779297e09520`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.6.0-py3-none-any.whl` | `3868886564c5b3c2a27296889ea591446c96b867ffb1221f8b970e38654a1e5d` |
+| `enginery-0.6.0.tar.gz` | `dffc23e1a95b37e1f120a609593cb03f3ee6b75304bbd53031cb364a088564c1` |
+
+The same hashes were produced by `release_gate.py` on the tagged commit and reported by PyPI for the uploaded files.
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.6.0/>. The wheel was uploaded at 2026-10-13T03:40:46Z and the sdist at 2026-10-13T03:40:49Z.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.6.0>, published 2026-10-13T03:41:01Z with exactly the wheel and the sdist as assets.
+- **Human approval:** the owner's messages "Approved for the release of v0.6.0" and "go ahead with the release right now" preceded the tag, PyPI upload, and GitHub Release.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` independently verified the non-draft GitHub Release target and both GitHub and PyPI artifact hashes (`PASS verify-published-release version=0.6.0 tag=v0.6.0`). No-project, no-cache consumers installed `enginery==0.6.0` from PyPI on macOS (`uv`, Python 3.12.8) and in a clean `ubuntu:24.04` container (`pip`, Python 3.12.3), and `scripts/release_consumer_smoke.py --package enginery==0.6.0` passed on both with the same checks as above.
+
+### Not claimed
+
+This release claims no isolated-runner, live-host, bootstrap, or factory-path qualification, and adds no `enginery factory` command. Both agent hosts remain `experimental`. Ubuntu consumer proof uses a clean `ubuntu:24.04` container, not supported-host qualification. G4 remains fail-closed and Stage 4 self-improvement remains unimplemented with no committed date.
+
+### Final verdict
+
+**GO.** `v0.6.0` is tagged from verified main and published on PyPI and GitHub Releases with matching wheel and sdist hashes. It adds no workflow stage.
+
 ## `v0.5.0`
 
 Post-publication evidence for the M24b release-preparation pass on 2026-08-11.
