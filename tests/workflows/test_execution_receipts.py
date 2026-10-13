@@ -28,7 +28,7 @@ from enginery.workflows.implementation import Stage1ImplementationExecutor
 _OMP_PIN = "openai/gpt-5.2"
 _CLAUDE_PIN = "claude-opus-4-8"
 _PIN = _OMP_PIN
-_BANNERS = {"omp": "omp v18.10.2\n", "claude-code": "2.1.296 (Claude Code)\n"}
+_BANNERS = {"omp": "omp v18.10.3\n", "claude-code": "2.1.296 (Claude Code)\n"}
 _MODEL_FLAG_PINS = {"omp": _OMP_PIN, "claude-code": _CLAUDE_PIN}
 _EFFORT_FLAGS = {"omp": "--thinking", "claude-code": "--effort"}
 _HOSTS = ("omp", "claude-code")

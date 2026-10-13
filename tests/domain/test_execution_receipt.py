@@ -16,6 +16,7 @@ from enginery.domain.execution_receipt import (
 )
 from enginery.domain.execution_selection import (
     HoldReason,
+    detect_catalog_drift,
     detect_host_drift,
     validate_against_catalog,
 )
@@ -133,15 +134,31 @@ def test_a_receipt_for_a_different_selection_does_not_satisfy_a_strict_requireme
 def test_host_drift_holds_only_a_selection_that_needs_native_controls() -> None:
     pinned = selection_for("omp", model=MODEL)
     default = selection_for("omp")
-    bound = InstalledHost("18.10.2", "json-protocol=3")
+    bound = InstalledHost("18.10.3", "json-protocol=3")
 
     assert detect_host_drift(pinned, installed=bound) is None
     assert detect_host_drift(default, installed=InstalledHost("9.9.9", "other")) is None
-    for installed in (InstalledHost("18.10.3", "json-protocol=3"), None):
+    for installed in (InstalledHost("18.10.2", "json-protocol=3"), None):
         hold = detect_host_drift(pinned, installed=installed)
         assert hold is not None
         assert hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
-        assert hold.details["bound_executable_version"] == "18.10.2"
+        assert hold.details["bound_executable_version"] == "18.10.3"
+
+
+def test_a_run_bound_to_the_first_catalog_holds_against_the_omp_the_current_catalog_names() -> None:
+    bound = selection_for("omp", model=MODEL, catalog=load_execution_catalog("1"))
+
+    host_hold = detect_host_drift(bound, installed=InstalledHost("18.10.3", "json-protocol=3"))
+    catalog_hold = detect_catalog_drift(bound, current=load_execution_catalog())
+
+    assert host_hold is not None
+    assert host_hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
+    assert host_hold.details["bound_executable_version"] == "18.10.2"
+    assert host_hold.details["installed_executable_version"] == "18.10.3"
+    assert catalog_hold is not None
+    assert catalog_hold.reason is HoldReason.CATALOG_DRIFT
+    assert catalog_hold.details["bound_catalog_version"] == "1"
+    assert catalog_hold.details["current_catalog_version"] == "2"
 
 
 def test_validation_against_the_catalog_rejects_forged_tier_fingerprint_or_catalog() -> None:

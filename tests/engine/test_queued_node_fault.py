@@ -211,7 +211,7 @@ def _sleeping_harness(tmp_path: Path, seconds: int = 120) -> str:
     if seconds < 120:
         script.write_text(
             "#!/bin/sh\n"
-            'case "$1" in --help|--version) echo "omp v18.10.2"; exit 0;; esac\n'
+            'case "$1" in --help|--version) echo "omp v18.10.3"; exit 0;; esac\n'
             f"sleep {seconds}\n"
             'echo \'{"type":"session"}\'\n'
             'echo \'{"type":"agent_start"}\'\n'
@@ -435,7 +435,7 @@ def test_queued_implement_is_held_not_dispatched_while_the_catalog_has_drifted(
     drifted = replace(
         service,
         execution_catalog=replace(
-            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="3"
         ),
     )
 
@@ -607,7 +607,7 @@ def test_a_held_older_run_does_not_strand_capacity_a_current_newer_run_can_use(
     drifted = replace(
         service,
         execution_catalog=replace(
-            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="3"
         ),
     )
 
@@ -667,7 +667,7 @@ def test_stage1_wiring_a_drifted_older_run_does_not_strand_a_current_newer_run(
 ) -> None:
     now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
     later_catalog = replace(
-        load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+        load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="3"
     )
     runtime = CoordinatorRuntime(ledger_service, owner="operator")
     older = _qualified_request(tmp_path, "aaa")

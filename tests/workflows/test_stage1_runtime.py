@@ -1821,7 +1821,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
             ),
             ArtifactStore(tmp_path / "artifacts"),
             command_runner=lambda arguments: subprocess.CompletedProcess(
-                arguments, 0, stdout="omp v18.10.2\n", stderr=""
+                arguments, 0, stdout="omp v18.10.3\n", stderr=""
             ),
         ),
     )

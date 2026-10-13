@@ -93,10 +93,10 @@ class _Rig:
         return _Process(self.output)
 
 
-_OMP_INSTALLED = "omp v18.10.2\n\nUSAGE\n"
+_OMP_INSTALLED = "omp v18.10.3\n\nUSAGE\n"
 _CLAUDE_INSTALLED = "2.1.296 (Claude Code)\n"
 _HOSTS = {
-    "omp": ("openai/gpt-5.2", "--thinking", _OMP_INSTALLED, "omp v18.10.3\n"),
+    "omp": ("openai/gpt-5.2", "--thinking", _OMP_INSTALLED, "omp v18.10.4\n"),
     "claude-code": ("claude-opus-4-8", "--effort", _CLAUDE_INSTALLED, "2.1.297 (Claude Code)\n"),
 }
 

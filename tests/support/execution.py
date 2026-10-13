@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.domain.execution_catalog import ExecutionCatalog
 from enginery.domain.execution_selection import (
     ExecutionSelection,
     LayerControls,
@@ -17,8 +18,9 @@ def selection_for(
     model: str | None = None,
     effort: str | None = None,
     strict_effective: bool | None = None,
+    catalog: ExecutionCatalog | None = None,
 ) -> ExecutionSelection:
-    """Resolve a run-layer selection against the packaged catalog; pins when given."""
+    """Resolve a run-layer selection against a catalog (packaged by default); pins when given."""
     return resolve_execution_selection(
         (
             LayerControls(
@@ -31,5 +33,5 @@ def selection_for(
                 strict_effective=strict_effective,
             ),
         ),
-        catalog=load_execution_catalog(),
+        catalog=load_execution_catalog() if catalog is None else catalog,
     )

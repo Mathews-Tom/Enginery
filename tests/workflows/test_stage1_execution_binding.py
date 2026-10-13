@@ -66,7 +66,7 @@ _PRE_SELECTION_KEYS = {
 
 def _drifted_catalog() -> ExecutionCatalog:
     return replace(
-        load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+        load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="3"
     )
 
 
@@ -479,12 +479,12 @@ class _StubHarness:
         raise AssertionError("no worker command may be built while the host is held")
 
 
-_BOUND_HOST = InstalledHost("18.10.2", "json-protocol=3")
+_BOUND_HOST = InstalledHost("18.10.3", "json-protocol=3")
 
 
 @pytest.mark.parametrize(
     "installed",
-    [InstalledHost("18.10.3", "json-protocol=3"), None],
+    [InstalledHost("18.10.2", "json-protocol=3"), None],
     ids=["changed", "unobservable"],
 )
 def test_a_changed_or_unobservable_host_holds_a_run_with_native_controls(
@@ -626,7 +626,7 @@ def test_collect_implementation_gives_the_executor_the_services_own_catalog(
     injected = replace(load_execution_catalog())
     service = replace(
         service,
-        harness=_StubHarness(InstalledHost("18.10.2", "json-protocol=3")),  # type: ignore[arg-type]
+        harness=_StubHarness(InstalledHost("18.10.3", "json-protocol=3")),  # type: ignore[arg-type]
         execution_catalog=injected,
     )
     _complete_check_node(runtime, request, "qualify", now)
