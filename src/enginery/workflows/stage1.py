@@ -33,6 +33,7 @@ from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
     ExecutionHold,
     ExecutionSelection,
+    HoldReason,
     detect_catalog_drift,
     detect_host_drift,
     validate_against_catalog,
@@ -50,6 +51,7 @@ from enginery.domain.serialization import (
 )
 from enginery.domain.workflow.manifest import CHECK_BINDING_SCHEMA_VERSION, WorkflowManifest
 from enginery.domain.workflow.shell_guard import reject_shell_invocation
+from enginery.engine.recovery import GONE, WorkerLiveness, assess_worker
 from enginery.engine.runtime import (
     RUN_AGGREGATE_TYPE,
     RUNTIME_NODE_AGGREGATE_TYPE,
@@ -285,6 +287,7 @@ class Stage1ProgressionAction(StrEnum):
     QUALIFY = "qualify"
     IMPLEMENT = "implement"
     DISPATCH_QUEUED = "dispatch_queued"
+    RECONCILE_WORKER = "reconcile_worker"
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
@@ -496,16 +499,18 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if implementation_status == "queued":
             return Stage1Progression(Stage1ProgressionAction.DISPATCH_QUEUED, run)
+        if implementation_status == "running" and self._cancel_in_progress(str(run_id)):
+            # The operator's cancel wins over a result that landed after it was requested.
+            return self._running_worker_progression(run)
         if implementation_status != "passed":
             result_path = _implementation_result_path(
                 run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
             )
-            action = (
-                Stage1ProgressionAction.COLLECT_IMPLEMENTATION
-                if result_path.is_file()
-                else Stage1ProgressionAction.WAIT
-            )
-            return Stage1Progression(action, run)
+            if result_path.is_file():
+                return Stage1Progression(Stage1ProgressionAction.COLLECT_IMPLEMENTATION, run)
+            if implementation_status == "running":
+                return self._running_worker_progression(run)
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
         generation = _generation(_string(implement_state, "attempt_id"))
 
         validate_state = self._node_state_optional(run_id, "validate")
@@ -612,6 +617,8 @@ class Stage1RunService:
                 lease_window=lease_window,
                 limits=limits,
             )
+        elif progression.action is Stage1ProgressionAction.RECONCILE_WORKER:
+            self.reconcile_exited_worker(request, now=now, heartbeat_window=heartbeat_window)
         elif progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
             self.collect_implementation(
                 request,
@@ -796,6 +803,83 @@ class Stage1RunService:
             run_id=request.run.id,
             attempt_id=_string(queued, "attempt_id"),
             operation_id=OperationId(_string(queued, "operation_id")),
+        )
+
+    def _running_worker_progression(self, run: Stage1Run) -> Stage1Progression:
+        """Decide what a running implementation node with no result file is waiting on.
+
+        A worker proven gone on this host -- its pid is free, held by another process, or the
+        host rebooted since it launched -- is reconciled to a bounded state; the reconcile step
+        looks once more for a result the worker wrote after this was derived. A worker that is
+        alive keeps the run waiting, including after the coordinator epoch that launched it
+        lapsed: with no daemon that is the normal state between ``watch --advance`` calls, and
+        it is only reported as ``lease_epoch_active: false`` in the worker report. An
+        interrupted cancel is finished. Whatever cannot be proven -- a worker recorded on
+        another machine, or an unreadable identity -- is an explicit hold with its reason,
+        never a silent wait.
+        """
+        run_id = str(run.request.run.id)
+        record = self.ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run_id}:implement"
+        )
+        if record is None:
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
+        assessment = assess_worker(record.state)
+        liveness = assessment.liveness
+        if liveness in GONE:
+            return Stage1Progression(Stage1ProgressionAction.RECONCILE_WORKER, run)
+        if liveness is WorkerLiveness.ALIVE:
+            if record.state.get("status") == "termination_requested":
+                return Stage1Progression(Stage1ProgressionAction.RECONCILE_WORKER, run)
+            return Stage1Progression(Stage1ProgressionAction.WAIT, run)
+        return Stage1Progression(
+            Stage1ProgressionAction.HOLD,
+            run,
+            ExecutionHold(
+                reason=HoldReason.WORKER_IDENTITY_UNPROVABLE,
+                message=(
+                    "the implementation worker's liveness cannot be proven from this host "
+                    f"({liveness.value}). There is no supported release for this in this "
+                    "release: the node keeps its slot until the worker is dealt with on the "
+                    "machine that launched it"
+                ),
+                details={"liveness": liveness.value},
+            ),
+        )
+
+    def _cancel_in_progress(self, run_id: str) -> bool:
+        record = self.ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run_id}:implement"
+        )
+        return record is not None and record.state.get("status") == "termination_requested"
+
+    def _implementation_result_exists(self, request: Stage1RunRequest) -> bool:
+        implement_state = self._node_state(request.run.id, "implement")
+        return _implementation_result_path(
+            request, operation_id=OperationId(_string(implement_state, "operation_id"))
+        ).is_file()
+
+    def reconcile_exited_worker(
+        self, request: Stage1RunRequest, *, now: datetime, heartbeat_window: timedelta
+    ) -> None:
+        """Resolve a worker that is provably gone: collect its result, else fail the node.
+
+        A result written after progression was derived (or by the very worker that then
+        exited) is collected rather than discarded as a death. An interrupted cancel is
+        finished as a cancellation by the runtime, before any result is considered: the
+        operator's cancel wins over a late result.
+        """
+        self._require_executable(request)
+        if not self._cancel_in_progress(str(request.run.id)) and (
+            self._implementation_result_exists(request)
+        ):
+            self.collect_implementation(request, now=now, heartbeat_window=heartbeat_window)
+            return
+        self.runtime.fail_exited_worker(
+            run_id=str(request.run.id),
+            node_id="implement",
+            now=now,
+            heartbeat_window=heartbeat_window,
         )
 
     def _queued_wakeup(self, run_id: RunId) -> Mapping[str, object] | None:
@@ -1392,6 +1476,11 @@ def _fixture_dispatch(
         dependencies=dependencies,
         workflow_definition_id=request.manifest.id.value,
         retain_workspace=node_id == "implement",
+        log_directory=(
+            request.execution_configuration.artifact_root / "worker-logs"
+            if node_id == "implement"
+            else None
+        ),
     )
 
 

@@ -23,6 +23,7 @@ from enginery.cli.stage1_request import run_build_request
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
+from enginery.engine.recovery import assess_worker
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService
@@ -118,7 +119,7 @@ def _watch(args: argparse.Namespace) -> None:
                 "aggregate_version": run.aggregate_version,
                 "action_taken": previous.action.value if args.advance else None,
                 "next_action": progression.action.value,
-                "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
+                "nodes": _nodes(ledger, runtime, run_id=str(run.request.run.id)),
                 "hold": None if progression.hold is None else progression.hold.to_state(),
                 "execution": execution_report(ledger, run, hold=progression.hold),
             }
@@ -341,7 +342,7 @@ def _evidence(args: argparse.Namespace) -> None:
                 "request_digest": str(run.request.digest),
                 "source_revision": run.request.work_snapshot.source_revision,
                 "base_revision": run.request.run.base_revision,
-                "nodes": _nodes(ledger, run_id=str(run.request.run.id)),
+                "nodes": _nodes(ledger, runtime, run_id=str(run.request.run.id)),
                 "hold": None if progression.hold is None else progression.hold.to_state(),
                 "execution": execution_report(ledger, run, hold=progression.hold),
             }
@@ -350,24 +351,77 @@ def _evidence(args: argparse.Namespace) -> None:
         ledger.close()
 
 
-def _nodes(ledger: LedgerService, *, run_id: str) -> list[dict[str, object]]:
+def _nodes(
+    ledger: LedgerService, runtime: CoordinatorRuntime, *, run_id: str
+) -> list[dict[str, object]]:
     nodes: list[dict[str, object]] = []
     prefix = f"{run_id}:"
     for projection in ledger.list_projections(aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE):
         if not projection.aggregate_id.startswith(prefix):
             continue
         state = projection.state
+        node_id = projection.aggregate_id.removeprefix(prefix)
         nodes.append(
             {
-                "node_id": projection.aggregate_id.removeprefix(prefix),
+                "node_id": node_id,
                 "attempt_id": state.get("attempt_id"),
                 "operation_id": state.get("operation_id"),
                 "status": state.get("status"),
                 "artifacts": state.get("artifact_references", []),
                 "wakeup": state.get("wakeup"),
+                "worker": (
+                    _worker_report(ledger, runtime, run_id=run_id, node_id=node_id)
+                    if state.get("status") == "running"
+                    else None
+                ),
             }
         )
     return sorted(nodes, key=lambda node: str(node["node_id"]))
+
+
+def _worker_report(
+    ledger: LedgerService, runtime: CoordinatorRuntime, *, run_id: str, node_id: str
+) -> dict[str, object] | None:
+    """Report what the persisted worker identity proves, read-only.
+
+    ``liveness`` separates a dead worker (``exited``/``pid_reused``) from a live worker whose
+    coordinator lapsed (``alive`` with ``lease_epoch_active`` false: the epoch that launched
+    the worker, not whichever coordinator owns the ledger now); a record from
+    another host or boot is ``foreign_host`` and is never probed locally.
+    """
+    record = ledger.read_process_manager_state(
+        process_manager_name="worker-supervisor", state_key=f"{run_id}:{node_id}"
+    )
+    if record is None:
+        return None
+    assessment = assess_worker(record.state)
+    identity = assessment.identity
+    lease = ledger.read_lease(run_id=run_id, node_id=node_id)
+    epoch = runtime.coordinator.current_epoch()
+    return {
+        "liveness": assessment.liveness.value,
+        "supervisor_status": record.state.get("status"),
+        "attempt_id": record.state.get("attempt_id"),
+        "pid": None if identity is None else identity.pid,
+        "process_group_id": None if identity is None else identity.process_group_id,
+        "start_identity": None if identity is None else identity.start_identity,
+        "host": (
+            None
+            if identity is None or identity.host is None
+            else {
+                "machine_id": identity.host.machine_id,
+                "boot_id": identity.host.boot_id,
+                "hostname": identity.host.hostname,
+            }
+        ),
+        "identity_version": record.state.get("identity_version", 1),
+        "lease_epoch": None if lease is None else lease.epoch,
+        "lease_expires_at": None if lease is None else lease.expires_at,
+        "coordinator_epoch": None if epoch is None else epoch.epoch,
+        "lease_epoch_active": runtime.lease_epoch_active(
+            run_id=run_id, node_id=node_id, now=_now()
+        ),
+    }
 
 
 def _read_json(path: Path) -> dict[str, object]:

@@ -3,19 +3,45 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 
 from enginery.domain.errors import HumanActionRequiredError, InternalInvariantViolationError
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
-from enginery.engine.supervisor import ProcessIdentity, probe_process
+from enginery.engine.supervisor import (
+    Locality,
+    Presence,
+    ProcessIdentity,
+    classify_locality,
+    identity_from_state,
+    probe_presence,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.process_manager import ProcessManagerStateRecord, ProcessManagerStateWrite
 from enginery.ledger.service import LedgerService
 
 _SUPERVISOR_NAME = "worker-supervisor"
+
+
+class WorkerLiveness(StrEnum):
+    """What this host can prove about a worker from its persisted identity alone."""
+
+    ALIVE = "alive"
+    EXITED = "exited"
+    PID_REUSED = "pid_reused"
+    REBOOTED = "rebooted"
+    FOREIGN_HOST = "foreign_host"
+    UNVERIFIABLE = "unverifiable"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerAssessment:
+    liveness: WorkerLiveness
+    identity: ProcessIdentity | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +106,10 @@ class RecoveryCoordinator:
         )
         if record is None:
             return RecoveryAssessment(False, "supervisor_state_missing")
+        if record.state.get("attempt_id") != lease.attempt_id:
+            return RecoveryAssessment(False, "worker_attempt_identity_mismatch")
+        if record.state.get("status") == "exit_reconciled":
+            return RecoveryAssessment(True, "already_reconciled")
         assessment = assess_orphan(process_state=record, workspace_path=workspace_path)
         if not assessment.ready_to_release:
             return assessment
@@ -115,22 +145,61 @@ class RecoveryCoordinator:
         return assessment
 
 
+def assess_worker(state: Mapping[str, object]) -> WorkerAssessment:
+    """Classify a persisted worker by its start, process-group and host identity.
+
+    A worker that is gone (death) and a worker that is still running while its coordinator
+    lapsed (heartbeat loss) are different facts: only a process whose recorded start identity
+    still holds its pid on this host and boot is ``ALIVE``. ``EXITED``, ``PID_REUSED`` (same
+    machine and boot, the pid now belongs to another process) and ``REBOOTED`` (same machine,
+    different boot) all prove the recorded worker is gone. A record from a different machine,
+    or one that cannot be read, proves nothing and is never classified by a local probe.
+    """
+    try:
+        identity = identity_from_state(state)
+    except InternalInvariantViolationError:
+        return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, None)
+    try:
+        locality = classify_locality(identity)
+    except InternalInvariantViolationError:
+        # This host's own identity cannot be established, so nothing can be proven.
+        return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, identity)
+    if locality is Locality.FOREIGN:
+        return WorkerAssessment(WorkerLiveness.FOREIGN_HOST, identity)
+    if locality is Locality.REBOOTED:
+        return WorkerAssessment(WorkerLiveness.REBOOTED, identity)
+    presence = probe_presence(identity)
+    if presence is Presence.UNPROVABLE:
+        # A legacy record's start time was formatted in an unknown time zone, so a mismatch
+        # may still be the same live process: fail closed.
+        return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, identity)
+    if presence is Presence.ABSENT:
+        return WorkerAssessment(WorkerLiveness.EXITED, identity)
+    if presence is Presence.OTHER:
+        # A pid this user cannot signal, or one with another start identity, is not our worker.
+        return WorkerAssessment(WorkerLiveness.PID_REUSED, identity)
+    return WorkerAssessment(WorkerLiveness.ALIVE, identity)
+
+
+GONE = frozenset({WorkerLiveness.EXITED, WorkerLiveness.PID_REUSED, WorkerLiveness.REBOOTED})
+"""Liveness values that prove the recorded worker is no longer running."""
+
+
 def assess_orphan(
     *, process_state: ProcessManagerStateRecord, workspace_path: Path
 ) -> RecoveryAssessment:
     """Prove a prior worker is absent and its workspace is quiescent.
 
-    Any malformed process state, PID reuse, live process, Git failure, or
-    in-progress Git lock blocks automatic recovery.
+    A worker is absent when its pid is free, held by a different process, or its host has
+    rebooted since it launched. A malformed or foreign-machine record, a live process, a Git
+    failure or an in-progress Git lock blocks automatic recovery.
     """
-    try:
-        identity = _identity_from_state(process_state)
-    except InternalInvariantViolationError:
+    liveness = assess_worker(process_state.state).liveness
+    if liveness is WorkerLiveness.UNVERIFIABLE:
         return RecoveryAssessment(False, "supervisor_identity_missing_or_invalid")
-    observed = probe_process(identity.pid)
-    if observed is not None:
-        if observed != identity:
-            return RecoveryAssessment(False, "process_identity_changed")
+    if liveness is WorkerLiveness.FOREIGN_HOST:
+        return RecoveryAssessment(False, "worker_host_identity_differs")
+    if liveness is WorkerLiveness.ALIVE:
         return RecoveryAssessment(False, "process_still_running")
     return assess_workspace_quiescence(workspace_path)
 
@@ -163,23 +232,13 @@ def assess_workspace_quiescence(workspace_path: Path) -> RecoveryAssessment:
     return RecoveryAssessment(True, "process_absent_workspace_quiescent")
 
 
-def _identity_from_state(record: ProcessManagerStateRecord) -> ProcessIdentity:
-    state = record.state
-    pid = state.get("pid")
-    process_group_id = state.get("process_group_id")
-    start_identity = state.get("start_identity")
-    if (
-        not isinstance(pid, int)
-        or not isinstance(process_group_id, int)
-        or not isinstance(start_identity, str)
-    ):
-        raise InternalInvariantViolationError("stored supervisor process identity is invalid")
-    return ProcessIdentity(pid, process_group_id, start_identity)
-
-
 __all__ = [
+    "GONE",
     "RecoveryAssessment",
     "RecoveryCoordinator",
+    "WorkerAssessment",
+    "WorkerLiveness",
     "assess_orphan",
+    "assess_worker",
     "assess_workspace_quiescence",
 ]

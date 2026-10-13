@@ -123,6 +123,7 @@ class FencedNodeLeases:
         now: datetime,
         expected_attempt_version: int,
         allow_expired_cancellation: bool = False,
+        allow_expired_failure: bool = False,
     ) -> None:
         """Accept an exact current-lease worker envelope once.
 
@@ -136,11 +137,14 @@ class FencedNodeLeases:
             raise InvalidInputError("expected_attempt_version cannot be negative")
         if allow_expired_cancellation and envelope.terminal_result != "cancelled":
             raise InvalidInputError("only a cancellation result may bypass lease liveness")
+        if allow_expired_failure and envelope.terminal_result != "failed":
+            raise InvalidInputError("only a failure result may bypass lease liveness here")
+        allow_expired = allow_expired_cancellation or allow_expired_failure
         current = self._ledger.read_lease(run_id=envelope.run_id, node_id=envelope.node_id)
         if (
             current is None
             or not _envelope_matches(current, envelope)
-            or (not allow_expired_cancellation and not _lease_active(current, now=now))
+            or (not allow_expired and not _lease_active(current, now=now))
         ):
             raise ExternalConflictError(
                 "worker result does not hold the current active node lease",

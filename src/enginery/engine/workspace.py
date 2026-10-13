@@ -219,9 +219,14 @@ class GitWorktreeBackend:
     def cleanup(
         self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
     ) -> WorkspaceReservation:
-        if reservation.status not in {"materialized", "reserved", "retained"}:
+        if reservation.status not in {"materialized", "reserved", "retained", "cleanup_started"}:
             raise InvalidInputError("workspace is already cleaned")
-        cleaning = self._record_status(reservation, status="cleanup_started", epoch=epoch, now=now)
+        # A cleanup interrupted after it was recorded as started resumes where it stopped.
+        cleaning = (
+            reservation
+            if reservation.status == "cleanup_started"
+            else self._record_status(reservation, status="cleanup_started", epoch=epoch, now=now)
+        )
         self._fault("workspace_cleanup_started")
         completed = subprocess.run(
             [
