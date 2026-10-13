@@ -240,6 +240,9 @@ class WorkerSupervisor:
         status = record.state.get("status")
         if status in {"exit_observed", "exit_reconciled"}:
             return
+        if locality is Locality.LOCAL:
+            # Refuse before recording a termination request that could not be completed.
+            require_provable(identity, action="terminate")
         if status == "running":
             requested = _state(lease, identity=identity, status="termination_requested")
             requested_result = self._ledger.append(
@@ -304,6 +307,7 @@ class WorkerSupervisor:
         if epoch is not None and epoch.epoch == lease.epoch and epoch.active_at(now):
             return False
         require_local(identity, action="terminate")
+        require_provable(identity, action="terminate")
         record = self._require_supervisor_record(lease)
         requested = _state(lease, identity=identity, status="termination_requested")
         requested["reason"] = "coordinator_heartbeat_expired"
@@ -354,19 +358,13 @@ class WorkerSupervisor:
         except ChildProcessError:
             reaped_pid = 0
         if reaped_pid != identity.pid:
-            try:
-                observed = probe_like(identity)
-            except PermissionError:
+            presence = require_provable(identity, action="observe")
+            if presence is Presence.OTHER:
                 self._record_inferred_exit(
                     lease, record, identity, coordinator_epoch, now, MISMATCH
                 )
                 return
-            if observed is not None:
-                if not same_process(identity, observed):
-                    self._record_inferred_exit(
-                        lease, record, identity, coordinator_epoch, now, MISMATCH
-                    )
-                    return
+            if presence is Presence.SAME:
                 raise ExternalConflictError(
                     "worker result arrived before supervised process exit was observed"
                 )
@@ -490,13 +488,10 @@ def _terminate_exact_group(identity: ProcessIdentity) -> str | None:
     ``MISMATCH`` is returned so the caller records it as evidence.
     """
     require_local(identity, action="terminate")
-    try:
-        current = probe_like(identity)
-    except PermissionError:
+    presence = require_provable(identity, action="terminate")
+    if presence is Presence.OTHER:
         return MISMATCH
-    if current is not None and not same_process(identity, current):
-        return MISMATCH
-    if current is None and _group_is_empty(identity.process_group_id):
+    if presence is Presence.ABSENT and _group_is_empty(identity.process_group_id):
         return None
     for termination in (signal.SIGTERM, signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError):
@@ -585,6 +580,46 @@ def probe_process(pid: int, *, inherited_environment: bool = False) -> ProcessId
 def probe_like(recorded: ProcessIdentity) -> ProcessIdentity | None:
     """Probe a recorded worker's pid the way that record was made (legacy: as inherited)."""
     return probe_process(recorded.pid, inherited_environment=recorded.legacy)
+
+
+class Presence(enum.Enum):
+    """What the recorded worker's pid shows on this host and boot."""
+
+    ABSENT = "absent"
+    SAME = "same"
+    OTHER = "other"
+    UNPROVABLE = "unprovable"
+
+
+def probe_presence(recorded: ProcessIdentity) -> Presence:
+    """Decide whether the recorded worker still holds its pid.
+
+    A host-bound record carries a start identity read under a fixed time zone and locale, so
+    a present pid with a different start identity, or one this user cannot signal, is another
+    process (``OTHER``). A legacy record's start time was formatted under the launching shell's
+    unknown time zone: a mismatch there may be the same live process, so it proves nothing
+    (``UNPROVABLE``) and is never treated as the worker being gone.
+    """
+    try:
+        observed = probe_like(recorded)
+    except PermissionError:
+        return Presence.UNPROVABLE if recorded.legacy else Presence.OTHER
+    if observed is None:
+        return Presence.ABSENT
+    if same_process(recorded, observed):
+        return Presence.SAME
+    return Presence.UNPROVABLE if recorded.legacy else Presence.OTHER
+
+
+def require_provable(identity: ProcessIdentity, *, action: str) -> Presence:
+    """Return the pid's presence, refusing a legacy record whose start time cannot be trusted."""
+    presence = probe_presence(identity)
+    if presence is Presence.UNPROVABLE:
+        raise HumanActionRequiredError(
+            f"worker start identity cannot be verified, so it cannot be {action}d",
+            details={"pid": identity.pid, "recorded_start_identity": identity.start_identity},
+        )
+    return presence
 
 
 def _pid_exists(pid: int) -> bool:
@@ -802,6 +837,7 @@ __all__ = [
     "IDENTITY_VERSION",
     "HostIdentity",
     "Locality",
+    "Presence",
     "ProcessIdentity",
     "WorkerSupervisor",
     "classify_locality",
@@ -809,7 +845,9 @@ __all__ = [
     "is_local",
     "probe_host",
     "probe_like",
+    "probe_presence",
     "probe_process",
     "require_local",
+    "require_provable",
     "same_process",
 ]

@@ -14,11 +14,11 @@ from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.supervisor import (
     Locality,
+    Presence,
     ProcessIdentity,
     classify_locality,
     identity_from_state,
-    probe_like,
-    same_process,
+    probe_presence,
 )
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.process_manager import ProcessManagerStateRecord, ProcessManagerStateWrite
@@ -168,14 +168,15 @@ def assess_worker(state: Mapping[str, object]) -> WorkerAssessment:
         return WorkerAssessment(WorkerLiveness.FOREIGN_HOST, identity)
     if locality is Locality.REBOOTED:
         return WorkerAssessment(WorkerLiveness.REBOOTED, identity)
-    try:
-        observed = probe_like(identity)
-    except PermissionError:
-        # A pid this user cannot signal is held by someone else's process, not our worker.
-        return WorkerAssessment(WorkerLiveness.PID_REUSED, identity)
-    if observed is None:
+    presence = probe_presence(identity)
+    if presence is Presence.UNPROVABLE:
+        # A legacy record's start time was formatted in an unknown time zone, so a mismatch
+        # may still be the same live process: fail closed.
+        return WorkerAssessment(WorkerLiveness.UNVERIFIABLE, identity)
+    if presence is Presence.ABSENT:
         return WorkerAssessment(WorkerLiveness.EXITED, identity)
-    if not same_process(identity, observed):
+    if presence is Presence.OTHER:
+        # A pid this user cannot signal, or one with another start identity, is not our worker.
         return WorkerAssessment(WorkerLiveness.PID_REUSED, identity)
     return WorkerAssessment(WorkerLiveness.ALIVE, identity)
 

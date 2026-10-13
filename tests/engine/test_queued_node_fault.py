@@ -1169,3 +1169,156 @@ def test_a_cancel_interrupted_after_its_termination_request_is_finished_as_a_can
         )
         == 1
     )
+
+
+def _start_identity_formatted_elsewhere(pid: int) -> str:
+    """The start time as a shell in another time zone would have recorded it."""
+    if sys.platform != "darwin":
+        return "a start identity from another launch"
+    inherited = probe_process(pid, inherited_environment=True)
+    assert inherited is not None
+    for zone in ("Pacific/Kiritimati", "America/Los_Angeles", "Asia/Kolkata"):
+        shifted = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            env={**os.environ, "TZ": zone, "LC_ALL": "C"},
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        if shifted != inherited.start_identity:
+            return shifted
+    raise AssertionError("no time zone changed the formatted start time")
+
+
+def _make_legacy(ledger: LedgerService, pid: int) -> None:
+    other = _start_identity_formatted_elsewhere(pid)
+
+    def legacy(state: dict[str, object]) -> None:
+        for key in ("identity_version", "machine_id", "boot_id", "hostname"):
+            state.pop(key, None)
+        state["start_identity"] = other
+
+    _rewrite_worker_record(ledger, legacy)
+
+
+def test_a_legacy_record_whose_start_time_mismatches_a_live_pid_is_held_and_never_signalled(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now
+    )
+    _make_legacy(ledger_service, pid)
+
+    progression = service.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.WORKER_IDENTITY_UNPROVABLE
+    assert progression.hold.details["liveness"] == "unverifiable"
+    assert _advance(service, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.HOLD
+    runtime = CoordinatorRuntime(ledger_service, owner="operator")
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=11), heartbeat_window=timedelta(seconds=60)
+    )
+    with pytest.raises(HumanActionRequiredError):
+        runtime.cancel_node(
+            run_id="run-fault",
+            node_id="implement",
+            epoch=epoch.epoch,
+            now=now + timedelta(seconds=12),
+        )
+    # The worker may be the same live process: nothing was signalled, reconciled or recorded.
+    assert probe_process(pid) is not None
+    assert _implement_state(ledger_service)["status"] == "running"
+    assert _supervisor_record(ledger_service)["status"] == "running"
+    assert (
+        _event_count(
+            ledger_service,
+            event_type="worker.termination_requested",
+            aggregate_id="run-fault:implement",
+        )
+        == 0
+    )
+    _stop(pid)
+
+
+@pytest.mark.parametrize("worker_state", ["alive", "gone"])
+def test_an_operators_cancel_wins_over_a_result_that_arrived_after_it(
+    ledger_service: LedgerService, tmp_path: Path, worker_state: str
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    hook = _FireOnce("termination_requested")
+    runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now, fault_hook=hook
+    )
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
+    )
+    with pytest.raises(RuntimeError, match="termination_requested"):
+        runtime.cancel_node(
+            run_id="run-fault",
+            node_id="implement",
+            epoch=epoch.epoch,
+            now=now + timedelta(seconds=6),
+        )
+    if worker_state == "gone":
+        os.killpg(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    _write_result(request)
+
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.RECONCILE_WORKER
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+    state = _implement_state(ledger_service)
+    assert state["status"] == "cancelled"
+    assert state.get("failure_reason") is None
+    assert (
+        _event_count(
+            ledger_service, event_type="worker.cancelled", aggregate_id="run-fault:implement"
+        )
+        == 1
+    )
+    ingested = [
+        json.loads(row[0])
+        for row in ledger_service.connection.execute(
+            "SELECT payload FROM events WHERE event_type = 'node_attempt.result_ingested' "
+            "AND aggregate_id = ?",
+            (str(state["attempt_id"]),),
+        )
+    ]
+    # The only ingested result is the cancellation itself, never the late success.
+    assert [entry["terminal_result"] for entry in ingested] == ["cancelled"]
+    assert probe_process(pid) is None
+
+
+def test_reconciling_an_interrupted_cancel_directly_does_not_collect_a_late_result(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    hook = _FireOnce("termination_requested")
+    runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now, fault_hook=hook
+    )
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
+    )
+    with pytest.raises(RuntimeError, match="termination_requested"):
+        runtime.cancel_node(
+            run_id="run-fault",
+            node_id="implement",
+            epoch=epoch.epoch,
+            now=now + timedelta(seconds=6),
+        )
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    _write_result(request)
+
+    service.reconcile_exited_worker(
+        request, now=now + timedelta(seconds=10), heartbeat_window=timedelta(seconds=60)
+    )
+
+    assert _implement_state(ledger_service)["status"] == "cancelled"

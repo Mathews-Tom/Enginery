@@ -499,6 +499,9 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if implementation_status == "queued":
             return Stage1Progression(Stage1ProgressionAction.DISPATCH_QUEUED, run)
+        if implementation_status == "running" and self._cancel_in_progress(str(run_id)):
+            # The operator's cancel wins over a result that landed after it was requested.
+            return self._running_worker_progression(run)
         if implementation_status != "passed":
             result_path = _implementation_result_path(
                 run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
@@ -844,6 +847,12 @@ class Stage1RunService:
             ),
         )
 
+    def _cancel_in_progress(self, run_id: str) -> bool:
+        record = self.ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run_id}:implement"
+        )
+        return record is not None and record.state.get("status") == "termination_requested"
+
     def _implementation_result_exists(self, request: Stage1RunRequest) -> bool:
         implement_state = self._node_state(request.run.id, "implement")
         return _implementation_result_path(
@@ -857,10 +866,13 @@ class Stage1RunService:
 
         A result written after progression was derived (or by the very worker that then
         exited) is collected rather than discarded as a death. An interrupted cancel is
-        finished as a cancellation by the runtime.
+        finished as a cancellation by the runtime, before any result is considered: the
+        operator's cancel wins over a late result.
         """
         self._require_executable(request)
-        if self._implementation_result_exists(request):
+        if not self._cancel_in_progress(str(request.run.id)) and (
+            self._implementation_result_exists(request)
+        ):
             self.collect_implementation(request, now=now, heartbeat_window=heartbeat_window)
             return
         self.runtime.fail_exited_worker(

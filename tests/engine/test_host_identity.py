@@ -424,3 +424,79 @@ def test_a_pid_held_by_another_users_process_is_pid_reused_and_never_crashes() -
     }
 
     assert assess_worker(state).liveness is WorkerLiveness.PID_REUSED
+
+
+def test_a_legacy_record_with_a_mismatched_start_time_is_unverifiable_never_gone(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    coordinator, lease, identity, repository = _start(ledger_service, tmp_path)
+    try:
+
+        def legacy(state: dict[str, object]) -> None:
+            for key in ("identity_version", "machine_id", "boot_id", "hostname"):
+                del state[key]
+            state["start_identity"] = "Thu Jan  1 00:00:00 1970"
+
+        _rewrite(ledger_service, legacy)
+        recorded = _record(ledger_service)
+        assert identity_from_state(recorded.state).legacy
+
+        assert assess_worker(recorded.state).liveness is WorkerLiveness.UNVERIFIABLE
+        orphan = assess_orphan(process_state=recorded, workspace_path=repository)
+        assert (orphan.ready_to_release, orphan.reason) == (
+            False,
+            "supervisor_identity_missing_or_invalid",
+        )
+        supervisor = WorkerSupervisor(ledger_service, coordinator)
+        with pytest.raises(HumanActionRequiredError, match="cannot be verified"):
+            supervisor.cancel_persisted(lease=lease, now=_NOW)
+        with pytest.raises(HumanActionRequiredError, match="cannot be verified"):
+            supervisor.observe_exit(lease=lease, coordinator_epoch=lease.epoch, now=_NOW)
+        with pytest.raises(HumanActionRequiredError, match="cannot be verified"):
+            supervisor.enforce_heartbeat(
+                lease=lease,
+                identity=identity_from_state(recorded.state),
+                now=_NOW + timedelta(minutes=5),
+            )
+        assert probe_process(identity.pid) == identity
+        assert _record(ledger_service).state["status"] == "running"
+        assert _event_count(ledger_service, "worker.termination_requested") == 0
+    finally:
+        _terminate(identity)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root may signal pid 1")
+def test_a_legacy_record_on_a_pid_this_user_cannot_signal_is_unverifiable() -> None:
+    state: dict[str, object] = {
+        "pid": 1,
+        "process_group_id": 1,
+        "start_identity": "recorded long ago",
+    }
+
+    assert assess_worker(state).liveness is WorkerLiveness.UNVERIFIABLE
+
+
+def test_terminating_a_legacy_identity_with_a_mismatched_start_time_refuses_directly() -> None:
+    from enginery.engine.supervisor import _terminate_exact_group
+
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+    )
+    try:
+        local = probe_process(bystander.pid)
+        assert local is not None
+        legacy = ProcessIdentity(
+            local.pid, local.process_group_id, "Thu Jan  1 00:00:00 1970", None
+        )
+        assert legacy.legacy
+
+        with pytest.raises(HumanActionRequiredError, match="cannot be verified"):
+            _terminate_exact_group(legacy)
+
+        assert bystander.poll() is None
+        assert probe_process(bystander.pid) == local
+    finally:
+        bystander.kill()
+        bystander.wait()
