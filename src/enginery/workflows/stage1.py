@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -507,6 +508,8 @@ class Stage1RunService:
                 run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
             )
             if result_path.is_file():
+                if implementation_status == "running" and self._worker_still_exiting(run):
+                    return Stage1Progression(Stage1ProgressionAction.WAIT, run)
                 return Stage1Progression(Stage1ProgressionAction.COLLECT_IMPLEMENTATION, run)
             if implementation_status == "running":
                 return self._running_worker_progression(run)
@@ -846,6 +849,32 @@ class Stage1RunService:
                 details={"liveness": liveness.value},
             ),
         )
+
+    def _worker_still_exiting(self, run: Stage1Run) -> bool:
+        """Whether a worker that already published its result is provably still running.
+
+        A worker writes its result and only then finishes shutting down. The supervisor
+        refuses to record a result until it has observed the worker's exit, so collecting in
+        that window can only fail with a conflict; the run waits for the exit instead. Only a
+        worker this host proves alive waits: one that is gone, or whose liveness cannot be
+        proven, is collected as before, where the supervisor records the exit or refuses with
+        its own explicit reason. A worker that is a child of this process and has already
+        exited is reaped here, since it would otherwise stay visible as running until someone
+        waited for it.
+        """
+        record = self.ledger.read_process_manager_state(
+            process_manager_name="worker-supervisor", state_key=f"{run.request.run.id}:implement"
+        )
+        if record is None:
+            return False
+        assessment = assess_worker(record.state)
+        if assessment.liveness is not WorkerLiveness.ALIVE or assessment.identity is None:
+            return False
+        try:
+            reaped, _ = os.waitpid(assessment.identity.pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        return reaped != assessment.identity.pid
 
     def _cancel_in_progress(self, run_id: str) -> bool:
         record = self.ledger.read_process_manager_state(

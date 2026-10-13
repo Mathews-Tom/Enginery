@@ -738,6 +738,12 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         if time.monotonic() >= deadline:
             pytest.fail("supervised OMP worker did not retain a result")
         time.sleep(0.01)
+    # The result is published just before the worker exits: the run waits for that exit and
+    # only then offers the result for collection, which therefore cannot be refused.
+    while service.next_action(request.run.id).action.value == "wait":
+        if time.monotonic() >= deadline:
+            pytest.fail("supervised OMP worker did not exit after retaining its result")
+        time.sleep(0.01)
     assert service.next_action(request.run.id).action.value == "collect_implementation"
     recovered = Stage1RunService(
         runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
@@ -747,19 +753,11 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             ArtifactStore(tmp_path / "recovered-artifacts"),
         ),
     )
-    while True:
-        try:
-            result = recovered.collect_implementation(
-                request,
-                now=now + timedelta(seconds=3),
-                heartbeat_window=timedelta(seconds=60),
-            )
-        except ExternalConflictError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.01)
-        else:
-            break
+    result = recovered.collect_implementation(
+        request,
+        now=now + timedelta(seconds=3),
+        heartbeat_window=timedelta(seconds=60),
+    )
     assert recovered.next_action(request.run.id).action.value == "await_human_review"
     second = service.start(
         request,
