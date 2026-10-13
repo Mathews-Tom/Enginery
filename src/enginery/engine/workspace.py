@@ -1,4 +1,9 @@
-"""Run-scoped Git worktree reservations with coordinator fencing."""
+"""Run-scoped workspace reservations with coordinator fencing.
+
+A reservation is either a ``git worktree`` of the operator's repository (trusted-local; a
+worktree is not containment) or a self-contained task-local clone that shares nothing with
+the operator's repository (the isolated profile).
+"""
 
 from __future__ import annotations
 
@@ -14,11 +19,24 @@ from enginery.domain.errors import (
     InvalidInputError,
 )
 from enginery.engine.coordinator import Coordinator
+from enginery.engine.task_repository import (
+    BUNDLE_FILE_NAME,
+    intake_branch_bundle,
+    intake_path_for,
+    materialize_task_local_repository,
+    out_path_for,
+    remove_task_local_workspace,
+    verify_intake_branch,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.process_manager import ProcessManagerStateWrite
 from enginery.ledger.service import LedgerService
 
 _MANAGER_NAME = "workspace-reservations"
+
+WORKSPACE_MODE_GIT_WORKTREE = "git-worktree"
+WORKSPACE_MODE_TASK_LOCAL_CLONE = "task-local-clone"
+WORKSPACE_MODES = frozenset({WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE})
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +48,7 @@ class WorkspaceReservation:
     base_revision: str
     status: str
     state_version: int
+    mode: str = WORKSPACE_MODE_GIT_WORKTREE
 
 
 class GitWorktreeBackend:
@@ -54,12 +73,15 @@ class GitWorktreeBackend:
         repository_path: Path,
         workspace_path: Path,
         base_revision: str,
+        mode: str = WORKSPACE_MODE_GIT_WORKTREE,
         epoch: int,
         now: datetime,
     ) -> WorkspaceReservation:
         _require_text(repository_id, "repository_id")
         _require_text(run_id, "run_id")
         _require_text(base_revision, "base_revision")
+        if mode not in WORKSPACE_MODES:
+            raise InvalidInputError("workspace mode is not supported")
         existing = self._ledger.read_process_manager_state(
             process_manager_name=_MANAGER_NAME, state_key=repository_id
         )
@@ -74,7 +96,7 @@ class GitWorktreeBackend:
             if prior_status in {"reserved", "materialized", "retained"}:
                 return _reservation_from_state(existing.state, existing.state_version)
         state = _reservation_state(
-            repository_id, run_id, repository_path, workspace_path, base_revision, "reserved"
+            repository_id, run_id, repository_path, workspace_path, base_revision, "reserved", mode
         )
         result = self._ledger.append(
             AppendCommand(
@@ -101,6 +123,7 @@ class GitWorktreeBackend:
             base_revision,
             "reserved",
             result.process_manager_states[1].state_version,
+            mode,
         )
         self._fault("workspace_reserved")
         return reservation
@@ -110,6 +133,17 @@ class GitWorktreeBackend:
     ) -> WorkspaceReservation:
         if reservation.status != "reserved":
             raise InvalidInputError("only a reserved workspace can be materialized")
+        if reservation.mode == WORKSPACE_MODE_TASK_LOCAL_CLONE:
+            materialize_task_local_repository(
+                repository_path=reservation.repository_path,
+                workspace_path=reservation.workspace_path,
+                base_revision=reservation.base_revision,
+            )
+            materialized = self._record_status(
+                reservation, status="materialized", epoch=epoch, now=now
+            )
+            self._fault("workspace_materialized")
+            return materialized
         completed = subprocess.run(
             [
                 "git",
@@ -144,6 +178,8 @@ class GitWorktreeBackend:
         if reservation.status not in {"materialized", "retained"}:
             raise InvalidInputError("only a materialized workspace can verify its branch")
         _require_text(head_branch, "head_branch")
+        if reservation.mode == WORKSPACE_MODE_TASK_LOCAL_CLONE:
+            return self._verify_task_local_branch(reservation, head_branch=head_branch)
         branch = self._run_git(
             reservation.workspace_path, "symbolic-ref", "--quiet", "--short", "HEAD"
         )
@@ -216,6 +252,29 @@ class GitWorktreeBackend:
             )
         return head_revision
 
+    def _verify_task_local_branch(
+        self, reservation: WorkspaceReservation, *, head_branch: str
+    ) -> str:
+        """Verify the worker's bundled branch from a host-owned intake repository.
+
+        The worker's own repository (its config and hooks) is worker-controlled, so the host
+        never runs git inside it: it imports only the bundle the worker wrote, into an intake
+        repository the host created, and verifies the branch there. The branch is not on
+        any remote at this point; publishing it is a separate, host-side effect.
+        """
+        intake_branch_bundle(
+            repository_path=reservation.repository_path,
+            workspace_path=reservation.workspace_path,
+            bundle_path=out_path_for(reservation.workspace_path) / BUNDLE_FILE_NAME,
+            head_branch=head_branch,
+            base_revision=reservation.base_revision,
+        )
+        return verify_intake_branch(
+            intake_path=intake_path_for(reservation.workspace_path),
+            head_branch=head_branch,
+            base_revision=reservation.base_revision,
+        )
+
     def cleanup(
         self, reservation: WorkspaceReservation, *, epoch: int, now: datetime
     ) -> WorkspaceReservation:
@@ -228,6 +287,22 @@ class GitWorktreeBackend:
             else self._record_status(reservation, status="cleanup_started", epoch=epoch, now=now)
         )
         self._fault("workspace_cleanup_started")
+        if cleaning.mode == WORKSPACE_MODE_TASK_LOCAL_CLONE:
+            leftover = remove_task_local_workspace(workspace_path=cleaning.workspace_path)
+            if leftover:
+                retained = self._record_status(cleaning, status="retained", epoch=epoch, now=now)
+                self._fault("workspace_cleanup_recorded")
+                raise ExternalConflictError(
+                    "task-local workspace cleanup left files behind; workspace retained for "
+                    "reconciliation",
+                    details={
+                        "workspace_path": str(retained.workspace_path),
+                        "retained_paths": ", ".join(str(path) for path in leftover),
+                    },
+                )
+            cleaned = self._record_status(cleaning, status="cleaned", epoch=epoch, now=now)
+            self._fault("workspace_cleanup_recorded")
+            return cleaned
         completed = subprocess.run(
             [
                 "git",
@@ -266,6 +341,7 @@ class GitWorktreeBackend:
             reservation.workspace_path,
             reservation.base_revision,
             status,
+            reservation.mode,
         )
         result = self._ledger.append(
             AppendCommand(
@@ -294,6 +370,7 @@ class GitWorktreeBackend:
             reservation.base_revision,
             status,
             result.process_manager_states[1].state_version,
+            reservation.mode,
         )
 
     def retain(
@@ -374,8 +451,9 @@ def _reservation_state(
     workspace_path: Path,
     base_revision: str,
     status: str,
+    mode: str = WORKSPACE_MODE_GIT_WORKTREE,
 ) -> dict[str, object]:
-    return {
+    state: dict[str, object] = {
         "repository_id": repository_id,
         "run_id": run_id,
         "repository_path": str(repository_path),
@@ -383,6 +461,11 @@ def _reservation_state(
         "base_revision": base_revision,
         "status": status,
     }
+    if mode != WORKSPACE_MODE_GIT_WORKTREE:
+        # A reservation persisted before workspace modes existed has no key and decodes as
+        # a git worktree, so its stored state is exactly what it was.
+        state["mode"] = mode
+    return state
 
 
 def _reservation_from_state(state: object, state_version: int) -> WorkspaceReservation:
@@ -403,6 +486,9 @@ def _reservation_from_state(state: object, state_version: int) -> WorkspaceReser
     assert isinstance(workspace_path, str)
     assert isinstance(base_revision, str)
     assert isinstance(status, str)
+    mode = state.get("mode", WORKSPACE_MODE_GIT_WORKTREE)
+    if not isinstance(mode, str) or mode not in WORKSPACE_MODES:
+        raise InternalInvariantViolationError("workspace reservation mode is invalid")
     return WorkspaceReservation(
         repository_id,
         run_id,
@@ -411,6 +497,7 @@ def _reservation_from_state(state: object, state_version: int) -> WorkspaceReser
         base_revision,
         status,
         state_version,
+        mode,
     )
 
 
@@ -419,4 +506,10 @@ def _require_text(value: str, field_name: str) -> None:
         raise InvalidInputError(f"{field_name} must be non-blank")
 
 
-__all__ = ["GitWorktreeBackend", "WorkspaceReservation"]
+__all__ = [
+    "WORKSPACE_MODES",
+    "WORKSPACE_MODE_GIT_WORKTREE",
+    "WORKSPACE_MODE_TASK_LOCAL_CLONE",
+    "GitWorktreeBackend",
+    "WorkspaceReservation",
+]

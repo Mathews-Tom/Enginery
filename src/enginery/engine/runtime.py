@@ -28,7 +28,12 @@ from enginery.engine.scheduler import (
     SchedulingLimits,
 )
 from enginery.engine.supervisor import ProcessIdentity, WorkerSupervisor
-from enginery.engine.workspace import GitWorktreeBackend, WorkspaceReservation
+from enginery.engine.workspace import (
+    WORKSPACE_MODE_GIT_WORKTREE,
+    WORKSPACE_MODES,
+    GitWorktreeBackend,
+    WorkspaceReservation,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 
@@ -54,6 +59,7 @@ class FixtureDispatch:
     workflow_definition_id: str | None = None
     retain_workspace: bool = False
     log_directory: Path | None = None
+    workspace_mode: str = WORKSPACE_MODE_GIT_WORKTREE
 
     def __post_init__(self) -> None:
         if not all(
@@ -76,6 +82,8 @@ class FixtureDispatch:
             raise InvalidInputError("fixture dispatch dependencies must be non-blank node keys")
         if self.workflow_definition_id is not None and not self.workflow_definition_id.strip():
             raise InvalidInputError("workflow definition id must be non-blank when present")
+        if self.workspace_mode not in WORKSPACE_MODES:
+            raise InvalidInputError("fixture dispatch workspace mode is not supported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,7 @@ class FixtureRuntime:
             repository_path=request.repository_path,
             workspace_path=request.workspace_path,
             base_revision=request.base_revision,
+            mode=request.workspace_mode,
             epoch=epoch,
             now=now,
         )
@@ -1273,7 +1282,7 @@ def _node_id(request: FixtureDispatch) -> str:
 def _request_state(
     request: FixtureDispatch, *, status: str, actor_type: ActorType
 ) -> dict[str, object]:
-    return {
+    state: dict[str, object] = {
         "run_id": request.run_id,
         "node_id": request.node_id,
         "attempt_id": request.attempt_id,
@@ -1291,6 +1300,11 @@ def _request_state(
         "actor_type": actor_type.value,
         "status": status,
     }
+    if request.workspace_mode != WORKSPACE_MODE_GIT_WORKTREE:
+        # A request persisted before workspace modes existed has no key and decodes as a
+        # git worktree, so its stored state is exactly what it was.
+        state["workspace_mode"] = request.workspace_mode
+    return state
 
 
 def _request_from_state(state: object) -> FixtureDispatch:
@@ -1313,6 +1327,9 @@ def _request_from_state(state: object) -> FixtureDispatch:
     log_directory = state.get("log_directory")
     if log_directory is not None and (not isinstance(log_directory, str) or not log_directory):
         raise InternalInvariantViolationError("runtime node state has invalid log directory")
+    workspace_mode = state.get("workspace_mode", WORKSPACE_MODE_GIT_WORKTREE)
+    if not isinstance(workspace_mode, str) or workspace_mode not in WORKSPACE_MODES:
+        raise InternalInvariantViolationError("runtime node state has invalid workspace mode")
     workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
@@ -1353,6 +1370,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
         workflow_definition_id=workflow_definition_id,
         retain_workspace=retain_workspace,
         log_directory=Path(log_directory) if log_directory is not None else None,
+        workspace_mode=workspace_mode,
     )
 
 
