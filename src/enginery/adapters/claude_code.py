@@ -15,6 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
+from enginery.adapters.runner_launch import (
+    MAX_RESULT_BYTES,
+    isolated_command,
+    publish_runner_receipt,
+    read_bounded_text,
+    require_isolated_permissions,
+    worker_environment,
+)
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -41,9 +49,16 @@ from enginery.application.work_ports import (
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
-from enginery.domain.execution_receipt import ExecutionReceipt
+from enginery.domain.execution_receipt import ExecutionReceipt, RunnerReceiptRef
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.runner import (
+    WORKER_HOME,
+    PermissionMapping,
+    RunnerContext,
+    isolated_permission_mapping,
+    trusted_local_permission_mapping,
+)
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
 
@@ -115,6 +130,10 @@ class ClaudeCodeHarness:
     )
     terminator: Callable[[int], None] = field(default=lambda pid: os.killpg(pid, signal.SIGTERM))
     catalog: ExecutionCatalog = field(default_factory=load_execution_catalog)
+    permissions: PermissionMapping | None = None
+    """Overrides the mapping resolved from the trust mode (never a bypass when isolated)."""
+    runner: RunnerContext | None = None
+    """Set to run the worker in the isolated container profile instead of as the operator."""
     _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _commands: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
     _launch_versions: dict[str, str | None] = field(default_factory=dict, init=False)
@@ -125,6 +144,18 @@ class ClaudeCodeHarness:
     )
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
     _cancelled: set[str] = field(default_factory=set, init=False)
+
+    def __post_init__(self) -> None:
+        if self.runner is not None and self.permissions is not None:
+            require_isolated_permissions(self.permissions)
+
+    def resolved_permissions(self) -> PermissionMapping:
+        """The permission mapping this harness launches with: declared, never implicit."""
+        if self.permissions is not None:
+            return self.permissions
+        if self.runner is not None:
+            return isolated_permission_mapping(_HARNESS_ID)
+        return trusted_local_permission_mapping(_HARNESS_ID)
 
     def probe(self) -> AdapterStatus:
         try:
@@ -168,6 +199,10 @@ class ClaudeCodeHarness:
         return probe_installed_host(self.config.executable, self.command_runner)
 
     def start(self, task: HarnessTask) -> HarnessSession:
+        if self.runner is not None:
+            raise WorkerFailureError(
+                "an isolated Claude Code worker is started through the supervised launcher"
+            )
         session = HarnessSession(
             session_id=f"claude-code-{task.operation_id}", operation_id=task.operation_id
         )
@@ -247,8 +282,7 @@ class ClaudeCodeHarness:
             "--session-id",
             str(uuid.uuid5(uuid.NAMESPACE_URL, str(task.operation_id))),
             "--strict-mcp-config",
-            "--permission-mode",
-            "bypassPermissions",
+            *self.resolved_permissions().arguments,
         ]
         launch = prepare_native_controls(
             task.selection,
@@ -259,6 +293,22 @@ class ClaudeCodeHarness:
         arguments += launch.arguments
         return tuple(arguments), launch.observed_executable_version
 
+    def container_environment(self, task: HarnessTask) -> tuple[tuple[str, str], ...]:
+        """The explicit environment of the isolated worker; nothing is inherited from the host."""
+        del task
+        if self.runner is None:
+            raise InvalidInputError(
+                "only an isolated Claude Code worker has a container environment"
+            )
+        return worker_environment(
+            (
+                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                ("CLAUDE_CONFIG_DIR", f"{WORKER_HOME}/.claude"),
+                ("DISABLE_AUTOUPDATER", "1"),
+                ("DISABLE_TELEMETRY", "1"),
+            )
+        )
+
     def _receipt(
         self,
         task: HarnessTask,
@@ -266,6 +316,7 @@ class ClaudeCodeHarness:
         launched_command: tuple[str, ...] | None,
         *,
         observed_at_launch: str | None,
+        runner: RunnerReceiptRef | None = None,
     ) -> ExecutionReceipt:
         return build_receipt(
             task.selection,
@@ -274,6 +325,7 @@ class ClaudeCodeHarness:
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
             observed_at_launch=observed_at_launch,
+            runner=runner,
         )
 
     def _require_session(self, session: HarnessSession) -> None:
@@ -287,6 +339,16 @@ class ClaudeCodeHarness:
         runs the given command and redacts/records its exit, independent of
         which harness CLI is being wrapped.
         """
+        if self.runner is not None:
+            return isolated_command(
+                runner=self.runner,
+                harness=_HARNESS_ID,
+                task=task,
+                result_path=result_path,
+                permissions=self.resolved_permissions(),
+                environment=self.container_environment(task),
+                inner_command=self.command_for(task),
+            )
         if not result_path.is_absolute():
             raise InvalidInputError("Claude Code worker result path must be absolute")
         command, observed = self._host_command(task)
@@ -310,10 +372,15 @@ class ClaudeCodeHarness:
         result_path: Path,
         launched_command: tuple[str, ...] | None = None,
     ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]:
-        """Read a supervised worker handoff after its process exit is observed."""
+        """Read a supervised worker handoff after its process exit is observed.
+
+        An isolated worker's result file is untrusted: it is size-bounded, its output is
+        redacted before it is published, and the attempt is only accepted together with the
+        runner receipt the launcher wrote for it.
+        """
         try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            payload = json.loads(self._read_result(result_path))
+        except json.JSONDecodeError as error:
             raise WorkerFailureError(
                 "Claude Code supervised worker did not retain a valid result"
             ) from error
@@ -343,6 +410,14 @@ class ClaudeCodeHarness:
             raise WorkerFailureError(
                 "Claude Code supervised worker result operation does not match task"
             )
+        runner_ref: RunnerReceiptRef | None = None
+        if self.runner is not None:
+            if terminal_status not in {"succeeded", "failed"}:
+                raise WorkerFailureError(
+                    "Claude Code supervised worker terminal status is unsupported"
+                )
+            output = redact_credential_shaped_text(output)
+            runner_ref = publish_runner_receipt(self.runner, task, self.artifact_store)
         digest = self.artifact_store.publish_bytes(
             output.encode("utf-8"), media_type="application/json"
         )
@@ -364,9 +439,22 @@ class ClaudeCodeHarness:
                     events,
                     launched_command,
                     observed_at_launch=launch_observation(launched_command),
+                    runner=runner_ref,
                 ),
             ),
         )
+
+    def _read_result(self, result_path: Path) -> str:
+        if self.runner is not None:
+            return read_bounded_text(
+                result_path, limit=MAX_RESULT_BYTES, what="Claude Code supervised worker result"
+            )
+        try:
+            return result_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise WorkerFailureError(
+                "Claude Code supervised worker did not retain a valid result"
+            ) from error
 
 
 def _render_task(task: HarnessTask) -> str:
