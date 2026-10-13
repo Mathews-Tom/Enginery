@@ -63,7 +63,9 @@ def test_the_first_catalog_version_stays_registered_and_frozen_at_its_tested_omp
 
     assert first.version == "1"
     assert first.host("omp").executable_version == "18.10.2"
-    assert first.digest.hex_value == REGISTERED_CATALOG_DIGESTS["1"]
+    assert first.digest.hex_value == (
+        "23598e0c044269fddefc073583fddf2432d940626fad6130d2b9e64d805196a3"
+    )
     assert first.digest != current.digest
     assert first.host("claude-code") == current.host("claude-code")
 

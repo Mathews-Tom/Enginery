@@ -504,7 +504,7 @@ def test_a_changed_catalog_holds_a_bound_selection_without_rebinding_it() -> Non
     selection = _resolve(
         LayerControls(layer=SelectionLayer.RUN, harness="omp", model=OMP_MODEL, model_pinned=True)
     )
-    drifted = replace(CATALOG, digest=Digest.of_bytes(b"a later catalog"), version="2")
+    drifted = replace(CATALOG, digest=Digest.of_bytes(b"a later catalog"), version="3")
 
     assert detect_catalog_drift(selection, current=CATALOG) is None
     hold = detect_catalog_drift(selection, current=drifted)
@@ -518,7 +518,7 @@ def test_a_changed_catalog_holds_a_bound_selection_without_rebinding_it() -> Non
 
 
 def test_a_legacy_binding_never_drifts() -> None:
-    drifted = replace(CATALOG, digest=Digest.of_bytes(b"a later catalog"), version="2")
+    drifted = replace(CATALOG, digest=Digest.of_bytes(b"a later catalog"), version="3")
 
     assert (
         detect_catalog_drift(ExecutionSelection.legacy_host_default("omp"), current=drifted) is None

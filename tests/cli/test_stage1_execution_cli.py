@@ -445,7 +445,7 @@ def test_watch_holds_a_run_bound_to_a_catalog_that_is_no_longer_current(
         capsys,
         ["stage1", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
-    drifted = replace(load_execution_catalog(), digest=Digest.of_bytes(b"later"), version="2")
+    drifted = replace(load_execution_catalog(), digest=Digest.of_bytes(b"later"), version="3")
     monkeypatch.setattr("enginery.workflows.stage1.load_execution_catalog", lambda: drifted)
 
     watch = _run_json(
