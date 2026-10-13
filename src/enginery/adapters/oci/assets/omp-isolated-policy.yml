@@ -1,0 +1,58 @@
+# Permission overlay for the isolated omp worker.
+#
+# It is loaded with `omp --config` next to `--approval-mode write`, which auto-approves read and
+# workspace-write tools and refuses every other tool call because a headless run has nobody to
+# ask. This file adds the only shell commands the worker may run, and it is baked into the image
+# root-owned and read-only so the worker cannot widen it. Overlay values win over the
+# repository's own `.omp` settings, so a repository cannot widen it either.
+#
+# `deny` patterns match any segment of a compound command. `allow` patterns match only a whole
+# command that carries no shell control syntax (`;`, `&&`, `|`, redirection, substitution), so a
+# narrow allow can never smuggle a second command. A command that matches nothing needs approval
+# and is therefore refused.
+tools:
+  approval:
+    # A repository setting of `bash: allow` would otherwise grant every shell command.
+    bash: prompt
+    eval: deny
+    task: deny
+bash:
+  patterns:
+    # The worker commits locally only; publishing is done by the operator side.
+    - {match: "git push*", approval: deny}
+    - {match: "git remote*", approval: deny}
+    - {match: "git config*", approval: deny}
+    - {match: "git bundle*", approval: deny}
+    - {match: "git fetch*", approval: deny}
+    - {match: "git pull*", approval: deny}
+    - {match: "git clone*", approval: deny}
+    - {match: "git submodule*", approval: deny}
+    - {match: "git -c *", approval: deny}
+    - {match: "git -C *", approval: deny}
+    - {match: "curl*", approval: deny}
+    - {match: "wget*", approval: deny}
+    - {match: "ssh*", approval: deny}
+    - {match: "scp*", approval: deny}
+    - {match: "nc *", approval: deny}
+    # Local version-control work.
+    - {match: "git status*", approval: allow}
+    - {match: "git add*", approval: allow}
+    - {match: "git commit*", approval: allow}
+    - {match: "git diff*", approval: allow}
+    - {match: "git log*", approval: allow}
+    - {match: "git show*", approval: allow}
+    - {match: "git switch*", approval: allow}
+    - {match: "git checkout -b*", approval: allow}
+    - {match: "git branch*", approval: allow}
+    - {match: "git rev-parse*", approval: allow}
+    - {match: "git ls-files*", approval: allow}
+    # Test and lint runners.
+    - {match: "pytest*", approval: allow}
+    - {match: "python3 -m pytest*", approval: allow}
+    - {match: "python -m pytest*", approval: allow}
+    - {match: "uv run pytest*", approval: allow}
+    - {match: "uv run ruff*", approval: allow}
+    - {match: "uv run mypy*", approval: allow}
+    - {match: "ruff check*", approval: allow}
+    - {match: "ruff format*", approval: allow}
+    - {match: "mypy*", approval: allow}

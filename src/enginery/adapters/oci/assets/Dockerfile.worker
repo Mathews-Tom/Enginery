@@ -1,0 +1,104 @@
+# Isolated runner worker image.
+#
+# Every input is pinned: the base by multi-arch index digest, the Debian packages by an archive
+# snapshot plus exact versions, uv by image digest, and the coding harnesses by exact version.
+# Nothing secret is ever baked in; credentials reach a worker only through a runtime allowlist.
+#
+# The image is built from a context containing exactly this file and worker_entry.py. It runs
+# with a read-only root filesystem, no capabilities, uid/gid 65532, and tmpfs /tmp + /home/worker.
+ARG NODE_BASE_IMAGE=node:22-bookworm-slim
+ARG NODE_BASE_DIGEST=sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0
+ARG UV_DIGEST=sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168
+
+FROM ${UV_IMAGE}@${UV_DIGEST} AS uv
+
+FROM ${NODE_BASE_IMAGE}@${NODE_BASE_DIGEST}
+
+ARG DEBIAN_SNAPSHOT=20261005T000000Z
+ARG GIT_VERSION=1:2.39.5-0+deb12u3
+ARG PYTHON3_VERSION=3.11.2-1+b1
+ARG CA_CERTIFICATES_VERSION=20250419~deb12u1
+ARG BUN_VERSION=1.3.14
+ARG CLAUDE_CODE_VERSION=2.1.296
+ARG OMP_VERSION=18.10.3
+ARG WORKER_UID=65532
+ARG WORKER_GID=65532
+
+USER root
+
+# Debian packages come from the archive snapshot the pinned base was built from, so the exact
+# versions below stay installable and a rebuild resolves the same bytes.
+RUN set -eu; \
+    printf '%s\n' \
+      'Types: deb' \
+      "URIs: http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" \
+      'Suites: bookworm bookworm-updates' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      'Check-Valid-Until: no' \
+      '' \
+      'Types: deb' \
+      "URIs: http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}" \
+      'Suites: bookworm-security' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      'Check-Valid-Until: no' \
+      > /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Retries=5 update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+      "git=${GIT_VERSION}" \
+      "python3=${PYTHON3_VERSION}"; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    groupadd --gid "${WORKER_GID}" worker; \
+    useradd --uid "${WORKER_UID}" --gid "${WORKER_GID}" --home-dir /home/worker \
+      --create-home --shell /bin/bash worker; \
+    install -d -o "${WORKER_UID}" -g "${WORKER_GID}" -m 0755 /workspace /out; \
+    install -d -m 0755 /opt/enginery; \
+    git config --system --add safe.directory /workspace
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Harness packages, installed as root and read-only to the worker at runtime. bun is required
+# by the omp launcher (`#!/usr/bin/env bun`); claude-code resolves its platform binary through
+# optional dependencies, which exist for linux arm64 and x64.
+RUN set -eu; \
+    npm install --global --no-audit --no-fund --loglevel=error "bun@${BUN_VERSION}"; \
+    npm install --global --no-audit --no-fund --loglevel=error \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"; \
+    npm cache clean --force; \
+    rm -rf /root/.npm /root/.cache /tmp/*
+
+# Root-owned and read-only to the worker: the entrypoint and the harness permission overlay.
+COPY worker_entry.py omp-isolated-policy.yml /opt/enginery/
+RUN chown root:root /opt/enginery/worker_entry.py /opt/enginery/omp-isolated-policy.yml; \
+    chmod 0444 /opt/enginery/worker_entry.py /opt/enginery/omp-isolated-policy.yml
+
+# Harnesses must not update themselves or phone home from a worker.
+ENV HOME=/home/worker \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    DISABLE_BUG_COMMAND=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DO_NOT_TRACK=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    GIT_TERMINAL_PROMPT=0
+
+LABEL dev.enginery.runner-image="1" \
+      dev.enginery.claude-code="${CLAUDE_CODE_VERSION}" \
+      dev.enginery.omp="${OMP_VERSION}" \
+      dev.enginery.bun="${BUN_VERSION}"
+
+USER ${WORKER_UID}:${WORKER_GID}
+WORKDIR /workspace
+
+# The launcher passes the full command; the base image's entrypoint script must not interpose.
+ENTRYPOINT []
+CMD []
