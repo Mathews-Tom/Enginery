@@ -69,6 +69,8 @@ def _minimal_argv(
     return [
         "stage1",
         "build-request",
+        "--runner",
+        "trusted-local",
         "--output",
         str(output),
         "--run-id",

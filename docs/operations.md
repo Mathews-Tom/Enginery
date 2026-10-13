@@ -309,6 +309,7 @@ GitHub issue, instead of the hand-written Python composition in
 
 ```bash
 uv run enginery stage1 build-request \
+  --runner trusted-local \
   --output request.json \
   --run-id issue-142 \
   --repository <owner>/<repo> \
@@ -762,19 +763,114 @@ a run against a restored ledger.
 event log; use it if a projection appears stale or inconsistent after a
 manual intervention. It never rewrites historical events.
 
+## Trust modes and the isolated runner
+
+Every Stage 1 run is bound, when its request is built, to exactly one
+trust mode. `enginery stage1 build-request` requires the choice:
+
+```bash
+uv run enginery stage1 build-request ... --runner trusted-local
+uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sha256:<image id> [--docker-context NAME]
+```
+
+- **`trusted-local`** runs the worker as you, in a git worktree of your
+  repository, with your environment and filesystem. It is explicitly the
+  weaker mode and is never containment. Its harness permission mapping is
+  declared rather than implicit: Claude Code runs with `--permission-mode
+  bypassPermissions` and omp with its headless default approval mode, both of
+  which are recorded as unconditional bypasses.
+- **`isolated-oci`** runs the worker in a container built from a pinned image.
+  A run bound to it is *held*, never run as `trusted-local`, when no qualified
+  engine, image, or profile is available; `stage1 start` refuses to bind it
+  and `stage1 watch` reports the hold (`runner_unqualified` or
+  `runner_fingerprint_drift`) with the retained binding intact.
+
+A request persisted before trust modes existed decodes unchanged as a legacy
+`trusted-local` run and keeps its original request digest; a new run cannot be
+started without an explicit mode.
+
+### The isolated profile
+
+`enginery runner build-image [--docker-context NAME]` builds the worker image
+from the recipe packaged with Enginery on a qualified engine and prints its
+exact image id and recipe digest; `enginery runner status --image sha256:<id>`
+reports whether the engine, image, and profile are admitted. The image is built
+from a base pinned by digest with pinned packages (Claude Code 2.1.296, omp
+18.10.3, bun 1.3.14, git, python3, uv) and is identified by its exact id,
+never a mutable tag. A qualified engine reports cgroup v2, a confined seccomp
+profile, and enforces memory, swap, CPU, and pids limits; an engine that cannot
+is refused with the missing requirement named. Docker Desktop and rootless
+Docker are the engines the profile has been exercised on.
+
+Each worker attempt runs with a non-root uid/gid, every capability dropped,
+`no-new-privileges`, a read-only root filesystem with tmpfs scratch and home,
+hard memory/swap/CPU/pids limits, no devices, no privilege, no Docker socket,
+no host-home mount, a private IPC namespace, and an attachment to a single
+`--internal` container network. The only host paths mounted are the run's
+task-local workspace and a per-attempt result directory, both read-write. The
+environment is an explicit allowlist, never inherited from the host. The
+engine's own report of the created container is checked against the profile
+before the worker starts, and a launch that is weaker than the profile in any
+respect is refused and removed.
+
+The worker never sees your repository's `.git`, hooks, or configuration. The
+workspace is a self-contained clone with no remote and no reference to the host
+repository. When the worker finishes it hands back its branch as a git bundle;
+the host imports that bundle into an intake repository it created itself,
+verifies the branch there (name, ancestry from the run's base revision, a
+non-empty change), and never runs git inside the worker's repository, whose
+configuration and hooks the worker controls. An isolated worker commits locally
+and holds no remote and no credentials; its branch is not on any remote until
+the verified branch is published by a separate, host-side step.
+
+Validation commands for an isolated run execute inside the same restricted
+runner against the task-local workspace, never on the host. They run offline:
+the repository's validation must work with what the image and the workspace
+provide.
+
+### Harness permissions
+
+The isolated profile never launches a harness with permission checks off, and
+each mapping is recorded in the runner receipt:
+
+- Claude Code runs restricted to the workspace with `--permission-mode dontAsk
+  --permission-prompts none`, an allow-list of file tools and of git and test
+  commands, and a deny-list that refuses `git push`, remote and fetch commands,
+  `curl`/`wget`/`ssh`, and web tools. Anything not allowed is denied, never
+  prompted.
+- omp runs with `--approval-mode write` and a read-only policy overlay baked
+  into the image that allows the same git and test commands and denies the
+  rest; the repository's own settings cannot widen it.
+
+### Receipts
+
+Every isolated attempt retains a runner receipt, digest-identified in the
+artifact store and referenced from the attempt's execution receipt: engine kind,
+version and security options, image id and recipe digest, profile digest, host
+identity, the container's effective flags as the engine reported them (never
+the requested ones), the permission mapping, and environment key names (never
+values). `enginery stage1 watch` prints the reference.
+
+Model access for an isolated worker is not part of this profile: with only the
+internal network attached, a worker has no route to any model until a model
+relay is configured.
+
 ## Security limits
 
 State every guarantee precisely; do not imply more than what is
 implemented.
 
-- **Worktree isolation is not hostile-code containment.** Enginery's
-  workspace backend is a git worktree with a child-process policy. It
-  reduces *accidental* interference between concurrent runs sharing one
-  repository. It does not prevent a process — malicious, compromised, or
-  prompt-injected — from reaching the operator's user account, filesystem,
-  network, keychain, or other host processes. A stronger execution-
-  containment claim requires a separately designed container or VM backend,
-  which does not exist in this release.
+- **Trusted-local worktree execution is not hostile-code containment.** In
+  `trusted-local` mode Enginery's workspace backend is a git worktree with a
+  child-process policy. It reduces *accidental* interference between
+  concurrent runs sharing one repository. It does not prevent a process —
+  malicious, compromised, or prompt-injected — from reaching the operator's
+  user account, filesystem, network, keychain, or other host processes. The
+  `isolated-oci` mode (see
+  [Trust modes and the isolated runner](#trust-modes-and-the-isolated-runner))
+  runs the worker in a hardened container and is a different, stronger claim
+  with its own stated limits; it is never selected for you and never
+  substituted for a run that asked for it.
 - **Trusted-local is not containment, and no hostile-code safety claim is
   made.** Run Enginery only against repositories, issues, and harness
   sessions you trust. Stage 1 never merges. A Stage 2 pull-request merge is

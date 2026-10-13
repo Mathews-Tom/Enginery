@@ -60,6 +60,23 @@ def execution_report(
         "submitted": None if receipt is None else list(receipt.submitted_arguments),
         "effective": _effective(selection, receipt),
         "holds": holds,
+        "runner": _runner_report(run, receipt),
+    }
+
+
+def _runner_report(run: Stage1Run, receipt: ExecutionReceipt | None) -> dict[str, object]:
+    """Report the trust mode the run is bound to and the runner receipt its attempt retained."""
+    selection = run.request.runner
+    return {
+        "trust_mode": selection.trust_mode.value,
+        "binding": "legacy" if selection.legacy else "bound",
+        "profile": selection.profile_name,
+        "profile_digest": None
+        if selection.profile_digest is None
+        else str(selection.profile_digest),
+        "image": selection.image,
+        "docker_context": selection.docker_context,
+        "receipt": None if receipt is None or receipt.runner is None else receipt.runner.to_state(),
     }
 
 

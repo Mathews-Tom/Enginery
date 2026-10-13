@@ -41,6 +41,7 @@ from enginery.domain.execution_selection import (
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
@@ -126,6 +127,7 @@ def _qualified_request(tmp_path: Path, name: str = "fault") -> Stage1RunRequest:
     )
     snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="1")
     return Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(f"run-{name}"),
             work_item_id=work_item.id,

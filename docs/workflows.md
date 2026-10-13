@@ -354,7 +354,7 @@ The control plane does not infer model identity from a label or assume different
 
 ### Workspace isolation is precise, not absolute
 
-Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Explicit containerization is required for untrusted external code execution — a future container or VM backend, not a property of the first release. Until then, a workspace process can still reach the user account, network, filesystem, keychain, and other processes.
+Workspaces ensure isolated, reproducible repository changes: git worktrees give every run its own exclusive checkout, preventing accidental collision between concurrent runs. Untrusted external code execution requires the explicit `isolated-oci` trust mode (a hardened task-local container; see the operations guide). In `trusted-local` mode a workspace process can still reach the user account, network, filesystem, keychain, and other processes.
 
 ### Agents never receive production or publication credentials
 

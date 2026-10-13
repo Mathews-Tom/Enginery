@@ -11,6 +11,10 @@ from enum import StrEnum
 from pathlib import Path
 
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.runner_ports import (
+    IsolatedCommandRunner,
+    RunnerAdmissionPort,
+)
 from enginery.application.work_ports import (
     DeclaredWorkClassification,
     HarnessResult,
@@ -42,6 +46,7 @@ from enginery.domain.execution_selection import (
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.serialization import (
     run_from_dict,
     run_to_dict,
@@ -63,6 +68,8 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.task_repository import out_path_for
+from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
 from enginery.ledger.service import LedgerService
@@ -107,6 +114,7 @@ class Stage1RunRequest:
     implementation: Stage1ImplementationRequest
     execution_configuration: Stage1ExecutionConfiguration
     execution_selection: ExecutionSelection
+    runner: RunnerSelection = LEGACY_RUNNER_SELECTION
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -213,6 +221,10 @@ class Stage1RunRequest:
             # A run persisted before execution selections existed has no selection key, so
             # its state, and therefore its request digest, is exactly what it was.
             state["execution_selection"] = self.execution_selection.to_state()
+        if not self.runner.legacy:
+            # A run persisted before trust modes existed has no runner key, so its state, and
+            # therefore its request digest, is exactly what it was.
+            state["runner"] = self.runner.to_state()
         return state
 
 
@@ -349,6 +361,8 @@ class Stage1RunService:
     outcomes: OutcomeCaptureService | None = None
     execution_catalog: ExecutionCatalog | None = None
     host_probe: Callable[[], InstalledHost | None] | None = None
+    runner_admission: RunnerAdmissionPort | None = None
+    isolated_command_runner: IsolatedCommandRunner | None = None
 
     def start(
         self,
@@ -374,6 +388,12 @@ class Stage1RunService:
         ):
             _require_current_check_contracts(request)
             _require_bound_selection(request)
+            _require_bound_runner(request)
+            runner_hold = self._runner_hold(request)
+            if runner_hold is not None:
+                raise HumanActionRequiredError(
+                    runner_hold.message, details=dict(runner_hold.details)
+                )
             validate_against_catalog(request.execution_selection, catalog=self._current_catalog())
         self.runtime.register_run(
             run_id=str(request.run.id),
@@ -452,6 +472,9 @@ class Stage1RunService:
         hold = self._catalog_hold(request)
         if hold is not None:
             return _BindingCheck(hold)
+        runner_hold = self._runner_hold(request)
+        if runner_hold is not None:
+            return _BindingCheck(runner_hold)
         selection = request.execution_selection
         if selection.legacy or not selection.requires_native_controls:
             return _BindingCheck(None)
@@ -465,6 +488,34 @@ class Stage1RunService:
             detect_host_drift(selection, installed=installed),
             None if installed is None else installed.executable_version,
         )
+
+    def _runner_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
+        """Return a hold unless an isolated selection is currently admitted by a qualified runner.
+
+        A run bound to the isolated profile is never run in another mode: with no runner
+        admission configured, or one that does not qualify the pinned engine, image and
+        profile, the run is held and its recorded binding is retained.
+        """
+        if not request.runner.isolated_mode:
+            return None
+        if self.runner_admission is None:
+            return ExecutionHold(
+                reason=HoldReason.RUNNER_UNQUALIFIED,
+                message=(
+                    "the run requires the isolated runner but no runner admission is "
+                    "configured; it is held, not run in trusted-local mode"
+                ),
+                details={"trust_mode": request.runner.trust_mode.value},
+            )
+        return self.runner_admission.admit(request.runner).hold
+
+    def _require_isolated_runner(self) -> IsolatedCommandRunner:
+        if self.isolated_command_runner is None:
+            raise HumanActionRequiredError(
+                "isolated validation requires the isolated runner; it is not configured, and "
+                "validation is never run on the host instead"
+            )
+        return self.isolated_command_runner
 
     def _recorded_execution_hold(
         self, implement_state: Mapping[str, object]
@@ -983,10 +1034,13 @@ class Stage1RunService:
         self._require_executable(request)
         self._require_passed_node(request.run.id, "implement")
         generation = self._implement_generation(request.run.id)
-        return Stage1ValidationExecutor(
+        executor = Stage1ValidationExecutor(
             runtime=self.runtime,
             artifact_store=self._require_harness().artifact_store,
-        ).validate(
+        )
+        if request.runner.isolated_mode:
+            executor = replace(executor, command_runner=self._require_isolated_runner())
+        return executor.validate(
             dispatch=WorkflowNodeDispatch(
                 _fixture_dispatch(
                     request,
@@ -1387,15 +1441,27 @@ def _implementation_task(
     repair_context: str | None,
 ) -> HarnessTask:
     execution = request.implementation
+    isolated = request.runner.isolated_mode
     if repair_context is None:
         branch_constraint = (
             f"Create and work only on branch {request.head_branch!r} from "
-            f"{request.run.base_revision!r}; commit and push the completed change to origin."
+            f"{request.run.base_revision!r}; "
+            + (
+                "commit the completed change locally. You hold no remote and no credentials: "
+                "do not push; the operator publishes the verified branch."
+                if isolated
+                else "commit and push the completed change to origin."
+            )
         )
     else:
         branch_constraint = (
             f"Continue only on the existing branch {request.head_branch!r}; do not create "
-            f"a new branch. {repair_context} Commit and push the corrected change to origin."
+            f"a new branch. {repair_context} "
+            + (
+                "Commit the corrected change locally; do not push, the operator publishes it."
+                if isolated
+                else "Commit and push the corrected change to origin."
+            )
         )
     return HarnessTask(
         run_id=request.run.id,
@@ -1411,6 +1477,8 @@ def _implementation_task(
         time_budget_seconds=execution.time_budget_seconds,
         cost_budget=execution.cost_budget,
         selection=request.execution_selection,
+        head_branch=request.head_branch if isolated else None,
+        base_revision=request.run.base_revision if isolated else None,
     )
 
 
@@ -1432,9 +1500,12 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
-    return request.workspace_path / (
-        f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
-    )
+    name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
+    if request.runner.isolated_mode:
+        # The worker writes its result into the per-attempt output directory, the only
+        # writable mount besides its task-local workspace, never into a host-owned path.
+        return out_path_for(request.workspace_path) / name
+    return request.workspace_path / name
 
 
 def _scheduled_implementation(
@@ -1530,6 +1601,11 @@ def _fixture_dispatch(
             if node_id == "implement"
             else None
         ),
+        workspace_mode=(
+            WORKSPACE_MODE_TASK_LOCAL_CLONE
+            if request.runner.isolated_mode
+            else WORKSPACE_MODE_GIT_WORKTREE
+        ),
     )
 
 
@@ -1546,6 +1622,27 @@ def _require_bound_selection(request: Stage1RunRequest) -> None:
 def _selection_digest(request: Stage1RunRequest) -> Digest | None:
     """Return the digest decisions and evidence bind to, or None for a pre-selection run."""
     return None if request.execution_selection.legacy else request.execution_selection.digest
+
+
+def _require_bound_runner(request: Stage1RunRequest) -> None:
+    """Fail loudly unless a new run binds an explicit trust mode.
+
+    Trusted-local is a declared, weaker choice, never what a run gets by omission.
+    """
+    if request.runner.legacy:
+        raise InvalidInputError(
+            "a new Stage 1 run must bind a trust mode (--runner trusted-local or isolated-oci); "
+            "rebuild the request with the current `enginery stage1 build-request`",
+            details={"run_id": str(request.run.id)},
+        )
+
+
+def _runner_from_state(state: Mapping[str, object]) -> RunnerSelection:
+    """Decode the bound trust mode; a run persisted before trust modes decodes as legacy."""
+    raw = state.get("runner")
+    if raw is None:
+        return LEGACY_RUNNER_SELECTION
+    return RunnerSelection.from_state(raw)
 
 
 def _selection_from_state(
@@ -1630,6 +1727,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         required_checks=tuple(required_checks_value),
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,
+        runner=_runner_from_state(state),
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")

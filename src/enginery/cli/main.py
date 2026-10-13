@@ -29,6 +29,7 @@ from enginery.cli.ledger import (
     run_verify,
 )
 from enginery.cli.outcome import run_outcome
+from enginery.cli.runner import add_runner_parser, run_runner
 from enginery.cli.stage1 import run_stage1
 from enginery.cli.stage1_request import add_build_request_parser
 from enginery.cli.stage2 import run_stage2
@@ -245,6 +246,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Report whether release would succeed without releasing anything.",
     )
     workspace_release_parser.add_argument("--json", action="store_true")
+
+    add_runner_parser(subparsers)
 
     capability_parser = subparsers.add_parser("capability", help="Capability lock commands.")
     capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
@@ -480,6 +483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_gate(args)
         if args.command == "workspace":
             return run_workspace(args)
+        if args.command == "runner":
+            return run_runner(args)
         if args.command == "adapter":
             if args.adapter_command == "doctor":
                 return _run_adapter_doctor(args)

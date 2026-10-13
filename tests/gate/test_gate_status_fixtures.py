@@ -23,6 +23,7 @@ from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.ledger.events import AppendCommand, EventWrite
@@ -76,6 +77,7 @@ def _stage1_request(
     )
     root = tmp_path / run_id
     return Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(run_id),
             work_item_id=work_item.id,

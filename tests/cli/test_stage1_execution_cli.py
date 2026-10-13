@@ -64,6 +64,8 @@ def _build_argv(tmp_path: Path, *extra: str, output: Path | None = None) -> list
     return [
         "stage1",
         "build-request",
+        "--runner",
+        "trusted-local",
         "--output",
         str(output or tmp_path / "request.json"),
         "--run-id",

@@ -38,7 +38,8 @@ to end. Label the issue with exactly one `enginery/work-kind/issue` (or
 request from it:
 
 ```bash
-uv run enginery stage1 build-request --output request.json --run-id issue-142 \
+uv run enginery stage1 build-request --runner trusted-local \
+  --output request.json --run-id issue-142 \
   --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
@@ -75,6 +76,7 @@ from enginery.domain.execution_selection import (
 )
 from enginery.domain.ids import RunId, WorkItemId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
 from enginery.workflows.stage1 import (
@@ -121,6 +123,7 @@ run = Run(
 )
 
 request = Stage1RunRequest(
+    runner=RunnerSelection.trusted_local(),
     run=run,
     work_snapshot=snapshot,
     manifest=manifest,

@@ -20,6 +20,7 @@ from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
+from enginery.cli.stage1_runner import IsolatedWiring, isolated_wiring
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
@@ -80,7 +81,7 @@ def _start(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
-        run = Stage1RunService(runtime=runtime, ledger=ledger).start(
+        run = _read_only_service(runtime=runtime, ledger=ledger, request=request).start(
             request,
             now=_now(),
             heartbeat_window=_HEARTBEAT_WINDOW,
@@ -133,23 +134,29 @@ def _watch(args: argparse.Namespace) -> None:
         ledger.close()
 
 
-def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarness:
+def _harness_for(
+    configuration: Stage1ExecutionConfiguration, wiring: IsolatedWiring | None = None
+) -> SupervisedHarness:
     artifact_store = ArtifactStore(configuration.artifact_root)
     if configuration.harness_provider == "omp":
+        omp_config = OmpAdapterConfig(
+            credential_reference=configuration.harness_credential_reference,
+            executable=configuration.harness_executable,
+        )
+        if wiring is None:
+            return OmpHarness(omp_config, artifact_store)
         return OmpHarness(
-            OmpAdapterConfig(
-                credential_reference=configuration.harness_credential_reference,
-                executable=configuration.harness_executable,
-            ),
-            artifact_store,
+            omp_config, artifact_store, command_runner=wiring.probe, runner=wiring.context
         )
     if configuration.harness_provider == "claude-code":
+        claude_config = ClaudeCodeAdapterConfig(
+            credential_reference=configuration.harness_credential_reference,
+            executable=configuration.harness_executable,
+        )
+        if wiring is None:
+            return ClaudeCodeHarness(claude_config, artifact_store)
         return ClaudeCodeHarness(
-            ClaudeCodeAdapterConfig(
-                credential_reference=configuration.harness_credential_reference,
-                executable=configuration.harness_executable,
-            ),
-            artifact_store,
+            claude_config, artifact_store, command_runner=wiring.probe, runner=wiring.context
         )
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
@@ -158,13 +165,22 @@ def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarne
 
 
 def _host_probe_for(
-    configuration: Stage1ExecutionConfiguration,
+    configuration: Stage1ExecutionConfiguration, wiring: IsolatedWiring | None
 ) -> Callable[[], InstalledHost | None]:
-    """Return a probe that only runs the host's identity command: no artifact store, no files."""
+    """Return a probe that only runs the identity command of the harness that will run.
+
+    A trusted-local run probes the host's own binary. An isolated run probes the binary in the
+    pinned image, in a throw-away hardened container: the host binary is not what runs. No
+    artifact store and no files are created either way.
+    """
     if configuration.harness_provider == "omp":
-        return lambda: probe_installed_omp(configuration.harness_executable)
+        if wiring is None:
+            return lambda: probe_installed_omp(configuration.harness_executable)
+        return lambda: probe_installed_omp(configuration.harness_executable, wiring.probe)
     if configuration.harness_provider == "claude-code":
-        return lambda: probe_installed_claude(configuration.harness_executable)
+        if wiring is None:
+            return lambda: probe_installed_claude(configuration.harness_executable)
+        return lambda: probe_installed_claude(configuration.harness_executable, wiring.probe)
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
         details={"harness_provider": configuration.harness_provider},
@@ -175,10 +191,12 @@ def _read_only_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
     """A service for diagnostics and decisions that must never create harness state."""
+    wiring = isolated_wiring(request, create_directories=False)
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
-        host_probe=_host_probe_for(request.execution_configuration),
+        host_probe=_host_probe_for(request.execution_configuration, wiring),
+        runner_admission=None if wiring is None else wiring.admission,
     )
 
 
@@ -186,6 +204,7 @@ def _advancing_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
     configuration = request.execution_configuration
+    wiring = isolated_wiring(request, create_directories=True)
     github = GitHubAdapterConfig(
         repository=configuration.github_repository,
         credential_reference=configuration.github_credential_reference,
@@ -197,8 +216,10 @@ def _advancing_service(
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
         pull_requests=pull_requests,
-        harness=_harness_for(configuration),
+        harness=_harness_for(configuration, wiring),
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
+        runner_admission=None if wiring is None else wiring.admission,
+        isolated_command_runner=None if wiring is None else wiring.validation,
     )
 
 

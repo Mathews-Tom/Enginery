@@ -152,6 +152,7 @@ from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.fixture_build import FixtureBuilder
@@ -324,6 +325,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     )
     snapshot = _snapshot(run_index)
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(run_id),
             work_item_id=snapshot.work_item.id,

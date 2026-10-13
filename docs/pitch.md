@@ -115,7 +115,7 @@ Unknown actions deny. An implementation task, a credential request, a pull-reque
 
 ### Honest workspace claims
 
-The first backend uses git worktrees and child-process supervision. This prevents accidental repository collision; it is not hostile-process containment. Production and publication credentials stay in fixed, reviewed broker code outside agent workspaces. Stronger isolation is a future implementation choice, not a marketing adjective.
+The `trusted-local` backend uses git worktrees and child-process supervision. This prevents accidental repository collision; it is not hostile-process containment. The explicit `isolated-oci` backend runs the worker in a hardened task-local container with stated, tested limits. Production and publication credentials stay in fixed, reviewed broker code outside agent workspaces. Isolation claims are named by mode, not a marketing adjective.
 
 Trusted-local operation is not containment, and no claim of safety against hostile code is made. Stage 1 never merges. A Stage 2 pull-request merge is policy-gated: the shipped default rules allow low- and medium-risk merges once current-head merge-ready evidence passes, and deny high-risk merges by default. Release publication, deployment, and rollback always require a current interactive human approval. Enginery never triggers external reviewer bots.
 

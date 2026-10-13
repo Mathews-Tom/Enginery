@@ -17,6 +17,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.ledger.service import LedgerService
@@ -416,6 +417,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
     )
     snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="issue-revision-1")
     return Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-stage1"),
             work_item_id=work_item.id,

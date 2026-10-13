@@ -45,6 +45,7 @@ from enginery.domain.execution_selection import (
 )
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerProfile, RunnerSelection
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
@@ -167,6 +168,27 @@ def add_build_request_parser(
         "model. Rejected with --effort, since neither host reports effective effort.",
     )
     parser.add_argument("--artifact-root", required=True, type=Path)
+    parser.add_argument(
+        "--runner",
+        required=True,
+        choices=("trusted-local", "isolated-oci"),
+        help="The trust mode the worker runs in. trusted-local runs the worker as you, with "
+        "your filesystem and environment, and is not containment. isolated-oci runs it in a "
+        "hardened task-local container; a run bound to it is held, never run as trusted-local, "
+        "when no qualified engine and image are available.",
+    )
+    parser.add_argument(
+        "--runner-image",
+        default=None,
+        metavar="sha256:ID",
+        help="With isolated-oci: the exact worker image id to pin (see `enginery runner "
+        "build-image`). Never a mutable tag.",
+    )
+    parser.add_argument(
+        "--docker-context",
+        default=None,
+        help="With isolated-oci: the docker context of the container engine to run on.",
+    )
 
 
 def _add_digest_override(parser: argparse.ArgumentParser, *, flag: str) -> None:
@@ -232,6 +254,24 @@ def _probe_host(args: argparse.Namespace, harness: str) -> InstalledHost | None:
         return probe_installed_omp(executable)
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness", details={"harness": harness}
+    )
+
+
+def _runner_selection(args: argparse.Namespace) -> RunnerSelection:
+    """Bind the explicitly requested trust mode; isolation needs an exact pinned image."""
+    if args.runner == "trusted-local":
+        if args.runner_image is not None or args.docker_context is not None:
+            raise InvalidInputError(
+                "--runner-image and --docker-context apply only to --runner isolated-oci"
+            )
+        return RunnerSelection.trusted_local()
+    if args.runner_image is None:
+        raise InvalidInputError(
+            "--runner isolated-oci requires --runner-image sha256:<image id> "
+            "(build one with `enginery runner build-image`)"
+        )
+    return RunnerSelection.isolated(
+        image=args.runner_image, profile=RunnerProfile(), docker_context=args.docker_context
     )
 
 
@@ -363,6 +403,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             artifact_root=args.artifact_root.resolve(),
         ),
         execution_selection=selection,
+        runner=_runner_selection(args),
     )
 
 
