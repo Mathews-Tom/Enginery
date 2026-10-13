@@ -1,18 +1,17 @@
-"""Fault injection for the pilot-identified "queued but not selected" gap.
+"""Regression for the pilot-identified "queued but not selected" liveness defect.
 
-``docs/pitch.md``'s "Operator burden" finding: "a node that reaches
-``queued`` but is not selected within its registering tick has no
-automatic retry path, only an explicit ``stage1 cancel``." This test
-reproduces the exact scenario -- an unrelated run already occupying the
-sole global scheduling slot when ``dispatch_implementation`` ticks --
-and records the observed behavior exactly, rather than inventing a fix
-the milestone's own scope forbids assuming is needed.
+An implementation node registered while an unrelated run already occupies the sole global
+scheduling slot is not selected on its registering tick. It must stay a durable, visible
+queued state -- not an error -- and the first coordinator evaluation after the capacity is
+released must dispatch it exactly once. These tests drive the real ``Stage1RunService``
+composition against a real SQLite ledger and real worker subprocesses.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,10 +20,18 @@ import pytest
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.adapter_types import AdapterStatus
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import LifecycleProjection, WorkLedgerSnapshot
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import ExternalConflictError
+from enginery.domain.errors import HumanActionRequiredError
+from enginery.domain.execution_catalog import ExecutionCatalog
+from enginery.domain.execution_selection import (
+    ExecutionSelection,
+    LayerControls,
+    SelectionLayer,
+    resolve_execution_selection,
+)
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.run import Run, RunState
@@ -37,6 +44,7 @@ from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
+    Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,
 )
@@ -90,34 +98,34 @@ class _FixedWorkLedger:
         raise NotImplementedError("not exercised by this fault-injection scenario")
 
 
-def _qualified_request(tmp_path: Path) -> Stage1RunRequest:
-    repository, _base_revision = _repository(tmp_path, "repository-under-test")
+def _qualified_request(tmp_path: Path, name: str = "fault") -> Stage1RunRequest:
+    repository, base_revision = _repository(tmp_path, f"repository-under-test-{name}")
     manifest = stage1_work_manifest()
     work_item = WorkItem(
-        id=WorkItemId("work-fault"),
+        id=WorkItemId(f"work-{name}"),
         work_kind=WorkKind.ISSUE,
         source_provider="github",
-        external_reference="owner/repo#fault",
-        source_snapshot_reference="issue:fault@1",
+        external_reference=f"owner/repo#{name}",
+        source_snapshot_reference=f"issue:{name}@1",
         title="Bounded fault-injection change",
         objective="Reproduce a queued-but-not-selected implement node.",
         acceptance_criteria=("observable result",),
         constraints=(),
         risk_class=RiskClass.LOW,
-        repository_targets=("repository-fault",),
+        repository_targets=(f"repository-{name}",),
         dependencies=(),
         state=WorkItemState.QUALIFYING,
     )
     snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="1")
     return Stage1RunRequest(
         run=Run(
-            id=RunId("run-fault"),
+            id=RunId(f"run-{name}"),
             work_item_id=work_item.id,
             work_item_snapshot_digest=work_item.bound_field_digest,
             workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
             workflow_definition_digest=manifest.content_digest,
-            repository="repository-fault",
-            base_revision="base-revision",
+            repository=f"repository-{name}",
+            base_revision=base_revision,
             policy_set_version="policy-v1",
             adapter_versions={},
             adapter_fingerprints={},
@@ -128,18 +136,18 @@ def _qualified_request(tmp_path: Path) -> Stage1RunRequest:
         ),
         work_snapshot=snapshot,
         manifest=manifest,
-        repository_id="repository-fault",
+        repository_id=f"repository-{name}",
         repository_path=repository,
-        workspace_path=tmp_path / "workspace-fault",
+        workspace_path=tmp_path / f"workspace-{name}",
         base_branch="main",
-        head_branch="enginery/run-fault",
+        head_branch=f"enginery/run-{name}",
         validation_commands=(("true",),),
         applicable_criteria=(True,),
         required_checks=("CI",),
         repair_limit=1,
         implementation=Stage1ImplementationRequest(
-            attempt_id="implement-0",
-            operation_id=OperationId("implement:run-fault"),
+            attempt_id=f"{name}-implement-0",
+            operation_id=OperationId(f"implement:run-{name}"),
             time_budget_seconds=60,
             cost_budget=Decimal("1.0"),
             permitted_capabilities=("git",),
@@ -153,7 +161,7 @@ def _qualified_request(tmp_path: Path) -> Stage1RunRequest:
             harness_provider="omp",
             harness_credential_reference="unused-fixture",
             harness_executable="true",
-            artifact_root=tmp_path / "artifacts-fault",
+            artifact_root=tmp_path / f"artifacts-{name}",
         ),
     )
 
@@ -189,26 +197,51 @@ def _occupy_global_capacity(
     return occupier.run_id, occupier.node_id
 
 
-def test_queued_implement_node_has_no_automatic_retry_and_cancel_recovers_it(
-    ledger_service: LedgerService, tmp_path: Path
-) -> None:
-    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
-    runtime = CoordinatorRuntime(ledger_service, owner="operator")
-    request = _qualified_request(tmp_path)
-    service = Stage1RunService(
+def _sleeping_harness(tmp_path: Path) -> str:
+    """A real executable that stays alive until its process group is terminated."""
+    script = tmp_path / "harness-sleep"
+    script.write_text("#!/bin/sh\nexec sleep 120\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+def _service(
+    ledger: LedgerService, runtime: CoordinatorRuntime, request: Stage1RunRequest, tmp_path: Path
+) -> Stage1RunService:
+    return Stage1RunService(
         runtime=runtime,
-        ledger=ledger_service,
+        ledger=ledger,
         work_ledger=_FixedWorkLedger(request.work_snapshot),
         harness=OmpHarness(
-            OmpAdapterConfig(credential_reference="unused-fixture", executable="true"),
+            OmpAdapterConfig(
+                credential_reference="unused-fixture", executable=_sleeping_harness(tmp_path)
+            ),
             ArtifactStore(request.execution_configuration.artifact_root),
         ),
     )
 
-    # Occupy the sole global concurrency slot with an unrelated run before the
-    # request under test ever registers its implement node.
-    occupier_run_id, occupier_node_id = _occupy_global_capacity(runtime, tmp_path=tmp_path, now=now)
 
+def _event_count(ledger: LedgerService, *, event_type: str, aggregate_id: str) -> int:
+    row = ledger.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type = ? AND aggregate_id = ?",
+        (event_type, aggregate_id),
+    ).fetchone()
+    return int(row[0])
+
+
+def _implement_state(ledger: LedgerService) -> dict[str, object]:
+    node = ledger.read_projection(aggregate_type="runtime_node", aggregate_id="run-fault:implement")
+    assert node is not None
+    return dict(node.state)
+
+
+def _queue_implement_behind_occupier(
+    ledger: LedgerService, tmp_path: Path, now: datetime
+) -> tuple[CoordinatorRuntime, Stage1RunService, Stage1RunRequest, tuple[str, str]]:
+    runtime = CoordinatorRuntime(ledger, owner="operator")
+    request = _qualified_request(tmp_path)
+    service = _service(ledger, runtime, request, tmp_path)
+    occupier = _occupy_global_capacity(runtime, tmp_path=tmp_path, now=now)
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
     service.qualify(
         request,
@@ -218,74 +251,471 @@ def test_queued_implement_node_has_no_automatic_retry_and_cancel_recovers_it(
         heartbeat_window=timedelta(seconds=60),
     )
     assert service.next_action(request.run.id).action.value == "implement"
+    return runtime, service, request, occupier
 
-    # dispatch_implementation registers the "implement" node as queued and ticks
-    # in the same call; global capacity is already exhausted, so it is never
-    # selected -- reproducing the pilot's exact finding.
-    with pytest.raises(ExternalConflictError, match="was not scheduled"):
-        service.dispatch_implementation(
-            request,
-            now=now + timedelta(seconds=2),
-            heartbeat_window=timedelta(seconds=60),
-            lease_window=timedelta(seconds=30),
-            limits=_LIMITS,
+
+def _release_occupier(
+    runtime: CoordinatorRuntime, occupier: tuple[str, str], now: datetime
+) -> None:
+    epoch = runtime.claim_epoch(now=now, heartbeat_window=timedelta(seconds=60))
+    runtime.cancel_node(
+        run_id=occupier[0],
+        node_id=occupier[1],
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=1),
+    )
+
+
+def _advance(
+    service: Stage1RunService, request: Stage1RunRequest, now: datetime
+) -> Stage1ProgressionAction:
+    return service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    ).action
+
+
+def test_queued_implement_redispatches_exactly_once_after_capacity_is_released(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, occupier = _queue_implement_behind_occupier(
+        ledger_service, tmp_path, now
+    )
+
+    # The registering tick cannot select the node: it is a visible queued state, not an error.
+    registered = service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+    assert registered.fixture is None
+    assert registered.wakeup is not None
+    assert registered.wakeup["reason"] == "global_capacity"
+    assert registered.wakeup["evaluations"] == 1
+    assert _implement_state(ledger_service)["status"] == "queued"
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.DISPATCH_QUEUED
+
+    # While the slot is still occupied, advancing keeps it queued, records the evaluation and
+    # launches nothing.
+    assert (
+        _advance(service, request, now + timedelta(seconds=3))
+        is Stage1ProgressionAction.DISPATCH_QUEUED
+    )
+    still_queued = _implement_state(ledger_service)
+    assert still_queued["status"] == "queued"
+    wakeup = still_queued["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "global_capacity"
+    assert wakeup["evaluations"] == 2
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
+    assert (
+        _event_count(
+            ledger_service, event_type="worker.launch_intended", aggregate_id="run-fault:implement"
+        )
+        == 0
+    )
+
+    # Releasing the occupying slot for real makes the next evaluation dispatch the same
+    # operation exactly once.
+    _release_occupier(runtime, occupier, now + timedelta(seconds=5))
+    assert _advance(service, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.WAIT
+    running = _implement_state(ledger_service)
+    assert running["status"] == "running"
+    assert running["operation_id"] == str(request.implementation.operation_id)
+    closed = running["wakeup"]
+    assert isinstance(closed, dict)
+    assert closed["reason"] is None
+    assert closed["queued_since"] == (now + timedelta(seconds=2)).isoformat()
+    assert closed["dispatched_at"] == (now + timedelta(seconds=10)).isoformat()
+    lease = ledger_service.read_lease(run_id="run-fault", node_id="implement")
+    assert lease is not None
+
+    # Repeated evaluation never duplicates the lease, worker or launch.
+    for offset in (11, 12, 13):
+        assert _advance(service, request, now + timedelta(seconds=offset)) is (
+            Stage1ProgressionAction.WAIT
+        )
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") == lease
+    for event_type in ("worker.launch_intended", "worker.started"):
+        assert (
+            _event_count(ledger_service, event_type=event_type, aggregate_id="run-fault:implement")
+            == 1
         )
 
-    implement_node = ledger_service.read_projection(
-        aggregate_type="runtime_node", aggregate_id="run-fault:implement"
+    # Tear down the real worker process group.
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=20), heartbeat_window=timedelta(seconds=60)
     )
-    assert implement_node is not None
-    assert implement_node.state["status"] == "queued"
+    runtime.cancel_node(
+        run_id="run-fault",
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=21),
+    )
 
-    # The node is durably queued but next_action never reports "implement" again
-    # (it is not None any more), so nothing re-attempts scheduling it.
-    assert service.next_action(request.run.id).action.value == "wait"
 
-    # Genuinely free the occupied slot by cancelling the occupier -- if any
-    # automatic retry existed, it would now have room to run.
-    free_epoch = runtime.claim_epoch(
+def test_queued_implement_is_cancellable_and_reaches_human_review(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, _ = _queue_implement_behind_occupier(ledger_service, tmp_path, now)
+    service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+
+    epoch = runtime.claim_epoch(
         now=now + timedelta(seconds=5), heartbeat_window=timedelta(seconds=60)
     )
     runtime.cancel_node(
-        run_id=occupier_run_id,
-        node_id=occupier_node_id,
-        epoch=free_epoch.epoch,
+        run_id="run-fault",
+        node_id="implement",
+        epoch=epoch.epoch,
         now=now + timedelta(seconds=6),
     )
 
-    # Even with capacity now genuinely free, repeated advance() calls stay stuck
-    # at "wait": advance()'s action table has no handler for WAIT, so nothing
-    # ever re-ticks the stuck node. This is the confirmed, reproducible gap.
-    for offset in (10, 20, 30):
-        progression = service.advance(
-            request.run.id,
-            now=now + timedelta(seconds=offset),
+    assert _implement_state(ledger_service)["status"] == "cancelled"
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    assert _advance(service, request, now + timedelta(seconds=7)) is (
+        Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+
+
+def test_queued_implement_is_held_not_dispatched_while_the_catalog_has_drifted(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, occupier = _queue_implement_behind_occupier(
+        ledger_service, tmp_path, now
+    )
+    service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+    _release_occupier(runtime, occupier, now + timedelta(seconds=5))
+    drifted = replace(
+        service,
+        execution_catalog=replace(
+            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+        ),
+    )
+
+    # Capacity is free, but the drifted binding holds the node: nothing may launch.
+    assert drifted.next_action(request.run.id).action is Stage1ProgressionAction.HOLD
+    assert _advance(drifted, request, now + timedelta(seconds=10)) is Stage1ProgressionAction.HOLD
+    with pytest.raises(HumanActionRequiredError, match="catalog changed"):
+        drifted.redispatch_queued_implementation(
+            request,
+            now=now + timedelta(seconds=11),
             heartbeat_window=timedelta(seconds=60),
             lease_window=timedelta(seconds=30),
             limits=_LIMITS,
         )
-        assert progression.action.value == "wait"
+    assert _implement_state(ledger_service)["status"] == "queued"
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
 
-    # The accepted recovery path is exactly what docs/pitch.md and
-    # docs/operations.md already document: stage1 cancel. Claim a fresh epoch
-    # (matching the CLI's own _cancel) and cancel the stuck queued node.
+    # Once the binding is current again the same queued node dispatches.
+    assert _advance(service, request, now + timedelta(seconds=12)) is Stage1ProgressionAction.WAIT
+    assert _implement_state(ledger_service)["status"] == "running"
     epoch = runtime.claim_epoch(
-        now=now + timedelta(seconds=40), heartbeat_window=timedelta(seconds=60)
+        now=now + timedelta(seconds=20), heartbeat_window=timedelta(seconds=60)
     )
     runtime.cancel_node(
-        run_id=str(request.run.id),
+        run_id="run-fault",
         node_id="implement",
         epoch=epoch.epoch,
-        now=now + timedelta(seconds=41),
+        now=now + timedelta(seconds=21),
     )
 
-    cancelled_node = ledger_service.read_projection(
-        aggregate_type="runtime_node", aggregate_id="run-fault:implement"
-    )
-    assert cancelled_node is not None
-    assert cancelled_node.state["status"] == "cancelled"
 
-    # Recovery is real and reachable: next_action now routes to the existing,
-    # already-documented human-review/repair path -- no dedicated stuck-recovery
-    # feature is needed beyond what stage1 cancel + stage1 review already do.
-    assert service.next_action(request.run.id).action.value == "await_human_review"
+def test_an_older_queued_run_keeps_its_priority_and_the_newer_run_records_the_reservation(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, occupier = _queue_implement_behind_occupier(
+        ledger_service, tmp_path, now
+    )
+    repository, base_revision = _repository(tmp_path, "foreign-repository")
+    foreign = FixtureDispatch(
+        run_id="run-aaa-foreign",
+        node_id="work",
+        attempt_id="attempt-foreign",
+        repository_id="repository-foreign",
+        repository_path=repository,
+        workspace_path=tmp_path / "workspace-foreign",
+        base_revision=base_revision,
+        command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        expected_attempt_version=0,
+        operation_id="operation-foreign",
+    )
+    # Queued first, and first in fair order: it must win the freed slot.
+    assert (
+        runtime.tick(
+            now=now + timedelta(seconds=1),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=_LIMITS,
+            requests=(foreign,),
+        ).dispatched
+        == ()
+    )
+    service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+    _release_occupier(runtime, occupier, now + timedelta(seconds=5))
+
+    # The newer run's advance cannot take the slot the fair plan granted to the older run,
+    # and it never launches the older run's node itself.
+    assert (
+        _advance(service, request, now + timedelta(seconds=10))
+        is Stage1ProgressionAction.DISPATCH_QUEUED
+    )
+    waiting = _implement_state(ledger_service)
+    assert waiting["status"] == "queued"
+    wakeup = waiting["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "capacity_reserved_for_other_run"
+    assert wakeup["reserved_for"] == "run-aaa-foreign"
+    assert wakeup["evaluations"] == 2
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
+    foreign_node = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-aaa-foreign:work"
+    )
+    assert foreign_node is not None
+    assert foreign_node.state["status"] == "queued"
+    assert ledger_service.read_lease(run_id="run-aaa-foreign", node_id="work") is None
+
+    # The older run launches on its own advance; the newer one then waits for real capacity.
+    started = runtime.tick(
+        now=now + timedelta(seconds=11),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+        run_ids=("run-aaa-foreign",),
+    ).dispatched
+    assert [fixture.lease.run_id for fixture in started] == ["run-aaa-foreign"]
+    assert (
+        _advance(service, request, now + timedelta(seconds=12))
+        is Stage1ProgressionAction.DISPATCH_QUEUED
+    )
+    blocked = _implement_state(ledger_service)["wakeup"]
+    assert isinstance(blocked, dict)
+    assert blocked["reason"] == "global_capacity"
+    assert blocked["reserved_for"] is None
+
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=13), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-aaa-foreign",
+        node_id="work",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=14),
+    )
+    assert _advance(service, request, now + timedelta(seconds=15)) is Stage1ProgressionAction.WAIT
+    assert _implement_state(ledger_service)["status"] == "running"
+    runtime.cancel_node(
+        run_id="run-fault",
+        node_id="implement",
+        epoch=epoch.epoch,
+        now=now + timedelta(seconds=16),
+    )
+
+
+def test_a_held_older_run_does_not_strand_capacity_a_current_newer_run_can_use(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    runtime, service, request, occupier = _queue_implement_behind_occupier(
+        ledger_service, tmp_path, now
+    )
+    service.dispatch_implementation(
+        request,
+        now=now + timedelta(seconds=2),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+    )
+    repository, base_revision = _repository(tmp_path, "newer-repository")
+    newer = FixtureDispatch(
+        run_id="run-newer",
+        node_id="work",
+        attempt_id="attempt-newer",
+        repository_id="repository-newer",
+        repository_path=repository,
+        workspace_path=tmp_path / "workspace-newer",
+        base_revision=base_revision,
+        command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        expected_attempt_version=0,
+        operation_id="operation-newer",
+    )
+    assert (
+        runtime.tick(
+            now=now + timedelta(seconds=3),
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=30),
+            limits=_LIMITS,
+            requests=(newer,),
+            run_ids=("run-newer",),
+        ).dispatched
+        == ()
+    )
+    _release_occupier(runtime, occupier, now + timedelta(seconds=5))
+    drifted = replace(
+        service,
+        execution_catalog=replace(
+            load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+        ),
+    )
+
+    # The older run's binding is held, so the fair plan skips it and the newer run launches.
+    held = drifted._held_runs()
+    assert list(held) == ["run-fault"]
+    started = runtime.tick(
+        now=now + timedelta(seconds=6),
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=30),
+        limits=_LIMITS,
+        run_ids=("run-newer",),
+        held_runs=held,
+    ).dispatched
+    assert [fixture.lease.run_id for fixture in started] == ["run-newer"]
+    waiting = _implement_state(ledger_service)
+    assert waiting["status"] == "queued"
+    wakeup = waiting["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "execution_hold"
+    assert wakeup["reserved_for"] is None
+    assert "catalog changed" in str(wakeup["detail"])
+    assert ledger_service.read_lease(run_id="run-fault", node_id="implement") is None
+
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=7), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-newer", node_id="work", epoch=epoch.epoch, now=now + timedelta(seconds=8)
+    )
+    assert _advance(service, request, now + timedelta(seconds=9)) is Stage1ProgressionAction.WAIT
+    runtime.cancel_node(
+        run_id="run-fault", node_id="implement", epoch=epoch.epoch, now=now + timedelta(seconds=10)
+    )
+
+
+def _selection_bound_to(catalog: ExecutionCatalog) -> ExecutionSelection:
+    return resolve_execution_selection(
+        (
+            LayerControls(
+                layer=SelectionLayer.RUN,
+                harness="omp",
+                model=None,
+                effort=None,
+                model_pinned=False,
+                effort_pinned=False,
+                strict_effective=None,
+            ),
+        ),
+        catalog=catalog,
+    )
+
+
+@pytest.mark.parametrize("path", ["dispatch_implementation", "advance_redispatch"])
+def test_stage1_wiring_a_drifted_older_run_does_not_strand_a_current_newer_run(
+    ledger_service: LedgerService, tmp_path: Path, path: str
+) -> None:
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    later_catalog = replace(
+        load_execution_catalog(), digest=Digest.of_bytes(b"a later catalog"), version="2"
+    )
+    runtime = CoordinatorRuntime(ledger_service, owner="operator")
+    older = _qualified_request(tmp_path, "aaa")
+    newer = replace(
+        _qualified_request(tmp_path, "zzz"), execution_selection=_selection_bound_to(later_catalog)
+    )
+    older_service = _service(ledger_service, runtime, older, tmp_path)
+    newer_service = replace(
+        _service(ledger_service, runtime, newer, tmp_path), execution_catalog=later_catalog
+    )
+    occupier = _occupy_global_capacity(runtime, tmp_path=tmp_path, now=now)
+    windows = {
+        "heartbeat_window": timedelta(seconds=60),
+        "lease_window": timedelta(seconds=30),
+        "limits": _LIMITS,
+    }
+    for service, request, offset in ((older_service, older, 1), (newer_service, newer, 4)):
+        service.start(
+            request, now=now + timedelta(seconds=offset), heartbeat_window=timedelta(seconds=60)
+        )
+        service.qualify(
+            request,
+            external_reference=request.work_snapshot.work_item.external_reference,
+            applicable_criteria=request.applicable_criteria,
+            now=now + timedelta(seconds=offset + 1),
+            heartbeat_window=timedelta(seconds=60),
+        )
+    # The older run queues first behind the occupier, under the catalog it was bound to.
+    assert (
+        older_service.dispatch_implementation(
+            older, now=now + timedelta(seconds=3), **windows
+        ).fixture
+        is None
+    )
+    if path == "advance_redispatch":
+        assert (
+            newer_service.dispatch_implementation(
+                newer, now=now + timedelta(seconds=6), **windows
+            ).fixture
+            is None
+        )
+    _release_occupier(runtime, occupier, now + timedelta(seconds=8))
+    # The catalog is now the later one: the older run is held, the newer one is current.
+    drifted_older = replace(older_service, execution_catalog=later_catalog)
+    assert list(drifted_older._held_runs()) == ["run-aaa"]
+
+    if path == "dispatch_implementation":
+        launched = newer_service.dispatch_implementation(
+            newer, now=now + timedelta(seconds=10), **windows
+        ).fixture
+        assert launched is not None
+    else:
+        newer_service.advance(newer.run.id, now=now + timedelta(seconds=10), **windows)
+        launched = None
+    started = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-zzz:implement"
+    )
+    assert started is not None and started.state["status"] == "running"
+    assert launched is None or launched.lease.run_id == "run-zzz"
+    held = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id="run-aaa:implement"
+    )
+    assert held is not None and held.state["status"] == "queued"
+    wakeup = held.state["wakeup"]
+    assert isinstance(wakeup, dict)
+    assert wakeup["reason"] == "execution_hold"
+    assert wakeup["reserved_for"] is None
+    assert "catalog changed" in str(wakeup["detail"])
+    assert ledger_service.read_lease(run_id="run-aaa", node_id="implement") is None
+    epoch = runtime.claim_epoch(
+        now=now + timedelta(seconds=20), heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.cancel_node(
+        run_id="run-zzz", node_id="implement", epoch=epoch.epoch, now=now + timedelta(seconds=21)
+    )
+    runtime.cancel_node(
+        run_id="run-aaa", node_id="implement", epoch=epoch.epoch, now=now + timedelta(seconds=22)
+    )

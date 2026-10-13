@@ -6,6 +6,7 @@ import enum
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from enginery.domain.errors import InvalidInputError
 
@@ -42,6 +43,7 @@ class SchedulableNode:
     state: SchedulableState = SchedulableState.QUEUED
     repository_id: str | None = None
     requirements_satisfied: bool = True
+    queued_since: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.key in self.dependencies:
@@ -64,10 +66,35 @@ class SchedulingLimits:
             raise InvalidInputError("per_repository_concurrency must be positive")
 
 
+class DeferralReason(enum.StrEnum):
+    """Why a queued node was evaluated but not selected for dispatch."""
+
+    GLOBAL_CAPACITY = "global_capacity"
+    REPOSITORY_CAPACITY = "repository_capacity"
+    DEPENDENCIES = "dependencies"
+    DEPENDENCY_FAILED = "dependency_failed"
+    REQUIREMENTS = "requirements"
+    CAPACITY_RESERVED = "capacity_reserved_for_other_run"
+    EXECUTION_HOLD = "execution_hold"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredNode:
+    """One evaluated, still-queued node and the single reason it was not selected."""
+
+    key: NodeKey
+    reason: DeferralReason
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulingPlan:
     selected: tuple[NodeKey, ...]
-    next_run_id: str | None
+    deferred: tuple[DeferredNode, ...] = ()
+
+
+_DEAD_DEPENDENCY_STATES = frozenset(
+    {SchedulableState.FAILED, SchedulableState.CANCELLED, SchedulableState.BLOCKED}
+)
 
 
 class ReadinessScheduler:
@@ -78,9 +105,8 @@ class ReadinessScheduler:
         nodes: Iterable[SchedulableNode],
         *,
         limits: SchedulingLimits,
-        last_run_id: str | None = None,
     ) -> SchedulingPlan:
-        """Return a stable round-robin selection within configured limits."""
+        """Select ready nodes across every run, oldest queued run first, within the limits."""
         by_key = _index_nodes(nodes)
         active = tuple(
             node
@@ -88,14 +114,12 @@ class ReadinessScheduler:
             if node.state in {SchedulableState.LEASED, SchedulableState.RUNNING}
         )
         available_slots = limits.global_concurrency - len(active)
-        if available_slots <= 0:
-            return SchedulingPlan(selected=(), next_run_id=last_run_id)
         repository_load = _repository_load(active)
         ready_by_run: dict[str, deque[SchedulableNode]] = defaultdict(deque)
         for node in sorted(by_key.values(), key=lambda item: item.key):
-            if _is_ready(node, by_key):
+            if available_slots > 0 and _is_ready(node, by_key):
                 ready_by_run[node.key.run_id].append(node)
-        run_order = _rotated_run_order(ready_by_run, last_run_id=last_run_id)
+        run_order = _oldest_first_run_order(ready_by_run)
         selected: list[NodeKey] = []
         while available_slots > 0 and run_order:
             progressed = False
@@ -120,10 +144,38 @@ class ReadinessScheduler:
                     break
             if not progressed:
                 break
-        return SchedulingPlan(
-            selected=tuple(selected),
-            next_run_id=selected[-1].run_id if selected else last_run_id,
+        chosen = frozenset(selected)
+        deferred = tuple(
+            DeferredNode(
+                node.key,
+                _deferral_reason(node, by_key, repository_load, limits=limits),
+            )
+            for node in sorted(by_key.values(), key=lambda item: item.key)
+            if node.state is SchedulableState.QUEUED and node.key not in chosen
         )
+        return SchedulingPlan(selected=tuple(selected), deferred=deferred)
+
+
+def _deferral_reason(
+    node: SchedulableNode,
+    nodes: dict[NodeKey, SchedulableNode],
+    repository_load: dict[str, int],
+    *,
+    limits: SchedulingLimits,
+) -> DeferralReason:
+    if not node.requirements_satisfied:
+        return DeferralReason.REQUIREMENTS
+    dependency_states = [nodes[dependency].state for dependency in node.dependencies]
+    if any(state in _DEAD_DEPENDENCY_STATES for state in dependency_states):
+        return DeferralReason.DEPENDENCY_FAILED
+    if any(state is not SchedulableState.SUCCEEDED for state in dependency_states):
+        return DeferralReason.DEPENDENCIES
+    if (
+        node.repository_id is not None
+        and repository_load.get(node.repository_id, 0) >= limits.per_repository_concurrency
+    ):
+        return DeferralReason.REPOSITORY_CAPACITY
+    return DeferralReason.GLOBAL_CAPACITY
 
 
 def _index_nodes(nodes: Iterable[SchedulableNode]) -> dict[NodeKey, SchedulableNode]:
@@ -163,14 +215,22 @@ def _repository_load(active: tuple[SchedulableNode, ...]) -> dict[str, int]:
     return load
 
 
-def _rotated_run_order(
-    ready_by_run: dict[str, deque[SchedulableNode]], *, last_run_id: str | None
-) -> deque[str]:
-    ordered = sorted(ready_by_run)
-    if last_run_id is not None and last_run_id in ordered:
-        start = (ordered.index(last_run_id) + 1) % len(ordered)
-        ordered = ordered[start:] + ordered[:start]
-    return deque(ordered)
+def _oldest_first_run_order(ready_by_run: dict[str, deque[SchedulableNode]]) -> deque[str]:
+    """Order runs by how long their oldest ready node has been queued, then by run id.
+
+    The order depends only on persisted queue times, so every coordinator process derives
+    the same one: a later-arriving run never overtakes an older queued run, whatever its id.
+    A node with no recorded queue time (a record from before queue times were kept) ranks
+    after every timed node.
+    """
+
+    def rank(run_id: str) -> tuple[bool, datetime, str]:
+        times = [
+            node.queued_since for node in ready_by_run[run_id] if node.queued_since is not None
+        ]
+        return (not times, min(times) if times else datetime.max.replace(tzinfo=UTC), run_id)
+
+    return deque(sorted(ready_by_run, key=rank))
 
 
 def _next_allowed_candidate(
@@ -190,6 +250,8 @@ def _next_allowed_candidate(
 
 
 __all__ = [
+    "DeferralReason",
+    "DeferredNode",
     "NodeKey",
     "ReadinessScheduler",
     "SchedulableNode",

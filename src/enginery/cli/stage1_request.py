@@ -47,6 +47,7 @@ from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
+    implementation_attempt_id,
 )
 
 _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
@@ -127,7 +128,11 @@ def add_build_request_parser(
     )
     parser.add_argument("--required-check", dest="required_checks", action="append", default=None)
     parser.add_argument("--repair-limit", type=int, default=1)
-    parser.add_argument("--implementation-attempt-id", default="implement-0")
+    parser.add_argument(
+        "--implementation-attempt-id",
+        default=None,
+        help="Defaults to <run-id>-implement-0, unique per run on a shared ledger.",
+    )
     parser.add_argument(
         "--implementation-operation-id", default=None, help="Defaults to implement:<run-id>."
     )
@@ -232,6 +237,19 @@ def _harness_executable(args: argparse.Namespace, harness: str) -> str:
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     """Construct one durable Stage 1 request from ``build-request`` flags."""
     run_id = args.run_id
+    if args.repair_limit > 0:
+        # Repair attempt ids are always derived from the run id, whatever the first attempt's
+        # id is, so the longest one must be valid for the run to be able to repair.
+        implementation_attempt_id(run_id, args.repair_limit)
+    if args.implementation_attempt_id is None:
+        try:
+            attempt_id = implementation_attempt_id(run_id, 0)
+        except InvalidInputError as error:
+            raise InvalidInputError(
+                f"{error}, or pass --implementation-attempt-id", details=error.details
+            ) from error
+    else:
+        attempt_id = args.implementation_attempt_id
     work_item_id = args.work_item_id or f"work-{run_id}"
     head_branch = args.head_branch or f"enginery/{run_id}"
     implementation_operation_id = OperationId(
@@ -315,7 +333,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         else ("CI",),
         repair_limit=args.repair_limit,
         implementation=Stage1ImplementationRequest(
-            attempt_id=args.implementation_attempt_id,
+            attempt_id=attempt_id,
             operation_id=implementation_operation_id,
             time_budget_seconds=args.implementation_time_budget_seconds,
             cost_budget=_cost_budget(args),

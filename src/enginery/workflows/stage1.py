@@ -284,6 +284,7 @@ class Stage1ProgressionAction(StrEnum):
 
     QUALIFY = "qualify"
     IMPLEMENT = "implement"
+    DISPATCH_QUEUED = "dispatch_queued"
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
@@ -306,11 +307,17 @@ class Stage1Progression:
 
 @dataclass(frozen=True, slots=True)
 class Stage1ImplementationDispatch:
-    """One supervised OMP attempt launched by the coordinator runtime."""
+    """One implementation attempt registered with the coordinator runtime.
+
+    ``fixture`` is the supervised OMP attempt when it was scheduled. It is ``None`` when the
+    node stayed durably queued behind capacity or a dependency; ``wakeup`` then carries the
+    recorded blocking reason, and a later ``advance`` redispatches the same operation.
+    """
 
     task: HarnessTask
-    fixture: DispatchedFixture
+    fixture: DispatchedFixture | None
     result_path: Path
+    wakeup: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +401,28 @@ class Stage1RunService:
     def _catalog_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
         return detect_catalog_drift(request.execution_selection, current=self._current_catalog())
 
+    def _held_runs(self) -> dict[str, str]:
+        """Map every Stage 1 run whose catalog binding has drifted to its hold message.
+
+        Computed from durable run requests and the current catalog only, never from a host
+        probe, so queued nodes of a held run are left out of the fair plan and cannot strand
+        capacity another run could use. Host-fingerprint holds need a probe and stay a
+        manual case. A run projection that is not a Stage 1 request has no catalog binding.
+        """
+        held: dict[str, str] = {}
+        catalog = self._current_catalog()
+        for projection in self.ledger.list_projections(aggregate_type=RUN_AGGREGATE_TYPE):
+            try:
+                run = _run_from_state(
+                    projection.state, aggregate_version=projection.aggregate_version
+                )
+            except (InvalidInputError, InternalInvariantViolationError):
+                continue
+            hold = detect_catalog_drift(run.request.execution_selection, current=catalog)
+            if hold is not None:
+                held[projection.aggregate_id] = hold.message
+        return held
+
     def _binding_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
         """Return a catalog drift hold, else a host fingerprint drift hold, else None.
 
@@ -465,6 +494,8 @@ class Stage1RunService:
             if recorded is not None:
                 return Stage1Progression(Stage1ProgressionAction.HOLD, run, recorded)
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        if implementation_status == "queued":
+            return Stage1Progression(Stage1ProgressionAction.DISPATCH_QUEUED, run)
         if implementation_status != "passed":
             result_path = _implementation_result_path(
                 run.request, operation_id=OperationId(_string(implement_state, "operation_id"))
@@ -573,6 +604,14 @@ class Stage1RunService:
                 lease_window=lease_window,
                 limits=limits,
             )
+        elif progression.action is Stage1ProgressionAction.DISPATCH_QUEUED:
+            self.redispatch_queued_implementation(
+                request,
+                now=now,
+                heartbeat_window=heartbeat_window,
+                lease_window=lease_window,
+                limits=limits,
+            )
         elif progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
             self.collect_implementation(
                 request,
@@ -670,7 +709,7 @@ class Stage1RunService:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
                 )
-            attempt_id = f"implement-{generation}"
+            attempt_id = implementation_attempt_id(str(request.run.id), generation)
             operation_id = OperationId.derive(
                 run_id=request.run.id,
                 node_id=NodeId("implement"),
@@ -703,28 +742,66 @@ class Stage1RunService:
             lease_window=lease_window,
             limits=limits,
             requests=(dispatch,),
+            run_ids=(str(request.run.id),),
+            held_runs=self._held_runs(),
         )
-        matching = tuple(
-            fixture
-            for fixture in tick.dispatched
-            if fixture.lease.run_id == str(request.run.id)
-            and fixture.lease.node_id == "implement"
-            and fixture.lease.attempt_id == attempt_id
-            and fixture.lease.operation_id == str(operation_id)
+        return Stage1ImplementationDispatch(
+            task=task,
+            fixture=_scheduled_implementation(
+                tick.dispatched,
+                run_id=request.run.id,
+                attempt_id=attempt_id,
+                operation_id=operation_id,
+            ),
+            result_path=result_path,
+            wakeup=self._queued_wakeup(request.run.id),
         )
-        if len(matching) != 1:
+
+    def redispatch_queued_implementation(
+        self,
+        request: Stage1RunRequest,
+        *,
+        now: datetime,
+        heartbeat_window: timedelta,
+        lease_window: timedelta,
+        limits: SchedulingLimits,
+    ) -> DispatchedFixture | None:
+        """Re-evaluate a durably queued implementation and dispatch it once if now eligible.
+
+        The queued node keeps its original attempt and operation identity: this registers
+        nothing, only lets the coordinator re-derive readiness from the ledger. The same
+        binding checks as the first dispatch run first, so a drifted run is held rather than
+        launched, and the tick is scoped to this run so it can never launch another run's
+        node under a binding checked here. Returns ``None`` when the node stays queued; its
+        blocking reason and evaluation count are recorded on the runtime node.
+        """
+        self._require_executable(request)
+        self._require_passed_node(request.run.id, "qualify")
+        queued = self._node_state(request.run.id, "implement")
+        if queued.get("status") != "queued":
             raise ExternalConflictError(
-                "qualified implementation was not scheduled",
-                details={
-                    "run_id": str(request.run.id),
-                    "dispatched_nodes": [
-                        f"{fixture.lease.run_id}:{fixture.lease.node_id}"
-                        for fixture in tick.dispatched
-                    ],
-                },
+                "Stage 1 queued redispatch requires a queued implementation",
+                details={"run_id": str(request.run.id), "status": str(queued.get("status"))},
             )
-        fixture = matching[0]
-        return Stage1ImplementationDispatch(task=task, fixture=fixture, result_path=result_path)
+        tick = self.runtime.tick(
+            now=now,
+            heartbeat_window=heartbeat_window,
+            lease_window=lease_window,
+            limits=limits,
+            run_ids=(str(request.run.id),),
+            held_runs=self._held_runs(),
+        )
+        return _scheduled_implementation(
+            tick.dispatched,
+            run_id=request.run.id,
+            attempt_id=_string(queued, "attempt_id"),
+            operation_id=OperationId(_string(queued, "operation_id")),
+        )
+
+    def _queued_wakeup(self, run_id: RunId) -> Mapping[str, object] | None:
+        state = self._node_state_optional(run_id, "implement")
+        wakeup = None if state is None else state.get("wakeup")
+        return wakeup if isinstance(wakeup, dict) else None
 
     def collect_implementation(
         self,
@@ -1204,10 +1281,51 @@ def _implementation_task(
     )
 
 
+def implementation_attempt_id(run_id: str, generation: int) -> str:
+    """Derive ``<run-id>-implement-<generation>``, failing loudly if it is not a valid id.
+
+    Attempt ids are ledger-wide aggregate ids with a bounded length. A run id too long to
+    carry the suffix is rejected rather than truncated, which could collide with another run.
+    """
+    attempt_id = f"{run_id}-implement-{generation}"
+    try:
+        NodeAttemptId(attempt_id)
+    except InvalidInputError as error:
+        raise InvalidInputError(
+            "run id is too long to derive a valid implementation attempt id; use a shorter run id",
+            details={"run_id": run_id, "attempt_id": attempt_id},
+        ) from error
+    return attempt_id
+
+
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
     return request.workspace_path / (
         f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     )
+
+
+def _scheduled_implementation(
+    dispatched: tuple[DispatchedFixture, ...],
+    *,
+    run_id: RunId,
+    attempt_id: str,
+    operation_id: OperationId,
+) -> DispatchedFixture | None:
+    """Return the one launch of this exact implementation operation, or None if still queued."""
+    matching = tuple(
+        fixture
+        for fixture in dispatched
+        if fixture.lease.run_id == str(run_id)
+        and fixture.lease.node_id == "implement"
+        and fixture.lease.attempt_id == attempt_id
+        and fixture.lease.operation_id == str(operation_id)
+    )
+    if len(matching) > 1:
+        raise InternalInvariantViolationError(
+            "a tick launched one implementation operation more than once",
+            details={"run_id": str(run_id), "operation_id": str(operation_id)},
+        )
+    return matching[0] if matching else None
 
 
 def _generation(attempt_id: str) -> int:
@@ -1508,5 +1626,6 @@ __all__ = [
     "Stage1Run",
     "Stage1RunRequest",
     "Stage1RunService",
+    "implementation_attempt_id",
     "stage1_request_from_state",
 ]
