@@ -143,6 +143,8 @@ class HarnessTask:
     time_budget_seconds: int
     cost_budget: Decimal | None
     selection: ExecutionSelection
+    head_branch: str | None = None
+    base_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not self.workspace_path.is_absolute():

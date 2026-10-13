@@ -17,7 +17,12 @@ from enginery.domain.execution_catalog import (
     InstalledHost,
     RangedHostVersion,
 )
-from enginery.domain.execution_receipt import EffectiveControl, ExecutionReceipt, HostObservation
+from enginery.domain.execution_receipt import (
+    EffectiveControl,
+    ExecutionReceipt,
+    HostObservation,
+    RunnerReceiptRef,
+)
 from enginery.domain.execution_selection import ExecutionSelection, validate_against_catalog
 
 
@@ -157,6 +162,7 @@ def build_receipt(
     launched_command: tuple[str, ...] | None,
     models: Iterable[str],
     observed_at_launch: str | None,
+    runner: RunnerReceiptRef | None = None,
 ) -> ExecutionReceipt:
     """Build a receipt from the launched command and the host's own reported models.
 
@@ -194,6 +200,7 @@ def build_receipt(
         effective_model=model,
         effective_effort=EffectiveControl.unknown(reason=effort_reason),
         host=_host_observation(selection, observed_at_launch),
+        runner=runner,
     )
 
 

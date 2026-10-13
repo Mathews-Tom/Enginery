@@ -181,3 +181,61 @@ def test_validation_against_the_catalog_rejects_forged_tier_fingerprint_or_catal
         validate_against_catalog(
             replace(pinned, catalog_digest=Digest.of_bytes(b"x")), catalog=catalog
         )
+
+
+def test_a_receipt_without_a_runner_keeps_the_pre_runner_shape_and_decodes_unchanged() -> None:
+    receipt = _receipt(None)
+
+    state = receipt.to_state()
+
+    assert set(state) == {
+        "schema_version",
+        "selection_digest",
+        "harness",
+        "submitted_arguments",
+        "effective_model",
+        "effective_effort",
+        "host",
+    }
+    assert ExecutionReceipt.from_state(state).runner is None
+
+
+def test_a_receipt_records_and_round_trips_the_runner_receipt_it_ran_under() -> None:
+    from enginery.domain.execution_receipt import RunnerReceiptRef
+
+    ref = RunnerReceiptRef(
+        trust_mode="isolated-oci",
+        receipt_digest=Digest.of_bytes(b"runner receipt"),
+        image_id="sha256:" + "a" * 64,
+        profile_digest=Digest.of_bytes(b"profile"),
+    )
+
+    decoded = ExecutionReceipt.from_state(replace(_receipt(None), runner=ref).to_state())
+
+    assert decoded.runner == ref
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "not a mapping",
+        {"trust_mode": "isolated-oci", "image_id": "sha256:" + "a" * 64},
+        {
+            "trust_mode": "isolated-oci",
+            "receipt_digest": "not-a-digest",
+            "image_id": "sha256:" + "a" * 64,
+            "profile_digest": str(Digest.of_bytes(b"p")),
+        },
+        {
+            "trust_mode": 7,
+            "receipt_digest": str(Digest.of_bytes(b"r")),
+            "image_id": "sha256:" + "a" * 64,
+            "profile_digest": str(Digest.of_bytes(b"p")),
+        },
+    ],
+)
+def test_a_malformed_runner_receipt_reference_is_rejected(state: object) -> None:
+    from enginery.domain.execution_receipt import RunnerReceiptRef
+
+    with pytest.raises(InvalidInputError):
+        RunnerReceiptRef.from_state(state)

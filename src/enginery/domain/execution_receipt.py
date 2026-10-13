@@ -136,6 +136,50 @@ class HostObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class RunnerReceiptRef:
+    """A pointer from an execution receipt to the retained runner receipt it ran under."""
+
+    trust_mode: str
+    receipt_digest: Digest
+    image_id: str
+    profile_digest: Digest
+
+    def __post_init__(self) -> None:
+        if not self.trust_mode.strip() or not self.image_id.strip():
+            raise InvalidInputError("runner receipt reference must name its mode and image")
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "trust_mode": self.trust_mode,
+            "receipt_digest": str(self.receipt_digest),
+            "image_id": self.image_id,
+            "profile_digest": str(self.profile_digest),
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> RunnerReceiptRef:
+        if not isinstance(state, Mapping):
+            raise InvalidInputError("runner receipt reference must be a mapping")
+        digests: dict[str, Digest] = {}
+        for key in ("receipt_digest", "profile_digest"):
+            text = state.get(key)
+            if not isinstance(text, str):
+                raise InvalidInputError(f"runner receipt reference {key} must be text")
+            algorithm, _, hex_value = text.partition(":")
+            digests[key] = Digest(algorithm=algorithm, hex_value=hex_value)
+        trust_mode = state.get("trust_mode")
+        image_id = state.get("image_id")
+        if not isinstance(trust_mode, str) or not isinstance(image_id, str):
+            raise InvalidInputError("runner receipt reference is malformed")
+        return cls(
+            trust_mode=trust_mode,
+            receipt_digest=digests["receipt_digest"],
+            image_id=image_id,
+            profile_digest=digests["profile_digest"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionReceipt:
     """The submitted and effective controls of one harness execution."""
 
@@ -145,6 +189,7 @@ class ExecutionReceipt:
     effective_model: EffectiveControl
     effective_effort: EffectiveControl
     host: HostObservation | None = None
+    runner: RunnerReceiptRef | None = None
 
     def __post_init__(self) -> None:
         if not self.harness.strip():
@@ -153,7 +198,7 @@ class ExecutionReceipt:
             raise InvalidInputError("execution receipt submitted arguments must be non-blank")
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "schema_version": EXECUTION_RECEIPT_SCHEMA_VERSION,
             "selection_digest": None
             if self.selection_digest is None
@@ -164,6 +209,11 @@ class ExecutionReceipt:
             "effective_effort": self.effective_effort.to_state(),
             "host": None if self.host is None else self.host.to_state(),
         }
+        if self.runner is not None:
+            # A receipt persisted before runner references existed has no key and decodes
+            # unchanged; only a launch that actually ran under a runner records one.
+            state["runner"] = self.runner.to_state()
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> ExecutionReceipt:
@@ -196,6 +246,11 @@ class ExecutionReceipt:
                 state.get("effective_effort"), name="effective_effort"
             ),
             host=HostObservation.from_state(state.get("host")),
+            runner=(
+                None
+                if state.get("runner") is None
+                else RunnerReceiptRef.from_state(state["runner"])
+            ),
         )
 
 
@@ -264,5 +319,6 @@ __all__ = [
     "EffectiveState",
     "ExecutionReceipt",
     "HostObservation",
+    "RunnerReceiptRef",
     "evaluate_effective_requirement",
 ]

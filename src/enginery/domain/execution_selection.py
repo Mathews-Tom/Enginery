@@ -71,6 +71,8 @@ class HoldReason(enum.Enum):
     EFFECTIVE_CONTROL_MISMATCH = "effective_control_mismatch"
     SUBMITTED_CONTROLS_MISMATCH = "submitted_controls_mismatch"
     WORKER_IDENTITY_UNPROVABLE = "worker_identity_unprovable"
+    RUNNER_UNQUALIFIED = "runner_unqualified"
+    RUNNER_FINGERPRINT_DRIFT = "runner_fingerprint_drift"
 
 
 @dataclass(frozen=True, slots=True)
