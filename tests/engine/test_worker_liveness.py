@@ -288,6 +288,19 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _wait_until_gone(pid: int, *, timeout: float = 15.0) -> None:
+    """Wait for a process that is not our child to leave the process table.
+
+    Reaping a group's leader proves nothing about its descendants: after SIGKILL a
+    grandchild stays in the table until its adopter reaps it, so it can still be visible
+    for a moment after the leader has been waited on.
+    """
+    deadline = time.monotonic() + timeout
+    while _alive(pid):
+        assert time.monotonic() < deadline, f"process {pid} was never removed after SIGKILL"
+        time.sleep(0.005)
+
+
 def test_a_sigterm_ignoring_leader_and_its_grandchild_are_killed_as_a_whole_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -332,7 +345,7 @@ def test_a_group_that_survives_both_signals_is_reported_not_waited_on(
         monkeypatch.undo()
         os.killpg(identity.process_group_id, signal.SIGKILL)
         leader.wait(timeout=15)
-        assert not _alive(grandchild)
+        _wait_until_gone(grandchild)
 
 
 def test_worker_stderr_goes_to_a_private_per_attempt_log_and_stdout_is_discarded(

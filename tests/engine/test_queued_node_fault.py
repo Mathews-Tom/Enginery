@@ -917,13 +917,14 @@ def test_a_live_worker_after_the_coordinator_window_waits_and_is_collected_norma
         progression = service.next_action(request.run.id)
         if progression.action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION:
             break
-        # Between the worker's start and its result, the run only waits: never a hold.
+        # Between the worker's start and its exit, the run only waits: never a hold, and
+        # never a collect that the supervisor would refuse because the worker still runs.
         assert progression.action is Stage1ProgressionAction.WAIT
         assert progression.hold is None
         assert time.monotonic() < deadline, "the worker never produced its result"
         time.sleep(0.05)
 
-    # Once it exits, the next advance collects the result through the normal path.
+    # Collection is only offered once the worker has exited, so it goes through the normal path.
     collected = _advance(service, request, later)
     assert collected is not Stage1ProgressionAction.HOLD
     assert _implement_state(ledger_service)["status"] != "running"
@@ -934,6 +935,48 @@ def test_a_live_worker_after_the_coordinator_window_waits_and_is_collected_norma
         == 1
     )
     assert probe_process(pid) is None
+
+
+def test_a_worker_that_published_its_result_but_has_not_exited_is_waited_on_then_collected(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every Python process started from here on, the worker wrapper included, lingers for a
+    # fixed time at interpreter shutdown: the result is on disk while the process still runs.
+    lingering = tmp_path / "lingering-exit"
+    lingering.mkdir()
+    (lingering / "sitecustomize.py").write_text(
+        "import atexit, time\natexit.register(time.sleep, 4.0)\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PYTHONPATH", str(lingering))
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    _runtime, service, request, pid = _dispatch_running_implementation(
+        ledger_service, tmp_path, now, seconds=1
+    )
+    result_path = _implementation_result_path(
+        request, operation_id=OperationId("implement:run-fault")
+    )
+    deadline = time.monotonic() + 30
+    while not result_path.is_file():
+        assert time.monotonic() < deadline, "the worker never published its result"
+        time.sleep(0.01)
+    later = now + timedelta(minutes=10)
+
+    # The result is visible and the worker provably runs: waiting is the only honest answer,
+    # for the derived action and for an advance alike. Collecting would be refused.
+    assert probe_process(pid) is not None
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.WAIT
+    assert _advance(service, request, later) is Stage1ProgressionAction.WAIT
+    assert _implement_state(ledger_service)["status"] == "running"
+
+    while service.next_action(request.run.id).action is Stage1ProgressionAction.WAIT:
+        assert time.monotonic() < deadline, "the exited worker was never offered for collection"
+        time.sleep(0.05)
+    assert (
+        service.next_action(request.run.id).action is Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+    )
+
+    assert _advance(service, request, later) is not Stage1ProgressionAction.HOLD
+    assert _implement_state(ledger_service)["status"] != "running"
 
 
 def _rewrite_worker_record(
