@@ -41,19 +41,31 @@ def test_each_host_records_its_tested_executable_and_protocol_fingerprint() -> N
     omp = catalog.host("omp")
     claude = catalog.host("claude-code")
 
-    assert (omp.executable_version, omp.protocol_fingerprint) == ("18.10.2", "json-protocol=3")
+    assert (omp.executable_version, omp.protocol_fingerprint) == ("18.10.3", "json-protocol=3")
     assert (claude.executable_version, claude.protocol_fingerprint) == (
         "2.1.296",
         "stream-json-schema=1",
     )
-    assert omp.matches(InstalledHost("18.10.2", "json-protocol=3"))
-    assert not omp.matches(InstalledHost("18.10.3", "json-protocol=3"))
-    assert not omp.matches(InstalledHost("18.10.2", "json-protocol=4"))
+    assert omp.matches(InstalledHost("18.10.3", "json-protocol=3"))
+    assert not omp.matches(InstalledHost("18.10.2", "json-protocol=3"))
+    assert not omp.matches(InstalledHost("18.10.4", "json-protocol=3"))
+    assert not omp.matches(InstalledHost("18.10.3", "json-protocol=4"))
     with pytest.raises(MissingPrerequisiteError, match="native controls are unsupported"):
-        omp.require_installed(InstalledHost("18.10.3", "json-protocol=3"))
+        omp.require_installed(InstalledHost("18.10.2", "json-protocol=3"))
     with pytest.raises(MissingPrerequisiteError, match="could not be probed"):
         omp.require_installed(None)
-    omp.require_installed(InstalledHost("18.10.2", "json-protocol=3"))
+    omp.require_installed(InstalledHost("18.10.3", "json-protocol=3"))
+
+
+def test_the_first_catalog_version_stays_registered_and_frozen_at_its_tested_omp() -> None:
+    first = load_execution_catalog("1")
+    current = load_execution_catalog()
+
+    assert first.version == "1"
+    assert first.host("omp").executable_version == "18.10.2"
+    assert first.digest.hex_value == REGISTERED_CATALOG_DIGESTS["1"]
+    assert first.digest != current.digest
+    assert first.host("claude-code") == current.host("claude-code")
 
 
 def test_each_host_maps_controls_to_its_own_native_flags_and_vocabulary() -> None:
@@ -71,7 +83,9 @@ def test_each_host_maps_controls_to_its_own_native_flags_and_vocabulary() -> Non
 
 def test_the_catalog_lists_no_model_identifiers() -> None:
     raw = (
-        Path(execution_catalog.__file__).parent.parent / "config" / "execution-catalog-v1.toml"
+        Path(execution_catalog.__file__).parent.parent
+        / "config"
+        / f"execution-catalog-v{CURRENT_CATALOG_VERSION}.toml"
     ).read_text(encoding="utf-8")
 
     assert "gpt-" not in raw

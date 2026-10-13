@@ -141,7 +141,7 @@ def _task_for(harness_name: str, operation_id: str, *, model: str | None) -> Har
 @pytest.mark.parametrize(
     ("harness_name", "pin", "banner"),
     [
-        ("omp", "openai/gpt-5.2", "omp v18.10.2\n"),
+        ("omp", "openai/gpt-5.2", "omp v18.10.3\n"),
         ("claude-code", "claude-opus-4-8", "2.1.296 (Claude Code)\n"),
     ],
 )

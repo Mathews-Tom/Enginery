@@ -528,7 +528,7 @@ def test_read_only_diagnostics_never_create_harness_state_and_never_crash_on_the
     blocker.write_text("a file where the artifact root's parent would be", encoding="utf-8")
     if executable == "host-script":
         script = tmp_path / "host-script"
-        script.write_text("#!/bin/sh\necho 'omp v18.10.2'\n", encoding="utf-8")
+        script.write_text("#!/bin/sh\necho 'omp v18.10.3'\n", encoding="utf-8")
         script.chmod(0o755)
         executable = str(script)
     pinned = selection_for("omp", model="openai/gpt-5.2")

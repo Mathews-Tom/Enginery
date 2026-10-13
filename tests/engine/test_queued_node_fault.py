@@ -211,7 +211,7 @@ def _sleeping_harness(tmp_path: Path, seconds: int = 120) -> str:
     if seconds < 120:
         script.write_text(
             "#!/bin/sh\n"
-            'case "$1" in --help|--version) echo "omp v18.10.2"; exit 0;; esac\n'
+            'case "$1" in --help|--version) echo "omp v18.10.3"; exit 0;; esac\n'
             f"sleep {seconds}\n"
             'echo \'{"type":"session"}\'\n'
             'echo \'{"type":"agent_start"}\'\n'

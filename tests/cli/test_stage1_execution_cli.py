@@ -254,7 +254,7 @@ def test_evidence_reports_requested_selected_submitted_and_effective_separately(
                 "--effort",
                 "high",
                 "--harness-executable",
-                str(_fake_host(tmp_path, "omp v18.10.2")),
+                str(_fake_host(tmp_path, "omp v18.10.3")),
                 output=output,
             )
         )
@@ -374,7 +374,7 @@ def test_watch_holds_a_pinned_run_whose_installed_host_is_not_the_bound_fingerpr
     assert isinstance(hold, dict)
     assert hold["reason"] == "host_fingerprint_drift"
     assert hold["details"]["installed_executable_version"] == "0.0.1"  # type: ignore[index]
-    assert hold["details"]["bound_executable_version"] == "18.10.2"  # type: ignore[index]
+    assert hold["details"]["bound_executable_version"] == "18.10.3"  # type: ignore[index]
     execution = watch["execution"]
     assert isinstance(execution, dict)
     assert execution["holds"] == [hold]
@@ -386,7 +386,7 @@ def test_watch_proceeds_when_the_installed_host_is_the_bound_fingerprint(
 ) -> None:
     output = tmp_path / "request.json"
     database = tmp_path / "ledger.db"
-    healthy = _fake_host(tmp_path, "omp v18.10.2")
+    healthy = _fake_host(tmp_path, "omp v18.10.3")
     assert (
         main(
             _build_argv(
@@ -491,7 +491,7 @@ for event in events:
     print(json.dumps(event))
 raise SystemExit(1 if fail and host == "omp" else 0)
 """
-_BANNERS = {"omp": "omp v18.10.2", "claude-code": "2.1.296 (Claude Code)"}
+_BANNERS = {"omp": "omp v18.10.3", "claude-code": "2.1.296 (Claude Code)"}
 _PINS = {"omp": OMP_MODEL, "claude-code": CLAUDE_MODEL}
 _EFFORT_FLAGS = {"omp": "--thinking", "claude-code": "--effort"}
 _NOW = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
