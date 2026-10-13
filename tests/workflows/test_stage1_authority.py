@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
@@ -41,6 +42,7 @@ from tests.workflows.test_stage1_isolated import (
 from tests.workflows.test_stage1_runtime import RecordingPullRequests
 
 from enginery.adapters.git_publication import GitBranchPublisher
+from enginery.application import branch_publication
 from enginery.application.branch_publication import (
     BranchPublicationPort,
     BranchPublicationRequest,
@@ -51,11 +53,11 @@ from enginery.application.worker_environment import LAUNCHER_KEYS, TRUSTED_LOCAL
 from enginery.cli.stage1 import _branch_publisher
 from enginery.domain.errors import (
     ExternalConflictError,
+    HumanActionRequiredError,
     InvalidInputError,
     MissingPrerequisiteError,
     WorkerFailureError,
 )
-from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.engine.runtime import (
@@ -69,6 +71,7 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1 import (
+    DEFAULT_VALIDATION_COMMAND,
     Stage1ProgressionAction,
     Stage1RunService,
     stage1_request_from_state,
@@ -268,13 +271,17 @@ def test_a_new_runs_worker_is_told_to_commit_locally_in_both_modes_and_a_legacy_
             _reap(dispatch)
             constraints.append(dispatch.task.constraints[-1])
 
-    # Everything after the base revision is the publication contract; the revisions differ.
-    assert constraints[0].split("; ", 1)[1] == constraints[1].split("; ", 1)[1], (
-        "the contract is the same in both modes"
-    )
-    assert "commit the completed change locally" in constraints[0]
-    assert "do not push" in constraints[0]
-    assert "push the completed change to origin" not in constraints[0]
+    # Both modes are told to commit locally and not push, but only the isolated worker is told
+    # it has no remote access and no credentials: a trusted-local worker still runs as the
+    # operator, with ambient access, and is never told otherwise.
+    for constraint in constraints:
+        assert "commit the completed change locally" in constraint
+        assert "do not push" in constraint
+        assert "the operator publishes the verified branch" in constraint
+        assert "push the completed change to origin" not in constraint
+    assert "no remote access and no credentials" not in constraints[0]
+    assert "credential" not in constraints[0] and "remote access" not in constraints[0]
+    assert "no remote access and no credentials" in constraints[1]
 
     legacy_directory = tmp_path / "legacy"
     legacy_directory.mkdir()
@@ -610,13 +617,16 @@ class EventfulPublisher:
     def probe(self) -> object:
         return self.inner.probe()
 
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        return self.inner.changed_paths(base_revision=base_revision, head_revision=head_revision)
+
     def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
         self.events.append("publish")
         self.requests.append(request)
         return self.inner.publish(request)
 
-    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
-        return self.inner.reconcile(operation_id=operation_id)
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
+        return self.inner.reconcile(request)
 
 
 @dataclass
@@ -664,7 +674,14 @@ def _give_origin(repository: Path) -> tuple[Path, Path]:
     return remote, pushes
 
 
-def _isolated_ready_to_open(ledger: LedgerService, tmp_path: Path) -> Ready:
+def _isolated_ready_to_open(
+    ledger: LedgerService,
+    tmp_path: Path,
+    *,
+    attempt_id: str = "implement-0",
+    committed: Mapping[str, str] | None = None,
+    protected_paths: tuple[str, ...] = (),
+) -> Ready:
     runner = RecordingIsolatedRunner()
     built = _build(
         ledger,
@@ -673,11 +690,14 @@ def _isolated_ready_to_open(ledger: LedgerService, tmp_path: Path) -> Ready:
         admission=ScriptedAdmission(),
         isolated_runner=runner,
         deterministic_implement=True,
+        attempt_id=attempt_id,
     )
+    if protected_paths:
+        built.request = replace(built.request, protected_paths=protected_paths)
     remote, pushes = _give_origin(built.repository)
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
     _complete_through_implement(built)
-    head = _verify_implementation(built)
+    head = _verify_implementation(built, committed=committed)
     built.service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
     )
@@ -808,8 +828,8 @@ def test_a_publisher_failure_is_retried_to_success_once_the_conflict_is_gone(
     assert ready.events == ["publish", "publish", "pull_request"]
 
 
-def _advance_to_repair_generation(ready: Ready) -> str:
-    """Leave a second, verified implementation attempt: what a repair generation produces."""
+def _advance_to_repair_generation(ready: Ready, *, generation: int = 1) -> str:
+    """Leave a further, verified implementation attempt: what a repair generation produces."""
     built = ready.built
     repository = built.repository
     git("switch", "-q", "-c", "repair-source", built.request.run.base_revision, cwd=repository)
@@ -817,7 +837,7 @@ def _advance_to_repair_generation(ready: Ready) -> str:
     git("add", "repair.txt", cwd=repository)
     git("commit", "-q", "-m", "repair", cwd=repository)
     repaired = git("rev-parse", "HEAD", cwd=repository)
-    attempt_id = f"{RUN_ID}-implement-1"
+    attempt_id = f"{RUN_ID}-implement-{generation}"
     node = built.runtime.read_node_request(run_id=RUN_ID, node_id="implement")
     dispatch = WorkflowNodeDispatch(
         FixtureDispatch(
@@ -830,7 +850,7 @@ def _advance_to_repair_generation(ready: Ready) -> str:
             base_revision=node.base_revision,
             command=("implement",),
             expected_attempt_version=0,
-            operation_id=f"implement-repair:{RUN_ID}:1",
+            operation_id=f"implement-repair:{RUN_ID}:{generation}",
             dependencies=node.dependencies,
             workflow_definition_id=node.workflow_definition_id,
             workspace_mode=node.workspace_mode,
@@ -844,7 +864,10 @@ def _advance_to_repair_generation(ready: Ready) -> str:
         run_id=RUN_ID, node_id="implement", epoch=epoch.epoch, now=NOW + timedelta(seconds=10)
     )
     _record_verified_head(
-        built.ledger, attempt_id, repaired, correlation="implementation-verified-head-1"
+        built.ledger,
+        attempt_id,
+        repaired,
+        correlation=f"implementation-verified-head-{generation}",
     )
     return repaired
 
@@ -916,14 +939,17 @@ class _FailingOnce:
     def probe(self) -> object:
         return self.inner.probe()
 
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        return self.inner.changed_paths(base_revision=base_revision, head_revision=head_revision)
+
     def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
         if not self.failed:
             self.failed = True
             raise ExternalConflictError("simulated crash before the push")
         return self.inner.publish(request)
 
-    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
-        return self.inner.reconcile(operation_id=operation_id)
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
+        return self.inner.reconcile(request)
 
 
 def test_a_publisher_that_reports_another_revision_is_not_trusted(
@@ -935,10 +961,13 @@ def test_a_publisher_that_reports_another_revision_is_not_trusted(
         def probe(self) -> object:
             raise AssertionError("unused")
 
+        def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+            return ()
+
         def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
             return PublishedBranch(branch=request.branch, revision="9" * 40)
 
-        def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
+        def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
             return ReconciliationResult.NOT_FOUND
 
     lying = replace(ready.service, branch_publisher=cast(BranchPublicationPort, Liar()))
@@ -1086,3 +1115,482 @@ def test_a_trusted_local_run_publishes_the_verified_head_from_its_workspace(
     assert pushes.read_text(encoding="utf-8").splitlines() == [f"refs/heads/{BRANCH}"]
     node = _node(ledger_service, "open_pr")
     assert node is not None and node["published_revision"] == head
+
+
+# --- protected paths: a held publication -----------------------------------------------------
+
+_WORKFLOW = {".github/workflows/x.yml": "name: x\non: push\njobs: {}\n"}
+
+
+def _decide(ready: Ready, decision: str, *, reason: str = "reviewed the workflow change") -> None:
+    """Record the operator's decision exactly as ``stage1 approve``/``stage1 reject`` does."""
+    runtime = ready.built.runtime
+    now = NOW + timedelta(seconds=11)
+    epoch = runtime.claim_epoch(now=now, heartbeat_window=HEARTBEAT)
+    approved = decision == "approve"
+    runtime.resolve_human_wait(
+        run_id=RUN_ID,
+        node_id="open_pr",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="passed" if approved else "failed",
+        extra={
+            "operator_decision": "approved" if approved else "rejected",
+            "reason": reason,
+        },
+    )
+
+
+def _next_action(ready: Ready) -> Stage1ProgressionAction:
+    return ready.built.service.next_action(ready.built.request.run.id).action
+
+
+def test_a_candidate_editing_a_ci_workflow_is_held_and_nothing_is_pushed(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+
+    with pytest.raises(HumanActionRequiredError) as caught:
+        ready.open()
+
+    message = str(caught.value)
+    assert ".github/workflows/x.yml" in message
+    assert "stage1 approve" in message and "stage1 reject" in message
+    assert f"--run-id {RUN_ID}" in message and "--node-id open_pr" in message
+    assert caught.value.details["approve_command"].startswith("enginery stage1 approve ")
+    assert ready.remote_branch() is None, "nothing reached the remote"
+    assert ready.accepted_pushes() == []
+    assert ready.publisher.requests == [], "the publisher was never asked to push"
+    assert ready.events == [] and ready.pulls.requests == []
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None and open_pr["status"] == "awaiting_human"
+    record = open_pr["protected_publication"]
+    assert isinstance(record, dict)
+    assert record["matched_paths"] == [".github/workflows/x.yml"]
+    assert record["head_revision"] == ready.head
+    assert ".github/**" in record["patterns"] and "CODEOWNERS" in record["patterns"]
+    assert record["digest"]
+    assert open_pr["human_wait_reason"] == message
+    assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, (
+        "an advance never retries a held publication on its own"
+    )
+
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    assert ready.remote_branch() is None and ready.publisher.requests == []
+    assert _node(ledger_service, "open_pr") == open_pr, "a repeated attempt changes nothing"
+
+
+def test_an_approved_protected_publication_publishes_and_records_the_decision(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+
+    _decide(ready, "approve", reason="the workflow change is intended")
+
+    assert _next_action(ready) is Stage1ProgressionAction.OPEN_PR, (
+        "the step is performed, not skipped"
+    )
+    assert ready.remote_branch() is None, "an approval alone pushes nothing"
+    ready.open()
+
+    assert ready.events == ["publish", "pull_request"]
+    assert ready.remote_branch() == ready.head
+    assert ready.accepted_pushes() == [f"refs/heads/{BRANCH}"]
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None
+    assert open_pr["status"] == "passed"
+    assert open_pr["attempt_id"] == "open-pr-approved-0"
+    assert open_pr["published_revision"] == ready.head
+    assert open_pr["pull_request_number"] == 17
+    record = open_pr["protected_publication"]
+    assert isinstance(record, dict) and record["matched_paths"] == [".github/workflows/x.yml"]
+    approval = open_pr["publication_approval"]
+    assert isinstance(approval, dict)
+    assert approval["operator_decision"] == "approved"
+    assert approval["reason"] == "the workflow change is intended"
+    assert approval["approved_protected_publication_digest"] == record["digest"]
+    assert _next_action(ready) is Stage1ProgressionAction.WAIT_FOR_CI
+
+
+def test_a_rejected_protected_publication_is_final_and_pushes_nothing(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+
+    _decide(ready, "reject", reason="not for this issue")
+
+    assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    with pytest.raises(ExternalConflictError, match="rejected"):
+        ready.open()
+    assert ready.remote_branch() is None and ready.publisher.requests == []
+
+
+def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_again(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    _decide(ready, "approve")
+    flaky = _FailingOnce(ready.publisher.inner)
+    ready.service = replace(ready.service, branch_publisher=cast(BranchPublicationPort, flaky))
+
+    with pytest.raises(ExternalConflictError, match="simulated crash"):
+        ready.open()
+    interrupted = _node(ledger_service, "open_pr")
+    assert interrupted is not None and interrupted["status"] == "queued"
+    assert interrupted["attempt_id"] == "open-pr-approved-0"
+    ready.open()
+
+    assert ready.remote_branch() == ready.head
+    node = _node(ledger_service, "open_pr")
+    assert node is not None and node["status"] == "passed"
+    assert node["publication_approval"] == {"operator_decision": "approved"}
+
+
+def test_a_protected_set_that_changed_after_the_approval_does_not_publish_on_it(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    _decide(ready, "approve")
+    # The request itself is digest-bound, so only a different built-in set (a newer release) can
+    # differ from the one the operator approved the matched paths under.
+    monkeypatch.setattr(
+        branch_publication,
+        "DEFAULT_PROTECTED_PATH_PATTERNS",
+        (*branch_publication.DEFAULT_PROTECTED_PATH_PATTERNS, "*.yml"),
+    )
+
+    with pytest.raises(ExternalConflictError, match="no longer matches"):
+        ready.open()
+
+    assert ready.remote_branch() is None and ready.publisher.requests == []
+
+
+def test_an_ordinary_change_publishes_unheld_and_records_the_empty_match(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(
+        ledger_service, tmp_path, committed={"src/app.py": "print('x')\n", "docs/a.md": "a\n"}
+    )
+
+    ready.open()
+
+    assert ready.events == ["publish", "pull_request"]
+    assert ready.remote_branch() == ready.head
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None
+    assert open_pr["attempt_id"] == "open-pr-0"
+    assert "publication_approval" not in open_pr
+    record = open_pr["protected_publication"]
+    assert isinstance(record, dict)
+    assert record["matched_paths"] == [] and record["matched_path_count"] == 0
+    assert record["changed_path_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".GitHub/Workflows/X.yml",
+        "CODEOWNERS",
+        "docs/CODEOWNERS",
+        ".circleci/config.yml",
+        "holdouts/case-1.json",
+        ".enginery/policy.json",
+        "services/api/Jenkinsfile",
+        'ci/odd \u00e9 name".yml',
+    ],
+)
+def test_protected_paths_hold_including_case_variants_and_odd_names(
+    ledger_service: LedgerService, tmp_path: Path, path: str
+) -> None:
+    extra = ("ci/**",) if path.startswith("ci/") else ()
+    ready = _isolated_ready_to_open(
+        ledger_service, tmp_path, committed={path: "x\n"}, protected_paths=extra
+    )
+
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+
+    assert ready.remote_branch() is None and ready.publisher.requests == []
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None
+    assert open_pr["protected_publication"]["matched_paths"] == [path]  # type: ignore[index]
+
+
+def test_an_extra_protected_pattern_bound_in_the_request_holds_what_it_names(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(
+        ledger_service,
+        tmp_path,
+        committed={"deploy/prod.yaml": "x\n", "src/app.py": "y\n"},
+        protected_paths=("deploy/**",),
+    )
+
+    with pytest.raises(HumanActionRequiredError, match=r"deploy/prod\.yaml"):
+        ready.open()
+
+    assert ready.remote_branch() is None
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None
+    record = open_pr["protected_publication"]
+    assert isinstance(record, dict) and record["matched_paths"] == ["deploy/prod.yaml"]
+    assert "deploy/**" in record["patterns"]
+
+
+def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_push(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _build(
+        ledger_service,
+        tmp_path,
+        runner=RunnerSelection.trusted_local(),
+        validation_commands=(_host_marker_command(tmp_path / "validation-ran"),),
+        deterministic_implement=True,
+    )
+    remote, pushes = _give_origin(built.repository)
+    workspace = built.request.workspace_path
+    git(
+        "worktree",
+        "add",
+        "--detach",
+        str(workspace),
+        built.request.run.base_revision,
+        cwd=built.repository,
+    )
+    git("switch", "-q", "-c", BRANCH, cwd=workspace)
+    (workspace / ".gitlab-ci.yml").write_text("stages: [x]\n", encoding="utf-8")
+    git("add", ".gitlab-ci.yml", cwd=workspace)
+    git("commit", "-q", "-m", "implement", cwd=workspace)
+    head = git("rev-parse", "HEAD", cwd=workspace)
+    built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+    _complete_through_implement(built)
+    _record_verified_head(ledger_service, "implement-0", head, correlation="verified-head-held")
+    events: list[str] = []
+    real = _branch_publisher(built.request)
+    assert real is not None
+    service = replace(
+        built.service,
+        pull_requests=cast(PullRequestPort, EventfulPullRequests(events)),
+        branch_publisher=cast(BranchPublicationPort, EventfulPublisher(real, events)),
+    )
+    service.validate_implementation(
+        built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
+    )
+    service.review_implementation(
+        built.request,
+        ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+        repair_attempt=0,
+        now=NOW + timedelta(seconds=4),
+        heartbeat_window=HEARTBEAT,
+    )
+
+    with pytest.raises(HumanActionRequiredError, match=r"\.gitlab-ci\.yml"):
+        service.open_pull_request(
+            built.request, now=NOW + timedelta(seconds=9), heartbeat_window=HEARTBEAT
+        )
+
+    assert events == []
+    assert pushes.exists() is False
+    assert BRANCH not in git("for-each-ref", "refs/heads", cwd=remote)
+
+
+# --- the run's own attempt generation --------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", [1, 3, 7])
+def test_a_first_attempt_id_not_ending_in_zero_publishes_first_and_repairs_over_that_head(
+    ledger_service: LedgerService, tmp_path: Path, first: int
+) -> None:
+    ready = _isolated_ready_to_open(
+        ledger_service, tmp_path, attempt_id=f"issue-142-attempt-{first}"
+    )
+
+    ready.open()
+
+    (request,) = ready.publisher.requests
+    assert request.expected_remote_revision is None, (
+        "the first publication expects no remote branch"
+    )
+    assert ready.remote_branch() == ready.head
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None and open_pr["attempt_id"] == f"open-pr-{first}"
+    assert _next_action(ready) is Stage1ProgressionAction.WAIT_FOR_CI
+
+    repaired = _advance_to_repair_generation(ready, generation=first + 1)
+    ready.open()
+
+    _, second = ready.publisher.requests
+    assert second.head_revision == repaired
+    assert second.expected_remote_revision == ready.head, (
+        "the previous generation is the real first attempt, not a derived -implement-N id"
+    )
+    assert ready.remote_branch() == repaired
+    open_pr = _node(ledger_service, "open_pr")
+    assert open_pr is not None and open_pr["attempt_id"] == f"open-pr-{first + 1}"
+
+
+def test_a_review_for_another_repair_index_than_the_implementations_is_refused(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, attempt_id="issue-142-attempt-3")
+
+    with pytest.raises(InvalidInputError, match="repair index"):
+        ready.built.service.review_implementation(
+            ready.built.request,
+            ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+            repair_attempt=3,
+            now=NOW + timedelta(seconds=5),
+            heartbeat_window=HEARTBEAT,
+        )
+
+
+# --- isolated validation and the tools the image has ------------------------------------------
+
+
+@dataclass
+class ToolRunner:
+    """An isolated runner whose command result and ``command -v`` probe answer are scripted."""
+
+    returncode: int
+    output: str = "output\n"
+    tool_present: bool = False
+    calls: list[tuple[str, ...]] = field(default_factory=list)
+
+    def __call__(
+        self, command: tuple[str, ...], workspace: Path
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(command)
+        if command[:2] == ("sh", "-c"):
+            return subprocess.CompletedProcess(command, 0 if self.tool_present else 1, "", "")
+        return subprocess.CompletedProcess(command, self.returncode, self.output, "")
+
+
+def _ready_to_validate_with(
+    ledger: LedgerService, tmp_path: Path, runner: ToolRunner, *, command: tuple[str, ...]
+) -> Harnessed:
+    built = _build(
+        ledger,
+        tmp_path,
+        runner=_isolated(),
+        admission=ScriptedAdmission(),
+        isolated_runner=cast(RecordingIsolatedRunner, runner),
+        validation_commands=(command,),
+        deterministic_implement=True,
+    )
+    built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+    _complete_through_implement(built)
+    _verify_implementation(built)
+    return built
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [
+        (127, "sh: 1: pytest: not found\n"),
+        (1, "[Errno 2] No such file or directory: 'pytest'"),
+        (1, "[Errno 13] Permission denied: 'pytest'"),
+    ],
+    ids=["exit-127", "wrapper-enoent", "wrapper-eacces"],
+)
+def test_a_validation_tool_missing_from_the_image_is_a_hold_naming_it_not_a_failed_validation(
+    ledger_service: LedgerService, tmp_path: Path, returncode: int, output: str
+) -> None:
+    runner = ToolRunner(returncode=returncode, output=output, tool_present=False)
+    built = _ready_to_validate_with(
+        ledger_service, tmp_path, runner, command=("pytest", "-q", "tests")
+    )
+
+    with pytest.raises(HumanActionRequiredError) as caught:
+        _validate(built)
+
+    assert "'pytest'" in str(caught.value)
+    assert "not available in the pinned runner image" in str(caught.value)
+    assert caught.value.details["tool"] == "pytest"
+    assert runner.calls[0] == ("pytest", "-q", "tests")
+    assert runner.calls[1][:2] == ("sh", "-c") and runner.calls[1][-1] == "pytest", (
+        "the same container restrictions are asked whether the executable exists"
+    )
+    node = _node(ledger_service, "validate")
+    assert node is not None
+    assert node["status"] == "awaiting_human", "a hold, never a recorded verdict"
+    assert node["tool"] == "pytest"
+    assert "'pytest'" in str(node["human_wait_reason"])
+    assert "validation_artifact_digest" not in node
+    assert not validation_path_for(built.request.workspace_path).exists()
+    action = built.service.next_action(built.request.run.id).action
+    assert action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+
+
+def test_exit_127_from_a_tool_that_exists_is_an_ordinary_failed_validation(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    runner = ToolRunner(returncode=127, output="script exited 127 itself\n", tool_present=True)
+    built = _ready_to_validate_with(ledger_service, tmp_path, runner, command=("python3", "x.py"))
+
+    result = _validate(built)
+
+    assert result.passed is False
+    node = _node(ledger_service, "validate")
+    assert node is not None and node["status"] == "failed"
+    assert len(runner.calls) == 2, "the probe ran once and found the tool"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output", "passed"),
+    [
+        (1, "3 tests failed\n", False),
+        (2, "[Errno 2] only mentioned in passing\n", False),
+        (0, "ok\n", True),
+    ],
+    ids=["failure", "other-exit-code", "pass"],
+)
+def test_an_ordinary_result_is_never_probed(
+    ledger_service: LedgerService, tmp_path: Path, returncode: int, output: str, passed: bool
+) -> None:
+    runner = ToolRunner(returncode=returncode, output=output, tool_present=False)
+    built = _ready_to_validate_with(ledger_service, tmp_path, runner, command=("make",))
+
+    assert _validate(built).passed is passed
+
+    assert runner.calls == [("make",)]
+
+
+def test_an_isolated_run_cannot_start_with_the_host_default_validation_command(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _build(
+        ledger_service,
+        tmp_path,
+        runner=_isolated(),
+        admission=ScriptedAdmission(),
+        validation_commands=(DEFAULT_VALIDATION_COMMAND,),
+    )
+
+    with pytest.raises(InvalidInputError, match="must name its validation commands"):
+        built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+
+    assert ledger_service.read_projection(aggregate_type="run", aggregate_id=RUN_ID) is None
+
+
+def test_a_trusted_local_run_keeps_the_host_default_validation_command(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _build(
+        ledger_service,
+        tmp_path,
+        runner=RunnerSelection.trusted_local(),
+        validation_commands=(DEFAULT_VALIDATION_COMMAND,),
+    )
+
+    built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+
+    assert ledger_service.read_projection(aggregate_type="run", aggregate_id=RUN_ID) is not None

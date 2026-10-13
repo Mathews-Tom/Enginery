@@ -14,6 +14,7 @@ from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.runner import (
     MODEL_ACCESS_NONE,
     MODEL_ACCESS_RELAY,
+    NO_NETWORK,
     OUT_MOUNT,
     WORKER_HOME,
     WORKER_TMP,
@@ -30,6 +31,7 @@ from enginery.domain.runner import (
     RunnerReceipt,
     RunnerSelection,
     TrustMode,
+    expected_network,
     isolated_permission_mapping,
     outcome_path_for,
 )
@@ -85,7 +87,9 @@ def harness_task(
     )
 
 
-def clean_effective_container(profile: RunnerProfile) -> EffectiveContainer:
+def clean_effective_container(
+    profile: RunnerProfile, *, network: str = NO_NETWORK
+) -> EffectiveContainer:
     """What an engine reports for a container that satisfies the profile exactly."""
     limits = profile.resources
     return EffectiveContainer(
@@ -99,8 +103,8 @@ def clean_effective_container(profile: RunnerProfile) -> EffectiveContainer:
         memory_swap_bytes=limits.memory_bytes,
         nano_cpus=limits.nano_cpus,
         pids_limit=limits.pids,
-        network_mode=profile.network,
-        networks=(profile.network,),
+        network_mode=network,
+        networks=(network,),
         mounts=(
             ("volume", WORKSPACE_MOUNT, True),
             ("volume", OUT_MOUNT, True),
@@ -134,7 +138,12 @@ def runner_receipt(
         image=ImageIdentity(image_id=context.selection.image, recipe_digest="sha256:" + "b" * 64),
         container_name=runner_container_name(operation_id),
         host={"os": "linux"},
-        effective=clean_effective_container(context.profile),
+        effective=clean_effective_container(
+            context.profile,
+            network=expected_network(
+                context.profile, operation_id, relay=context.relay is not None
+            ),
+        ),
         permissions=permissions,
         harness_version=host.tested_executable_version,
         harness_protocol=host.protocol_fingerprint,

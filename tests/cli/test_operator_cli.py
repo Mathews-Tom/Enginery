@@ -813,6 +813,85 @@ def test_a_backup_that_fails_verification_aborts_before_the_database_is_touched(
     assert not list(tmp_path.glob("ledger.db.pre-restore-*"))
 
 
+def _break_manifest(backup: Path, defect: str) -> str:
+    manifest = backup / "manifest.json"
+    good = json.loads(manifest.read_text())
+    if defect == "missing-manifest":
+        manifest.unlink()
+        return "no manifest.json"
+    if defect == "malformed-json":
+        manifest.write_text('{"created_at": "2026-', encoding="utf-8")
+        return "not valid JSON"
+    if defect == "not-an-object":
+        manifest.write_text("[1, 2]", encoding="utf-8")
+        return "must be a JSON object"
+    if defect == "unreadable-bytes":
+        manifest.write_bytes(b"\xff\xfe\x00garbage")
+        return "cannot be read"
+    if defect == "missing-field":
+        del good["schema_version"]
+        manifest.write_text(json.dumps(good), encoding="utf-8")
+        return "'schema_version'"
+    if defect == "wrong-type":
+        good["includes_artifacts"] = "yes"
+        manifest.write_text(json.dumps(good), encoding="utf-8")
+        return "'includes_artifacts'"
+    if defect == "bool-as-int":
+        good["schema_version"] = True
+        manifest.write_text(json.dumps(good), encoding="utf-8")
+        return "'schema_version'"
+    assert defect == "missing-database"
+    (backup / "ledger.db").unlink()
+    return "missing its ledger snapshot"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-manifest",
+        "malformed-json",
+        "not-an-object",
+        "unreadable-bytes",
+        "missing-field",
+        "wrong-type",
+        "bool-as-int",
+        "missing-database",
+    ],
+)
+def test_restore_maps_a_defective_backup_manifest_to_invalid_input(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    defect: str,
+) -> None:
+    backup = _make_backup(ledger_path, tmp_path, capsys)
+    _run(capsys, "pause", "--database", str(ledger_path))
+    ledger_service.close()
+    expected = _break_manifest(backup, defect)
+    before = ledger_path.read_bytes()
+
+    code, _, error = _run(
+        capsys, "restore", "--backup", str(backup), "--database", str(ledger_path)
+    )
+
+    assert code == 2
+    assert error["error"]["failure_class"] == "invalid_input"  # type: ignore[index]
+    assert expected in error["error"]["message"]  # type: ignore[index]
+    assert ledger_path.read_bytes() == before
+
+
+def test_restore_of_a_missing_backup_directory_is_invalid_input(
+    ledger_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, error = _run(
+        capsys, "restore", "--backup", str(tmp_path / "nope"), "--database", str(ledger_path)
+    )
+
+    assert code == 2
+    assert "is not a directory" in error["error"]["message"]  # type: ignore[index]
+
+
 def test_a_restored_ledger_that_fails_verification_rolls_back_loudly(
     ledger_service: LedgerService,
     ledger_path: Path,

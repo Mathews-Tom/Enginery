@@ -21,7 +21,13 @@ Configuration (environment): ``RELAY_UPSTREAM`` (``http://host:port``, required)
 ``RELAY_TOKEN_FILE`` (default ``/run/relay/gateway-token``), ``RELAY_LISTEN_HOST`` (default
 ``0.0.0.0``), ``RELAY_LISTEN_PORT`` (default ``8080``; ``0`` picks a free port and is announced
 on stdout), ``RELAY_CONNECT_TIMEOUT`` (seconds, default 10), ``RELAY_READ_TIMEOUT`` (seconds,
-default 900).
+default 900), ``RELAY_MAX_IN_FLIGHT`` (forwarded requests at once, default 4) and
+``RELAY_MAX_CONNECTIONS`` (open connections at once, default 32).
+
+Requests are bounded: a body over 8 MiB is refused with 413, a forwarded request beyond the
+in-flight limit is refused with 503 and ``Retry-After`` before its body is read, and connections
+beyond the connection limit are answered 503 and closed. The container restarts the relay after
+a crash (or an out-of-memory kill); until it answers ``/healthz`` again, admission holds.
 """
 
 from __future__ import annotations
@@ -29,7 +35,9 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import sys
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +45,26 @@ from typing import Any, NoReturn
 
 ALLOWED_MODEL_PREFIXES = ("anthropic/", "openai-codex/")
 BARE_CLAUDE_PREFIX = "claude-"
-MAX_REQUEST_BYTES = 32 * 1024 * 1024
+# Request bounds. The relay buffers each POST body in full (it must read the model out of the JSON
+# and may rewrite it), so its memory is bounded by (body cap x requests in flight), not by the
+# number of connections.
+#
+# MAX_REQUEST_BYTES = 8 MiB. A full 1M-token text context is about 4 MiB of JSON (roughly four
+# bytes a token), so 8 MiB keeps every real long-context request working, with room for large tool
+# results and a few base64 screenshots. The previous 32 MiB let eight concurrent POSTs exceed the
+# relay container's 256 MiB memory limit.
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+# DEFAULT_MAX_IN_FLIGHT = 4 forwarded requests at once. Each holds the raw body, its decoded text
+# and its parsed document (and a re-serialized copy when the model id is canonicalized): about
+# 30-40 MiB for an 8 MiB body, so four fit the 256 MiB limit; a request beyond four gets 503 with
+# Retry-After, which both harnesses retry with backoff. Responses stream and are not buffered.
+DEFAULT_MAX_IN_FLIGHT = 4
+# DEFAULT_MAX_CONNECTIONS = 32 sockets (handler threads) at once, half the container's 64-process
+# limit, so a flood of slow connections cannot exhaust it; beyond that a connection is answered
+# 503 and closed without a thread. ``/healthz`` is never counted against the in-flight limit.
+DEFAULT_MAX_CONNECTIONS = 32
+RETRY_AFTER_SECONDS = 2
+SHED_SEND_TIMEOUT_SECONDS = 1.0
 MAX_MODELS_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BODY_BYTES = 1024 * 1024
 MAX_TOKEN_FILE_BYTES = 4096
@@ -107,6 +134,8 @@ class RelayConfig:
     listen_port: int
     connect_timeout: float
     read_timeout: float
+    max_in_flight: int = DEFAULT_MAX_IN_FLIGHT
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
 
     @property
     def upstream_netloc(self) -> str:
@@ -131,6 +160,8 @@ def parse_config(environ: dict[str, str]) -> RelayConfig:
         raise RelayConfigError(f"relay configuration is malformed: {error}") from error
     if not 0 <= listen_port <= 65535 or connect_timeout <= 0 or read_timeout <= 0:
         raise RelayConfigError("relay port or timeouts are out of range")
+    max_in_flight = _positive_int(environ, "RELAY_MAX_IN_FLIGHT", DEFAULT_MAX_IN_FLIGHT)
+    max_connections = _positive_int(environ, "RELAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS)
     return RelayConfig(
         upstream_scheme=parts.scheme,
         upstream_host=parts.hostname,
@@ -140,7 +171,19 @@ def parse_config(environ: dict[str, str]) -> RelayConfig:
         listen_port=listen_port,
         connect_timeout=connect_timeout,
         read_timeout=read_timeout,
+        max_in_flight=max_in_flight,
+        max_connections=max_connections,
     )
+
+
+def _positive_int(environ: dict[str, str], name: str, default: int) -> int:
+    try:
+        value = int(environ.get(name, str(default)))
+    except ValueError as error:
+        raise RelayConfigError(f"{name} must be an integer") from error
+    if value < 1:
+        raise RelayConfigError(f"{name} must be at least 1")
+    return value
 
 
 # --- policy ---------------------------------------------------------------------------------
@@ -267,21 +310,82 @@ def read_token(path: str) -> str | None:
 
 
 class RefusalError(Exception):
-    def __init__(self, status: int, error_type: str, message: str, decision: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        error_type: str,
+        message: str,
+        decision: str,
+        headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.error_type = error_type
         self.message = message
         self.decision = decision
+        self.headers = headers
 
 
 class RelayServer(ThreadingHTTPServer):
+    """The relay's HTTP server, with a bound on connections and on forwarded requests.
+
+    ``in_flight`` admits at most ``max_in_flight`` forwarded requests at once (the rest get 503
+    and ``Retry-After``). Connections beyond ``max_connections`` are answered 503 and closed on
+    the accept thread, without spawning a handler thread, so slow or numerous clients cannot
+    exhaust the container's process limit.
+    """
+
     daemon_threads = True
     request_queue_size = 64
 
     def __init__(self, config: RelayConfig) -> None:
         self.config = config
+        self.in_flight = threading.BoundedSemaphore(config.max_in_flight)
+        self._connections = threading.BoundedSemaphore(config.max_connections)
         super().__init__((config.listen_host, config.listen_port), RelayHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._connections.acquire(blocking=False):
+            self._shed(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connections.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connections.release()
+
+    @staticmethod
+    def _shed(request: socket.socket) -> None:
+        payload = json.dumps(
+            {
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "the relay is at its connection limit; retry shortly",
+                }
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        head = (
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            f"Retry-After: {RETRY_AFTER_SECONDS}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        try:
+            request.settimeout(SHED_SEND_TIMEOUT_SECONDS)
+            request.sendall(head + payload)
+        except OSError:
+            pass
+        sys.stderr.write("relay - connection-limit 503\n")
+        sys.stderr.flush()
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -384,7 +488,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             if refusal.status == 405:
                 allowed = "GET" if route == ROUTE_HEALTH else FORWARDED_ROUTES[route]
                 allow = (("Allow", allowed),)
-            self._refuse(refusal, allow)
+            self._refuse(refusal, (*refusal.headers, *allow))
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
         except Exception:  # last resort: never leak internals, never hang the client
@@ -412,6 +516,22 @@ class RelayHandler(BaseHTTPRequestHandler):
             raise RefusalError(405, "invalid_request_error", "method not allowed", "method")
         if "transfer-encoding" in {name.lower() for name in self.headers}:
             raise RefusalError(411, "invalid_request_error", "content-length is required", "length")
+        # Admission comes before the body is read: a request beyond the limit is refused without
+        # buffering anything, so the bound on memory is (body cap x in-flight limit).
+        if not self.server.in_flight.acquire(blocking=False):
+            raise RefusalError(
+                503,
+                "overloaded_error",
+                "the relay is at its concurrency limit; retry shortly",
+                "busy",
+                headers=(("Retry-After", str(RETRY_AFTER_SECONDS)),),
+            )
+        try:
+            self._forward_admitted(route, query)
+        finally:
+            self.server.in_flight.release()
+
+    def _forward_admitted(self, route: str, query: str) -> None:
         body = self._read_body(route)
         decision = "forward"
         if route != ROUTE_MODELS:

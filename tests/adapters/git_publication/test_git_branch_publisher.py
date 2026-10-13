@@ -8,10 +8,12 @@ environments the adapter used.
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from enginery.application.branch_publication import BranchPublicationRequest, Pu
 from enginery.domain.errors import (
     AmbiguousExternalSideEffectError,
     ExternalConflictError,
+    InvalidInputError,
 )
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -544,40 +547,42 @@ def test_an_origin_url_that_would_be_an_option_is_refused(rig: Rig) -> None:
         rig.publisher().publish(rig.request(head))
 
 
-def test_a_push_that_times_out_is_an_ambiguous_effect_to_reconcile_not_a_failure(
+def test_a_push_that_times_out_is_an_ambiguous_effect_to_retry_not_a_failure(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(git_publication, "_GIT_TIMEOUT_SECONDS", 1.0)
+    # Long enough that the credential-config reads before the push never hit it on a loaded
+    # machine; the wrapper sleeps 30 s inside the push, so the push is what times out.
+    monkeypatch.setattr(git_publication, "_GIT_TIMEOUT_SECONDS", 8.0)
     (rig.root / "slow-push").write_text("", encoding="utf-8")
     head = _implement(rig)
 
-    with pytest.raises(AmbiguousExternalSideEffectError, match="reconcile before retrying"):
+    with pytest.raises(AmbiguousExternalSideEffectError, match="retry open_pr") as caught:
         rig.publisher(wrapped=True).publish(rig.request(head))
 
+    assert "reconcile" not in str(caught.value), "no reconcile path is advertised to the operator"
     assert f"refs/heads/{BRANCH}" not in remote_refs(rig.remote)
 
 
 # --- reconciliation ------------------------------------------------------------------------------
 
 
-def test_reconcile_finds_a_matching_publication_and_nothing_for_an_unseen_operation(
+def test_reconcile_is_stateless_a_fresh_publisher_reads_what_a_recorded_request_would_leave(
     rig: Rig,
 ) -> None:
     head = _implement(rig)
-    publisher = rig.publisher()
     request = rig.request(head)
 
-    assert publisher.reconcile(operation_id=request.operation_id) is ReconciliationResult.NOT_FOUND
-    publisher.publish(request)
+    assert rig.publisher().reconcile(request) is ReconciliationResult.NOT_FOUND
+    rig.publisher().publish(request)
 
+    # A different instance never saw the publication: it decides from the request alone, as a
+    # restarted coordinator would from the ledger-recorded request.
+    restarted = rig.publisher()
+    assert restarted.reconcile(request) is ReconciliationResult.FOUND_MATCHING
     assert (
-        publisher.reconcile(operation_id=request.operation_id)
+        restarted.reconcile(rig.request(head, operation="publish:never-attempted"))
         is ReconciliationResult.FOUND_MATCHING
-    )
-    assert (
-        publisher.reconcile(operation_id=OperationId("publish:never-attempted"))
-        is ReconciliationResult.NOT_FOUND
-    )
+    ), "the verdict is about the branch and revision, not about an in-memory operation id"
 
 
 def test_reconcile_is_not_found_while_the_branch_is_absent_or_still_at_the_expected_head(
@@ -585,34 +590,233 @@ def test_reconcile_is_not_found_while_the_branch_is_absent_or_still_at_the_expec
 ) -> None:
     first = _implement(rig, "one.txt", "one\n")
     publisher = rig.publisher()
-    # An attempt recorded and then refused before any push: the revision is not in the source.
-    unpublishable = rig.request("c" * 40, operation="publish:absent")
-    with pytest.raises(ExternalConflictError):
-        publisher.publish(unpublishable)
     assert (
-        publisher.reconcile(operation_id=unpublishable.operation_id)
+        publisher.reconcile(rig.request("c" * 40, operation="publish:absent"))
         is ReconciliationResult.NOT_FOUND
     )
 
     publisher.publish(rig.request(first))
     repair = rig.request("d" * 40, expected=first, operation="publish:at-expected")
-    with pytest.raises(ExternalConflictError):
-        publisher.publish(repair)
-    assert publisher.reconcile(operation_id=repair.operation_id) is ReconciliationResult.NOT_FOUND
+    assert publisher.reconcile(repair) is ReconciliationResult.NOT_FOUND
 
 
 def test_reconcile_never_resolves_a_foreign_head_it_raises(rig: Rig) -> None:
     head = _implement(rig)
-    publisher = rig.publisher()
     request = rig.request(head)
     rival = rig.rival_push("rival.txt", "foreign\n")
-    with pytest.raises(ExternalConflictError):
-        publisher.publish(request)
 
     with pytest.raises(ExternalConflictError, match="neither pushed nor expected"):
-        publisher.reconcile(operation_id=request.operation_id)
+        rig.publisher().reconcile(request)
 
     assert remote_refs(rig.remote)[f"refs/heads/{BRANCH}"] == rival
+
+
+# --- changed paths -------------------------------------------------------------------------------
+
+
+def _base(rig: Rig) -> str:
+    return git("rev-parse", "main", cwd=rig.source)
+
+
+def test_changed_paths_lists_what_the_branch_adds_changes_and_deletes(rig: Rig) -> None:
+    base = _base(rig)
+    (rig.source / "docs").mkdir()
+    commit(rig.source, "docs/new.md", "new\n", "add")
+    (rig.source / "README").write_text("changed\n", encoding="utf-8")
+    git("add", "README", cwd=rig.source)
+    git("commit", "-q", "-m", "change", cwd=rig.source)
+    git("rm", "-q", "docs/new.md", cwd=rig.source)
+    head = commit(rig.source, "kept.txt", "kept\n", "delete and add")
+
+    changed = rig.publisher().changed_paths(base_revision=base, head_revision=head)
+
+    assert sorted(changed) == ["README", "kept.txt"], "an added-then-deleted path is no change"
+
+
+def test_a_deletion_of_a_tracked_file_is_a_changed_path(rig: Rig) -> None:
+    (rig.source / ".github").mkdir()
+    commit(rig.source, ".github/CODEOWNERS", "* @owner\n", "add")
+    base = git("rev-parse", "HEAD", cwd=rig.source)
+    git("rm", "-q", ".github/CODEOWNERS", cwd=rig.source)
+    git("commit", "-q", "-m", "delete", cwd=rig.source)
+    head = git("rev-parse", "HEAD", cwd=rig.source)
+
+    changed = rig.publisher().changed_paths(base_revision=base, head_revision=head)
+
+    assert changed == (".github/CODEOWNERS",)
+
+
+def test_a_rename_reports_both_the_old_and_the_new_path(rig: Rig) -> None:
+    (rig.source / ".github" / "workflows").mkdir(parents=True)
+    body = "name: ci\non: push\njobs: {}\n" * 20
+    commit(rig.source, ".github/workflows/ci.yml", body, "add workflow")
+    base = git("rev-parse", "HEAD", cwd=rig.source)
+    git("mv", ".github/workflows/ci.yml", "ci.yml", cwd=rig.source)
+    git("commit", "-q", "-m", "move the workflow out", cwd=rig.source)
+    head = git("rev-parse", "HEAD", cwd=rig.source)
+
+    changed = rig.publisher().changed_paths(base_revision=base, head_revision=head)
+
+    assert sorted(changed) == [".github/workflows/ci.yml", "ci.yml"], (
+        "rename detection must not hide the protected location the file left"
+    )
+
+
+def test_paths_with_odd_characters_are_reported_exactly(rig: Rig) -> None:
+    base = _base(rig)
+    odd = ['we"ird name.txt', "line\nbreak.txt", "caf\u00e9 \u00fcber.txt", "tab\there.txt"]
+    for name in odd:
+        (rig.source / name).write_text("x\n", encoding="utf-8")
+    git("add", "-A", cwd=rig.source)
+    git("commit", "-q", "-m", "odd", cwd=rig.source)
+    head = git("rev-parse", "HEAD", cwd=rig.source)
+
+    changed = rig.publisher().changed_paths(base_revision=base, head_revision=head)
+
+    assert sorted(changed) == sorted(odd)
+
+
+def test_changed_paths_resolves_a_branch_name_base_and_refuses_a_missing_one(rig: Rig) -> None:
+    head = _implement(rig)
+
+    assert rig.publisher().changed_paths(base_revision="main", head_revision=head) == (
+        "feature.txt",
+    )
+    with pytest.raises(ExternalConflictError, match="base revision"):
+        rig.publisher().changed_paths(base_revision="no-such-branch", head_revision=head)
+    with pytest.raises(InvalidInputError):
+        rig.publisher().changed_paths(base_revision="--upload-pack=x", head_revision=head)
+    with pytest.raises(InvalidInputError):
+        rig.publisher().changed_paths(base_revision="main", head_revision="main")
+
+
+def test_a_planted_diff_driver_or_textconv_never_runs_while_paths_are_read(rig: Rig) -> None:
+    marker = rig.root / "driver-ran"
+    driver = rig.root / "driver.sh"
+    driver.write_text(f"#!/bin/sh\necho ran >> {marker}\n", encoding="utf-8")
+    driver.chmod(0o755)
+    git("config", "diff.external", str(driver), cwd=rig.source)
+    git("config", "diff.evil.textconv", str(driver), cwd=rig.source)
+    (rig.source / ".gitattributes").write_text("*.txt diff=evil\n", encoding="utf-8")
+    base = _base(rig)
+    git("add", ".gitattributes", cwd=rig.source)
+    head = _implement(rig)
+
+    changed = rig.publisher().changed_paths(base_revision=base, head_revision=head)
+
+    assert ".gitattributes" in changed and "feature.txt" in changed
+    assert not marker.exists()
+
+
+# --- worker-writable repository configuration ----------------------------------------------------
+
+
+class _UnauthorizedServer(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="enginery-test"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+def _serve_unauthorized() -> tuple[http.server.HTTPServer, str]:
+    server = http.server.HTTPServer(("127.0.0.1", 0), _UnauthorizedServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/org/repo.git"
+
+
+def _marker_script(path: Path, marker: Path, *, output: str = "") -> None:
+    path.write_text(f'#!/bin/sh\necho "$0 $1" >> {marker}\n{output}', encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_a_credential_helper_planted_in_the_repository_never_runs_but_the_operators_does(
+    rig: Rig,
+) -> None:
+    planted = rig.root / "planted-helper.sh"
+    operators = rig.root / "operator-helper.sh"
+    planted_marker = rig.root / "planted-ran"
+    operator_marker = rig.root / "operator-ran"
+    _marker_script(planted, planted_marker, output="echo username=evil\necho password=evil\n")
+    _marker_script(operators, operator_marker, output="echo username=op\necho password=op\n")
+    server, url = _serve_unauthorized()
+    try:
+        git("remote", "set-url", "origin", url, cwd=rig.host)
+        git("config", "credential.helper", f"!{planted}", cwd=rig.host)
+        git("config", "credential.helper", f"!{planted}", cwd=rig.source)
+        git("config", f"credential.{url}.helper", "", cwd=rig.source)
+        (rig.home / ".gitconfig").write_text(
+            f"[credential]\n\thelper = !{operators}\n", encoding="utf-8"
+        )
+        head = _implement(rig)
+
+        with pytest.raises(ExternalConflictError):
+            rig.publisher().publish(rig.request(head))
+    finally:
+        server.shutdown()
+
+    assert not planted_marker.exists(), "a helper from repository config received the credential"
+    assert operator_marker.exists(), "the operator's own helper stays in charge"
+
+
+def test_an_ssh_command_planted_in_the_repository_never_runs(rig: Rig) -> None:
+    marker = rig.root / "ssh-ran"
+    planted = rig.root / "planted-ssh.sh"
+    _marker_script(planted, marker)
+    git("remote", "set-url", "origin", "ssh://git@127.0.0.1:9/org/repo.git", cwd=rig.host)
+    git("config", "core.sshCommand", str(planted), cwd=rig.host)
+    git("config", "core.sshCommand", str(planted), cwd=rig.source)
+    head = _implement(rig)
+
+    with pytest.raises(ExternalConflictError):
+        rig.publisher().publish(rig.request(head))
+
+    assert not marker.exists()
+
+
+def test_an_askpass_program_planted_in_the_repository_never_runs(rig: Rig) -> None:
+    marker = rig.root / "askpass-ran"
+    planted = rig.root / "planted-askpass.sh"
+    _marker_script(planted, marker, output="echo secret\n")
+    server, url = _serve_unauthorized()
+    try:
+        git("remote", "set-url", "origin", url, cwd=rig.host)
+        git("config", "core.askPass", str(planted), cwd=rig.host)
+        git("config", "core.askPass", str(planted), cwd=rig.source)
+        head = _implement(rig)
+
+        with pytest.raises(ExternalConflictError):
+            rig.publisher().publish(rig.request(head))
+    finally:
+        server.shutdown()
+
+    assert not marker.exists()
+
+
+def test_every_git_invocation_resets_credentials_ssh_and_hooks_before_anything_else(
+    rig: Rig,
+) -> None:
+    head = _implement(rig)
+
+    rig.publisher(wrapped=True).publish(rig.request(head))
+
+    network = [
+        [str(argument) for argument in entry["argv"]]  # type: ignore[attr-defined]
+        for entry in rig.invocations()
+        if any(command in entry["argv"] for command in ("push", "ls-remote"))  # type: ignore[operator]
+    ]
+    assert network
+    for argv in network:
+        overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+        assert "credential.helper=" in overrides
+        assert "core.sshCommand=ssh" in overrides
+        assert "core.askPass=" in overrides
+        assert "core.hooksPath=/dev/null" in overrides
+        subcommand = next(a for a in argv if a in {"push", "ls-remote"})
+        assert argv.index("credential.helper=") < argv.index(subcommand)
 
 
 # --- probe ----------------------------------------------------------------------------------------
@@ -627,6 +831,7 @@ def test_probe_reports_an_available_publisher_with_a_fingerprint(rig: Rig) -> No
         "branch_publication",
         "branch_publication_reconciliation",
         "expected_head_lease",
+        "changed_paths",
     }
     assert str(rig.remote) not in status.detail
 

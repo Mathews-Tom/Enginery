@@ -2,10 +2,13 @@
 
 The relay is the only container that holds the model gateway bearer. It is pinned to an exact
 image, hardened like a worker (non-root, no capabilities, no-new-privileges, read-only root
-filesystem, bounded resources), and dual-homed: on the profile's internal network under the
-alias ``enginery-relay``, where workers reach it, and on a bridge network that gives it a route
-to the gateway. A worker is attached to the internal network only, so the relay is the sole
-path to a model.
+filesystem, bounded resources) and lives on the egress bridge network, which gives it a route to
+the gateway. It is not attached to any worker network while idle. A worker with model access gets
+an internal network created for its one attempt; the launcher connects the relay to that network
+under the alias ``enginery-relay`` for the attempt's lifetime and disconnects it at the end
+(``attach``/``detach``). So the relay is the sole path to a model, a worker reaches it only on
+its own network, and neither a worker without model access, a validation container nor another
+attempt's worker shares a network with it.
 
 The token file is mounted read-only and is only ever stat-ed on the host: its content is read by
 the relay process alone, on every request, and is never read, logged or recorded here.
@@ -55,6 +58,13 @@ EGRESS_NETWORK = "enginery-runner-egress"
 
 RELAY_TOKEN_MOUNT = "/run/relay/gateway-token"
 """Where the token file appears inside the relay container (read-only)."""
+
+RELAY_RESTART_POLICY = "unless-stopped"
+"""The relay comes back after a crash or an out-of-memory kill (and after the engine restarts).
+
+While it is restarting, or after it is stopped on purpose, ``status`` reports it unhealthy, and
+admission holds every run that needs model access until it answers its health check again.
+"""
 
 RELAY_LIMITS = ResourceLimits(
     memory_mib=256, cpus=1.0, pids=64, tmp_mib=16, home_mib=1, stop_grace_seconds=5
@@ -267,13 +277,35 @@ class RelayManager:
                 limits=self.limits,
             )
         )
-        if self.profile.network not in networks:
-            problems.append(f"is not attached to the internal network {self.profile.network}")
         if self.egress_network not in networks:
             problems.append(f"is not attached to the egress network {self.egress_network}")
+        for network in networks:
+            if network != self.egress_network and not self._is_attempt_network(network):
+                problems.append(
+                    f"is attached to the network {network}, which is neither the egress network "
+                    "nor an attempt's own network"
+                )
+        restart = _text(
+            _mapping(_mapping(container.get("HostConfig")).get("RestartPolicy")).get("Name")
+        )
+        if restart != RELAY_RESTART_POLICY:
+            problems.append(
+                f"has restart policy {restart or 'none'!r}, not {RELAY_RESTART_POLICY!r}, so a "
+                "crash or an out-of-memory kill would leave it down"
+            )
         if problems:
             detail = "the relay container " + "; ".join(problems)
             return RelayStatus(True, running, False, image_id, networks, upstream, detail)
+        if state.get("Restarting") is True:
+            return RelayStatus(
+                True,
+                running,
+                False,
+                image_id,
+                networks,
+                upstream,
+                "the relay container is restarting after a crash or an out-of-memory kill",
+            )
         if not running:
             return RelayStatus(
                 True,
@@ -329,7 +361,6 @@ class RelayManager:
         token = check_token_file(token_file)
         identity = self.engine.qualify()
         verify_relay_image(self.engine, relay_image)
-        self.engine.ensure_internal_network(self.profile.network)
         self._ensure_egress_network()
         spec = self._spec_digest(relay_image, upstream, token)
         existing = self.status()
@@ -352,9 +383,56 @@ class RelayManager:
         return self._await_healthy(wait_seconds)
 
     def down(self) -> RelayStatus:
-        """Remove the relay container (the networks stay); idempotent."""
+        """Remove the relay container (the egress network stays); idempotent."""
         self._remove_relay()
         return self.status()
+
+    def attach(self, network: str) -> None:
+        """Connect the running relay to one attempt's own network under the alias workers use.
+
+        Refuses a network that is not an attempt network of this profile (the egress network must
+        never be handed out), a container that is not the relay, and a relay that is stopped or
+        restarting: an attempt that was promised model access is never started without it.
+        """
+        self._require_attempt_network(network)
+        container = self._relay_document()
+        state = _mapping(container.get("State"))
+        if state.get("Running") is not True or state.get("Restarting") is True:
+            raise MissingPrerequisiteError(
+                "the model access relay is not running, so it cannot be attached to the "
+                "attempt's network",
+                details={"network": network},
+            )
+        self.engine.connect_network(network, self.container_name, alias=RELAY_HOSTNAME)
+
+    def detach(self, network: str) -> None:
+        """Disconnect the relay from one attempt's network; a gone relay or network is fine."""
+        self._require_attempt_network(network)
+        self.engine.disconnect_network(network, self.container_name, force=True)
+
+    def _is_attempt_network(self, network: str) -> bool:
+        return network.startswith(f"{self.profile.network}-")
+
+    def _require_attempt_network(self, network: str) -> None:
+        if not self._is_attempt_network(network):
+            raise InvalidInputError(
+                "the relay is only ever attached to an attempt's own network",
+                details={"network": network},
+            )
+
+    def _relay_document(self) -> Mapping[str, object]:
+        try:
+            container = self.engine.container_inspect(self.container_name)
+        except ObjectNotFoundError as error:
+            raise MissingPrerequisiteError(
+                "the model access relay container does not exist"
+            ) from error
+        labels = _mapping(_mapping(container.get("Config")).get("Labels"))
+        if labels.get(RELAY_LABEL) != "1":
+            raise MissingPrerequisiteError(
+                f"a container named {self.container_name} exists but is not the relay"
+            )
+        return container
 
     # --- internals -------------------------------------------------------------------------
 
@@ -364,7 +442,7 @@ class RelayManager:
             "image": relay_image,
             "upstream": upstream,
             "token_file": str(token),
-            "internal_network": self.profile.network,
+            "restart_policy": RELAY_RESTART_POLICY,
             "egress_network": self.egress_network,
             "limits": self.limits.to_state(),
         }
@@ -451,15 +529,15 @@ class RelayManager:
     ) -> None:
         profile = RunnerProfile(resources=self.limits, network=self.profile.network)
         user = self._expected_user()
-        hardening = list(hardening_arguments(profile, network=self.profile.network))
+        # The relay is created on the egress network only: it joins an attempt's own internal
+        # network when that attempt starts (``attach``) and leaves it when it ends.
+        hardening = list(hardening_arguments(profile, network=self.egress_network))
         hardening[hardening.index("--user") + 1] = user
         arguments = [
             "create",
             *hardening,
-            "--network-alias",
-            RELAY_HOSTNAME,
             "--restart",
-            "unless-stopped",
+            RELAY_RESTART_POLICY,
             "-v",
             f"{token}:{RELAY_TOKEN_MOUNT}:ro",
             "--label",
@@ -491,7 +569,6 @@ class RelayManager:
                     "the engine created a relay container that is not hardened: "
                     + "; ".join(problems)
                 )
-            self._checked(("network", "connect", self.egress_network, self.container_name))
             self.engine.start(self.container_name)
         except Exception:
             self.engine.remove(self.container_name)

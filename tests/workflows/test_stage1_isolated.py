@@ -11,6 +11,7 @@ import contextlib
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -214,8 +215,9 @@ def _request(
     runner: RunnerSelection,
     base_revision: str,
     repository: Path,
-    validation_commands: tuple[tuple[str, ...], ...] = (("uv", "run", "pytest", "-q"),),
+    validation_commands: tuple[tuple[str, ...], ...] = (("python3", "-m", "unittest"),),
     deterministic_implement: bool = False,
+    attempt_id: str = "implement-0",
 ) -> Stage1RunRequest:
     template = stage1_work_manifest()
     manifest = template
@@ -270,7 +272,7 @@ def _request(
         required_checks=("CI",),
         repair_limit=1,
         implementation=Stage1ImplementationRequest(
-            attempt_id="implement-0",
+            attempt_id=attempt_id,
             operation_id=OperationId("implement:run-isolated"),
             time_budget_seconds=60,
             cost_budget=None,
@@ -291,10 +293,11 @@ def _build(
     runner: RunnerSelection,
     admission: ScriptedAdmission | OciRunnerAdmission | None = None,
     isolated_runner: RecordingIsolatedRunner | None = None,
-    validation_commands: tuple[tuple[str, ...], ...] = (("uv", "run", "pytest", "-q"),),
+    validation_commands: tuple[tuple[str, ...], ...] = (("python3", "-m", "unittest"),),
     deterministic_implement: bool = False,
     symbolic_base: str | None = None,
     harness: RecordingHarness | None = None,
+    attempt_id: str = "implement-0",
 ) -> Harnessed:
     repository, base = _repository(tmp_path)
     if symbolic_base is not None:
@@ -307,6 +310,7 @@ def _build(
         repository=repository,
         validation_commands=validation_commands,
         deterministic_implement=deterministic_implement,
+        attempt_id=attempt_id,
     )
     runtime = CoordinatorRuntime(ledger, owner="coordinator")
     harness = harness or RecordingHarness(ArtifactStore(tmp_path / "artifacts"))
@@ -868,7 +872,11 @@ def _complete_through_implement(built: Harnessed) -> None:
             FixtureDispatch(
                 run_id=RUN_ID,
                 node_id=node_id,
-                attempt_id=f"{node_id}-0",
+                attempt_id=(
+                    built.request.implementation.attempt_id
+                    if node_id == "implement"
+                    else f"{node_id}-0"
+                ),
                 repository_id="repository-1",
                 repository_path=built.repository,
                 workspace_path=built.request.workspace_path,
@@ -894,7 +902,7 @@ def _host_marker_command(marker: Path) -> tuple[str, ...]:
     )
 
 
-def _verify_implementation(built: Harnessed) -> str:
+def _verify_implementation(built: Harnessed, *, committed: Mapping[str, str] | None = None) -> str:
     """Leave what a collected isolated implementation leaves: a host-verified head, recorded.
 
     A real worker clone commits on the head branch and bundles it; the host imports the bundle
@@ -906,7 +914,7 @@ def _verify_implementation(built: Harnessed) -> str:
         base_revision=built.request.run.base_revision,
         workspace_path=built.request.workspace_path,
         head_branch=built.request.head_branch,
-        committed={"feature.txt": "implemented\n"},
+        committed=committed if committed is not None else {"feature.txt": "implemented\n"},
         leftovers={"scratch.txt": "left behind by the worker\n"},
     )
     built.ledger.append(
@@ -915,7 +923,7 @@ def _verify_implementation(built: Harnessed) -> str:
             events=(
                 EventWrite(
                     aggregate_type="node_attempt",
-                    aggregate_id="implement-0",
+                    aggregate_id=built.request.implementation.attempt_id,
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,

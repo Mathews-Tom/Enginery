@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import tarfile
 from collections.abc import Sequence
@@ -156,6 +157,25 @@ def read_volume(engine: OciEngine, spec: LaunchSpec, path: str) -> dict[str, byt
 
     engine.copy_out(holder, path, read)
     return found
+
+
+def write_volume_file(engine: OciEngine, spec: LaunchSpec, name: str, data: bytes) -> None:
+    """Put one regular file into the workspace volume of a running store container.
+
+    It is owned by the worker's uid and gid, as the seeded workspace is, so a running worker can
+    read, replace and delete it. This is how a test talks to a worker that is still running.
+    """
+    holder = store_names_for(spec.container_name).holder
+
+    def write(stream: IO[bytes]) -> None:
+        with tarfile.open(fileobj=stream, mode="w|") as archive:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            info.uid, info.gid = spec.profile.uid, spec.profile.gid
+            archive.addfile(info, io.BytesIO(data))
+
+    engine.copy_in(holder, "/workspace", write)
 
 
 def start_and_wait(engine: OciEngine, spec: LaunchSpec) -> tuple[int, dict[str, Any]]:

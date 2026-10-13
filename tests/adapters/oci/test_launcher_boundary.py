@@ -876,7 +876,6 @@ def test_real_the_container_log_is_bounded_whatever_a_worker_prints_to_it(
         "    for _ in range(24 * 1024):\n"
         "        log.write(chunk)\n"
     )
-    real_engine.ensure_internal_network(real_profile.network)
     created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", flood), nonce="n" * 32))
     assert created.returncode == 0, created.stderr
     try:

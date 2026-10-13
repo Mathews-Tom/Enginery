@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from pathlib import Path
 from enginery.application.branch_publication import (
     BranchPublicationPort,
     BranchPublicationRequest,
+    ProtectedPathPolicy,
     PublishedBranch,
 )
 from enginery.application.execution_catalog import load_execution_catalog
@@ -91,6 +93,7 @@ from enginery.workflows.pull_request import (
 )
 from enginery.workflows.review import ReviewOutcome, ReviewReport
 from enginery.workflows.stage1_runtime import (
+    MissingToolProbingRunner,
     Stage1QualificationExecutor,
     Stage1ReviewExecutor,
     Stage1ReviewResult,
@@ -125,6 +128,7 @@ class Stage1RunRequest:
     execution_configuration: Stage1ExecutionConfiguration
     execution_selection: ExecutionSelection
     runner: RunnerSelection = LEGACY_RUNNER_SELECTION
+    protected_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -163,6 +167,7 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 requires non-blank exact-head checks")
         if self.repair_limit < 0:
             raise InvalidInputError("Stage 1 repair_limit cannot be negative")
+        ProtectedPathPolicy(self.protected_paths)
         if self.execution_selection.harness != self.execution_configuration.harness_provider:
             raise InvalidInputError(
                 "Stage 1 execution selection harness must match the configured harness provider",
@@ -235,6 +240,11 @@ class Stage1RunRequest:
             # A run persisted before trust modes existed has no runner key, so its state, and
             # therefore its request digest, is exactly what it was.
             state["runner"] = self.runner.to_state()
+        if self.protected_paths:
+            # Extra protected-path patterns only widen the default set. A request without any has
+            # no key, so every earlier run keeps the state and request digest it was persisted
+            # with.
+            state["protected_paths"] = list(self.protected_paths)
         return state
 
 
@@ -401,6 +411,7 @@ class Stage1RunService:
             _require_bound_selection(request)
             _require_bound_runner(request)
             _require_no_opaque_budget(request)
+            require_explicit_isolated_validation(request)
             runner_hold = self._runner_hold(request)
             if runner_hold is not None:
                 raise HumanActionRequiredError(
@@ -686,6 +697,14 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
         if open_pr_state.get("status") == "queued":
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
+        if (
+            open_pr_state.get("status") == "passed"
+            and open_pr_state.get("operator_decision") == "approved"
+            and "pull_request_number" not in open_pr_state
+        ):
+            # The operator approved a held publication: the branch is not published and no pull
+            # request exists yet, so the step is performed now, never skipped.
+            return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
         if open_pr_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
@@ -709,7 +728,8 @@ class Stage1RunService:
             # this run's own implementation.
             action = (
                 Stage1ProgressionAction.IMPLEMENT
-                if generation < run.request.repair_limit
+                if generation - _generation(run.request.implementation.attempt_id)
+                < run.request.repair_limit
                 else Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
             )
             return Stage1Progression(action, run)
@@ -866,7 +886,7 @@ class Stage1RunService:
                     "Stage 1 implementation repair requires a blocked CI observation"
                 )
             generation = _generation(_string(existing, "attempt_id")) + 1
-            if generation > request.repair_limit:
+            if generation - _generation(request.implementation.attempt_id) > request.repair_limit:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
                 )
@@ -1160,7 +1180,9 @@ class Stage1RunService:
             with verified_head_checkout(
                 workspace_path=request.workspace_path, head_revision=head_revision
             ) as checkout:
-                return replace(executor, command_runner=isolated_runner).validate(
+                return replace(
+                    executor, command_runner=MissingToolProbingRunner(isolated_runner)
+                ).validate(
                     dispatch=dispatch,
                     commands=request.validation_commands,
                     now=now,
@@ -1186,15 +1208,26 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> Stage1ReviewResult:
-        """Record an independent review only after passed validation."""
+        """Record an independent review only after passed validation.
+
+        ``repair_attempt`` is the repair index of the implementation being reviewed (0 for the
+        first attempt); the review node carries the implementation's own generation, so a run
+        whose first attempt id ends in another number is reviewed under the same one.
+        """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "validate")
+        generation = _generation(request.implementation.attempt_id) + repair_attempt
+        if generation != self._implement_generation(request.run.id):
+            raise InvalidInputError(
+                "the review's repair attempt is not the implementation's repair index",
+                details={"repair_attempt": repair_attempt, "run_id": str(request.run.id)},
+            )
         return Stage1ReviewExecutor(self.runtime).review(
             dispatch=WorkflowNodeDispatch(
                 _fixture_dispatch(
                     request,
                     node_id="review",
-                    attempt_id=f"review-{repair_attempt}",
+                    attempt_id=f"review-{generation}",
                     operation_id=str(
                         OperationId.derive(
                             run_id=request.run.id,
@@ -1230,6 +1263,11 @@ class Stage1RunService:
         side publishes the verified branch here, before the pull request, constrained to the
         remote head it expects. A run persisted before operator publication keeps the contract
         its worker was launched under, which pushed the branch itself, and publishes nothing.
+
+        A branch that changes a protected path (CI configuration, code ownership, evaluator or
+        holdout material) is held before anything is pushed: the node waits for the operator's
+        ``stage1 approve``/``stage1 reject`` decision, and only a recorded approval of exactly
+        that matched set lets the next call publish it.
         """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "review")
@@ -1247,11 +1285,20 @@ class Stage1RunService:
             target_scope=request.repository_id,
             ordinal=0,
         )
+        approval = (
+            None
+            if publisher is None
+            else self._protected_publication_approval(request, generation=generation)
+        )
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
                 request,
                 node_id="open_pr",
-                attempt_id=f"open-pr-{generation}",
+                attempt_id=(
+                    f"open-pr-{generation}"
+                    if approval is None
+                    else f"open-pr-approved-{generation}"
+                ),
                 operation_id=str(operation_id),
                 command=("open_pr",),
                 dependencies=((str(request.run.id), "review"),),
@@ -1263,6 +1310,16 @@ class Stage1RunService:
         )
         publication: dict[str, object] = {}
         if publisher is not None:
+            publication["protected_publication"] = self._require_protected_publication_decision(
+                request,
+                publisher,
+                generation=generation,
+                approval=approval,
+                epoch=epoch.epoch,
+                now=now,
+            )
+            if approval is not None:
+                publication["publication_approval"] = dict(approval)
             published = self._publish_verified_branch(request, publisher, generation=generation)
             publication["published_revision"] = published.revision
         pull_request = self._require_pull_requests().create_or_update(
@@ -1300,18 +1357,19 @@ class Stage1RunService:
     ) -> PublishedBranch:
         """Publish the verified head of the current attempt, expecting the previous publication.
 
-        The first publication expects the remote branch to be absent. A repair generation
-        expects it at exactly the head the previous generation's verified attempt published;
-        that is read from the ledger-recorded verified result of that attempt, which survives
-        the open-pull-request node being re-registered. A remote branch at any other revision is
-        an external conflict, never overwritten.
+        The first publication of the run, whatever the trailing number of its first attempt's id,
+        expects the remote branch to be absent. A repair generation expects it at exactly the head
+        the previous generation's verified attempt published; that attempt is mapped back to the
+        id it was really dispatched under and its head read from the ledger-recorded verified
+        result, which survives the open-pull-request node being re-registered. A remote branch
+        at any other revision is an external conflict, never overwritten.
         """
         head_revision = self._verified_head_revision(
             attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
         )
         expected_remote_revision = (
             None
-            if generation == 0
+            if generation == _generation(request.implementation.attempt_id)
             else self._verified_head_revision(
                 attempt_id=_implementation_attempt_for(request, generation - 1)
             )
@@ -1355,6 +1413,135 @@ class Stage1RunService:
                 details={"attempt_id": attempt_id},
             )
         return head_revision
+
+    def _protected_publication_approval(
+        self, request: Stage1RunRequest, *, generation: int
+    ) -> dict[str, object] | None:
+        """Return the operator's recorded approval of this generation's held publication, if any.
+
+        The only approval is the typed ``stage1 approve`` decision on the held ``open_pr`` node,
+        read back from its durable state: a node that is passed by a decision, carries the held
+        record and has not created a pull request. Once an approval has been consumed the node
+        is re-registered under an attempt id that names it, so a crash after the approval still
+        resumes as approved. A recorded rejection is final and is never overridden.
+        """
+        state = self._node_state_optional(request.run.id, "open_pr")
+        if state is None:
+            return None
+        attempt_id = _string(state, "attempt_id")
+        if _generation(attempt_id) != generation:
+            return None
+        if attempt_id == f"open-pr-approved-{generation}":
+            return {"operator_decision": "approved"}
+        decision = state.get("operator_decision")
+        if state.get("status") == "failed" and decision == "rejected":
+            raise ExternalConflictError(
+                "the operator rejected publishing this branch, which changes protected paths",
+                details={"run_id": str(request.run.id), "reason": str(state.get("reason"))},
+            )
+        held = state.get("protected_publication")
+        if (
+            state.get("status") == "passed"
+            and decision == "approved"
+            and isinstance(held, Mapping)
+            and "pull_request_number" not in state
+        ):
+            return {
+                "operator_decision": "approved",
+                "reason": str(state.get("reason")),
+                "approved_protected_publication_digest": str(held.get("digest")),
+            }
+        return None
+
+    def _require_protected_publication_decision(
+        self,
+        request: Stage1RunRequest,
+        publisher: BranchPublicationPort,
+        *,
+        generation: int,
+        approval: Mapping[str, object] | None,
+        epoch: int,
+        now: datetime,
+    ) -> dict[str, object]:
+        """Return the protected-path record of the verified branch, holding it unless approved.
+
+        The changed paths are read by the host from its own verified repository, never from a
+        worker claim, and matched against the protected set. A match with no recorded approval
+        puts the ``open_pr`` node into a durable human wait and raises: nothing is pushed.
+        """
+        head_revision = self._verified_head_revision(
+            attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
+        )
+        reservation = self.runtime.read_workspace_reservation(request.repository_id)
+        base_revision = (
+            reservation.resolved_base_revision
+            if reservation is not None and reservation.run_id == str(request.run.id)
+            else request.run.base_revision
+        )
+        policy = ProtectedPathPolicy(request.protected_paths)
+        changed = publisher.changed_paths(base_revision=base_revision, head_revision=head_revision)
+        matched = policy.matched(changed)
+        record: dict[str, object] = {
+            "patterns": list(policy.patterns),
+            "base_revision": base_revision,
+            "head_revision": head_revision,
+            "changed_path_count": len(changed),
+            "matched_path_count": len(matched),
+            "matched_paths": list(matched[:_MAX_RECORDED_PROTECTED_PATHS]),
+            "digest": str(
+                Digest.of_json(
+                    {
+                        "patterns": list(policy.patterns),
+                        "base_revision": base_revision,
+                        "head_revision": head_revision,
+                        "matched_paths": list(matched),
+                    }
+                )
+            ),
+        }
+        if not matched:
+            return record
+        if approval is not None:
+            approved_digest = approval.get("approved_protected_publication_digest")
+            if approved_digest is not None and approved_digest != record["digest"]:
+                raise ExternalConflictError(
+                    "the approved protected-path publication no longer matches the verified "
+                    "branch or the protected set; it is not published",
+                    details={
+                        "run_id": str(request.run.id),
+                        "approved_digest": str(approved_digest),
+                        "current_digest": str(record["digest"]),
+                    },
+                )
+            return record
+        approve = _decision_command("approve", request)
+        reject = _decision_command("reject", request)
+        shown = ", ".join(matched[:5]) + (
+            f" and {len(matched) - 5} more" if len(matched) > 5 else ""
+        )
+        reason = (
+            f"the verified branch changes protected paths ({shown}); it is held and nothing is "
+            f"published. Review the change, then publish it with `{approve}` or refuse it with "
+            f"`{reject}`"
+        )
+        if self._node_status(request.run.id, "open_pr") == "queued":
+            self.runtime.await_human_node(
+                run_id=str(request.run.id),
+                node_id="open_pr",
+                epoch=epoch,
+                now=now,
+                reason=reason,
+                extra={"protected_publication": record, "generation": generation},
+            )
+        raise HumanActionRequiredError(
+            reason,
+            details={
+                "node_id": "open_pr",
+                "matched_paths": list(matched[:_MAX_RECORDED_PROTECTED_PATHS]),
+                "approve_command": approve,
+                "reject_command": reject,
+            },
+        )
 
     def _node_status(self, run_id: RunId, node_id: str) -> str | None:
         projection = self.ledger.read_projection(
@@ -1677,8 +1864,13 @@ def _implementation_task(
             f"Create and work only on branch {request.head_branch!r} from "
             f"{base_revision!r}; "
             + (
-                "commit the completed change locally. You are given no remote access and no "
-                "credentials: do not push; the operator publishes the verified branch."
+                (
+                    "commit the completed change locally. You are given no remote access and "
+                    "no credentials: do not push; the operator publishes the verified branch."
+                    if isolated
+                    else "commit the completed change locally and do not push: the operator "
+                    "publishes the verified branch."
+                )
                 if operator_publishes
                 else "commit and push the completed change to origin."
             )
@@ -1729,11 +1921,49 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
     return attempt_id
 
 
+def first_attempt_generation(attempt_id: str) -> int:
+    """Return the generation a run's first implementation attempt id carries, or refuse the id.
+
+    A run's generations are the trailing numbers of its implementation attempt ids: the first
+    attempt's explicit id sets the starting one and every repair adds one. An id without a
+    trailing number cannot start a run.
+    """
+    suffix = attempt_id.rsplit("-", 1)[-1]
+    if not suffix.isdigit():
+        raise InvalidInputError(
+            "an implementation attempt id must end in -<number>",
+            details={"attempt_id": attempt_id},
+        )
+    return int(suffix)
+
+
 def _implementation_attempt_for(request: Stage1RunRequest, generation: int) -> str:
-    """Return the attempt id the implementation of one repair generation was dispatched under."""
-    if generation == 0:
+    """Return the attempt id the implementation of one generation was really dispatched under.
+
+    The first generation is the run's own first attempt id, whatever number it ends in; every
+    later generation is the derived repair id. A generation before the first one never existed.
+    """
+    first = _generation(request.implementation.attempt_id)
+    if generation == first:
         return request.implementation.attempt_id
+    if generation < first:
+        raise InternalInvariantViolationError(
+            "Stage 1 has no implementation attempt before its first generation",
+            details={"run_id": str(request.run.id), "generation": generation},
+        )
     return implementation_attempt_id(str(request.run.id), generation)
+
+
+_MAX_RECORDED_PROTECTED_PATHS = 200
+
+
+def _decision_command(decision: str, request: Stage1RunRequest) -> str:
+    """Name the exact operator command that records ``decision`` on the held publication."""
+    return (
+        f"enginery stage1 {decision} --database <ledger> --owner <operator> "
+        f"--run-id {shlex.quote(str(request.run.id))} --node-id open_pr "
+        '--reason "<why>"'
+    )
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
@@ -1887,6 +2117,30 @@ def _require_bound_runner(request: Stage1RunRequest) -> None:
         )
 
 
+DEFAULT_VALIDATION_COMMAND: tuple[str, ...] = ("uv", "run", "pytest", "-q")
+"""The validation command a trusted-local request gets when it names none."""
+
+
+def require_explicit_isolated_validation(request: Stage1RunRequest) -> None:
+    """Refuse an isolated request that validates with the host default instead of naming commands.
+
+    Isolated validation runs offline inside the pinned runner image, which carries python3, node,
+    git and uv but none of a project's own test dependencies, so the host default
+    (``uv run pytest -q``, which needs to resolve pytest) cannot run there. An isolated run must
+    name validation commands that run with what the image has, never inherit one that cannot.
+    """
+    if request.runner.isolated_mode and request.validation_commands == (
+        DEFAULT_VALIDATION_COMMAND,
+    ):
+        raise InvalidInputError(
+            "an isolated run must name its validation commands (--validation-command): isolated "
+            "validation runs offline in the pinned runner image, which has python3, node, git "
+            "and uv but not the project's test dependencies, so the host default "
+            f"`{' '.join(DEFAULT_VALIDATION_COMMAND)}` cannot run there",
+            details={"run_id": str(request.run.id)},
+        )
+
+
 def _require_no_opaque_budget(request: Stage1RunRequest) -> None:
     """Refuse a hard-dollar budget that no supported harness enforces.
 
@@ -1996,6 +2250,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,
         runner=_runner_from_state(state),
+        protected_paths=_protected_paths_from_state(state),
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")
@@ -2004,6 +2259,15 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     if state.get("request_digest") != str(request.digest):
         raise InvalidInputError("Stage 1 run projection has a mismatched request digest")
     return Stage1Run(request=request, status=status, aggregate_version=aggregate_version)
+
+
+def _protected_paths_from_state(state: Mapping[str, object]) -> tuple[str, ...]:
+    raw = state.get("protected_paths")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(pattern, str) for pattern in raw):
+        raise InvalidInputError("Stage 1 protected_paths must be a list of strings")
+    return tuple(raw)
 
 
 def _classification_from_state(

@@ -24,6 +24,7 @@ from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError, 
 from enginery.domain.execution_catalog import HostCapability, InstalledHost
 from enginery.domain.execution_receipt import RunnerReceiptRef
 from enginery.domain.runner import (
+    RELAY_HOSTNAME,
     WORKER_HOME,
     WORKER_TMP,
     LaunchOutcome,
@@ -33,7 +34,9 @@ from enginery.domain.runner import (
     RunnerContext,
     RunnerReceipt,
     TrustMode,
+    expected_network,
     outcome_path_for,
+    profile_violations,
 )
 from enginery.ledger.artifact_store import ArtifactStore
 
@@ -184,6 +187,7 @@ def isolated_command(
         docker_context=runner.selection.docker_context,
         harness_version=None if image_host is None else image_host.executable_version,
         harness_protocol=None if image_host is None else image_host.protocol_fingerprint,
+        relay_container=RELAY_HOSTNAME if runner.relay is not None else None,
     )
     encoded = json.dumps(spec.to_state(), sort_keys=True, separators=(",", ":"))
     return (sys.executable, "-m", LAUNCHER_MODULE, "--spec", encoded, "--", *inner_command)
@@ -364,6 +368,33 @@ def verified_image_host(host: HostCapability, installed: InstalledHost | None) -
     )
 
 
+def read_runner_receipt(path: Path, *, what: str = "runner receipt") -> RunnerReceipt:
+    """Read and decode the launcher's receipt file (a host-only file the worker cannot reach).
+
+    A missing, oversized, non-regular or malformed receipt is a worker failure: an attempt
+    without proof of what it ran under is never accepted, and no receipt is ever invented.
+    """
+    text = read_bounded_text(path, limit=MAX_RECEIPT_BYTES, what=what)
+    try:
+        return RunnerReceipt.from_state(json.loads(text))
+    except (json.JSONDecodeError, InvalidInputError) as error:
+        raise WorkerFailureError(f"{what} is malformed") from error
+
+
+def publish_receipt(receipt: RunnerReceipt, artifact_store: ArtifactStore) -> RunnerReceiptRef:
+    """Publish one verified receipt (its canonical form) and return the reference to it."""
+    canonical = json.dumps(receipt.to_state(), sort_keys=True, separators=(",", ":"))
+    digest = artifact_store.publish_bytes(canonical.encode("utf-8"), media_type="application/json")
+    if digest != receipt.digest:  # the published bytes are exactly the receipt's canonical form
+        raise WorkerFailureError("runner receipt digest is inconsistent")
+    return RunnerReceiptRef(
+        trust_mode=receipt.trust_mode.value,
+        receipt_digest=digest,
+        image_id=receipt.image.image_id,
+        profile_digest=receipt.profile_digest,
+    )
+
+
 def publish_runner_receipt(
     runner: RunnerContext,
     task: HarnessTask,
@@ -375,31 +406,32 @@ def publish_runner_receipt(
 
     A missing, malformed or mismatching receipt is a worker failure: an isolated attempt
     without proof of what it ran under is never accepted, and no receipt is ever invented.
-    The receipt must also record the in-image harness identity the adapter verified.
+    The receipt must also record the in-image harness identity the adapter verified, and the
+    container it describes must have been attached to exactly the network its run was granted
+    (its own attempt network with model access, none without) and satisfy the profile.
     """
     operation_id = str(task.operation_id)
-    path = Path(runner_receipt_path(runner, operation_id))
-    text = read_bounded_text(path, limit=MAX_RECEIPT_BYTES, what="runner receipt")
-    try:
-        receipt = RunnerReceipt.from_state(json.loads(text))
-    except (json.JSONDecodeError, InvalidInputError) as error:
-        raise WorkerFailureError("runner receipt is malformed") from error
+    receipt = read_runner_receipt(Path(runner_receipt_path(runner, operation_id)))
     mismatches = _receipt_mismatches(receipt, runner, operation_id, expected_host)
     if mismatches:
         raise WorkerFailureError(
             "runner receipt does not match the admitted run",
             details={"mismatches": ",".join(mismatches)},
         )
-    canonical = json.dumps(receipt.to_state(), sort_keys=True, separators=(",", ":"))
-    digest = artifact_store.publish_bytes(canonical.encode("utf-8"), media_type="application/json")
-    if digest != receipt.digest:  # the published bytes are exactly the receipt's canonical form
-        raise WorkerFailureError("runner receipt digest is inconsistent")
-    return RunnerReceiptRef(
-        trust_mode=receipt.trust_mode.value,
-        receipt_digest=digest,
-        image_id=receipt.image.image_id,
-        profile_digest=receipt.profile_digest,
+    violations = profile_violations(
+        runner.profile, receipt.effective, network=granted_network(runner, operation_id)
     )
+    if violations:
+        raise WorkerFailureError(
+            "runner receipt records a container weaker than the admitted profile",
+            details={"violations": "; ".join(violations)[-2000:]},
+        )
+    return publish_receipt(receipt, artifact_store)
+
+
+def granted_network(runner: RunnerContext, operation_id: str) -> str:
+    """The one network the run's selection permits ``operation_id``'s container to join."""
+    return expected_network(runner.profile, operation_id, relay=runner.relay is not None)
 
 
 def _receipt_mismatches(

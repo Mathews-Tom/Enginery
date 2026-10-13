@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,9 +26,8 @@ from enginery.application.delivery_ports import (
     ValidationRequest,
     ValidationStatus,
 )
-from enginery.application.work_ports import HarnessTask, WorkspaceRequest
+from enginery.application.work_ports import HarnessTask, WorkspaceHandle, WorkspaceRequest
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
 
@@ -174,15 +174,11 @@ def _repository(path: Path) -> tuple[Path, str]:
     return path, git("rev-parse", "HEAD")
 
 
-def test_local_workspace_hands_back_exactly_the_permitted_environment_keys(
+def test_a_local_workspace_carries_no_environment_of_its_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository, base = _repository(tmp_path / "repository")
-    monkeypatch.setenv("LANG", "C.UTF-8")
     monkeypatch.setenv("GH_TOKEN", "must-never-be-copied")
-    monkeypatch.setenv("GITHUB_TOKEN", "must-never-be-copied")
-    monkeypatch.setenv("ENGINERY_UNLISTED", "unlisted")
-    monkeypatch.delenv("TZ", raising=False)
     workspaces = LocalWorkspace(tmp_path / "workspaces")
 
     handle = workspaces.create(
@@ -192,35 +188,22 @@ def test_local_workspace_hands_back_exactly_the_permitted_environment_keys(
             repository_path=repository,
             base_revision=base,
             operation_id=OperationId("op-workspace-env"),
-            permitted_environment_keys=("LANG", "TZ"),
         )
     )
 
-    # Only permitted keys the host defines: LANG is present, TZ is permitted but undefined, and
-    # every credential and unlisted variable is absent.
-    assert handle.environment == (("LANG", "C.UTF-8"),)
+    assert handle.path.is_dir()
+    assert "GH_TOKEN" not in repr(handle)
     workspaces.cleanup(handle, operation_id=OperationId("op-workspace-env-cleanup"))
 
 
-def test_local_workspace_refuses_a_credential_shaped_permission_before_creating_anything(
-    tmp_path: Path,
-) -> None:
-    repository, base = _repository(tmp_path / "repository")
-    root = tmp_path / "workspaces"
+def test_the_launch_environment_has_one_allowlist_and_a_workspace_request_has_no_second_one() -> (
+    None
+):
+    request_fields = {field.name for field in dataclasses.fields(WorkspaceRequest)}
+    handle_fields = {field.name for field in dataclasses.fields(WorkspaceHandle)}
 
-    with pytest.raises(InvalidInputError, match="credential-shaped"):
-        LocalWorkspace(root).create(
-            WorkspaceRequest(
-                run_id=RunId("run-1"),
-                repository_id="org/repo",
-                repository_path=repository,
-                base_revision=base,
-                operation_id=OperationId("op-workspace-credential"),
-                permitted_environment_keys=("PATH", "GITHUB_TOKEN"),
-            )
-        )
-
-    assert not root.exists()
+    assert "permitted_environment_keys" not in request_fields
+    assert "environment" not in handle_fields
 
 
 def test_deployment_fixture_rolls_back_known_receipt() -> None:

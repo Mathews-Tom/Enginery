@@ -11,7 +11,8 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -351,7 +352,7 @@ def test_an_oversized_body_is_rejected_before_it_is_read(
     with socket.create_connection(("127.0.0.1", relay.port), timeout=10) as connection:
         connection.sendall(
             b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
-            + f"Content-Length: {32 * 1024 * 1024 + 1}\r\n\r\n".encode()
+            + f"Content-Length: {8 * 1024 * 1024 + 1}\r\n\r\n".encode()
         )
         reply = connection.recv(4096)
     assert reply.startswith(b"HTTP/1.1 413")
@@ -359,7 +360,7 @@ def test_an_oversized_body_is_rejected_before_it_is_read(
 
 
 def test_a_body_at_the_limit_is_accepted(relay: RelayProcess, upstream: RecordingUpstream) -> None:
-    filler = "x" * (32 * 1024 * 1024 - 200)
+    filler = "x" * (8 * 1024 * 1024 - 200)
     document = {"model": "anthropic/claude-sonnet-4-5", "messages": [], "filler": filler}
     status, _, _ = relay.post_json("/v1/messages", document)
     assert status == 200
@@ -658,3 +659,127 @@ def test_a_malformed_upstream_stops_the_relay_at_startup(tmp_path: Path, upstrea
     )
     assert completed.returncode == 2
     assert "RELAY_UPSTREAM" in completed.stderr
+
+
+# --- bounded load: request cap, in-flight limit, connection limit -----------------------------
+
+
+def _hold_upstream(
+    gate: threading.Event, entered: threading.Semaphore
+) -> Callable[[BaseHTTPRequestHandler], bool]:
+    def handler(request: BaseHTTPRequestHandler) -> bool:
+        entered.release()
+        gate.wait(20)
+        payload = b'{"ok":true}'
+        request.send_response(200)
+        request.send_header("Content-Length", str(len(payload)))
+        request.end_headers()
+        request.wfile.write(payload)
+        return True
+
+    return handler
+
+
+def test_the_request_cap_is_eight_mib_and_the_limits_are_the_documented_ones() -> None:
+    source = RELAY_SCRIPT.read_text("utf-8")
+
+    assert "MAX_REQUEST_BYTES = 8 * 1024 * 1024" in source
+    assert "DEFAULT_MAX_IN_FLIGHT = 4" in source
+    assert "DEFAULT_MAX_CONNECTIONS = 32" in source
+
+
+def test_requests_beyond_the_in_flight_limit_get_503_and_never_reach_the_gateway(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    gate, entered = threading.Event(), threading.Semaphore(0)
+    upstream.script.handler = _hold_upstream(gate, entered)
+    held: list[int] = []
+    with running_relay(upstream.url, token_file, {"RELAY_MAX_IN_FLIGHT": "2"}) as relay:
+
+        def call() -> None:
+            held.append(relay.post_json("/v1/messages", CLAUDE_BODY)[0])
+
+        workers = [threading.Thread(target=call) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        assert entered.acquire(timeout=15) and entered.acquire(timeout=15)
+        try:
+            status, headers, body = relay.post_json("/v1/messages", CLAUDE_BODY)
+            assert status == 503
+            assert headers.get("Retry-After") == "2"
+            assert b"concurrency limit" in body
+            assert len(upstream.forwarded()) == 2  # the third request never reached the gateway
+            # The relay still answers its own health check while it is saturated.
+            assert relay.request("GET", "/healthz")[0] == 200
+        finally:
+            gate.set()
+            for worker in workers:
+                worker.join(timeout=20)
+        assert held == [200, 200]
+        # The slots were released: the next request is served again.
+        assert relay.post_json("/v1/messages", CLAUDE_BODY)[0] == 200
+
+
+def test_a_refused_in_flight_request_is_not_counted_and_models_obey_the_same_limit(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    gate, entered = threading.Event(), threading.Semaphore(0)
+    upstream.script.handler = _hold_upstream(gate, entered)
+    with running_relay(upstream.url, token_file, {"RELAY_MAX_IN_FLIGHT": "1"}) as relay:
+        worker = threading.Thread(target=lambda: relay.post_json("/v1/messages", CLAUDE_BODY))
+        worker.start()
+        assert entered.acquire(timeout=15)
+        try:
+            assert relay.request("GET", "/v1/models")[0] == 503
+            assert relay.post_json("/v1/pi/stream", {"modelId": "anthropic/x"})[0] == 503
+        finally:
+            gate.set()
+            worker.join(timeout=20)
+        upstream.script.handler = None
+        assert relay.request("GET", "/v1/models")[0] == 200
+
+
+def test_connections_beyond_the_connection_limit_are_answered_503_without_a_thread(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    env = {"RELAY_MAX_CONNECTIONS": "2", "RELAY_MAX_IN_FLIGHT": "2"}
+    with running_relay(upstream.url, token_file, env) as relay:
+        idle = [socket.create_connection(("127.0.0.1", relay.port), timeout=10) for _ in range(2)]
+        try:
+            # Give the relay time to accept both and start their handler threads.
+            deadline = time.monotonic() + 10
+            reply = b""
+            while time.monotonic() < deadline and not reply.startswith(b"HTTP/1.1 503"):
+                with socket.create_connection(("127.0.0.1", relay.port), timeout=10) as extra:
+                    extra.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+                    reply = extra.recv(4096)
+                time.sleep(0.05)
+            assert reply.startswith(b"HTTP/1.1 503")
+            assert b"Retry-After: 2" in reply
+            assert b"connection limit" in reply
+        finally:
+            for connection in idle:
+                connection.close()
+        # Once the idle connections are gone the relay serves again.
+        deadline = time.monotonic() + 10
+        status = 0
+        while time.monotonic() < deadline and status != 200:
+            status = relay.request("GET", "/healthz")[0]
+            time.sleep(0.05)
+        assert status == 200
+        assert upstream.forwarded() == []
+
+
+@pytest.mark.parametrize("name", ["RELAY_MAX_IN_FLIGHT", "RELAY_MAX_CONNECTIONS"])
+@pytest.mark.parametrize("value", ["0", "-1", "many"])
+def test_a_malformed_limit_stops_the_relay_at_startup(name: str, value: str) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(RELAY_SCRIPT)],
+        env={"RELAY_UPSTREAM": "http://127.0.0.1:9", "PATH": "/usr/bin:/bin", name: value},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert name in completed.stderr

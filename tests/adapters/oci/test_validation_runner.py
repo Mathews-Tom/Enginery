@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -11,22 +12,32 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.runner_context import clean_effective_container
 
 from enginery.adapters.oci.launcher import write_outcome
-from enginery.adapters.oci.validation import OciValidationRunner
+from enginery.adapters.oci.validation import OciValidationRunner as _OciValidationRunner
 from enginery.adapters.runner_launch import LAUNCHER_MODULE, MAX_RESULT_BYTES
+from enginery.application.runner_ports import AttestedProcess
+from enginery.domain.digests import Digest
 from enginery.domain.errors import WorkerFailureError
 from enginery.domain.runner import (
     DEFAULT_ENV_ALLOWLIST,
+    NO_NETWORK,
+    EngineIdentity,
+    ImageIdentity,
     LaunchOutcome,
     LaunchSpec,
     OutcomeState,
     RunnerContext,
     RunnerProfile,
+    RunnerReceipt,
     RunnerSelection,
+    TrustMode,
     outcome_path_for,
 )
 from enginery.engine.task_repository import out_path_for
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.workflows.stage1_runtime import _redacted_validation_report
 
 from .support import IMAGE_ID
 
@@ -50,6 +61,8 @@ class FakeLauncher:
         process_returncode: int | None = None,
         record_outcome: bool = True,
         nonce: str = _NONCE,
+        write_receipt: bool = True,
+        receipt_change: Callable[[RunnerReceipt], RunnerReceipt] | None = None,
     ) -> None:
         self.returncode = returncode
         self.output = output
@@ -59,6 +72,8 @@ class FakeLauncher:
         self.process_returncode = returncode if process_returncode is None else process_returncode
         self.record_outcome = record_outcome
         self.nonce = nonce
+        self.write_receipt = write_receipt
+        self.receipt_change = receipt_change
         self.argv: tuple[str, ...] = ()
         self.spec: LaunchSpec | None = None
         self.raw_spec: dict[str, Any] = {}
@@ -75,6 +90,13 @@ class FakeLauncher:
             result.write_text(
                 json.dumps({"output": self.output, "nonce": self.nonce}), encoding="utf-8"
             )
+        if self.write_receipt:
+            receipt = _valid_receipt(self.spec)
+            if self.receipt_change is not None:
+                receipt = self.receipt_change(receipt)
+            Path(self.spec.receipt_path).write_text(
+                json.dumps(receipt.to_state(), sort_keys=True), encoding="utf-8"
+            )
         if self.record_outcome:
             exited = self.returncode if self.state is OutcomeState.EXITED else None
             write_outcome(
@@ -88,6 +110,39 @@ class FakeLauncher:
                 ),
             )
         return subprocess.CompletedProcess(self.argv, self.process_returncode, "", self.stderr)
+
+
+def _valid_receipt(spec: LaunchSpec) -> RunnerReceipt:
+    """The receipt a real launcher writes for a validation container: network ``none``."""
+    return RunnerReceipt(
+        operation_id=spec.operation_id,
+        trust_mode=TrustMode.ISOLATED_OCI,
+        profile_name=spec.profile.name,
+        profile_digest=spec.profile.digest,
+        engine=EngineIdentity(
+            kind="docker",
+            server_version="29.0.0",
+            operating_system="Linux",
+            kernel_version="6.8.0",
+            cgroup_version="2",
+            security_options=("name=seccomp", "name=cgroupns"),
+            rootless=True,
+        ),
+        image=ImageIdentity(image_id=spec.image, recipe_digest="sha256:" + "b" * 64),
+        container_name=spec.container_name,
+        host={"os": "linux"},
+        effective=clean_effective_container(spec.profile, network=NO_NETWORK),
+        permissions=spec.permissions,
+        harness_version=None,
+        harness_protocol=None,
+        started_at="2026-10-13T00:00:00Z",
+    )
+
+
+def OciValidationRunner(context: RunnerContext, **kwargs: Any) -> _OciValidationRunner:  # noqa: N802
+    """The runner under test, retaining receipts in an artifact store beside the receipts."""
+    artifact_root = Path(context.receipt_root).parent / "artifacts"
+    return _OciValidationRunner(context, artifact_root=artifact_root, **kwargs)
 
 
 def _context(tmp_path: Path) -> RunnerContext:
@@ -411,6 +466,9 @@ def test_the_real_launcher_seam_is_a_subprocess_with_a_closed_stdin(
         (Path(spec.out_path) / spec.result_name).write_text(
             json.dumps({"output": "ok", "nonce": _NONCE}), encoding="utf-8"
         )
+        Path(spec.receipt_path).write_text(
+            json.dumps(_valid_receipt(spec).to_state(), sort_keys=True), encoding="utf-8"
+        )
         write_outcome(
             outcome_path_for(spec.receipt_path),
             LaunchOutcome(
@@ -430,3 +488,118 @@ def test_the_real_launcher_seam_is_a_subprocess_with_a_closed_stdin(
     assert seen["argv"][:3] == [sys.executable, "-m", LAUNCHER_MODULE]
     assert seen["kwargs"]["stdin"] == subprocess.DEVNULL
     assert seen["kwargs"]["capture_output"] is True
+
+
+# --- the receipt a validation ran under -----------------------------------------------------
+
+
+def test_a_validation_container_gets_no_network_and_no_relay(
+    tmp_path: Path, workspace: Path
+) -> None:
+    launcher = FakeLauncher()
+
+    OciValidationRunner(_context(tmp_path), launcher=launcher)(("pytest",), workspace)
+
+    assert launcher.spec is not None
+    assert launcher.spec.relay_container is None
+    assert launcher.spec.attempt_network == "none"
+    assert "relay_container" not in launcher.raw_spec
+
+
+def test_the_verified_receipt_is_retained_and_returned_with_the_result(
+    tmp_path: Path, workspace: Path
+) -> None:
+    launcher = FakeLauncher()
+    context = _context(tmp_path)
+
+    completed = OciValidationRunner(context, launcher=launcher)(("pytest",), workspace)
+
+    assert isinstance(completed, AttestedProcess)
+    reference = completed.runner_receipt
+    assert launcher.spec is not None
+    written = RunnerReceipt.from_state(
+        json.loads(Path(launcher.spec.receipt_path).read_text("utf-8"))
+    )
+    assert reference.receipt_digest == written.digest
+    assert reference.image_id == IMAGE_ID
+    assert reference.profile_digest == context.profile.digest
+    store = ArtifactStore(Path(context.receipt_root).parent / "artifacts")
+    retained = RunnerReceipt.from_state(
+        json.loads(store.path_for(reference.receipt_digest).read_text("utf-8"))
+    )
+    assert retained == written
+    assert retained.effective.networks == ("none",)
+    assert retained.operation_id == launcher.spec.operation_id
+
+
+def test_the_validation_report_names_the_receipt_of_every_command(
+    tmp_path: Path, workspace: Path
+) -> None:
+    runner = OciValidationRunner(_context(tmp_path), launcher=FakeLauncher())
+    results = (runner(("pytest",), workspace), runner(("ruff", "check"), workspace))
+
+    report = json.loads(_redacted_validation_report((("pytest",), ("ruff", "check")), results))
+
+    named = [entry["runner_receipt"]["receipt_digest"] for entry in report["commands"]]
+    assert named == [str(result.runner_receipt.receipt_digest) for result in results]
+    assert len(set(named)) == 2  # one receipt per validation container
+    plain = subprocess.CompletedProcess(("true",), 0, "", "")
+    assert (
+        "runner_receipt"
+        not in json.loads(_redacted_validation_report((("true",),), (plain,)))["commands"][0]
+    )
+
+
+def _with(**change: Any) -> Callable[[RunnerReceipt], RunnerReceipt]:
+    return lambda receipt: dataclasses.replace(receipt, **change)
+
+
+def _weaker(**change: Any) -> Callable[[RunnerReceipt], RunnerReceipt]:
+    return lambda receipt: dataclasses.replace(
+        receipt, effective=dataclasses.replace(receipt.effective, **change)
+    )
+
+
+@pytest.mark.parametrize(
+    ("receipt_change", "mismatch"),
+    [
+        (_with(operation_id="validate:another"), "operation"),
+        (_with(profile_digest=Digest.of_bytes(b"another profile")), "profile"),
+        (
+            _with(image=ImageIdentity(image_id="sha256:" + "9" * 64, recipe_digest="sha256:b")),
+            "image",
+        ),
+        (_with(container_name="enginery-someone-else"), "container"),
+        (_with(trust_mode=TrustMode.TRUSTED_LOCAL), "trust_mode"),
+        (_weaker(network_mode="bridge", networks=("bridge",)), "attached only to the network"),
+        (
+            _weaker(
+                network_mode="enginery-runner-internal-x", networks=("enginery-runner-internal-x",)
+            ),
+            "attached only to the network",
+        ),
+        (_weaker(privileged=True), "container is privileged"),
+        (_weaker(cap_add=("NET_ADMIN",)), "adds capabilities"),
+    ],
+)
+def test_a_receipt_that_does_not_describe_this_run_under_the_profile_is_not_accepted(
+    tmp_path: Path,
+    workspace: Path,
+    receipt_change: Callable[[RunnerReceipt], RunnerReceipt],
+    mismatch: str,
+) -> None:
+    launcher = FakeLauncher(receipt_change=receipt_change)
+
+    with pytest.raises(WorkerFailureError, match="does not describe this run") as raised:
+        OciValidationRunner(_context(tmp_path), launcher=launcher)(("pytest",), workspace)
+
+    assert mismatch in str(raised.value.details["mismatches"])
+
+
+def test_a_missing_receipt_is_a_failure_never_an_unattested_result(
+    tmp_path: Path, workspace: Path
+) -> None:
+    launcher = FakeLauncher(write_receipt=False)
+
+    with pytest.raises(WorkerFailureError, match="receipt is missing"):
+        OciValidationRunner(_context(tmp_path), launcher=launcher)(("pytest",), workspace)

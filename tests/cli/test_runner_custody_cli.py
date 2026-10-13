@@ -126,6 +126,60 @@ def test_missing_token_file_is_recorded_as_a_finding(
     assert json.loads(capsys.readouterr().out)["conforms"] is False
 
 
+def test_macos_receipt_with_a_loose_token_file_exits_12(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "receipt.json"
+
+    code = main(_args(_token(tmp_path, 0o644), output, host="macos"))
+
+    printed = json.loads(capsys.readouterr().out)
+    assert code == 12
+    assert printed["conforms"] is False
+    assert "expected 0600" in printed["findings"][0]
+
+
+def test_a_symlinked_token_file_is_a_finding_on_every_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    link = tmp_path / "link.token"
+    link.symlink_to(_token(tmp_path))
+    output = tmp_path / "receipt.json"
+
+    code = main(_args(link, output))
+
+    printed = json.loads(capsys.readouterr().out)
+    assert code == 12
+    assert any("symbolic link" in finding for finding in printed["findings"])
+    assert json.loads(output.read_text())["custody"]["token_file"]["symlink"] is True
+
+
+def test_a_dangling_symlink_is_recorded_not_reported_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    link = tmp_path / "dangling.token"
+    link.symlink_to(tmp_path / "absent")
+
+    code = main(_args(link, tmp_path / "receipt.json"))
+
+    printed = json.loads(capsys.readouterr().out)
+    assert code == 12
+    assert any("symbolic link" in finding for finding in printed["findings"])
+
+
+def test_a_token_file_owned_by_another_user_is_a_finding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _token(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(token).st_uid + 1)
+
+    code = main(_args(token, tmp_path / "receipt.json"))
+
+    printed = json.loads(capsys.readouterr().out)
+    assert code == 12
+    assert any("not owned by the invoking user" in finding for finding in printed["findings"])
+
+
 def test_custody_receipt_refuses_credentialed_urls_and_existing_outputs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

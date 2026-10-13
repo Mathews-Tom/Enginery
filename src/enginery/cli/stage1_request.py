@@ -12,7 +12,9 @@ ambiguous, or outside the declared vocabulary is refused with the adapter's own
 error and nothing is written.
 
 Flags only choose how the run is executed. Their defaults are
-`policy-v1`, `("uv", "run", "pytest", "-q")`, `time_budget_seconds=1800`,
+`policy-v1`, `("uv", "run", "pytest", "-q")` (trusted-local only: an isolated run must name its
+validation commands, because its validation runs offline in the pinned runner image),
+`time_budget_seconds=1800`,
 `cost_budget=None` (no supported harness enforces a hard-dollar budget, so one is refused
 rather than carried), `permitted_capabilities=("git",)`,
 `evidence_requirements=("redacted harness transcript",)`,
@@ -53,10 +55,13 @@ from enginery.domain.runner import (
 )
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
+    DEFAULT_VALIDATION_COMMAND,
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
+    first_attempt_generation,
     implementation_attempt_id,
+    require_explicit_isolated_validation,
 )
 
 _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
@@ -119,14 +124,27 @@ def add_build_request_parser(
         action="append",
         default=None,
         metavar='"COMMAND ARG..."',
-        help='Repeatable, shell-split; defaults to "uv run pytest -q".',
+        help='Repeatable, shell-split. Defaults to "uv run pytest -q" for trusted-local; '
+        "required with isolated-oci, whose validation runs offline in the pinned runner image "
+        "(python3, node, git, uv, sh) and so cannot resolve a project's test dependencies.",
     )
     parser.add_argument("--required-check", dest="required_checks", action="append", default=None)
     parser.add_argument("--repair-limit", type=int, default=1)
     parser.add_argument(
+        "--protected-path",
+        dest="protected_paths",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help="Repeatable. An extra path pattern whose change holds the branch for an explicit "
+        "operator decision before it is published. It only adds to the built-in protected "
+        "set (.github/**, CI configuration, CODEOWNERS, .enginery/**, holdouts/**).",
+    )
+    parser.add_argument(
         "--implementation-attempt-id",
         default=None,
-        help="Defaults to <run-id>-implement-0, unique per run on a shared ledger.",
+        help="Defaults to <run-id>-implement-0, unique per run on a shared ledger. Must end in "
+        "-<number>: that number is the run's first generation and each repair adds one.",
     )
     parser.add_argument(
         "--implementation-operation-id", default=None, help="Defaults to implement:<run-id>."
@@ -251,7 +269,7 @@ def _reject_cost_budget(args: argparse.Namespace) -> None:
 
 def _validation_commands(values: list[str] | None) -> tuple[tuple[str, ...], ...]:
     if values is None:
-        return (("uv", "run", "pytest", "-q"),)
+        return (DEFAULT_VALIDATION_COMMAND,)
     return tuple(tuple(shlex.split(value)) for value in values)
 
 
@@ -304,11 +322,14 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     ``--external-reference``.
     """
     _reject_cost_budget(args)
+    runner_selection = _runner_selection(args)
+    if args.runner == "isolated-oci" and args.validation_commands is None:
+        raise InvalidInputError(
+            "--runner isolated-oci requires --validation-command: isolated validation runs "
+            "offline in the pinned runner image, which has python3, node, git, uv and sh but "
+            "not the project's test dependencies, so there is no default that can run there"
+        )
     run_id = args.run_id
-    if args.repair_limit > 0:
-        # Repair attempt ids are always derived from the run id, whatever the first attempt's
-        # id is, so the longest one must be valid for the run to be able to repair.
-        implementation_attempt_id(run_id, args.repair_limit)
     if args.implementation_attempt_id is None:
         try:
             attempt_id = implementation_attempt_id(run_id, 0)
@@ -318,6 +339,11 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             ) from error
     else:
         attempt_id = args.implementation_attempt_id
+    first_generation = first_attempt_generation(attempt_id)
+    if args.repair_limit > 0:
+        # Repair attempt ids are always derived from the run id, whatever the first attempt's
+        # id is, so the last one the run may need must be valid for it to be able to repair.
+        implementation_attempt_id(run_id, first_generation + args.repair_limit)
     head_branch = args.head_branch or f"enginery/{run_id}"
     implementation_operation_id = OperationId(
         args.implementation_operation_id or f"implement:{run_id}"
@@ -326,7 +352,6 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
 
     # The built-in default harness is a factory-layer input; only a harness the operator named
     # on the command line is a run-layer input, so the recorded source says which it was.
-    runner_selection = _runner_selection(args)
     selection = resolve_execution_selection(
         (
             LayerControls(layer=SelectionLayer.FACTORY, harness=_FACTORY_DEFAULT_HARNESS),
@@ -392,7 +417,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         state=RunState.CREATED,
     )
 
-    return Stage1RunRequest(
+    request = Stage1RunRequest(
         run=run,
         work_snapshot=snapshot,
         manifest=manifest,
@@ -434,7 +459,10 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         ),
         execution_selection=selection,
         runner=runner_selection,
+        protected_paths=tuple(args.protected_paths or ()),
     )
+    require_explicit_isolated_validation(request)
+    return request
 
 
 def run_build_request(args: argparse.Namespace) -> int:

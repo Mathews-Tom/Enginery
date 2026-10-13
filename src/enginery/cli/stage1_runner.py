@@ -83,7 +83,9 @@ def isolated_wiring(
         context=context,
         probe=OciProbeRunner(engine, selection.image, profile),
         admission=OciRunnerAdmission(profile=profile),
-        validation=OciValidationRunner(context),
+        validation=OciValidationRunner(
+            context, artifact_root=request.execution_configuration.artifact_root
+        ),
     )
 
 

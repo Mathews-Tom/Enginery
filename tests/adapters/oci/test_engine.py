@@ -13,10 +13,13 @@ from typing import Any
 import pytest
 
 from enginery.adapters.oci.engine import (
+    ATTEMPT_NETWORK_LABEL,
     ENGINE_ENVIRONMENT_KEYS,
     KIND_DOCKER,
     KIND_DOCKER_DESKTOP,
     KIND_ROOTLESS_DOCKER,
+    LAUNCHER_LABEL,
+    RUNNER_LABEL,
     EngineCommandError,
     ObjectNotFoundError,
     OciEngine,
@@ -25,7 +28,14 @@ from enginery.adapters.oci.engine import (
 from enginery.adapters.oci.launch import container_name_for
 from enginery.domain.errors import MissingPrerequisiteError, OperationTimeoutError
 
-from .support import DOCKER_DESKTOP_INFO, IMAGE_ID, ROOTLESS_INFO, FakeDocker, make_spec
+from .support import (
+    DOCKER_DESKTOP_INFO,
+    IMAGE_ID,
+    ROOTLESS_INFO,
+    FakeDocker,
+    FakeNetwork,
+    make_spec,
+)
 
 
 def _completed(
@@ -291,74 +301,165 @@ def test_qualify_does_not_ignore_unrelated_engine_warnings_but_is_not_blocked_by
 # --- networks ------------------------------------------------------------------------
 
 
-def test_ensure_internal_network_creates_an_internal_network_when_absent(
+def test_create_attempt_network_creates_an_internal_labelled_network(
     fake_docker: FakeDocker,
 ) -> None:
-    fake_docker.engine().ensure_internal_network("runner-net")
+    info = fake_docker.engine().create_attempt_network(
+        "attempt-net", operation_id="op-1", launcher='{"pid":1}'
+    )
 
-    assert fake_docker.networks == {"runner-net": True}
+    assert info.internal is True
+    assert info.containers == ()
+    assert fake_docker.networks["attempt-net"].internal is True
+    assert fake_docker.networks["attempt-net"].labels == {
+        RUNNER_LABEL: "1",
+        ATTEMPT_NETWORK_LABEL: "op-1",
+        LAUNCHER_LABEL: '{"pid":1}',
+    }
     created = fake_docker.calls_of("network create")
     assert len(created) == 1
     assert "--internal" in created[0]
-    assert created[0][-1] == "runner-net"
+    assert created[0][-1] == "attempt-net"
 
 
-def test_ensure_internal_network_is_idempotent(fake_docker: FakeDocker) -> None:
-    engine = fake_docker.engine()
-
-    engine.ensure_internal_network("runner-net")
-    engine.ensure_internal_network("runner-net")
-
-    assert len(fake_docker.calls_of("network create")) == 1
-    assert fake_docker.networks == {"runner-net": True}
-
-
-def test_ensure_internal_network_refuses_an_existing_network_that_is_not_internal(
+def test_create_attempt_network_without_a_launcher_carries_no_launcher_label(
     fake_docker: FakeDocker,
 ) -> None:
-    fake_docker.networks["runner-net"] = False
+    fake_docker.engine().create_attempt_network("attempt-net", operation_id="op-1")
 
-    with pytest.raises(MissingPrerequisiteError, match="not internal"):
-        fake_docker.engine().ensure_internal_network("runner-net")
+    assert LAUNCHER_LABEL not in fake_docker.networks["attempt-net"].labels
+
+
+def test_create_attempt_network_replaces_the_network_an_earlier_attempt_left(
+    fake_docker: FakeDocker,
+) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.add_relay()
+    engine.connect_network("attempt-net", "enginery-relay", alias="enginery-relay")
+    assert fake_docker.network_members("attempt-net") == ["enginery-relay"]
+
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+
+    # The stale endpoint was disconnected, the old network removed and a fresh one created.
+    assert fake_docker.network_members("attempt-net") == []
+    assert len(fake_docker.calls_of("network create")) == 2
+    assert len(fake_docker.calls_of("network rm")) == 1
+
+
+def test_a_same_named_network_that_is_not_an_attempt_network_is_never_replaced(
+    fake_docker: FakeDocker,
+) -> None:
+    fake_docker.networks["runner-net"] = FakeNetwork(internal=True, labels={})
+
+    with pytest.raises(MissingPrerequisiteError, match="not an attempt network"):
+        fake_docker.engine().create_attempt_network("runner-net", operation_id="op-1")
 
     assert fake_docker.calls_of("network create") == []
+    assert fake_docker.calls_of("network rm") == []
 
 
-def test_ensure_internal_network_tolerates_a_concurrent_creator(fake_docker: FakeDocker) -> None:
-    real_runner = fake_docker.__call__
-
-    def racing(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if "create" in argv:
-            # Another process creates the network between our inspect and our create.
-            fake_docker.networks["runner-net"] = True
-        return real_runner(argv, **kwargs)
-
-    OciEngine(runner=racing).ensure_internal_network("runner-net")
-
-    assert fake_docker.networks == {"runner-net": True}
-
-
-def test_ensure_internal_network_refuses_when_the_racing_network_is_not_internal(
+def test_create_attempt_network_refuses_a_network_the_engine_made_routable(
     fake_docker: FakeDocker,
 ) -> None:
     real_runner = fake_docker.__call__
 
-    def racing(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def routable(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        completed = real_runner(argv, **kwargs)
         if "create" in argv:
-            fake_docker.networks["runner-net"] = False
-        return real_runner(argv, **kwargs)
+            fake_docker.networks["attempt-net"].internal = False
+        return completed
 
     with pytest.raises(MissingPrerequisiteError, match="not internal"):
-        OciEngine(runner=racing).ensure_internal_network("runner-net")
+        OciEngine(runner=routable).create_attempt_network("attempt-net", operation_id="op-1")
 
 
-def test_ensure_internal_network_surfaces_a_real_create_failure(fake_docker: FakeDocker) -> None:
+def test_create_attempt_network_surfaces_a_real_create_failure(fake_docker: FakeDocker) -> None:
     fake_docker.failures["network create"] = (1, "Error response from daemon: pool overlaps")
 
     with pytest.raises(EngineCommandError) as raised:
-        fake_docker.engine().ensure_internal_network("runner-net")
+        fake_docker.engine().create_attempt_network("attempt-net", operation_id="op-1")
 
     assert "pool overlaps" in str(raised.value.details["stderr"])
+
+
+def test_remove_attempt_network_disconnects_what_is_attached_and_is_idempotent(
+    fake_docker: FakeDocker,
+) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.add_relay()
+    engine.connect_network("attempt-net", "enginery-relay", alias="enginery-relay")
+
+    engine.remove_attempt_network("attempt-net")
+
+    assert "attempt-net" not in fake_docker.networks
+    disconnect = fake_docker.calls_of("network disconnect")
+    assert disconnect == [("network", "disconnect", "--force", "attempt-net", "enginery-relay")]
+    # The relay itself is untouched; only its endpoint on the attempt network is gone.
+    assert "enginery-relay" in fake_docker.containers
+    engine.remove_attempt_network("attempt-net")
+
+
+def test_remove_attempt_network_surfaces_a_failure_to_remove(fake_docker: FakeDocker) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.failures["network rm"] = (1, "Error response from daemon: has active endpoints")
+
+    with pytest.raises(EngineCommandError, match="network rm"):
+        engine.remove_attempt_network("attempt-net")
+
+
+def test_network_info_reports_labels_members_and_absence(fake_docker: FakeDocker) -> None:
+    engine = fake_docker.engine()
+    assert engine.network_info("absent") is None
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.add_relay()
+    engine.connect_network("attempt-net", "enginery-relay", alias="enginery-relay")
+
+    info = engine.network_info("attempt-net")
+
+    assert info is not None
+    assert info.internal and info.containers == ("enginery-relay",)
+    assert info.labels[ATTEMPT_NETWORK_LABEL] == "op-1"
+
+
+def test_list_attempt_networks_names_only_labelled_networks(fake_docker: FakeDocker) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-a", operation_id="op-a")
+    engine.create_attempt_network("attempt-b", operation_id="op-b")
+    fake_docker.networks["enginery-runner-egress"] = FakeNetwork(
+        internal=False, labels={RUNNER_LABEL: "1"}
+    )
+
+    assert engine.list_attempt_networks() == ("attempt-a", "attempt-b")
+
+
+def test_connect_network_passes_the_alias_and_disconnect_tolerates_a_missing_endpoint(
+    fake_docker: FakeDocker,
+) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.add_relay()
+
+    engine.connect_network("attempt-net", "enginery-relay", alias="enginery-relay")
+    assert fake_docker.calls_of("network connect") == [
+        ("network", "connect", "--alias", "enginery-relay", "attempt-net", "enginery-relay")
+    ]
+    engine.disconnect_network("attempt-net", "enginery-relay")
+    engine.disconnect_network("attempt-net", "enginery-relay")  # not connected any more: fine
+    engine.disconnect_network("attempt-net", "absent-container", force=True)  # gone: fine
+    assert fake_docker.network_members("attempt-net") == []
+
+
+def test_disconnect_network_surfaces_an_unexpected_failure(fake_docker: FakeDocker) -> None:
+    engine = fake_docker.engine()
+    engine.create_attempt_network("attempt-net", operation_id="op-1")
+    fake_docker.add_relay()
+    fake_docker.failures["network disconnect"] = (1, "Error response from daemon: boom")
+
+    with pytest.raises(EngineCommandError, match="network disconnect"):
+        engine.disconnect_network("attempt-net", "enginery-relay")
 
 
 # --- images and containers -----------------------------------------------------------
@@ -479,27 +580,44 @@ def test_real_engine_identity_matches_what_docker_info_reports(real_engine: OciE
     assert real_engine.memory_total_bytes() == info["MemTotal"] > 0
 
 
-def test_real_engine_internal_network_is_created_once_and_is_internal(
-    real_engine: OciEngine, real_profile: Any
+def test_real_engine_attempt_network_is_internal_labelled_replaced_and_removed(
+    real_engine: OciEngine,
 ) -> None:
-    name = real_profile.network
+    name = f"enginery-test-attempt-{uuid.uuid4().hex[:8]}"
+    try:
+        created = real_engine.create_attempt_network(name, operation_id="op-real", launcher="{}")
+        assert created.internal is True
+        assert created.labels[ATTEMPT_NETWORK_LABEL] == "op-real"
+        assert created.labels[RUNNER_LABEL] == "1"
+        inspected = json.loads(real_engine.run_cli(("network", "inspect", name)).stdout)
+        assert [network["Internal"] for network in inspected] == [True]
+        assert name in real_engine.list_attempt_networks()
 
-    real_engine.ensure_internal_network(name)
-    real_engine.ensure_internal_network(name)
+        # A relaunch of the same operation replaces the network a dead launcher left behind.
+        first_id = inspected[0]["Id"]
+        real_engine.create_attempt_network(name, operation_id="op-real")
+        replaced = json.loads(real_engine.run_cli(("network", "inspect", name)).stdout)
+        assert replaced[0]["Id"] != first_id
+    finally:
+        real_engine.remove_attempt_network(name)
 
-    inspected = json.loads(real_engine.run_cli(("network", "inspect", name)).stdout)
-    assert [network["Internal"] for network in inspected] == [True]
+    assert real_engine.network_info(name) is None
+    assert name not in real_engine.list_attempt_networks()
+    real_engine.remove_attempt_network(name)  # idempotent
 
 
-def test_real_engine_refuses_a_same_named_network_that_is_not_internal(
+def test_real_engine_refuses_to_touch_a_network_that_is_not_an_attempt_network(
     real_engine: OciEngine,
 ) -> None:
     name = f"enginery-test-open-{uuid.uuid4().hex[:8]}"
     created = real_engine.run_cli(("network", "create", name))
     assert created.returncode == 0, created.stderr
     try:
-        with pytest.raises(MissingPrerequisiteError, match="not internal"):
-            real_engine.ensure_internal_network(name)
+        with pytest.raises(MissingPrerequisiteError, match="not an attempt network"):
+            real_engine.remove_attempt_network(name)
+        with pytest.raises(MissingPrerequisiteError, match="not an attempt network"):
+            real_engine.create_attempt_network(name, operation_id="op-real")
+        assert real_engine.network_info(name) is not None
     finally:
         real_engine.run_cli(("network", "rm", name))
 

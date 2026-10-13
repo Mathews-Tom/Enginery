@@ -109,9 +109,10 @@ def relay_image(real_engine: OciEngine) -> str:
 @pytest.fixture
 def stack(real_engine: OciEngine, relay_image: str, tmp_path: Path) -> Iterator[Stack]:
     suffix = uuid.uuid4().hex[:10]
-    internal = f"enginery-test-internal-{suffix}"
+    prefix = f"enginery-test-internal-{suffix}"
+    internal = f"{prefix}-{'a' * 24}"
     egress = f"enginery-test-egress-{suffix}"
-    profile = RunnerProfile(network=internal)
+    profile = RunnerProfile(network=prefix)
     manager = RelayManager(
         real_engine,
         profile=profile,
@@ -138,7 +139,7 @@ def stack(real_engine: OciEngine, relay_image: str, tmp_path: Path) -> Iterator[
         upstream.stop()
         with contextlib.suppress(Exception):
             manager.down()
-        for network in (internal, egress):
+        for network in (egress,):
             with contextlib.suppress(Exception):
                 real_engine.run_cli(("network", "rm", network))
 
@@ -146,25 +147,31 @@ def stack(real_engine: OciEngine, relay_image: str, tmp_path: Path) -> Iterator[
 def _run_worker(stack: Stack) -> dict[str, object]:
     name = f"enginery-test-worker-{uuid.uuid4().hex[:10]}"
     host, port = UNREACHABLE_PUBLIC_ADDRESS
-    completed = stack.engine.run_cli(
-        (
-            "run",
-            "--rm",
-            *hardening_arguments(stack.profile, network=stack.internal),
-            "--name",
-            name,
-            "--entrypoint",
-            "python3",
-            stack.relay_image,
-            "-c",
-            _WORKER_SCRIPT,
-            TOKEN,
-            str(stack.upstream.port),
-            host,
-            str(port),
-        ),
-        timeout=180,
-    )
+    stack.engine.create_attempt_network(stack.internal, operation_id="relay-docker-test")
+    stack.manager.attach(stack.internal)
+    try:
+        completed = stack.engine.run_cli(
+            (
+                "run",
+                "--rm",
+                *hardening_arguments(stack.profile, network=stack.internal),
+                "--name",
+                name,
+                "--entrypoint",
+                "python3",
+                stack.relay_image,
+                "-c",
+                _WORKER_SCRIPT,
+                TOKEN,
+                str(stack.upstream.port),
+                host,
+                str(port),
+            ),
+            timeout=180,
+        )
+    finally:
+        stack.manager.detach(stack.internal)
+        stack.engine.remove_attempt_network(stack.internal)
     assert completed.returncode == 0, completed.stderr[-2000:]
     return dict(json.loads(completed.stdout.strip().splitlines()[-1]))
 
@@ -177,7 +184,7 @@ def test_a_hardened_worker_reaches_models_only_through_the_relay(stack: Stack) -
     )
     assert status.healthy, status.detail
     assert status.running and status.image_id == stack.relay_image
-    assert stack.internal in status.networks and stack.egress in status.networks
+    assert status.networks == (stack.egress,)  # no worker network while no attempt runs
 
     result = _run_worker(stack)
 

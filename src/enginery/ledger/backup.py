@@ -95,13 +95,65 @@ def backup_ledger(
 
 
 def read_backup_manifest(backup_dir: Path) -> BackupManifest:
-    raw = json.loads((backup_dir / _MANIFEST_NAME).read_text(encoding="utf-8"))
+    """Read and validate a backup's manifest and confirm its ledger snapshot is present.
+
+    Every defect -- a missing directory, manifest or database file, unreadable or truncated
+    files, malformed JSON, a missing field or a field of the wrong type -- is an
+    :class:`InvalidInputError` that names the backup; none escapes as a raw OS or decode error.
+    """
+    manifest_path = backup_dir / _MANIFEST_NAME
+    if not backup_dir.is_dir():
+        raise InvalidInputError(
+            f"backup {backup_dir} is not a directory", details={"backup": str(backup_dir)}
+        )
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise InvalidInputError(
+            f"backup {backup_dir} has no {_MANIFEST_NAME}", details={"backup": str(backup_dir)}
+        ) from error
+    except (OSError, UnicodeDecodeError) as error:
+        raise InvalidInputError(
+            f"backup manifest {manifest_path} cannot be read: {error}",
+            details={"backup": str(backup_dir)},
+        ) from error
+    try:
+        raw = json.loads(text)
+    except ValueError as error:
+        raise InvalidInputError(
+            f"backup manifest {manifest_path} is not valid JSON: {error}",
+            details={"backup": str(backup_dir)},
+        ) from error
+    if not isinstance(raw, dict):
+        raise InvalidInputError(
+            f"backup manifest {manifest_path} must be a JSON object",
+            details={"backup": str(backup_dir)},
+        )
+    created_at = _manifest_field(raw, "created_at", str, manifest_path)
+    source_database = _manifest_field(raw, "source_database", str, manifest_path)
+    includes_artifacts = _manifest_field(raw, "includes_artifacts", bool, manifest_path)
+    schema_version = _manifest_field(raw, "schema_version", int, manifest_path)
+    if not (backup_dir / _DATABASE_NAME).is_file():
+        raise InvalidInputError(
+            f"backup {backup_dir} is missing its ledger snapshot {_DATABASE_NAME}",
+            details={"backup": str(backup_dir)},
+        )
     return BackupManifest(
-        created_at=raw["created_at"],
-        schema_version=raw["schema_version"],
-        source_database=raw["source_database"],
-        includes_artifacts=raw["includes_artifacts"],
+        created_at=created_at,
+        schema_version=schema_version,
+        source_database=source_database,
+        includes_artifacts=includes_artifacts,
     )
+
+
+def _manifest_field[T](raw: dict[str, object], key: str, kind: type[T], path: Path) -> T:
+    value = raw.get(key)
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise InvalidInputError(
+            f"backup manifest {path} field {key!r} is missing or not of type {kind.__name__}",
+            details={"manifest": str(path)},
+        )
+    return value
 
 
 def restore_ledger(

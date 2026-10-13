@@ -1,16 +1,25 @@
 """Host-side publication of a verified branch revision with plain ``git push``.
 
-This is the operator-side authority a worker never holds. The worker commits locally; the host
-verifies the branch in a repository the worker cannot write to (the host-owned intake repository
-of a task-local workspace, or the workspace of a trusted-local run) and only then does this adapter
-push exactly one revision to exactly one branch of the remote the *host* repository's ``origin``
-names. It never overwrites a remote branch it did not expect, never pushes anything else, and is
-idempotent: a remote already at the revision is success without a push.
+This is the operator-side authority a worker never holds in isolation. The worker commits locally;
+the host verifies the branch in a repository the worker cannot write to (the host-owned intake
+repository of a task-local workspace) and only then does this adapter push exactly one revision to
+exactly one branch of the remote the *host* repository's ``origin`` names. It never overwrites a
+remote branch it did not expect, never pushes anything else, and is idempotent: a remote already at
+the revision is success without a push.
+
+A trusted-local run has no such separation: its verified repository is the worker's own workspace
+and its ``origin`` is read from the repository configuration the worker could write. Every git
+command here therefore overrides the command-line-reachable settings a worker could plant there
+(hooks, fsmonitor, credential helpers, ssh command, askpass) with the operator's own user and
+system configuration, but a worker-writable repository remains a weaker publication source than
+the host-owned intake: per-url credential helpers and url rewrites in repository configuration
+cannot be neutralised from the command line.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -35,7 +44,6 @@ from enginery.domain.errors import (
     InvalidInputError,
     MissingPrerequisiteError,
 )
-from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 from enginery.ledger.redaction import redact_credential_shaped_text
 
@@ -56,6 +64,7 @@ the process that pushes, and in no worker environment.
 
 _GIT_TIMEOUT_SECONDS = 300.0
 _STDERR_DETAIL_CHARS = 2000
+_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 def publication_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -78,7 +87,7 @@ class GitBranchPublisher:
     repository_path: Path
     source_path: Path
     executable: str = "git"
-    _requests: dict[str, BranchPublicationRequest] = field(default_factory=dict, init=False)
+    _hardening_arguments: tuple[str, ...] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.repository_path.is_absolute() or not self.source_path.is_absolute():
@@ -120,7 +129,6 @@ class GitBranchPublisher:
         the check and the push is still never overwritten. The branch is re-read afterwards: a
         push that did not leave it at the verified revision is an error, not a success.
         """
-        self._requests[str(request.operation_id)] = request
         self._require_commit(request.head_revision)
         url = self._origin_url()
         remote = self._remote_revision(url, request.branch)
@@ -142,13 +150,7 @@ class GitBranchPublisher:
             completed = self._run(
                 [
                     "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
                     "push.followTags=false",
-                    "-c",
-                    "protocol.ext.allow=never",
-                    "-c",
-                    "protocol.fd.allow=never",
                     "push",
                     "--no-verify",
                     "--porcelain",
@@ -161,7 +163,8 @@ class GitBranchPublisher:
             )
         except subprocess.TimeoutExpired as error:
             raise AmbiguousExternalSideEffectError(
-                "branch publication timed out; reconcile before retrying",
+                "branch publication timed out and its effect is unknown; retry open_pr: "
+                "publication is idempotent and constrained to the expected remote head",
                 details={"branch": request.branch, "operation_id": str(request.operation_id)},
             ) from error
         if completed.returncode != 0:
@@ -184,17 +187,64 @@ class GitBranchPublisher:
             )
         return PublishedBranch(branch=request.branch, revision=request.head_revision)
 
-    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
-        """Compare the remote with what a recorded publication would have left.
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        """List every path ``base_revision..head_revision`` changes, with renames split in two.
 
-        An operation this publisher never attempted is ``NOT_FOUND``. For a recorded one the
-        remote branch at the revision is ``FOUND_MATCHING``; absent, or still at the revision the
-        publication expected, is ``NOT_FOUND`` (nothing was pushed, retrying is safe); anything
-        else is an external conflict, never an overwrite.
+        Read by the host from the verified repository with external diff drivers and textconv
+        disabled and rename detection off, so a path moved out of a protected directory is
+        reported at its old location as well as its new one. NUL-separated output keeps paths
+        with newlines or quotes exact; bytes that are not UTF-8 are replaced, which can only
+        make a path look different, never hide it from a pattern.
         """
-        request = self._requests.get(str(operation_id))
-        if request is None:
-            return ReconciliationResult.NOT_FOUND
+        if _OBJECT_ID.fullmatch(head_revision) is None:
+            raise InvalidInputError(
+                "head_revision must be a full object id", details={"head_revision": head_revision}
+            )
+        if not base_revision.strip() or base_revision.startswith("-"):
+            raise InvalidInputError(
+                "base_revision must be a revision", details={"base_revision": base_revision}
+            )
+        self._require_commit(head_revision)
+        resolved = self._run(
+            ["rev-parse", "--verify", "--end-of-options", f"{base_revision}^{{commit}}"],
+            cwd=self.source_path,
+        )
+        base = resolved.stdout.strip()
+        if resolved.returncode != 0 or _OBJECT_ID.fullmatch(base) is None:
+            raise ExternalConflictError(
+                "the verified repository does not contain the base revision",
+                details={"base_revision": base_revision},
+            )
+        completed = self._invoke_hardened(
+            [
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                f"{base}..{head_revision}",
+                "--",
+            ],
+            cwd=self.source_path,
+        )
+        if completed.returncode != 0:
+            raise ExternalConflictError(
+                "the changed paths of the verified branch could not be read",
+                details={"stderr": completed.stderr.decode("utf-8", "replace").strip()[-2000:]},
+            )
+        return tuple(
+            entry.decode("utf-8", "replace") for entry in completed.stdout.split(b"\x00") if entry
+        )
+
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
+        """Compare the remote with what ``request`` would have left, from the request alone.
+
+        The branch, head and expected head all come from the ledger-recorded request, so this
+        holds across a coordinator restart. The remote branch at the head is ``FOUND_MATCHING``;
+        absent, or still at the revision the publication expected, is ``NOT_FOUND`` (nothing was
+        pushed, retrying is safe); anything else is an external conflict, never an overwrite.
+        """
         remote = self._remote_revision(self._origin_url(), request.branch)
         if remote == request.head_revision:
             return ReconciliationResult.FOUND_MATCHING
@@ -240,16 +290,7 @@ class GitBranchPublisher:
 
     def _remote_revision(self, url: str, branch: str) -> str | None:
         completed = self._run(
-            [
-                "-c",
-                "protocol.ext.allow=never",
-                "-c",
-                "protocol.fd.allow=never",
-                "ls-remote",
-                "--",
-                url,
-                f"refs/heads/{branch}",
-            ],
+            ["ls-remote", "--", url, f"refs/heads/{branch}"],
             cwd=self.source_path,
         )
         if completed.returncode != 0:
@@ -270,12 +311,72 @@ class GitBranchPublisher:
     def _run(
         self, arguments: Sequence[str], *, cwd: Path | None
     ) -> subprocess.CompletedProcess[str]:
+        """Run hardened git and decode its output as text."""
+        completed = self._invoke_hardened(arguments, cwd=cwd)
+        return subprocess.CompletedProcess(
+            completed.args,
+            completed.returncode,
+            completed.stdout.decode("utf-8", "replace"),
+            completed.stderr.decode("utf-8", "replace"),
+        )
+
+    def _invoke_hardened(
+        self, arguments: Sequence[str], *, cwd: Path | None
+    ) -> subprocess.CompletedProcess[bytes]:
+        return self._invoke([*self._hardening(), *arguments], cwd=cwd)
+
+    def _hardening(self) -> tuple[str, ...]:
+        """Command-line settings that outrank anything a worker could plant in repository config.
+
+        Hooks, fsmonitor, askpass and the ``ext``/``fd`` transports are switched off. The
+        credential helper list and the ssh command are reset and then set to exactly what the
+        operator's own user and system configuration says, so a worker-written
+        ``credential.helper=!...`` or ``core.sshCommand`` in a shared repository config never
+        runs with the operator's credentials while the operator's own helpers keep working.
+        """
+        if self._hardening_arguments is None:
+            ssh_commands = self._operator_values("core.sshCommand")
+            settings = [
+                "core.hooksPath=/dev/null",
+                "core.fsmonitor=false",
+                "core.askPass=",
+                "protocol.ext.allow=never",
+                "protocol.fd.allow=never",
+                f"core.sshCommand={ssh_commands[-1] if ssh_commands else 'ssh'}",
+                "credential.helper=",
+                *(
+                    f"credential.helper={helper}"
+                    for helper in self._operator_values("credential.helper")
+                ),
+            ]
+            self._hardening_arguments = tuple(
+                argument for setting in settings for argument in ("-c", setting)
+            )
+        return self._hardening_arguments
+
+    def _operator_values(self, key: str) -> list[str]:
+        """Read ``key`` from the operator's system then user configuration only, never a repo."""
+        values: list[str] = []
+        for scope in ("--system", "--global"):
+            completed = self._invoke(
+                ["config", "--includes", scope, "--null", "--get-all", key], cwd=None
+            )
+            if completed.returncode == 0:
+                values.extend(
+                    value.decode("utf-8", "replace")
+                    for value in completed.stdout.split(b"\x00")
+                    if value
+                )
+        return values
+
+    def _invoke(
+        self, arguments: Sequence[str], *, cwd: Path | None
+    ) -> subprocess.CompletedProcess[bytes]:
         try:
             return subprocess.run(
                 [self.executable, *arguments],
                 cwd=cwd,
                 env=publication_environment(),
-                text=True,
                 capture_output=True,
                 check=False,
                 timeout=_GIT_TIMEOUT_SECONDS,
@@ -308,6 +409,7 @@ def _status(availability: AdapterAvailability, version: str | None, detail: str)
                     AdapterCapability("branch_publication", 1),
                     AdapterCapability("branch_publication_reconciliation", 1),
                     AdapterCapability("expected_head_lease", 1),
+                    AdapterCapability("changed_paths", 1),
                 ),
             )
         ),

@@ -158,16 +158,15 @@ def _custody_receipt(args: argparse.Namespace) -> int:
 
 
 def _inspect_token_file(path: Path) -> TokenFileMetadata:
-    """Describe the token file from its inode alone: it is never opened or read."""
-    symlink = path.is_symlink()
+    """Describe the token file from its inode alone (``lstat``): it is never opened or read."""
     try:
-        info = path.stat()
+        info = os.lstat(path)
     except FileNotFoundError:
         return TokenFileMetadata(
             path=str(path),
             exists=False,
             regular_file=False,
-            symlink=symlink,
+            symlink=False,
             mode=None,
             size_bytes=None,
         )
@@ -177,9 +176,10 @@ def _inspect_token_file(path: Path) -> TokenFileMetadata:
         path=str(path),
         exists=True,
         regular_file=stat.S_ISREG(info.st_mode),
-        symlink=symlink,
+        symlink=stat.S_ISLNK(info.st_mode),
         mode=f"{stat.S_IMODE(info.st_mode):04o}",
         size_bytes=info.st_size,
+        owned_by_invoker=info.st_uid == os.geteuid(),
     )
 
 

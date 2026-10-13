@@ -343,7 +343,8 @@ criterion of the issue as not applicable to this run (`0` for the issue body).
 rejected as an unrecognized argument.
 
 Every field not shown above defaults to the same values
-`docs/examples.md` documents (`policy-v1`, `uv run pytest -q`,
+`docs/examples.md` documents (`policy-v1`, `uv run pytest -q` for trusted-local
+runs only: an isolated run must pass `--validation-command`,
 `repair-limit 1`, a 1800-second OMP implementation attempt with no cost budget
 (see [Authority separation](#authority-separation)), `operator-gh-cli`/`operator-harness-session` credential
 references). `--capability-lockfile` (default
@@ -811,9 +812,13 @@ Docker are the engines the profile has been exercised on.
 Each worker attempt runs with a non-root uid/gid, every capability dropped,
 `no-new-privileges`, a read-only root filesystem with tmpfs scratch and home,
 hard memory/swap/CPU/pids limits, no devices, no privilege, no Docker socket,
-no host-home mount, a private IPC namespace, and an attachment to a single
-`--internal` container network. No host path is mounted: the workspace and the
-result tree are per-attempt tmpfs volumes, both read-write. The
+no host-home mount, a private IPC namespace, and either no network at all
+(`--network none`: every validation container and every worker without model
+access) or, for a worker with model access, an attachment to a single
+`--internal` network created for that one attempt (see
+[Model access through the relay](#model-access-through-the-relay)). No host path is
+mounted: the run's workspace and a per-attempt result directory are tmpfs volumes
+created for the attempt, both read-write (see below). The
 environment is an explicit allowlist, never inherited from the host. The
 engine's own report of the created container is checked against the profile
 before the worker starts, and a launch that is weaker than the profile in any
@@ -849,8 +854,29 @@ is not on any remote until the operator side publishes the verified branch (see
 Validation commands for an isolated run execute inside the same restricted
 runner, never on the host, against a fresh checkout of the verified head that the
 host makes from its own intake repository (see [Authority separation](#authority-separation)).
-They run offline: the repository's validation must work with what the image and
-the checkout provide.
+They run offline, in the pinned image, which carries `python3`, `node`, `git`, `uv`
+and `sh` but none of a project's own test dependencies: the repository's validation
+must work with what the image and the checkout provide. For that reason an isolated
+run must name its validation commands (`--validation-command` at `stage1
+build-request`; the host default `uv run pytest -q` is refused for an isolated run at
+build-request and at `stage1 start`). A command whose executable the image lacks is
+not reported as a failed validation: when a command ends the way a missing executable
+does (exit 127, or the wrapper's `No such file or directory` / `Permission denied`),
+the same container restrictions are asked whether the executable exists
+(`command -v`), and a confirmed absence puts the `validate` node into a durable human
+wait whose reason names the missing tool. The request is immutable, so the way out is
+a new run whose validation commands only use what the image has.
+
+Each validation container runs with `--network none` and has its own runner receipt,
+which the validation runner reads back and verifies before it accepts the result: the
+receipt must name this operation, the pinned image, the admitted profile and the
+validation permission mapping, record no network but `none`, and show no profile
+violation (non-root, no capabilities, read-only root, the two admitted mounts, no
+environment outside the allowlist). A missing or mismatching receipt fails the
+validation as a runner fault, never as a passing or failing test run. The verified
+receipt is retained in the artifact store, and the validation report and the `validate`
+node (`validation_runner_receipts`) name its digest, so a validation result states
+the receipt it ran under.
 
 ### Authority separation
 
@@ -862,9 +888,12 @@ run resumes unchanged.
 - **The worker's environment is an explicit allowlist.** The worker process is
   launched with exactly the allowlisted variables the host defines, never the
   host's ambient environment, and a credential-shaped name (a name containing
-  `TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE`, `API_KEY` or `CREDENTIAL`, the `GH_`,
-  `GITHUB_`, `AWS_`, `AZURE_`, `GOOGLE_`, `UV_PUBLISH_` and `PYPI_` prefixes, or
-  `SSH_AUTH_SOCK`) can never be permitted: naming one is an error. A trusted-local
+  `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `API_KEY`, `APIKEY`,
+  `PRIVATE_KEY` or `CREDENTIAL`, the `GH_`, `GITHUB_`, `AWS_`, `AZURE_`, `GOOGLE_`,
+  `UV_PUBLISH_` and `PYPI_` prefixes, or `SSH_AUTH_SOCK` or `SSH_AGENT_PID`) can
+  never be permitted: naming one is an error. This is the only allowlist path: the
+  launching runtime applies it, and a workspace request carries no environment of
+  its own. A trusted-local
   worker gets `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`,
   `LC_CTYPE`, `TERM`, `TMPDIR`, `TZ`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`,
   `PI_CONFIG_DIR`, the four `XDG_*` base directories, `SSL_CERT_FILE` and
@@ -877,21 +906,57 @@ run resumes unchanged.
   uses the launcher allowlist. A run persisted before this existed inherits the
   ambient environment, as it always did, and is reported as the legacy path.
 - **The worker commits locally and never pushes.** Its task says so in both
-  modes. After the host verifies the branch (in the host-owned intake repository
-  for an isolated run, in the workspace for a trusted-local one), `open_pr` first
-  publishes exactly that revision to `refs/heads/<head branch>` of the remote the
-  *host* repository's `origin` names, then creates or updates the pull request.
-  The push runs with hooks disabled, only that one refspec, a sanitized
-  environment (`PATH`, `HOME`, `USER`, `LANG`, `SSH_AUTH_SOCK`, `GH_TOKEN`,
-  `GITHUB_TOKEN`, no prompts: the source-host authority a worker never holds) and
-  `--force-with-lease` against the head it expects: the remote branch must be
-  absent on the first publication, or at the head the previous repair generation's
-  verified attempt published. A remote branch anywhere else is an external
-  conflict, never overwritten, and no pull request is created. The publication is
-  idempotent (a remote already at the revision is success without a push) and a
-  timed-out push is reported as an ambiguous effect to reconcile. The open
-  pull-request node records `published_revision`. A new run without a configured
-  publisher stops with a missing prerequisite.
+  modes (only an isolated worker is told it has no remote access and no credentials:
+  a trusted-local worker still runs as you, with ambient `HOME`, keychain, `gh` and
+  ssh access, and is not told otherwise). After the host verifies the branch (in the
+  host-owned intake repository for an isolated run, in the workspace for a
+  trusted-local one), `open_pr` first publishes exactly that revision to
+  `refs/heads/<head branch>` of the remote the *host* repository's `origin` names,
+  then creates or updates the pull request. The push runs with hooks disabled, only
+  that one refspec, a sanitized environment (`PATH`, `HOME`, `USER`, `LANG`,
+  `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, no prompts) and `--force-with-lease`
+  against the head it expects: the remote branch must be absent on the run's first
+  publication (whatever number its first attempt id ends in), or at the head the
+  previous generation's verified attempt published. A remote branch anywhere else is
+  an external conflict, never overwritten, and no pull request is created. The
+  publication is idempotent (a remote already at the revision is success without a
+  push); a timed-out push is an ambiguous effect, and the answer is to retry
+  `open_pr`. The publisher is stateless: its reconciliation reads the branch, head
+  and expected head from the recorded request. The open pull-request node records
+  `published_revision`. A new run without a configured publisher stops with a
+  missing prerequisite.
+- **Generations follow the run's own first attempt id.** A run's generations are the
+  trailing numbers of its implementation attempt ids: an explicit
+  `--implementation-attempt-id` (it must end in `-<number>`) sets the first one and
+  every repair adds one. The first publication, the review index (`--repair-attempt`
+  is the repair index, 0 for the first attempt) and the repair limit all count from
+  that first generation.
+- **Trusted-local publication is weaker.** The isolated publisher pushes from a
+  host-owned repository. A trusted-local publisher runs git against the worker's
+  own worktree, whose repository configuration the worker can write, and reads
+  `origin` from that shared configuration. Every publisher git command therefore
+  overrides hooks, fsmonitor, askpass, the `ext`/`fd` transports, the credential
+  helper list and `core.sshCommand` on the command line, restoring only what your own
+  user and system git configuration say; per-URL credential helpers and URL rewrites
+  in repository configuration cannot be neutralised that way. Use `isolated-oci` when
+  that matters.
+- **Protected paths are held for an operator decision.** Before pushing, the host
+  reads `git diff --name-only -z --no-ext-diff --no-textconv --no-renames
+  <base>..<head>` from its verified repository (renames list both paths) and matches
+  it, ignoring case and Unicode normalization form, against a protected set: by
+  default `.github/**`, other CI configuration (`.gitlab-ci.yml`, `.gitlab/**`,
+  `.circleci/**`, `.buildkite/**`, `azure-pipelines.yml`, `Jenkinsfile`, ...),
+  `CODEOWNERS` at any depth, `.enginery/**` and `holdouts/**`. `stage1 build-request
+  --protected-path GLOB` (repeatable) adds patterns bound into the request; the
+  defaults cannot be narrowed. A match puts the `open_pr` node into a human wait
+  (`awaiting_human`) with the set, the matched paths and a digest recorded, raises a
+  human-action-required error, and pushes nothing. The reason names the commands:
+  `enginery stage1 approve --database <ledger> --owner <operator> --run-id <id>
+  --node-id open_pr --reason "<why>"` publishes it on the next `stage1 watch
+  --advance` (the node is re-registered as `open-pr-approved-<n>` and records
+  `publication_approval`); `stage1 reject` with the same arguments ends it. An
+  approval applies only to the exact matched set it was recorded for. An ordinary
+  change records the empty match and publishes unheld.
 - **Validation sees the verified head.** An isolated run's validation commands run
   in the isolated runner against `<workspace>.validate`, a fresh self-contained
   checkout of the verified head made from the intake repository and removed
@@ -1030,17 +1095,31 @@ enforces the disk bound. `enginery stage1 watch` prints the reference.
 
 ## Model access through the relay
 
-An isolated worker has no route to any model. The only network it is attached
-to is `--internal`, so by default (`--model-access none`) it can run local
-tools and nothing else. `--model-access relay` binds the run to the
-model-access relay, the one path from a worker to a model.
+An isolated worker has no route to any model unless the run says so. By default
+(`--model-access none`) it runs with `--network none` and can run local tools and
+nothing else. `--model-access relay` binds the run to the model-access relay, the
+one path from a worker to a model.
 
 The relay is a separate container that you run, not part of any worker. It is
 the only thing that holds the model gateway's bearer token; a worker holds only
 the fixed placeholder credential `enginery-relay`, which the relay discards. It
-is attached to the runner's internal network, where workers reach it as
-`http://enginery-relay:8080`, and to a separate bridge network
-(`enginery-runner-egress`) that gives it, and only it, a route to the gateway.
+lives on a separate bridge network (`enginery-runner-egress`) that gives it, and
+only it, a route to the gateway, and is on no worker network while idle. For
+each attempt of a worker that was granted model access the launcher creates an
+`--internal` network of its own (`<profile network>-<24 hex of the operation
+id>`), connects the relay to it under the alias `enginery-relay` (workers reach
+it as `http://enginery-relay:8080`) after the worker container exists and has
+been checked and before it starts, verifies that the relay is the network's only
+member, and at the end disconnects the relay and removes the network. A worker
+without model access (`--model-access none`) and every validation container run
+with `--network none`: no interface but loopback, so neither can resolve or reach
+the relay while it is up. Two concurrent workers are on two different networks
+and cannot reach each other or the other's relay endpoint. A launcher that is
+killed outright leaves its network behind; the next launch (or `python -m
+enginery.adapters.oci.launcher --reconcile`) removes every attempt network whose
+launcher process is gone, disconnecting the relay first. Replacing the relay
+(`relay up --recreate`, `relay down`) while attempts are running cuts their model
+access.
 
 ```bash
 uv run enginery runner build-relay-image [--docker-context NAME]    # prints the exact relay image id
@@ -1090,12 +1169,29 @@ gateway:
 A model matches only by exact, case-sensitive prefix on an ASCII string with no
 surrounding whitespace or control characters; any other bare id,
 `google-antigravity/…` (which the broker holds but the relay denies) and every
-other provider is `403`. A request needs a `Content-Length` of at most 32 MiB
+other provider is `403`. A request needs a `Content-Length` of at most 8 MiB
 and a JSON object body with no duplicate keys, else `400`/`411`/`413`. The relay
 strips every inbound `Authorization`, `Proxy-Authorization`, `X-Api-Key` and
 cookie header and injects the gateway bearer; server-sent events are streamed
 through without buffering. It logs only method, path (without the query),
 decision and status.
+
+Load is bounded so one worker cannot starve the others. The 8 MiB request cap
+keeps every real long-context request (a full 1M-token text context is about
+4 MiB of JSON, with room for large tool results and a few screenshots) while
+bounding the memory of a buffered body; the relay buffers each POST body, so its
+memory is bounded by the cap times the number of requests in flight, and the
+limit is 4 forwarded requests at once (about 30-40 MiB each, inside the relay's
+256 MiB limit). A fifth gets `503` with `Retry-After: 2` before its body is read
+and never reaches the gateway; both harnesses retry with backoff. Connections
+beyond 32 (half the relay's 64-process limit) are answered `503` on the accept
+thread without starting a handler. `GET /healthz` is never counted against the
+in-flight limit. The relay container runs with `--restart unless-stopped`: after a
+crash or an out-of-memory kill it comes back by itself (and after the engine
+restarts), and `relay status` reports `restarting` as unhealthy so admission holds
+until it answers its health check again. Both limits can be changed with
+`RELAY_MAX_IN_FLIGHT` and `RELAY_MAX_CONNECTIONS` in the relay's environment (the
+packaged defaults above are what `relay up` runs).
 
 For a run bound to `relay`, Claude Code is started with `ANTHROPIC_BASE_URL`
 set to the relay, `ANTHROPIC_AUTH_TOKEN` set to the placeholder,
@@ -1108,15 +1204,21 @@ address is a secret.
 
 Admission applies the same check as `relay status`: a run bound to `relay` is
 *held*, never run without model access, when the relay container is absent,
-stopped, not on the internal and egress networks, not hardened as above, not
-answering its health check, or built from a different recipe
-(`runner_unqualified` or `runner_fingerprint_drift`).
+stopped or restarting, not on the egress network (or attached to any network
+that is neither the egress network nor an attempt's own), without its restart
+policy, not hardened as above, not answering its health check, or built from a
+different recipe (`runner_unqualified` or `runner_fingerprint_drift`). A run
+with `--model-access none` is not held by the relay's state at all.
 
 Limits: the relay narrows *which* models and routes a worker can use; it does
 not read prompts, cap spend, or stop a worker from using the permitted accounts'
-quota. Whoever can reach the relay's internal network can use it, and anyone who
-compromises the relay process or can inspect its container's mounts as you can
-read the bearer.
+quota. A worker with model access can use the relay for as long as its attempt
+runs (its network is the only one the relay shares with it), and a worker that
+floods it can still exhaust the relay's concurrency limit (and, with a
+structurally pathological body, its memory limit), cutting model access for other
+concurrent runs until the relay recovers; the restart policy and the admission
+hold bound that outage to the relay's restart time. Anyone who compromises the
+relay process or can inspect its container's mounts as you can read the bearer.
 
 ## Operator recovery entry point
 
@@ -1189,6 +1291,10 @@ uv run enginery-operator restore --database ledger.db --backup backup-dir [--art
   `<database>.failed-restore-<UTC time>`. A successful restore leaves the
   restored ledger **paused**: run `ledger verify`, check `status`, then
   `resume`.
+  A backup whose directory, `manifest.json` or `ledger.db` is missing or
+  unreadable, or whose manifest is not valid JSON or has a missing or
+  wrong-typed field, is refused as invalid input (exit `2`) with a message naming
+  the defect; nothing is touched.
 
 ## Auth-custody receipt
 
@@ -1216,16 +1322,21 @@ token, remove the VM copy), and the owner decision references (`--decision`,
 repeatable; default is the recorded 2026-10-13 set).
 
 For the token file it records **metadata only**: whether it exists, whether it
-is a regular file, whether it is a symlink, its mode and its size. The command
+is a regular file, whether it is a symlink, its mode, its size, and (only when
+it is not owned by you) `owned_by_invoker: false`. The command
 never opens the file, and the receipt contains neither the token nor any hash of
 it. A gateway or broker URL carrying userinfo, a query or a fragment is refused.
 
 The output is canonical JSON (sorted keys, compact separators) created
 atomically with mode `0644` — it is not secret — and an existing output is never
-replaced. The file's `sha256` equals the digest the command prints. A host that
-does not conform (a missing or non-regular token file, or on `ubuntu-lima` a
-token copy that is not `0600`) still gets a receipt, with the deviation listed
-in `findings` and `conforms: false`, and the command exits `12`.
+replaced. The file's `sha256` equals the digest the command prints. The token file
+must satisfy the relay's rules on every host: it exists, is a regular file, is not
+a symbolic link (checked with `lstat`), is owned by the invoking user and has mode
+`0600`. A host that does not conform still gets a receipt, with each deviation
+listed in `findings` and `conforms: false`, and the command exits `12`. The
+receipt's custody text is built from the gateway URL and host you pass and the
+mode actually observed; the Lima wording appears only for `ubuntu-lima` or a
+`host.lima.internal` gateway.
 
 An abridged receipt for the Lima host:
 

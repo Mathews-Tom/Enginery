@@ -20,6 +20,7 @@ from enginery.adapters.oci.relay import (
     RELAY_CONTAINER_NAME,
     RELAY_LABEL,
     RELAY_LIMITS,
+    RELAY_RESTART_POLICY,
     RELAY_SPEC_LABEL,
     RELAY_TOKEN_MOUNT,
     RelayManager,
@@ -133,7 +134,36 @@ class FakeRelayDocker:
             return _done(call)
         if args[1] == "connect":
             assert self.container is not None
-            self.container["NetworkSettings"]["Networks"][args[2]] = {}
+            rest = list(args[2:])
+            alias = None
+            if rest[0] == "--alias":
+                alias, rest = rest[1], rest[2:]
+            network, name = rest
+            if name != RELAY_CONTAINER_NAME:
+                return _done(
+                    call, 1, stderr=f"Error response from daemon: No such container: {name}"
+                )
+            self.container["NetworkSettings"]["Networks"][network] = {
+                "Aliases": [] if alias is None else [alias]
+            }
+            return _done(call)
+        if args[1] == "disconnect":
+            rest = [item for item in args[2:] if item != "--force"]
+            network, name = rest
+            if self.container is None or name != RELAY_CONTAINER_NAME:
+                return _done(
+                    call, 1, stderr=f"Error response from daemon: No such container: {name}"
+                )
+            if network not in self.container["NetworkSettings"]["Networks"]:
+                return _done(
+                    call,
+                    1,
+                    stderr=(
+                        f"Error response from daemon: container {name} is not connected "
+                        f"to network {network}"
+                    ),
+                )
+            del self.container["NetworkSettings"]["Networks"][network]
             return _done(call)
         raise AssertionError(args)
 
@@ -171,7 +201,7 @@ class FakeRelayDocker:
         container: dict[str, Any] = {
             "Name": "/" + values["--name"][0],
             "Image": image_id,
-            "State": {"Running": False},
+            "State": {"Running": False, "Restarting": False},
             "Config": {
                 "User": values["--user"][0],
                 "Labels": labels,
@@ -198,7 +228,7 @@ class FakeRelayDocker:
                 "RestartPolicy": {"Name": values["--restart"][0]},
             },
             "NetworkSettings": {
-                "Networks": {values["--network"][0]: {"Aliases": values["--network-alias"]}}
+                "Networks": {values["--network"][0]: {"Aliases": values.get("--network-alias", [])}}
             },
         }
         if self.tamper is not None:
@@ -237,16 +267,16 @@ def _up(manager: RelayManager, token: Path, **kwargs: Any) -> RelayStatus:
 # --- creation ---------------------------------------------------------------------------------
 
 
-def test_up_creates_a_hardened_dual_homed_relay_and_waits_until_it_is_healthy(
+def test_up_creates_a_hardened_relay_on_the_egress_network_and_waits_until_it_is_healthy(
     fake: FakeRelayDocker, token: Path
 ) -> None:
     status = _up(_manager(fake), token)
 
     assert status.healthy and status.running and status.present
     assert status.image_id == RELAY_IMAGE
-    assert status.networks == (EGRESS_NETWORK, INTERNAL)
+    assert status.networks == (EGRESS_NETWORK,)
     assert status.upstream == "http://host.docker.internal:47400"
-    assert fake.networks == {INTERNAL: True, EGRESS_NETWORK: False}
+    assert fake.networks == {EGRESS_NETWORK: False}
     (create,) = fake.calls_of("create")
     for pair in (
         ("--user", "65532:65532"),
@@ -256,8 +286,8 @@ def test_up_creates_a_hardened_dual_homed_relay_and_waits_until_it_is_healthy(
         ("--memory-swap", "256m"),
         ("--cpus", "1"),
         ("--pids-limit", "64"),
-        ("--network", INTERNAL),
-        ("--network-alias", "enginery-relay"),
+        ("--network", EGRESS_NETWORK),
+        ("--restart", "unless-stopped"),
         ("--name", RELAY_CONTAINER_NAME),
         ("--label", f"{RELAY_LABEL}=1"),
         ("-v", f"{token}:{RELAY_TOKEN_MOUNT}:ro"),
@@ -271,12 +301,11 @@ def test_up_creates_a_hardened_dual_homed_relay_and_waits_until_it_is_healthy(
     assert [value for flag, value in itertools.pairwise(create) if flag == "-v"] == [
         f"{token}:{RELAY_TOKEN_MOUNT}:ro"
     ]
-    assert fake.calls_of("network", "connect") == [
-        ("docker", "network", "connect", EGRESS_NETWORK, RELAY_CONTAINER_NAME)
-    ]
+    assert fake.calls_of("network", "connect") == []  # no shared worker network, no later join
     for forbidden in ("--privileged", "--pid", "--device", "--cap-add", "--publish", "-p"):
         assert forbidden not in create
-    assert fake.verbs().index("network connect") < fake.verbs().index("start enginery-relay")
+    verbs = [call[1] for call in fake.calls]
+    assert verbs.index("create") < verbs.index("start")
 
 
 def test_a_rootless_engine_runs_the_relay_as_mapped_root_so_it_can_read_the_private_token(
@@ -583,7 +612,7 @@ def test_the_relay_limits_are_the_documented_small_ones() -> None:
 
 
 def _healthy_status() -> RelayStatus:
-    return RelayStatus(True, True, True, RELAY_IMAGE, (EGRESS_NETWORK, INTERNAL), "u", "ok")
+    return RelayStatus(True, True, True, RELAY_IMAGE, (EGRESS_NETWORK,), "u", "ok")
 
 
 def _admit(
@@ -699,3 +728,205 @@ def test_plain_docker_runs_the_relay_as_the_token_owner_so_the_private_file_is_r
     (create,) = fake.calls_of("create")
     assert ("--user", f"{os.geteuid()}:{os.getegid()}") in list(itertools.pairwise(create))
     assert os.geteuid() != 0
+
+
+# --- the relay's networks: egress at rest, an attempt's own network while it runs ------------
+
+ATTEMPT_NETWORK = f"{INTERNAL}-0123456789abcdef01234567"
+
+
+def _fake_with_network(fake: FakeRelayDocker, name: str) -> None:
+    fake.networks[name] = True
+
+
+def test_up_never_creates_a_shared_worker_network(fake: FakeRelayDocker, token: Path) -> None:
+    _up(_manager(fake), token)
+
+    assert INTERNAL not in fake.networks
+    assert [call[-1] for call in fake.calls_of("network", "create")] == [EGRESS_NETWORK]
+
+
+def test_the_relay_is_created_on_the_egress_network_only_with_a_restart_policy(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    _up(_manager(fake), token)
+
+    (create,) = fake.calls_of("create")
+    pairs = list(itertools.pairwise(create))
+    assert ("--network", EGRESS_NETWORK) in pairs
+    assert ("--restart", RELAY_RESTART_POLICY) in pairs
+    assert RELAY_RESTART_POLICY == "unless-stopped"
+    assert "--network-alias" not in create
+    assert fake.container is not None
+    assert sorted(fake.container["NetworkSettings"]["Networks"]) == [EGRESS_NETWORK]
+
+
+def test_attach_connects_the_running_relay_to_an_attempt_network_under_its_alias(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    _fake_with_network(fake, ATTEMPT_NETWORK)
+
+    manager.attach(ATTEMPT_NETWORK)
+
+    assert fake.calls_of("network", "connect") == [
+        (
+            "docker",
+            "network",
+            "connect",
+            "--alias",
+            "enginery-relay",
+            ATTEMPT_NETWORK,
+            "enginery-relay",
+        )
+    ]
+    status = manager.status()
+    assert status.healthy, status.detail
+    assert status.networks == (EGRESS_NETWORK, ATTEMPT_NETWORK)
+
+
+def test_detach_disconnects_the_relay_and_leaves_it_on_the_egress_network(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    _fake_with_network(fake, ATTEMPT_NETWORK)
+    manager.attach(ATTEMPT_NETWORK)
+
+    manager.detach(ATTEMPT_NETWORK)
+    manager.detach(ATTEMPT_NETWORK)  # idempotent
+
+    assert manager.status().networks == (EGRESS_NETWORK,)
+    assert fake.calls_of("network", "disconnect")[0] == (
+        "docker",
+        "network",
+        "disconnect",
+        "--force",
+        ATTEMPT_NETWORK,
+        "enginery-relay",
+    )
+
+
+@pytest.mark.parametrize("network", [EGRESS_NETWORK, INTERNAL, "bridge", "none", "other-net"])
+def test_the_relay_is_only_ever_attached_to_an_attempt_network(
+    fake: FakeRelayDocker, token: Path, network: str
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+
+    with pytest.raises(InvalidInputError, match="attempt's own network"):
+        manager.attach(network)
+    with pytest.raises(InvalidInputError, match="attempt's own network"):
+        manager.detach(network)
+
+    assert fake.calls_of("network", "connect") == []
+    assert fake.calls_of("network", "disconnect") == []
+
+
+def test_attach_refuses_a_missing_stopped_or_restarting_relay(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    with pytest.raises(MissingPrerequisiteError, match="does not exist"):
+        manager.attach(ATTEMPT_NETWORK)
+    _up(manager, token)
+    assert fake.container is not None
+    fake.container["State"]["Running"] = False
+    with pytest.raises(MissingPrerequisiteError, match="not running"):
+        manager.attach(ATTEMPT_NETWORK)
+    fake.container["State"].update(Running=True, Restarting=True)
+    with pytest.raises(MissingPrerequisiteError, match="not running"):
+        manager.attach(ATTEMPT_NETWORK)
+
+    assert fake.calls_of("network", "connect") == []
+
+
+def test_attach_refuses_a_container_that_is_not_the_relay(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert fake.container is not None
+    del fake.container["Config"]["Labels"][RELAY_LABEL]
+
+    with pytest.raises(MissingPrerequisiteError, match="is not the relay"):
+        manager.attach(ATTEMPT_NETWORK)
+
+    assert fake.calls_of("network", "connect") == []
+
+
+@pytest.mark.parametrize("network", [INTERNAL, "bridge", "enginery-other-net"])
+def test_status_reports_a_relay_on_a_shared_or_foreign_network(
+    fake: FakeRelayDocker, token: Path, network: str
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert fake.container is not None
+    fake.container["NetworkSettings"]["Networks"][network] = {}
+
+    status = manager.status()
+
+    assert not status.healthy
+    assert network in status.detail
+    assert "neither the egress network nor an attempt's own network" in status.detail
+
+
+def test_status_does_not_require_any_internal_network(fake: FakeRelayDocker, token: Path) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+
+    status = manager.status()
+
+    assert status.healthy
+    assert status.networks == (EGRESS_NETWORK,)
+
+
+def test_status_reports_a_relay_without_its_restart_policy(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert fake.container is not None
+    fake.container["HostConfig"]["RestartPolicy"] = {"Name": "no"}
+    probes = len(fake.calls_of("exec"))
+
+    status = manager.status()
+
+    assert not status.healthy
+    assert "restart policy 'no'" in status.detail
+    assert len(fake.calls_of("exec")) == probes  # no health probe on a relay that stays down
+
+
+def test_status_reports_a_restarting_relay_as_unhealthy_without_probing_it(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert fake.container is not None
+    fake.container["State"].update(Running=True, Restarting=True)
+    probes = len(fake.calls_of("exec"))
+
+    status = manager.status()
+
+    assert (status.present, status.healthy) == (True, False)
+    assert "restarting" in status.detail
+    assert len(fake.calls_of("exec")) == probes
+
+
+def test_an_unhealthy_relay_holds_admission_until_it_answers_again(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert fake.container is not None
+    fake.container["State"].update(Running=True, Restarting=True)
+
+    decision = _admit(manager.status())
+
+    assert decision.hold is not None
+    assert decision.hold.reason is HoldReason.RUNNER_UNQUALIFIED
+    assert "restarting" in decision.hold.message
+
+    fake.container["State"].update(Running=True, Restarting=False)
+    assert _admit(manager.status()).hold is None

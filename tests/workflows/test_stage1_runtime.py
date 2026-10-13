@@ -731,8 +731,8 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     assert implementation.task.constraints[-1] == (
         "Create and work only on branch 'enginery/stage1' from "
-        f"{base_revision!r}; commit the completed change locally. You are given no remote "
-        "access and no credentials: do not push; the operator publishes the verified branch."
+        f"{base_revision!r}; commit the completed change locally and do not push: the operator "
+        "publishes the verified branch."
     )
     assert implementation.task.selection == request.execution_selection
     assert service.next_action(request.run.id).action.value == "wait"

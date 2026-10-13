@@ -16,7 +16,6 @@ from enginery.application.branch_publication import (
     PublishedBranch,
 )
 from enginery.domain.errors import ExternalConflictError
-from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
 
 HEAD_REVISION = "1" * 40
@@ -34,6 +33,9 @@ class RecordingBranchPublisher:
     requests: list[BranchPublicationRequest] = field(default_factory=list)
     remote: str | None = None
     failures_remaining: int = 0
+    changed: tuple[str, ...] = ()
+    """The paths every ``changed_paths`` call reports, whatever the revisions asked for."""
+    changed_path_requests: list[tuple[str, str]] = field(default_factory=list)
 
     def probe(self) -> AdapterStatus:
         return AdapterStatus(
@@ -47,6 +49,10 @@ class RecordingBranchPublisher:
             detail="recording branch publisher",
         )
 
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        self.changed_path_requests.append((base_revision, head_revision))
+        return self.changed
+
     def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
         self.requests.append(request)
         if self.failures_remaining > 0:
@@ -57,8 +63,7 @@ class RecordingBranchPublisher:
         self.remote = request.head_revision
         return PublishedBranch(branch=request.branch, revision=request.head_revision)
 
-    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
-        recorded = [item for item in self.requests if item.operation_id == operation_id]
-        if recorded and self.remote == recorded[-1].head_revision:
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
+        if self.remote == request.head_revision:
             return ReconciliationResult.FOUND_MATCHING
         return ReconciliationResult.NOT_FOUND

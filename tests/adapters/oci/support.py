@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import csv
 import io
+import itertools
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ from enginery.adapters.oci.launch import (
     store_arguments,
     store_names_for,
 )
+from enginery.adapters.oci.relay import RELAY_LABEL
 from enginery.domain.runner import ImageIdentity, LaunchSpec, PermissionMapping, RunnerProfile
 from enginery.engine.supervisor import HostIdentity
 
@@ -143,7 +145,16 @@ class _FakeContainer:
         self.mounts = mounts
         self.state = "created"
         self.exit_code = 0
+        self.restarting = False
         self.exited = threading.Event()
+
+
+class FakeNetwork:
+    """One network of the fake engine: whether it is internal, and its labels."""
+
+    def __init__(self, *, internal: bool, labels: Mapping[str, str]) -> None:
+        self.internal = internal
+        self.labels = dict(labels)
 
 
 _VALUE_FLAGS = frozenset(
@@ -210,7 +221,7 @@ class FakeDocker:
         self.images: dict[str, dict[str, Any]] = {
             IMAGE_ID: {"Id": IMAGE_ID, "Config": {"Env": list(IMAGE_ENV), "Labels": {}}}
         }
-        self.networks: dict[str, bool] = {}
+        self.networks: dict[str, FakeNetwork] = {}
         self.containers: dict[str, _FakeContainer] = {}
         self.calls: list[tuple[str, ...]] = []
         self.context: str | None = None
@@ -224,6 +235,9 @@ class FakeDocker:
         self.hooks: dict[str, Callable[[tuple[str, ...]], None]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self._volume_root = tempfile.TemporaryDirectory(prefix="fake-docker-volumes-")
+        self.honor_internal = True
+        """False models an engine that creates a routable network despite ``--internal``."""
+        self._lock = threading.RLock()
 
     # --- test controls ----------------------------------------------------------------
 
@@ -274,6 +288,25 @@ class FakeDocker:
                 directory = self.volume_path(volume)
                 shutil.rmtree(directory, ignore_errors=True)
                 directory.mkdir()
+
+    def add_relay(
+        self, name: str = "enginery-relay", *, running: bool = True, restarting: bool = False
+    ) -> None:
+        """Put a running relay container (as the relay manager labels it) on the engine."""
+        container = _FakeContainer(
+            {
+                "Id": "r" * 64,
+                "Name": f"/{name}",
+                "Image": IMAGE_ID,
+                "Config": {"Labels": {RELAY_LABEL: "1"}, "Env": []},
+                "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+                "NetworkSettings": {"Networks": {"enginery-runner-egress": {"NetworkID": ""}}},
+            },
+            {},
+        )
+        container.state = "running" if running else "exited"
+        container.restarting = restarting
+        self.containers[name] = container
 
     @property
     def verbs(self) -> list[str]:
@@ -405,7 +438,10 @@ class FakeDocker:
             return self._done(argv, injected[0], stderr=injected[1])
         handler = getattr(self, f"_do_{verb.replace(' ', '_')}", None)
         assert handler is not None, f"fake docker does not model {verb!r}: {args}"
-        return handler(args, argv)
+        if verb == "wait":  # blocks until the container exits, so it must not hold the lock
+            return handler(args, argv)
+        with self._lock:  # concurrent launchers share one engine and one set of volumes
+            return handler(args, argv)
 
     @staticmethod
     def _done(
@@ -438,15 +474,34 @@ class FakeDocker:
             )
         return self._done(argv, stdout=json.dumps(self.info))
 
+    def _network_document(self, name: str) -> dict[str, Any]:
+        network = self.networks[name]
+        return {
+            "Name": name,
+            "Internal": network.internal,
+            "Labels": dict(network.labels) or None,
+            "Containers": {
+                f"{index:064x}": {"Name": member}
+                for index, member in enumerate(self.network_members(name), start=1)
+            },
+        }
+
+    def network_members(self, name: str) -> list[str]:
+        """Names of the running containers the engine lists as attached to network ``name``."""
+        return sorted(
+            member
+            for member, container in self.containers.items()
+            if container.state == "running"
+            and name in container.inspect["NetworkSettings"]["Networks"]
+        )
+
     def _do_network_inspect(
         self, args: tuple[str, ...], argv: Sequence[str]
     ) -> subprocess.CompletedProcess[str]:
         name = args[2]
         if name not in self.networks:
             return self._missing(argv, "network", name)
-        return self._done(
-            argv, stdout=json.dumps([{"Name": name, "Internal": self.networks[name]}])
-        )
+        return self._done(argv, stdout=json.dumps([self._network_document(name)]))
 
     def _do_network_create(
         self, args: tuple[str, ...], argv: Sequence[str]
@@ -458,8 +513,81 @@ class FakeDocker:
                 1,
                 stderr=f"Error response from daemon: network with name {name} already exists",
             )
-        self.networks[name] = "--internal" in args
+        labels = {
+            key: value
+            for flag, item in itertools.pairwise(args)
+            if flag == "--label"
+            for key, _, value in [item.partition("=")]
+        }
+        internal = "--internal" in args and self.honor_internal
+        self.networks[name] = FakeNetwork(internal=internal, labels=labels)
         return self._done(argv, stdout="networkid\n")
+
+    def _do_network_ls(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        key = args[args.index("--filter") + 1].removeprefix("label=")
+        names = [name for name, network in self.networks.items() if key in network.labels]
+        return self._done(argv, stdout="".join(f"{name}\n" for name in names))
+
+    def _do_network_connect(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        rest = list(args[2:])
+        alias = None
+        if rest[0] == "--alias":
+            alias = rest[1]
+            rest = rest[2:]
+        network, container_name = rest
+        container = self.containers.get(container_name)
+        if container is None:
+            return self._missing(argv, "container", container_name)
+        if network not in self.networks:
+            return self._missing(argv, "network", network)
+        container.inspect["NetworkSettings"]["Networks"][network] = {
+            "Aliases": None if alias is None else [alias, container_name[:12]]
+        }
+        return self._done(argv)
+
+    def _do_network_disconnect(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        rest = [item for item in args[2:] if item != "--force"]
+        network, container_name = rest
+        container = self.containers.get(container_name)
+        if container is None:
+            return self._missing(argv, "container", container_name)
+        if network not in self.networks:
+            return self._missing(argv, "network", network)
+        if network not in container.inspect["NetworkSettings"]["Networks"]:
+            return self._done(
+                argv,
+                1,
+                stderr=(
+                    f"Error response from daemon: container {container_name} is not connected "
+                    f"to network {network}"
+                ),
+            )
+        del container.inspect["NetworkSettings"]["Networks"][network]
+        return self._done(argv)
+
+    def _do_network_rm(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        name = args[-1]
+        if name not in self.networks:
+            return self._missing(argv, "network", name)
+        if self.network_members(name):
+            return self._done(
+                argv,
+                1,
+                stderr=(
+                    f"Error response from daemon: error while removing network: network {name} "
+                    "has active endpoints"
+                ),
+            )
+        del self.networks[name]
+        return self._done(argv, stdout=f"{name}\n")
 
     def _do_image_inspect(
         self, args: tuple[str, ...], argv: Sequence[str]
@@ -482,7 +610,11 @@ class FakeDocker:
         if container is None:
             return self._missing(argv, "container", args[2])
         document = copy.deepcopy(container.inspect)
-        document["State"] = {"Status": container.state}
+        document["State"] = {
+            "Status": container.state,
+            "Running": container.state == "running",
+            "Restarting": container.restarting,
+        }
         if self.tamper is not None:
             self.tamper(document)
         return self._done(argv, stdout=json.dumps([document]))

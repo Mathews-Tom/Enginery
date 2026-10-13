@@ -33,7 +33,16 @@ HEALTHY = RelayStatus(True, True, True, RELAY_IMAGE, ("egress", "internal"), "ht
 
 
 def _isolated(tmp_path: Path, *extra: str) -> tuple[list[str], Path]:
-    return _build_argv(tmp_path, "--runner", "isolated-oci", "--runner-image", IMAGE_ID, *extra)
+    return _build_argv(
+        tmp_path,
+        "--runner",
+        "isolated-oci",
+        "--runner-image",
+        IMAGE_ID,
+        "--validation-command",
+        "python3 -m compileall -q .",
+        *extra,
+    )
 
 
 # --- build-request --model-access ---------------------------------------------------------

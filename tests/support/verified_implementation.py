@@ -70,6 +70,7 @@ def verified_head(
     )
     git("checkout", "-q", "-b", head_branch, cwd=workspace_path)
     for name, content in committed.items():
+        (workspace_path / name).parent.mkdir(parents=True, exist_ok=True)
         (workspace_path / name).write_text(content, encoding="utf-8")
         git("add", name, cwd=workspace_path)
     git("commit", "-q", "-m", "implement", cwd=workspace_path)

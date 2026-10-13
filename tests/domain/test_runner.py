@@ -47,8 +47,8 @@ def _effective(profile: RunnerProfile = PROFILE) -> EffectiveContainer:
         memory_swap_bytes=limits.memory_bytes,
         nano_cpus=limits.nano_cpus,
         pids_limit=limits.pids,
-        network_mode=profile.network,
-        networks=(profile.network,),
+        network_mode="none",
+        networks=("none",),
         mounts=(
             ("volume", WORKSPACE_MOUNT, True),
             ("volume", OUT_MOUNT, True),
@@ -61,7 +61,7 @@ def _effective(profile: RunnerProfile = PROFILE) -> EffectiveContainer:
 
 
 def test_a_container_that_matches_the_profile_has_no_violations() -> None:
-    assert profile_violations(PROFILE, _effective()) == ()
+    assert profile_violations(PROFILE, _effective(), network="none") == ()
 
 
 _BASE = _effective()
@@ -88,7 +88,7 @@ _MOUNTS = _BASE.mounts
         ({"pids_limit": _BASE.pids_limit + 1}, "pids"),
         ({"network_mode": "bridge", "networks": ("bridge",)}, "network"),
         ({"network_mode": "host", "networks": ("host",)}, "network"),
-        ({"networks": (PROFILE.network, "bridge")}, "network"),
+        ({"networks": ("none", "bridge")}, "network"),
         ({"networks": ()}, "network"),
         ({"devices": ("/dev/kvm",)}, "devices"),
         (
@@ -119,7 +119,7 @@ _MOUNTS = _BASE.mounts
     ],
 )
 def test_every_weakened_property_is_reported_by_name(change: dict[str, Any], expected: str) -> None:
-    violations = profile_violations(PROFILE, replace(_effective(), **change))
+    violations = profile_violations(PROFILE, replace(_effective(), **change), network="none")
 
     assert violations
     assert any(expected in violation for violation in violations), violations
@@ -128,14 +128,14 @@ def test_every_weakened_property_is_reported_by_name(change: dict[str, Any], exp
 def test_image_injected_environment_keys_are_not_violations() -> None:
     effective = replace(_effective(), env_keys=("HOME", "HOSTNAME", "NODE_VERSION"))
 
-    assert profile_violations(PROFILE, effective) == ()
+    assert profile_violations(PROFILE, effective, network="none") == ()
 
 
 def test_a_profile_with_non_default_limits_is_checked_against_its_own_limits() -> None:
     profile = RunnerProfile(resources=ResourceLimits(memory_mib=1024, cpus=1.0, pids=64))
 
-    assert profile_violations(profile, _effective(profile)) == ()
-    assert profile_violations(profile, _effective(PROFILE))
+    assert profile_violations(profile, _effective(profile), network="none") == ()
+    assert profile_violations(profile, _effective(PROFILE), network="none")
 
 
 @pytest.mark.parametrize(

@@ -276,7 +276,7 @@ def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
             "--run-id",
             long_run_id,
             "--implementation-attempt-id",
-            "short-attempt",
+            "short-attempt-0",
             output=output,
         )
     )
@@ -299,7 +299,7 @@ def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
             "--run-id",
             long_run_id,
             "--implementation-attempt-id",
-            "short-attempt",
+            "short-attempt-0",
             "--repair-limit",
             "0",
             output=output,

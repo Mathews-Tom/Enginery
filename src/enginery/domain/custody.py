@@ -44,6 +44,7 @@ _MAX_DECISION_CHARS = 200
 _MAX_TEXT_CHARS = 1024
 _MODE_PATTERN = re.compile(r"^[0-7]{4}$")
 _OWNER_ONLY_MODE = "0600"
+_LIMA_GATEWAY_HOST = "host.lima.internal"
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
@@ -103,6 +104,7 @@ class TokenFileMetadata:
     symlink: bool
     mode: str | None
     size_bytes: int | None
+    owned_by_invoker: bool = True
 
     def __post_init__(self) -> None:
         _require_text(self.path, "token file path")
@@ -120,7 +122,7 @@ class TokenFileMetadata:
         return self.mode == _OWNER_ONLY_MODE
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "path": self.path,
             "exists": self.exists,
             "regular_file": self.regular_file,
@@ -128,17 +130,27 @@ class TokenFileMetadata:
             "mode": self.mode,
             "size_bytes": self.size_bytes,
         }
+        if not self.owned_by_invoker:
+            state["owned_by_invoker"] = False
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> TokenFileMetadata:
         data = _mapping(state, "token file")
-        _exact_keys(data, ("path", "exists", "regular_file", "symlink", "mode", "size_bytes"))
+        _allowed_keys(
+            data,
+            required=("path", "exists", "regular_file", "symlink", "mode", "size_bytes"),
+            optional=("owned_by_invoker",),
+        )
         mode = data["mode"]
         size = data["size_bytes"]
         if mode is not None and not isinstance(mode, str):
             raise InvalidInputError("token file mode must be null or text")
         if size is not None and (not isinstance(size, int) or isinstance(size, bool)):
             raise InvalidInputError("token file size must be null or an integer")
+        owned = data.get("owned_by_invoker", True)
+        if not isinstance(owned, bool):
+            raise InvalidInputError("token file owned_by_invoker must be a boolean")
         return cls(
             path=_text(data, "path", "token file"),
             exists=_boolean(data, "exists", "token file"),
@@ -146,6 +158,7 @@ class TokenFileMetadata:
             symlink=_boolean(data, "symlink", "token file"),
             mode=mode,
             size_bytes=size,
+            owned_by_invoker=owned,
         )
 
 
@@ -287,10 +300,11 @@ def build_custody_receipt(
 ) -> AuthCustodyReceipt:
     """Build one host's custody receipt from endpoints, token-file metadata and decisions.
 
-    ``decisions`` default to :data:`DEFAULT_DECISIONS`. A token file that is missing or not a
-    regular file is a finding on every host; on ``ubuntu-lima`` the VM's own token copy must
-    additionally be owner-only (mode 0600). The receipt records findings rather than hiding
-    them, so a non-conforming host yields a receipt that says so.
+    ``decisions`` default to :data:`DEFAULT_DECISIONS`. The token file must satisfy the relay's
+    rules on every host: it exists, is a regular file (not a symlink), is owned by the invoking
+    user and has mode 0600. The receipt records findings rather than hiding them, so a
+    non-conforming host yields a receipt that says so. The custody text is built from the actual
+    gateway endpoint and host.
     """
     if created_at.tzinfo is None:
         raise InvalidInputError("custody receipt time must be timezone-aware")
@@ -305,11 +319,13 @@ def build_custody_receipt(
         "workers hold only the dummy credential and can reach models only through the relay",
         "no worker, image, or run request carries a provider credential or refresh token",
     )
+    observed_mode = token_file.mode or "absent"
     if host is CustodyHost.MACOS:
         location = "macos-host"
         custody = (
-            "the gateway and the auth broker run on the macOS host, which holds every provider "
-            f"grant; the gateway token file is {path} on the macOS host"
+            f"the gateway at {gateway.url} and the auth broker at {broker.url} run on the macOS "
+            "host, which holds every provider grant; the gateway token file is "
+            f"{path} on the macOS host (observed mode {observed_mode}, required 0600)"
         )
         revocation = (
             "omp auth-gateway token --regenerate (invalidates every copy of the bearer)",
@@ -320,11 +336,12 @@ def build_custody_receipt(
             "regenerate the gateway token: omp auth-gateway token --regenerate",
             f"delete the token file at {path} on the macOS host if it is no longer needed",
         )
-    else:
+    elif gateway.host == _LIMA_GATEWAY_HOST or host is CustodyHost.UBUNTU_LIMA:
         location = "remote-through-macos-gateway"
         custody = (
-            "custody stays on the macOS host: the VM reaches the macOS gateway through "
-            f"host.lima.internal and holds only a token copy at {path} (mode 0600)"
+            "custody stays on the macOS host: the VM reaches the macOS gateway at "
+            f"{gateway.url} (host {gateway.host}) and holds only a token copy at {path} "
+            f"(observed mode {observed_mode}, required 0600)"
         )
         revocation = (
             "on the macOS host: omp auth-gateway token --regenerate (invalidates the VM's copy)",
@@ -334,6 +351,23 @@ def build_custody_receipt(
             "stop the relay in the VM: enginery runner relay down",
             "regenerate the gateway token on the macOS host: omp auth-gateway token --regenerate",
             f"remove the VM token copy at {path}",
+        )
+    else:
+        location = f"gateway-{gateway.host}"
+        custody = (
+            f"the gateway at {gateway.url} (host {gateway.host}) holds the provider grants; "
+            f"this host holds only a token copy at {path} "
+            f"(observed mode {observed_mode}, required 0600)"
+        )
+        revocation = (
+            f"on the gateway host {gateway.host}: omp auth-gateway token --regenerate "
+            "(invalidates this host's copy)",
+            "restart that gateway so it only accepts the regenerated token",
+        )
+        cleanup = (
+            "stop the relay: enginery runner relay down",
+            f"regenerate the gateway token on {gateway.host}: omp auth-gateway token --regenerate",
+            f"remove the token copy at {path}",
         )
     return AuthCustodyReceipt(
         host=host,
@@ -353,20 +387,24 @@ def build_custody_receipt(
         revocation=revocation,
         cleanup=cleanup,
         decisions=recorded,
-        findings=_findings(host, token_file),
+        findings=_findings(token_file),
     )
 
 
-def _findings(host: CustodyHost, token_file: TokenFileMetadata) -> tuple[str, ...]:
+def _findings(token_file: TokenFileMetadata) -> tuple[str, ...]:
+    """Apply the relay's token-file rules (exists, regular, no symlink, owner, 0600) on any host."""
     if not token_file.exists:
         return (f"the gateway token file {token_file.path} does not exist",)
+    path = token_file.path
     findings: list[str] = []
+    if token_file.symlink:
+        findings.append(f"the gateway token file {path} is a symbolic link; name the file itself")
     if not token_file.regular_file:
-        findings.append(f"the gateway token file {token_file.path} is not a regular file")
-    if host is CustodyHost.UBUNTU_LIMA and not token_file.owner_only:
-        findings.append(
-            f"the VM token copy {token_file.path} has mode {token_file.mode}, expected 0600"
-        )
+        findings.append(f"the gateway token file {path} is not a regular file")
+    if not token_file.owned_by_invoker:
+        findings.append(f"the gateway token file {path} is not owned by the invoking user")
+    if not token_file.owner_only:
+        findings.append(f"the gateway token file {path} has mode {token_file.mode}, expected 0600")
     return tuple(findings)
 
 
@@ -413,6 +451,14 @@ def _texts(state: Mapping[str, object], key: str, name: str) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise InvalidInputError(f"{name} {key} must be a list of text")
     return tuple(value)
+
+
+def _allowed_keys(
+    data: Mapping[str, object], *, required: tuple[str, ...], optional: tuple[str, ...]
+) -> None:
+    keys = set(data)
+    if not set(required) <= keys or not keys <= set(required) | set(optional):
+        raise InvalidInputError("custody receipt fields are not the expected set")
 
 
 __all__ = [

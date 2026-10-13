@@ -2,10 +2,11 @@
 
 The relay is the operator-owned container that holds the model gateway bearer so that a worker
 never does. ``build-relay-image`` builds its pinned image from the packaged recipe and prints the
-exact image id; ``relay up`` runs it, attached to the runner's internal network and to an egress
-network, with the operator's token file mounted read-only. ``relay status`` is the same health
-check admission applies to a run that asked for model access. None of these commands reads the
-token file's content or runs a worker.
+exact image id; ``relay up`` runs it on the egress network only (it restarts after a crash), with
+the operator's token file mounted read-only. The launcher connects it to a worker's own
+per-attempt network for the length of that attempt. ``relay status`` is the same health check
+admission applies to a run that asked for model access. None of these commands reads the token
+file's content or runs a worker.
 """
 
 from __future__ import annotations

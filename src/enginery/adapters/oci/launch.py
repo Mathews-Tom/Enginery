@@ -367,7 +367,8 @@ def create_arguments(
     Excludes the ``docker`` executable and ``--context``. The environment is exactly
     ``spec.env``, re-checked here against the profile allowlist; nothing is inherited. When
     ``launcher`` is given, the container is labelled with that process so a later reconcile can
-    tell a live attempt from one whose launcher died.
+    tell a live attempt from one whose launcher died. The container joins exactly
+    ``spec.attempt_network`` (its own internal network, or ``none``), never a shared one.
     """
     expected_name = container_name_for(spec.operation_id)
     if spec.container_name != expected_name:
@@ -384,7 +385,7 @@ def create_arguments(
     )
     return (
         "create",
-        *hardening_arguments(spec.profile, network=spec.profile.network),
+        *hardening_arguments(spec.profile, network=spec.attempt_network),
         "--mount",
         _joining_mount(names.workspace_volume, WORKSPACE_MOUNT),
         "--mount",
@@ -685,6 +686,7 @@ def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tupl
         ("DeviceCgroupRules", "device cgroup rules"),
         ("PortBindings", "published ports"),
         ("Sysctls", "sysctls"),
+        ("ExtraHosts", "extra host entries"),
     ):
         if host.get(key):
             problems.append(f"container has {label}")

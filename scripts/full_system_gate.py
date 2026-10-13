@@ -222,10 +222,13 @@ class _FixturePublisher:
     def probe(self) -> object:
         raise AssertionError("not used by this gate")
 
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        return ()
+
     def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
         return PublishedBranch(branch=request.branch, revision=request.head_revision)
 
-    def reconcile(self, *, operation_id: OperationId) -> ReconciliationResult:
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
         return ReconciliationResult.FOUND_MATCHING
 
 

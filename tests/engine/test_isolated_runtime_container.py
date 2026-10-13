@@ -177,7 +177,8 @@ def test_a_container_commits_on_a_branch_and_the_host_verifies_and_cleans_it(
         assert receipt.container_name == container
         assert receipt.image.image_id == image_id
         assert receipt.profile_digest == profile.digest
-        assert profile_violations(profile, receipt.effective) == ()
+        assert profile_violations(profile, receipt.effective, network="none") == ()
+        assert receipt.effective.networks == ("none",)
         # The worker's own result and its bundle are in the out directory, not the workspace.
         result = json.loads((out_path_for(workspace) / "result.json").read_text(encoding="utf-8"))
         assert result["terminal_status"] == "succeeded"

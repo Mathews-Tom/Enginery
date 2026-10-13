@@ -72,8 +72,9 @@ def test_macos_receipt_records_scope_custody_exposure_and_decisions() -> None:
 
 
 def test_lima_receipt_records_remote_custody_and_requires_an_owner_only_copy() -> None:
-    conforming = _receipt(CustodyHost.UBUNTU_LIMA).to_state()
-    loose = _receipt(CustodyHost.UBUNTU_LIMA, _token(mode="0644"))
+    lima_gateway = "http://host.lima.internal:7011"
+    conforming = _receipt(CustodyHost.UBUNTU_LIMA, gateway_url=lima_gateway).to_state()
+    loose = _receipt(CustodyHost.UBUNTU_LIMA, _token(mode="0644"), gateway_url=lima_gateway)
 
     custody = conforming["custody"]
     assert isinstance(custody, dict)
@@ -85,11 +86,42 @@ def test_lima_receipt_records_remote_custody_and_requires_an_owner_only_copy() -
     assert loose.to_state()["conforms"] is False
 
 
-def test_macos_does_not_require_owner_only_but_a_missing_token_file_is_a_finding() -> None:
-    assert _receipt(CustodyHost.MACOS, _token(mode="0644")).conforms
-    missing = _receipt(CustodyHost.MACOS, _token(mode=None))
-    assert not missing.conforms
-    assert "does not exist" in missing.findings[0]
+def test_every_host_applies_the_relay_token_file_rules() -> None:
+    for host in CustodyHost:
+        assert not _receipt(host, _token(mode="0644")).conforms
+        assert "expected 0600" in _receipt(host, _token(mode="0644")).findings[0]
+        missing = _receipt(host, _token(mode=None))
+        assert not missing.conforms
+        assert "does not exist" in missing.findings[0]
+        link = TokenFileMetadata("/t", True, False, True, "0600", 1)
+        assert any("symbolic link" in f for f in _receipt(host, link).findings)
+        directory = TokenFileMetadata("/t", True, False, False, "0600", 1)
+        assert any("not a regular file" in f for f in _receipt(host, directory).findings)
+        foreign = TokenFileMetadata("/t", True, True, False, "0600", 1, owned_by_invoker=False)
+        assert any("not owned by the invoking user" in f for f in _receipt(host, foreign).findings)
+
+
+def test_owner_flag_is_omitted_when_default_and_round_trips_when_false() -> None:
+    assert "owned_by_invoker" not in _token().to_state()
+    foreign = TokenFileMetadata("/t", True, True, False, "0600", 1, owned_by_invoker=False)
+    receipt = _receipt(token=foreign)
+    decoded = AuthCustodyReceipt.from_state(json.loads(json.dumps(receipt.to_state())))
+    assert decoded.token_file.owned_by_invoker is False
+    assert decoded == receipt
+
+
+def test_custody_text_is_built_from_the_actual_gateway_and_mode() -> None:
+    macos = _receipt(CustodyHost.MACOS, _token(mode="0640"))
+    assert "http://127.0.0.1:7011" in macos.custody
+    assert "observed mode 0640" in macos.custody
+    assert "lima" not in macos.custody.lower()
+
+    other = _receipt(CustodyHost.UBUNTU_LIMA, gateway_url="http://gateway.example:9000")
+    assert other.custody_location == "remote-through-macos-gateway"
+    assert "http://gateway.example:9000" in other.custody
+
+    lima = _receipt(CustodyHost.UBUNTU_LIMA, gateway_url="http://host.lima.internal:7011")
+    assert "host.lima.internal" in lima.custody
 
 
 def test_receipt_carries_only_token_file_metadata() -> None:

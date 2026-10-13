@@ -288,6 +288,8 @@ def _build_argv(
             str(tmp_path / "workspace"),
             "--artifact-root",
             str(tmp_path / "artifacts"),
+            "--validation-command",
+            "python3 -m unittest",
         ],
         output,
     )
