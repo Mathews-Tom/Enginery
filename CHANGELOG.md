@@ -4,6 +4,46 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.6.0] - 2026-10-13
+
+Sixth release. `v0.6.0` makes the merged substrate-contract, execution-selection, and queue-liveness work available to consumers. It adds no workflow stage.
+
+### Added
+
+- A typed, closed check contract binds declared checks to `run_command` and `verify_evidence` workflow nodes (stable dotted check id, bound subject, an argv command contract or a named observer, and a stop or repair disposition per non-pass result). Stage 1's manifest is now `schema_version` 2 and binds `stage1.validate` and `stage1.verify`.
+- A packaged, frozen acceptance baseline v1 (`acceptance-baseline-v1.toml`) with a loader that verifies its registered SHA-256 digest before parsing. A new Stage 1 run must bind checks identical to the baseline's declarations.
+- A shell guard for Stage 1 validation commands: a command that launches a shell interpreter, directly or through a known launcher wrapper (`env`, `nice`, `timeout`, `sudo`, `uv run`, `npx`, and others), is rejected at `stage1 start`. It is an input guard, not a sandbox.
+- Execution selection: a run's requested harness, model, and native effort are recorded with the layer that supplied each, resolved by a fixed precedence, and bound to a digest-frozen execution catalog (`execution-catalog-v1.toml`). Both supported hosts, OMP and Claude Code, are `experimental` in the catalog; this release claims no host qualification.
+- `enginery stage1 build-request` gains `--model`, `--effort`, and `--strict-effective`. Aliases, bare OMP models, effort levels outside the host vocabulary, and a strict requirement with nothing pinned (or with `--effort`) are rejected with exit code 2 before any file is written.
+- Native controls: the OMP adapter submits `--model` and `--thinking`; the Claude Code adapter submits `--model` and `--effort`. A task is rejected before launch on a wrong pin form, an out-of-vocabulary effort, a selection for another harness or catalog, or an installed host that differs from the tested version and protocol fingerprint.
+- Execution receipts: `enginery stage1 watch` and `enginery stage1 evidence` print an `execution` block that keeps requested, selected, submitted, and effective controls apart, with the support tier, catalog identity, tested host fingerprint, and holds. Effective effort is reported as unknown on both hosts; a requested value is never presented as an effective one.
+- Queued Stage 1 implementation work is redispatched: `stage1 watch --advance` handles a new `dispatch_queued` action that dispatches a durably queued node exactly once when capacity frees, or records why it stayed queued (`global_capacity`, `repository_capacity`, `dependencies`, `dependency_failed`, `capacity_reserved_for_other_run`). Capacity is granted oldest-queued first from a durable queue time.
+- Worker liveness and identity: persisted worker identity binds the stable machine and boot identifiers, so a dead worker, a reused pid, a reboot, a live worker whose coordinator lapsed, a foreign host, and an unverifiable record are told apart. `stage1 watch` reports `lease_epoch_active` and the identity evidence for running nodes.
+- `docs/operations.md` documents queued work, wakeups, worker recovery, and the execution block; `scripts/fault_inject_workers.py` gains real-execution lifecycle scenarios for queued redispatch, restart, stale coordinators, cancellation, foreign hosts, killed workers, and reboots.
+
+### Changed
+
+- Public documentation is reconciled with the shipped product: `v0.5.0` is stated as published, the proposed factory command family is labelled proposed and not shipped (the CLI has no `enginery factory` command), and merge authority is described as the shipped policy rather than an unconditional claim.
+- A new `stage1 build-request` defaults the implementation attempt id to `<run-id>-implement-0` and repair attempts to `<run-id>-implement-N`, so a second run on a shared ledger no longer fails its lease. An explicit `--implementation-attempt-id` is honored and persisted runs keep their ids; a run id too long to carry the derived ids exits 2.
+- Cancelling a running worker is fenced by the active coordinator epoch rather than by the epoch that issued its lease, so it works after a coordinator restart. Cancel is retryable from a recorded termination request, termination waits for the whole process group with bounded SIGTERM then SIGKILL escalation, and an operator's cancel wins over a late result.
+- A worker proven dead (same host and boot, start identity absent, no result) is failed on the next advance with its identity evidence and frees its slot. A reused pid or a reboot is reconciled and never signalled; a different machine or an unreadable identity holds and keeps its slot.
+- Launched workers no longer inherit the coordinator's stdin, stdout, or stderr, so `stage1 watch --advance | reader` returns when the command does; worker stderr goes to a private per-attempt log under the artifact root.
+- Worker start identity is read under a fixed time zone and locale so launching, watching, and cancelling from shells with different `TZ` or `LANG` agree.
+- A run whose bound execution catalog digest or installed host fingerprint no longer matches is held with a diagnostic, every service action is refused, and the original binding is retained.
+
+### Breaking
+
+- Requests written by `v0.5.0`'s `enginery stage1 build-request` (manifest schema 1) are rejected by `enginery stage1 start`. Rebuild them with the current `enginery stage1 build-request`. A run already started from such a request is read and resumed unchanged; persisted schema 1 manifests keep their content digest.
+- `ClaudeCodeAdapterConfig.model` is removed. The model and effort a run requests come only from the per-task execution selection; when it names none, no flag is passed and Claude Code resolves its own default.
+- The request state of a new Stage 1 run includes its execution selection, so a rebuilt request has a different digest from one built for the same inputs by `v0.5.0`. Requests persisted before this change keep their exact digest and decode as a bare host default.
+- `enginery stage1 start` rejects a new run whose request validation commands launch a shell interpreter.
+
+### Not part of this release
+
+- No isolated runner, live two-host qualification, or factory command is part of this release. Both agent hosts remain `experimental`, trusted-local execution is not containment, and no hosted or multi-tenant claim is made.
+- Gate G4 and Stage 4 are unchanged: `enginery gate status --gate G4` remains fail-closed, no G4 passage is recorded, and Stage 4 has no committed date. The frozen acceptance baseline v1 is unchanged by this release.
+- No dependency changes since `v0.5.0`.
+
 ## [0.5.0] - 2026-08-11
 
 Fifth public release. `v0.5.0` makes M24's measurable, fail-closed G4 evidence surface available to consumers. It adds no workflow stage.

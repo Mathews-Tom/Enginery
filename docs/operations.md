@@ -7,7 +7,7 @@ running real workflows.
 
 Every command shown here is copied from `--help` output or a real, executed
 invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.5.0`. The Stage 1
+[`README.md`](../README.md#status). Enginery is `v0.6.0`, a release candidate. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `stage2 status` remains the only Stage 2 CLI command (a
@@ -23,9 +23,11 @@ gate-deferred — see
 
 ## Installation
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are published to PyPI
-and GitHub Releases; `v0.5.0` (2026-08-11) is the current release. Install
-the published package with:
+The published releases are `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0`
+(the latest, 2026-08-11) on PyPI and GitHub Releases. `v0.6.0` is the current
+release candidate and is not yet published; until it is, `pip install enginery`
+installs `v0.5.0`, so run the release candidate from a source checkout. Install
+the latest published package with:
 
 ```bash
 pip install enginery
@@ -55,7 +57,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.5.0 installed
+[ok] package_metadata: enginery 0.6.0 installed
 ```
 
 `enginery doctor --json` emits the same report as a machine-readable
@@ -801,14 +803,17 @@ implemented.
 
 ## Release scope and gate-deferred work
 
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` are all published
-(`v0.5.0` on 2026-08-11 to PyPI and GitHub Releases). Together they
+The published releases are `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0`
+(`v0.5.0` on 2026-08-11 to PyPI and GitHub Releases); `v0.6.0` is the current
+release candidate and is not yet published. Together the published releases
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
 capture pipeline. `v0.4.0` adds gate, request-builder, workspace, and adapter
 diagnostic commands and `v0.5.0` adds measurable G4 evidence, source
-classification, and authority verification; neither adds a workflow stage.
+classification, and authority verification; the `v0.6.0` release candidate adds
+reconciled public contracts, per-run execution selection with receipts, and
+queued-work and worker-liveness recovery; none of them adds a workflow stage.
 Stage 4 (governed factory self-improvement) is the only remaining stage;
 it is a separate, unversioned, gate-deferred train with its own milestones,
 gate, and operator documentation once it starts. In particular:
