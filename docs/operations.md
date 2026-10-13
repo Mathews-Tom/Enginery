@@ -143,7 +143,7 @@ script against a command that is not listed above.
 | `enginery ledger restore --backup PATH --database PATH [--artifacts PATH]` | Restore a ledger from a backup directory. |
 | `enginery ledger rebuild-projections --database PATH` | Rebuild ledger projections from stored events. |
 | `enginery policy explain REQUEST [--json]` | Explain a policy decision for a request document without authorizing it. |
-| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus compose a `--request` document from flags (below). |
+| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus build a `--request` document from a GitHub issue (below). |
 | `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
 | `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report fail-closed G4 readiness from classified completed runs and recorded authority evidence. |
@@ -303,10 +303,9 @@ flowchart LR
 ### Composing a request
 
 `stage1 start --request` needs a JSON document decodable by
-`stage1_request_from_state`. `enginery stage1 build-request` writes one
-from flags instead of hand-writing the Python composition
-[`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness)
-documents:
+`stage1_request_from_state`. `enginery stage1 build-request` writes one for a
+GitHub issue, instead of the hand-written Python composition in
+[`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness):
 
 ```bash
 uv run enginery stage1 build-request \

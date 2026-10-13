@@ -156,7 +156,8 @@ if len(parts) in (5, 6) and parts[0] == "repos" and parts[3] == "issues" and par
         )
         raise SystemExit(0)
     if parts[5] == "labels":
-        labels = ["enginery/work-kind/issue", "enginery/risk/low"] if "page=1" in query else []
+        page = int(dict(pair.split("=") for pair in query.split("&") if pair).get("page", "1"))
+        labels = ["enginery/work-kind/issue", "enginery/risk/low"] if page == 1 else []
         print(json.dumps([{"name": name} for name in labels]))
         raise SystemExit(0)
 sys.stderr.write("HTTP 404: Not Found\\n")

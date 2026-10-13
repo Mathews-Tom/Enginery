@@ -33,20 +33,28 @@ full lifecycle's shape without touching any external credential.
 ## Example B: real GitHub issue with an OMP or Claude Code harness
 
 This is what actually running a real issue through Stage 1 looks like end
-to end. It reuses the same request-building pattern
-[`docs/migration-sage-dev.md`](migration-sage-dev.md#step-3-build-one-enginery-request-per-active-ticket)
-uses for a migrated ticket, adapted for a fresh GitHub issue instead:
+to end. Label the issue with exactly one `enginery/work-kind/issue` (or
+`plan`) label and one `enginery/risk/low` (or `medium`) label, then build the
+request from it:
 
-**Preferred:** `enginery stage1 build-request` composes this document by
-reading the issue itself (the work item, source revision, and declared
-`enginery/work-kind/*` and `enginery/risk/*` classification come from the
-GitHub adapter, not from flags) — see
-[`docs/operations.md`](operations.md#composing-a-request). The manual
-Python composition below is kept for readers who want to see the exact
-domain objects a request is built from. It types the work item by hand, so
-the snapshot it binds carries no declared classification and is not what
-`stage1 watch --advance` re-reads from a labelled GitHub issue; use
-`build-request` for a run that must qualify.
+```bash
+uv run enginery stage1 build-request --output request.json --run-id issue-142 \
+  --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
+  --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
+  --workspace-path <absolute path to a fresh workspace directory> \
+  --artifact-root <absolute path to an artifact directory>
+```
+
+`build-request` reads the issue through the GitHub adapter (the work item,
+source revision, and declared `enginery/work-kind/*` and `enginery/risk/*`
+classification come from the issue, not from flags) — see
+[`docs/operations.md`](operations.md#composing-a-request). The Python script
+below is for inspection only: it shows the exact domain objects a request is
+made of. It types the work item by hand, so the snapshot it binds carries no
+declared classification and is not what `stage1 watch --advance` re-reads from
+a labelled GitHub issue; a request it writes does not qualify. It is the
+shape [`docs/migration-sage-dev.md`](migration-sage-dev.md#step-3-build-one-enginery-request-per-active-ticket)
+adapts for a migrated ticket.
 
 ```python
 # build_request.py
@@ -150,6 +158,8 @@ request = Stage1RunRequest(
 
 Path("request.json").write_text(json.dumps(request.initial_state(), indent=2), encoding="utf-8")
 ```
+
+The commands below start from the `request.json` that `build-request` wrote:
 
 ```bash
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json

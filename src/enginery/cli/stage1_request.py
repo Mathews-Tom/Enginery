@@ -1,32 +1,25 @@
 """``enginery stage1 build-request``: compose a valid ``--request`` document.
 
-Before this command, composing a `Stage1RunRequest` meant hand-writing the
-Python script `docs/examples.md` still documents (`build_request.py`):
-construct `WorkItem`, `Run`, and `Stage1RunRequest` directly against the
-library, then serialize `request.initial_state()` to JSON. This command
-performs the same, real construction the CLI's own `stage1 start` already
-decodes (`enginery.workflows.stage1.stage1_request_from_state`), driven by
-flags instead of a one-off script, and writes the identical JSON shape.
-
-What the source decides is not operator input. The work item, its source
+The command builds the same `Stage1RunRequest` that `stage1 start` decodes
+(`enginery.workflows.stage1.stage1_request_from_state`) and writes the identical
+JSON shape. The source issue is read, not typed: the work item, its source
 revision, and its declared classification (the canonical `enginery/work-kind/*`
-and `enginery/risk/*` labels) are read through the same GitHub adapter that
+and `enginery/risk/*` labels) come through the same GitHub adapter that
 `stage1 watch --advance` uses to qualify the run, and are bound exactly as the
 adapter returns them, so the request carries the digest qualification
 recomputes from the labelled issue. An issue whose labels are missing,
 ambiguous, or outside the declared vocabulary is refused with the adapter's own
 error and nothing is written.
 
-Every default mirrors `docs/examples.md`'s Example B script exactly
-(`policy-v1`, `("uv", "run", "pytest", "-q")`, `time_budget_seconds=1800`,
+Flags only choose how the run is executed. Their defaults are
+`policy-v1`, `("uv", "run", "pytest", "-q")`, `time_budget_seconds=1800`,
 `cost_budget=5.0`, `permitted_capabilities=("git",)`,
 `evidence_requirements=("redacted harness transcript",)`,
 `required_checks=("CI",)`, `repair_limit=1`, `operator-gh-cli` /
 `operator-harness-session` credential references, and the
 `no-capabilities-locked` / `local-environment` / `local-configuration`
 digest sentinels for a run with no bound capability lock, environment
-manifest, or configuration snapshot) so a guided invocation reproduces
-today's documented manual procedure without retyping it.
+manifest, or configuration snapshot.
 """
 
 from __future__ import annotations
@@ -70,7 +63,7 @@ def add_build_request_parser(
     """Register ``stage1 build-request``'s flags on the shared ``stage1`` subparsers."""
     parser = stage1_subparsers.add_parser(
         "build-request",
-        help="Write a Stage 1 --request document from flags instead of a hand-written script.",
+        help="Write a Stage 1 --request document for one GitHub issue.",
     )
     parser.add_argument(
         "--output", required=True, type=Path, help="Path to write the request JSON."
@@ -228,7 +221,9 @@ def _harness_executable(args: argparse.Namespace, harness: str) -> str:
 
 
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
-    """Construct one durable Stage 1 request from ``build-request`` flags."""
+    """Construct one durable Stage 1 request for the GitHub issue named by
+    ``--external-reference``.
+    """
     run_id = args.run_id
     if args.repair_limit > 0:
         # Repair attempt ids are always derived from the run id, whatever the first attempt's
@@ -276,9 +271,18 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     )
     snapshot = GitHubWorkLedger(github).fetch(args.external_reference)
     work_item = snapshot.work_item
+    criteria_count = len(work_item.acceptance_criteria)
+    unknown = sorted(
+        {index for index in args.inapplicable_criteria if not 0 <= index < criteria_count}
+    )
+    if unknown:
+        raise InvalidInputError(
+            f"--inapplicable-criterion {unknown} is outside the issue's {criteria_count} "
+            "acceptance criteria (0-based)",
+            details={"criteria": criteria_count},
+        )
     applicable_criteria = tuple(
-        index not in set(args.inapplicable_criteria)
-        for index in range(len(work_item.acceptance_criteria))
+        index not in set(args.inapplicable_criteria) for index in range(criteria_count)
     )
 
     run = Run(

@@ -514,3 +514,45 @@ def test_a_built_request_is_stale_once_the_issue_it_was_built_from_changes(
     assert _start_and_advance(tmp_path, output) == exit_code_for(FailureClass.STALE_EVIDENCE)
 
     assert "no longer matches the run request" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("index", ["1", "-1"])
+def test_build_request_rejects_an_inapplicable_criterion_outside_the_issue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], index: str
+) -> None:
+    exit_code, output = _built(tmp_path, "--inapplicable-criterion", index)
+
+    assert exit_code == 2
+    assert f"--inapplicable-criterion [{index}] is outside the issue's 1 acceptance" in (
+        capsys.readouterr().err
+    )
+    assert not output.exists()
+
+
+def test_build_request_names_a_github_cli_that_cannot_be_run_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "no-such-gh"
+    github = StandInGitHub(
+        executable=missing, state_path=tmp_path / "state.json", log_path=tmp_path / "calls.jsonl"
+    )
+
+    exit_code, output = _built(tmp_path, github=github)
+
+    assert exit_code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert str(missing) in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_watch_advance_reports_a_github_cli_that_has_gone_missing_with_a_mapped_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    github = write_stand_in_gh(tmp_path / "github")
+    exit_code, output = _built(tmp_path, github=github)
+    assert exit_code == 0
+    github.executable.unlink()
+    capsys.readouterr()
+
+    assert _start_and_advance(tmp_path, output) == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+
+    assert str(github.executable) in capsys.readouterr().err
