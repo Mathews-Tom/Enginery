@@ -556,8 +556,9 @@ coordinator owning the ledger does not make it true. `liveness` is:
   `worker_lost_to_reboot` and never signalled.
 - `foreign_host`: the record was written on another machine.
 - `unverifiable`: the record has no usable identity (for example a
-  launch that never recorded one, or an unknown identity version), or
-  this host's own identity could not be read.
+  launch that never recorded one, or an unknown identity version), this
+  host's own identity could not be read, or it is a pre-host-binding
+  record whose pid is present with a start time that does not match.
 
 The host is identified by a stable machine id and boot id, never by
 hostname: on macOS the platform UUID (`IOPlatformUUID`) and
@@ -573,8 +574,11 @@ under single-host semantics, as they always were.
 The worker's start time is read under a fixed time zone and locale
 (`TZ=UTC0`, `LC_ALL=C`), so launching, watching and cancelling from
 shells with different `TZ` or `LANG` agree on whether the same worker is
-alive. Records written before host binding keep the comparison they
-were written with.
+alive. A record written before host binding was formatted under its
+launching shell's time zone, which is unknown: if its pid is present
+and the start time does not match, the record is held as `unverifiable`
+rather than treated as a reused pid, because the process may be the
+same live worker. A legacy record whose pid is free is still `exited`.
 
 **When a worker dies.** If a `running` implementation has no result
 file and its worker is gone (`exited`, `pid_reused` or `rebooted`),
@@ -586,28 +590,33 @@ after a reboot) and the worker's pid, process group, start identity,
 `liveness` and host in `worker_exit_evidence`. The workspace is
 retained, the slot is freed for the next queued run, and the worker is
 never launched again. A pid that now belongs to another process, or a
-host that rebooted, is never signalled. If a result file exists it is
-collected first, including one written between deriving the action and
-acting on it. A worker that is alive on this host and boot keeps the
-run at `wait`, including once 60 seconds pass without the launching
+host that rebooted, is never signalled. If a result file exists and no
+cancel is pending it is collected first, including one written between
+deriving the action and acting on it. A worker that is alive on this
+host and boot keeps the run at `wait`, including once 60 seconds pass
+without the launching
 epoch being renewed: with no daemon that happens between `watch
 --advance` calls, and it shows only as `lease_epoch_active: false` in
 the worker report. A worker that cannot be proven dead is never
 failed: `next_action` is `hold` with `worker_identity_unprovable` and
 the `liveness` that blocked it (`foreign_host`, `unverifiable`). If an
 operator cancel was interrupted after its termination request, the
-next advance finishes it as `cancelled`, never as a worker death.
+next advance finishes it as `cancelled` before it considers any result
+file, so the cancel wins over a result that arrived after it, and it is
+never recorded as a worker death.
 
 **Manual holds.** A `foreign_host` worker was recorded on another
 machine, so nothing here can prove whether it is still running; an
-`unverifiable` record has no identity to prove anything from. Recovery
-refuses automatic resume, `stage1 watch --advance` reports the hold
-and `stage1 cancel` refuses, in each case without signalling anything.
-There is no supported release for such a node in this release: it
-keeps its workspace and its slot, and no command frees them. Deal with
-the worker where it was launched. A reused pid and a reboot are not
-holds: both prove the worker gone and are reconciled automatically,
-without a signal.
+`unverifiable` record (no identity, or a pre-host-binding record whose
+present pid has a start time that cannot be compared) has nothing to
+prove it from. Recovery refuses automatic resume, `stage1 watch
+--advance` reports the hold and `stage1 cancel` refuses, in each case
+without signalling anything. There is no supported release for such a
+node in this release: it keeps its workspace and its slot, and no
+command frees them. Deal with the worker where it was launched. A
+reused pid and a reboot of a host-bound record are not holds: both
+prove the worker gone and are reconciled automatically, without a
+signal.
 
 **Cancel semantics.** `stage1 cancel --node-id implement` is fenced by
 the current coordinator epoch, so it works from a later process or
