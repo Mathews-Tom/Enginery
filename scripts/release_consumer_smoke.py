@@ -8,7 +8,14 @@ working: the reported version, `doctor`, the G4 and Stage 1 request commands'
 help, execution-selection pinning (an unsupported pin and a contradictory strict
 requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged
-acceptance baseline and execution catalog, and the fail-closed G4 gate.
+acceptance baseline and execution catalog, the fail-closed G4 gate, and the isolated-runner
+surface: `runner` and `enginery-operator` help, the packaged worker and relay recipes (their
+digests equal the source tree's and every recipe file is in the wheel), the Stage 1 runner flags,
+and -- only when a container engine is reachable -- that `runner status` holds an absent image.
+A check that cannot run is reported as NOT RUN; any NOT RUN check makes the run INCOMPLETE
+(exit status 3), never a PASS. An engine that is reachable but unqualified is reported as such,
+distinct from an unreachable one, and a digest or byte-identity claim is made only when the
+comparison was actually made.
 
 No hosted model or GitHub call is made and nothing is written outside the temporary
 directory: the request commands read their issue from a stand-in `gh` written there.
@@ -19,18 +26,31 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 
 _WHEEL_NAME = re.compile(r"^enginery-(?P<version>[0-9][0-9A-Za-z.+!]*?)-py3-none-any\.whl$")
 _SDIST_NAME = re.compile(r"^enginery-(?P<version>[0-9][0-9A-Za-z.+!]*?)\.tar\.gz$")
 _REQUIREMENT = re.compile(r"^enginery==(?P<version>[0-9][0-9A-Za-z.+!]*)$")
+
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src"
+_ASSET_DIRECTORY = ("enginery", "adapters", "oci", "assets")
+_RUNNER_ASSETS = (
+    "Dockerfile.worker",
+    "worker_entry.py",
+    "omp-isolated-policy.yml",
+    "Dockerfile.relay",
+    "relay.py",
+)
+_ABSENT_IMAGE = "sha256:" + "0" * 63 + "1"
 
 _CLAUDE_MODEL = "claude-sonnet-4-5"
 _OMP_MODEL = "anthropic/claude-sonnet-4-5"
@@ -443,8 +463,219 @@ def _check_g4_fail_closed(executable: Path, *, root: Path) -> None:
     _note("gate status --gate G4 remains fail-closed (exit 3, overall fail)")
 
 
-def exercise_surface(*, executable: Path, python: Path, root: Path, version: str) -> None:
-    """Run every consumer-surface check against one installed `enginery`."""
+_RECIPE_PROGRAM = (
+    "import json\n"
+    "from importlib import resources\n"
+    "import enginery\n"
+    "from enginery.adapters.oci import image\n"
+    "root = resources.files('enginery.adapters.oci').joinpath('assets')\n"
+    "print(json.dumps({\n"
+    "    'package': enginery.__file__,\n"
+    "    'worker': image.recipe_digest(),\n"
+    "    'relay': image.relay_recipe_digest(),\n"
+    "    'assets': {p.name: len(p.read_bytes()) for p in root.iterdir() if p.is_file()},\n"
+    "}))\n"
+)
+
+_ENGINE_UNQUALIFIED_EXIT = 4
+
+_ENGINE_PROGRAM = (
+    "import sys\n"
+    "from enginery.adapters.oci.engine import OciEngine\n"
+    "try:\n"
+    "    OciEngine().qualify()\n"
+    "except Exception as error:\n"
+    "    # qualify() names every missing requirement in `details` only for an engine it reached.\n"
+    "    kind = 'unqualified' if 'missing' in getattr(error, 'details', {}) else 'unreachable'\n"
+    "    print(kind + ': ' + type(error).__name__ + ': ' + str(error)[:300])\n"
+    "    sys.exit(4 if kind == 'unqualified' else 3)\n"
+    "print('qualified')\n"
+)
+
+
+def _check_runner_help(executable: Path, *, root: Path) -> None:
+    for command in (["runner", "--help"], ["runner", "status", "--help"]):
+        _require_success([str(executable), *command], cwd=root)
+    operator = executable.with_name("enginery-operator")
+    if not operator.is_file():
+        raise ConsumerSmokeError(
+            f"the `enginery-operator` entry point is not installed: {operator}"
+        )
+    result = _require_success([str(operator), "--help"], cwd=root)
+    missing = [
+        word for word in ("status", "pause", "backup", "restore") if word not in result.stdout
+    ]
+    if missing:
+        raise ConsumerSmokeError(f"`enginery-operator --help` does not list {missing}")
+    _note("runner --help, runner status --help and enginery-operator --help run")
+
+
+def _check_stage1_runner_flags(executable: Path, *, root: Path) -> None:
+    result = _require_success([str(executable), "stage1", "build-request", "--help"], cwd=root)
+    missing = [
+        flag
+        for flag in ("--runner", "--runner-image", "--model-access")
+        if flag not in result.stdout
+    ]
+    if missing:
+        raise ConsumerSmokeError(f"`stage1 build-request --help` does not list {missing}")
+    _note("stage1 build-request lists --runner, --runner-image and --model-access")
+
+
+def _recipe_report(python: Path, *, root: Path, source: Path | None) -> Mapping[str, object]:
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    if source is not None:
+        environment["PYTHONPATH"] = str(source)
+    result = subprocess.run(
+        [str(python), "-c", _RECIPE_PROGRAM],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    if result.returncode != 0:
+        raise ConsumerSmokeError(
+            f"recipe probe failed\n{_describe([str(python), '-c', '<recipe probe>'], result)}"
+        )
+    report = json.loads(result.stdout)
+    if not isinstance(report, dict):
+        raise ConsumerSmokeError(f"recipe probe returned {report!r}")
+    return report
+
+
+def _check_runner_recipes(
+    python: Path, *, root: Path, source_root: Path | None, wheel: Path | None
+) -> list[str]:
+    """The installed recipes are present, non-empty and identical to the source tree's."""
+    installed = _recipe_report(python, root=root, source=None)
+    assets = installed["assets"]
+    if not isinstance(assets, dict):
+        raise ConsumerSmokeError(f"installed recipe assets are {assets!r}")
+    absent = [name for name in _RUNNER_ASSETS if not assets.get(name)]
+    if absent:
+        raise ConsumerSmokeError(f"the installed package lacks recipe files {absent}")
+    _note(f"packaged worker and relay recipe files are present ({', '.join(_RUNNER_ASSETS)})")
+    not_run: list[str] = []
+    asset_root = None if source_root is None else source_root.joinpath(*_ASSET_DIRECTORY)
+    if (
+        source_root is None
+        or asset_root is None
+        or not asset_root.joinpath("Dockerfile.worker").is_file()
+    ):
+        message = "NOT RUN recipe digests equal the source tree's (no source tree beside scripts/)"
+        print(message, flush=True)
+        not_run.append(message)
+    elif str(installed["package"]).startswith(str(source_root)):
+        message = (
+            "NOT RUN installed recipe digests equal the source tree's (the installed package is "
+            "the source tree itself: an editable install)"
+        )
+        print(message, flush=True)
+        not_run.append(message)
+    else:
+        source = _recipe_report(python, root=root, source=source_root)
+        if not str(source["package"]).startswith(str(source_root)):
+            raise ConsumerSmokeError("the source-tree recipe probe did not import the source tree")
+        for key in ("worker", "relay"):
+            if installed[key] != source[key]:
+                raise ConsumerSmokeError(
+                    f"the installed {key} recipe digest {installed[key]} differs from the source "
+                    f"tree's {source[key]}"
+                )
+        _note(
+            f"installed recipe digests equal the source tree's (worker {installed['worker']}, "
+            f"relay {installed['relay']})"
+        )
+    if wheel is not None:
+        compared = 0
+        with zipfile.ZipFile(wheel) as archive:
+            names = set(archive.namelist())
+            for name in _RUNNER_ASSETS:
+                member = "/".join((*_ASSET_DIRECTORY, name))
+                if member not in names:
+                    raise ConsumerSmokeError(f"the wheel {wheel.name} lacks {member}")
+                if asset_root is not None and asset_root.joinpath(name).is_file():
+                    packaged = hashlib.sha256(archive.read(member)).hexdigest()
+                    if packaged != _sha256(asset_root / name):
+                        raise ConsumerSmokeError(f"{member} in the wheel differs from the source")
+                    compared += 1
+        if compared == len(_RUNNER_ASSETS):
+            _note(
+                f"the wheel {wheel.name} carries every recipe file, byte-identical to the source "
+                "tree"
+            )
+        else:
+            _note(f"the wheel {wheel.name} carries every recipe file")
+            message = (
+                f"NOT RUN wheel recipe files are byte-identical to the source tree (compared "
+                f"{compared} of {len(_RUNNER_ASSETS)}: no source tree beside scripts/)"
+            )
+            print(message, flush=True)
+            not_run.append(message)
+    return not_run
+
+
+def _check_runner_engine(executable: Path, python: Path, *, root: Path) -> list[str]:
+    """Against a reachable container engine, `runner status` must hold an absent image id."""
+    probe = subprocess.run(
+        [str(python), "-c", _ENGINE_PROGRAM],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        reason = (probe.stdout.strip() or probe.stderr.strip() or "no answer")[:300]
+        if probe.returncode == _ENGINE_UNQUALIFIED_EXIT or reason.startswith("unqualified:"):
+            state = "a reachable engine that cannot enforce the isolated profile (unqualified)"
+        else:
+            state = "no reachable container engine (unreachable)"
+        message = (
+            f"engine NOT RUN runner status against a qualified container engine: {state}: {reason}"
+        )
+        print(message, flush=True)
+        return [message]
+    result = _run([str(executable), "runner", "status", "--image", _ABSENT_IMAGE], cwd=root)
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ConsumerSmokeError(
+            f"`runner status` printed no report\n{_describe([str(executable)], result)}"
+        ) from error
+    hold = report.get("hold") if isinstance(report, dict) else None
+    if (
+        result.returncode != 5
+        or not isinstance(report, dict)
+        or report.get("admitted") is not False
+        or not isinstance(hold, dict)
+        or hold.get("reason") != "runner_unqualified"
+    ):
+        raise ConsumerSmokeError(
+            f"`runner status` did not hold an absent image on a reachable engine\n{result.stdout}"
+        )
+    print(
+        "engine ok runner status holds an absent image id on the reachable engine (exit 5)",
+        flush=True,
+    )
+    return []
+
+
+def exercise_surface(
+    *,
+    executable: Path,
+    python: Path,
+    root: Path,
+    version: str,
+    wheel: Path | None = None,
+    source_root: Path | None = _SOURCE_ROOT,
+    require_engine: bool = False,
+) -> list[str]:
+    """Run every consumer-surface check against one installed `enginery`.
+
+    Returns the checks that could not run (each already printed as ``NOT RUN``); a check that
+    cannot run is never counted as a pass, and ``require_engine`` turns one into a failure.
+    """
     _check_version(executable, root=root, version=version)
     _check_doctor(executable, root=root, version=version)
     _check_help(executable, root=root)
@@ -452,6 +683,33 @@ def exercise_surface(*, executable: Path, python: Path, root: Path, version: str
     packaged = _check_packaged_data(python, root=root)
     _check_valid_pins(executable, root=root, packaged=packaged)
     _check_g4_fail_closed(executable, root=root)
+    _check_runner_help(executable, root=root)
+    _check_stage1_runner_flags(executable, root=root)
+    not_run = _check_runner_recipes(python, root=root, source_root=source_root, wheel=wheel)
+    not_run += _check_runner_engine(executable, python, root=root)
+    unrun_engine = [item for item in not_run if item.startswith("engine NOT RUN")]
+    if require_engine and unrun_engine:
+        kind = "unqualified" if "(unqualified)" in unrun_engine[0] else "unreachable"
+        raise ConsumerSmokeError(f"--require-engine: the container engine was {kind}")
+    return not_run
+
+
+INCOMPLETE_EXIT = 3
+
+
+def report_outcome(not_run: list[str]) -> int:
+    """``PASS`` only when every check ran; otherwise ``INCOMPLETE`` naming each check not run."""
+    if not_run:
+        print(
+            f"INCOMPLETE release-consumer-smoke: {len(not_run)} check(s) NOT RUN, so this is not "
+            "a pass:",
+            flush=True,
+        )
+        for item in not_run:
+            print(f"  - {item}", flush=True)
+        return INCOMPLETE_EXIT
+    print("PASS release-consumer-smoke")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -461,6 +719,11 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--sdist", type=Path)
     source.add_argument(
         "--package", help="published distribution requirement, for example enginery==0.6.0"
+    )
+    parser.add_argument(
+        "--require-engine",
+        action="store_true",
+        help="fail, rather than report NOT RUN, when no qualified container engine is reachable",
     )
     args = parser.parse_args(argv)
     version = expected_version(wheel=args.wheel, sdist=args.sdist, package=args.package)
@@ -482,11 +745,15 @@ def main(argv: list[str] | None = None) -> int:
             f"platform={platform.platform()}",
             flush=True,
         )
-        exercise_surface(
-            executable=venv / "bin" / "enginery", python=python, root=root, version=version
+        not_run = exercise_surface(
+            executable=venv / "bin" / "enginery",
+            python=python,
+            root=root,
+            version=version,
+            wheel=args.wheel,
+            require_engine=args.require_engine,
         )
-    print("PASS release-consumer-smoke")
-    return 0
+    return report_outcome(not_run)
 
 
 if __name__ == "__main__":
