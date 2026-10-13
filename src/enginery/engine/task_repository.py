@@ -16,6 +16,9 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
+import threading
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,6 +26,12 @@ from enginery.domain.errors import ExternalConflictError, InvalidInputError
 
 MAX_BUNDLE_BYTES = 1 << 30
 """Largest worker bundle the host accepts."""
+
+MAX_TREE_ENTRIES = 200_000
+"""Most entries (files, links, submodules) the host accepts in a worker branch's tree."""
+
+MAX_TREE_BYTES = 2 << 30
+"""Largest total blob size the host accepts in a worker branch's tree."""
 
 BUNDLE_FILE_NAME = "branch.bundle"
 """Name of the worker's result bundle inside its out directory."""
@@ -36,6 +45,8 @@ WORKER_HOOKS_PATH = "/nonexistent-enginery-hooks"
 _INTAKE_SUFFIX = ".intake.git"
 _OUT_SUFFIX = ".out"
 _MAX_BRANCH_LENGTH = 200
+_TREE_READ_CHUNK = 1 << 16
+_TREE_MAX_RECORD_BYTES = 1 << 20
 _FULL_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _BRANCH_FORBIDDEN = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
@@ -73,21 +84,9 @@ def materialize_task_local_repository(
     _require_empty_target(workspace_path)
     expected = resolve_commit(repository_path, base_revision)
 
-    workspace_path.parent.mkdir(parents=True, exist_ok=True)
-    _git_checked(
-        [
-            "clone",
-            "--local",
-            "--no-hardlinks",
-            "--no-checkout",
-            "--template=",
-            "--",
-            str(repository_path),
-            str(workspace_path),
-        ],
-        cwd=workspace_path.parent,
-        message="task-local repository clone failed",
-        details={"repository_path": str(repository_path)},
+    _ensure_private_parent(workspace_path.parent)
+    base_branch = _clone_base_only(
+        repository_path=repository_path, workspace_path=workspace_path, base_oid=expected
     )
     git_dir = workspace_path / ".git"
     if git_dir.is_symlink() or not git_dir.is_dir():
@@ -95,22 +94,17 @@ def materialize_task_local_repository(
             "task-local repository must own a real .git directory",
             details={"workspace_path": str(workspace_path)},
         )
-    alternates = git_dir / "objects" / "info" / "alternates"
-    if alternates.exists():
-        # A source that borrows objects makes the clone borrow them too: make the
-        # clone self-contained before the borrowed path can leak into the worker.
-        _git_checked(
-            ["repack", "-a", "-d", "-q"],
-            cwd=workspace_path,
-            message="task-local repository could not absorb borrowed objects",
-            details={"workspace_path": str(workspace_path)},
-        )
-        alternates.unlink()
     _git_checked(
         ["-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", expected],
         cwd=workspace_path,
         message="task-local repository checkout failed",
         details={"base_revision": base_revision},
+    )
+    _git_checked(
+        ["update-ref", "-d", f"refs/heads/{base_branch}"],
+        cwd=workspace_path,
+        message="task-local repository temporary branch removal failed",
+        details={"workspace_path": str(workspace_path)},
     )
     head = _git_checked(
         ["rev-parse", "--verify", "HEAD^{commit}"],
@@ -214,11 +208,19 @@ def intake_branch_bundle(
     )
 
 
-def verify_intake_branch(*, intake_path: Path, head_branch: str, base_revision: str) -> str:
+def verify_intake_branch(
+    *,
+    intake_path: Path,
+    head_branch: str,
+    base_revision: str,
+    max_tree_entries: int = MAX_TREE_ENTRIES,
+    max_tree_bytes: int = MAX_TREE_BYTES,
+) -> str:
     """Verify an intake branch descends from its base and carries a change.
 
-    ``base_revision`` must be a full object id (see :func:`resolve_commit`).
-    Returns the verified head revision.
+    ``base_revision`` must be a full object id (see :func:`resolve_commit`). The head's
+    recursive tree must stay within the entry-count and total-size bounds before it is
+    accepted. Returns the verified head revision.
     """
     _require_branch_name(head_branch)
     if not _FULL_OBJECT_ID.fullmatch(base_revision):
@@ -233,6 +235,7 @@ def verify_intake_branch(*, intake_path: Path, head_branch: str, base_revision: 
         message="git branch verification failed",
         details={"head_branch": head_branch},
     )
+    _bound_tree(intake_path, head_revision, max_entries=max_tree_entries, max_bytes=max_tree_bytes)
     ancestor = _git(
         ["merge-base", "--is-ancestor", base_revision, head_revision],
         cwd=intake_path,
@@ -334,6 +337,234 @@ def _git_checked(
             },
         )
     return completed.stdout.strip()
+
+
+_WORKTREE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "TMPDIR",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+        "XDG_CONFIG_HOME",
+    }
+)
+
+
+def worktree_git_environment() -> dict[str, str]:
+    """Environment for host git inside a linked worktree: an allowlist, never the ambient env.
+
+    User and system git configuration stay readable (a trusted-local ``origin`` may need the
+    operator's credential helper), but no ``GIT_*`` override, token or other ambient variable
+    reaches git or anything it spawns.
+    """
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _WORKTREE_ENVIRONMENT_KEYS or key.startswith("LC_")
+    }
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
+
+
+def run_worktree_git(
+    arguments: Sequence[str], *, cwd: Path, timeout: float = GIT_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[str]:
+    """Run host git in a linked worktree with fsmonitor and hooks disabled.
+
+    A worktree's configuration is shared and editable by whoever worked in it, so
+    ``core.fsmonitor`` and ``core.hooksPath`` are overridden on the command line and the
+    environment is sanitized. A task-local clone is never a valid ``cwd`` here: the host runs
+    no git at all inside one.
+    """
+    try:
+        return subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *arguments],
+            cwd=cwd,
+            env=worktree_git_environment(),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ExternalConflictError(
+            "git could not be executed",
+            details={"arguments": tuple(arguments), "error": str(error)},
+        ) from error
+
+
+def _ensure_private_parent(parent: Path) -> None:
+    """Require the directory holding workspace, result and intake to be operator-private.
+
+    The worker-facing directories live side by side in this parent; nobody but the operator
+    may list, replace or traverse it. A parent that already exists must already be a real
+    directory owned by this user with no group/other permission bits; a laxer one is refused
+    rather than silently re-permissioned, because it may be a shared directory.
+    """
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(parent, 0o700)
+    except FileExistsError:
+        created = False
+    else:
+        created = True
+        os.chmod(parent, 0o700)  # the creation mode is filtered through the umask
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise ExternalConflictError(
+            "task-local workspace parent must be a real directory owned by the operator with "
+            "mode 0700",
+            details={
+                "parent": str(parent),
+                "created": created,
+                "mode": oct(stat.S_IMODE(info.st_mode)),
+            },
+        )
+
+
+def _clone_base_only(*, repository_path: Path, workspace_path: Path, base_oid: str) -> str:
+    """Clone only what is reachable from ``base_oid``; return the temporary branch name.
+
+    The base is published under a unique temporary branch so a ``--no-local --single-branch
+    --no-tags`` clone transfers exactly its reachable objects: unreachable blobs, stashes,
+    other branches and tags of the host repository never reach the workspace. The temporary
+    branch is removed from the host repository again before this returns.
+    """
+    branch = f"enginery-base-{uuid.uuid4().hex}"
+    ref = f"refs/heads/{branch}"
+    _git_checked(
+        ["update-ref", ref, base_oid],
+        cwd=repository_path,
+        message="temporary base reference could not be created",
+        details={"repository_path": str(repository_path)},
+    )
+    try:
+        _git_checked(
+            [
+                "clone",
+                "--no-local",
+                "--single-branch",
+                "--no-tags",
+                "--no-checkout",
+                "--template=",
+                "--branch",
+                branch,
+                "--",
+                str(repository_path),
+                str(workspace_path),
+            ],
+            cwd=workspace_path.parent,
+            message="task-local repository clone failed",
+            details={"repository_path": str(repository_path)},
+        )
+    finally:
+        removal = _git(["update-ref", "-d", ref], cwd=repository_path)
+    if removal.returncode != 0:
+        raise ExternalConflictError(
+            "temporary base reference could not be removed",
+            details={"repository_path": str(repository_path), "stderr": removal.stderr.strip()},
+        )
+    return branch
+
+
+def _bound_tree(intake_path: Path, head_revision: str, *, max_entries: int, max_bytes: int) -> None:
+    """Refuse a head whose recursive tree exceeds the entry or total-size bound.
+
+    ``git ls-tree -r`` is streamed and stopped at the first violation, so a tree that expands
+    from few objects into millions of entries (a git bomb) is never fully enumerated.
+    """
+    command = [
+        "git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        f"--git-dir={intake_path}",
+        "ls-tree",
+        "-r",
+        "-l",
+        "-z",
+        "--full-tree",
+        head_revision,
+    ]
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            command,
+            cwd=intake_path,
+            env=_git_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+        )
+        timer = threading.Timer(GIT_TIMEOUT_SECONDS, process.kill)
+        timer.start()
+        entries = 0
+        total = 0
+        violation: ExternalConflictError | None = None
+        pending = b""
+        try:
+            assert process.stdout is not None
+            descriptor = process.stdout.fileno()
+            while violation is None:
+                chunk = os.read(descriptor, _TREE_READ_CHUNK)
+                if not chunk:
+                    break
+                records = (pending + chunk).split(b"\0")
+                pending = records.pop()
+                if len(pending) > _TREE_MAX_RECORD_BYTES:
+                    violation = ExternalConflictError(
+                        "worker branch tree contains an oversized path",
+                        details={"head_revision": head_revision},
+                    )
+                    break
+                for record in records:
+                    entries += 1
+                    total += _tree_record_size(record)
+                    if entries > max_entries or total > max_bytes:
+                        violation = ExternalConflictError(
+                            "worker branch tree exceeds the entry-count or size limit",
+                            details={
+                                "head_revision": head_revision,
+                                "max_entries": max_entries,
+                                "max_bytes": max_bytes,
+                            },
+                        )
+                        break
+        finally:
+            timer.cancel()
+            if violation is not None or process.poll() is None:
+                process.kill()
+            process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+        if violation is not None:
+            raise violation
+        if process.returncode != 0:
+            errors.seek(0)
+            raise ExternalConflictError(
+                "worker branch tree could not be listed",
+                details={
+                    "head_revision": head_revision,
+                    "stderr": errors.read().decode("utf-8", "replace").strip(),
+                },
+            )
+
+
+def _tree_record_size(record: bytes) -> int:
+    """Blob size from one ``ls-tree -l -z`` record (``-`` for a submodule entry)."""
+    header = record.partition(b"\t")[0].split()
+    if len(header) != 4:
+        raise ExternalConflictError("worker branch tree listing is malformed")
+    return 0 if header[3] == b"-" else int(header[3])
 
 
 # --- validation -------------------------------------------------------------------

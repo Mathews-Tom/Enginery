@@ -235,6 +235,7 @@ class CoordinatorRuntime:
         *,
         owner: str,
         fault_hook: Callable[[str], None] | None = None,
+        container_gone: Callable[[str], bool] | None = None,
     ) -> None:
         self._ledger = ledger
         self._coordinator = Coordinator(ledger, owner=owner)
@@ -242,6 +243,17 @@ class CoordinatorRuntime:
         self._leases = FencedNodeLeases(ledger, self._coordinator)
         self._workspaces = GitWorktreeBackend(ledger, self._coordinator, fault_hook=fault_hook)
         self._fault_hook = fault_hook
+        self._container_gone = container_gone
+
+    def _recovery(self) -> RecoveryCoordinator:
+        """Recovery that also checks, for task-local runs, that the runner container is gone.
+
+        ``container_gone`` maps a launch operation id to whether its runner container no longer
+        exists; without it the launcher process's proven absence is the only proof.
+        """
+        return RecoveryCoordinator(
+            self._ledger, self._coordinator, container_gone=self._container_gone
+        )
 
     @property
     def coordinator(self) -> Coordinator:
@@ -679,11 +691,12 @@ class CoordinatorRuntime:
                 self._ledger, self._coordinator, fault_hook=self._fault
             ).cancel_persisted(lease=lease, now=now, coordinator_epoch=transition_epoch)
             reservation = self._require_workspace(request)
-            assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+            assessment = self._recovery().reconcile(
                 lease=lease,
                 workspace_path=reservation.workspace_path,
                 epoch=transition_epoch,
                 now=now,
+                workspace_mode=reservation.mode,
             )
             attempt = self._ledger.read_projection(
                 aggregate_type="node_attempt", aggregate_id=request.attempt_id
@@ -790,8 +803,12 @@ class CoordinatorRuntime:
             lease=lease, coordinator_epoch=epoch.epoch, now=now
         )
         reservation = self._require_workspace(request)
-        reconciled = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
-            lease=lease, workspace_path=reservation.workspace_path, epoch=epoch.epoch, now=now
+        reconciled = self._recovery().reconcile(
+            lease=lease,
+            workspace_path=reservation.workspace_path,
+            epoch=epoch.epoch,
+            now=now,
+            workspace_mode=reservation.mode,
         )
         attempt = self._ledger.read_projection(
             aggregate_type="node_attempt", aggregate_id=request.attempt_id
@@ -876,11 +893,12 @@ class CoordinatorRuntime:
             identity=dispatched.identity,
             now=now,
         )
-        RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+        self._recovery().reconcile(
             lease=dispatched.lease,
             workspace_path=dispatched.workspace.workspace_path,
             epoch=dispatched.lease.epoch,
             now=now,
+            workspace_mode=dispatched.workspace.mode,
         )
         envelope = WorkerResultEnvelope(
             run_id=dispatched.lease.run_id,
@@ -1021,11 +1039,17 @@ class CoordinatorRuntime:
                 )
             self._require_completed_dependencies(request)
             if actor_type is ActorType.AGENT:
-                assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+                reservation = self._workspaces.read_reservation(request.repository_id)
+                assessment = self._recovery().reconcile(
                     lease=self._active_lease(current),
                     workspace_path=request.workspace_path,
                     epoch=epoch,
                     now=now,
+                    workspace_mode=(
+                        reservation.mode
+                        if reservation is not None and reservation.run_id == request.run_id
+                        else None
+                    ),
                 )
                 if not assessment.ready_to_release:
                     raise ExternalConflictError(
@@ -1036,7 +1060,6 @@ class CoordinatorRuntime:
                             "reason": assessment.reason,
                         },
                     )
-                reservation = self._workspaces.read_reservation(request.repository_id)
                 if (
                     reservation is not None
                     and reservation.run_id == request.run_id

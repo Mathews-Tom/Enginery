@@ -53,6 +53,8 @@ from .support import (
     IMAGE_ID,
     INNER,
     PERMISSIONS,
+    PERMISSIONS_WITHOUT_ARGUMENTS,
+    ROOTLESS_INFO,
     FakeDocker,
     host_probe,
     image_identity,
@@ -109,6 +111,7 @@ def test_a_successful_run_qualifies_creates_checks_records_starts_waits_and_remo
         "network create",
         "network inspect",
         "container inspect",
+        "ps",
         "create",
         "container inspect",
         "image inspect",
@@ -200,6 +203,7 @@ def test_every_engine_command_runs_under_the_engines_context_and_the_receipt_rec
         "network inspect",
         "network create",
         "container inspect",
+        "ps",
         "create",
         "image inspect",
         "start",
@@ -223,9 +227,10 @@ def test_every_engine_command_runs_under_the_engines_context_and_the_receipt_rec
     assert _receipt(spec).engine.context == "lima-rootless"
 
 
-def test_the_workspace_and_result_directories_are_opened_up_for_the_worker(
-    fake_docker: FakeDocker, tmp_path: Path
+def test_the_workspace_and_result_directories_are_opened_up_where_the_uid_mapping_needs_it(
+    tmp_path: Path,
 ) -> None:
+    fake_docker = FakeDocker(info=ROOTLESS_INFO)
     spec = make_spec(tmp_path)
     workspace = tmp_path / "workspace"
     (workspace / "src").mkdir()
@@ -244,6 +249,24 @@ def test_the_workspace_and_result_directories_are_opened_up_for_the_worker(
     assert stat.S_IMODE((workspace / "notes.txt").stat().st_mode) == 0o666
     assert stat.S_IMODE(workspace.stat().st_mode) == 0o777
     assert stat.S_IMODE((tmp_path / "out").stat().st_mode) == 0o777
+
+
+def test_nothing_is_opened_up_on_docker_desktop_where_the_operators_own_tree_is_writable(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "notes.txt").write_text("n", encoding="utf-8")
+    (workspace / "notes.txt").chmod(0o400)
+    workspace.chmod(0o700)
+    (tmp_path / "out").chmod(0o700)
+
+    code, _ = _launch(spec, fake_docker)
+
+    assert code == 0
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert stat.S_IMODE((workspace / "notes.txt").stat().st_mode) == 0o400
+    assert stat.S_IMODE((tmp_path / "out").stat().st_mode) == 0o700
 
 
 # --- exit statuses -------------------------------------------------------------------
@@ -335,6 +358,36 @@ def _set_host(change: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
             lambda document: document.update(Image="sha256:" + "9" * 64),
             "not created from the pinned image id",
         ),
+        (
+            _set_host({"SecurityOpt": ["no-new-privileges", "seccomp=unconfined"]}),
+            "security option 'seccomp=unconfined' is outside the profile",
+        ),
+        (
+            _set_host({"SecurityOpt": ["no-new-privileges", "apparmor=unconfined"]}),
+            "security option 'apparmor=unconfined' is outside the profile",
+        ),
+        (
+            _set_host({"SecurityOpt": ["no-new-privileges", "label=disable"]}),
+            "security option 'label=disable' is outside the profile",
+        ),
+        (
+            _set_host({"SecurityOpt": ["no-new-privileges", "systempaths=unconfined"]}),
+            "security option 'systempaths=unconfined' is outside the profile",
+        ),
+        (_set_host({"CgroupnsMode": "host"}), "cgroup namespace is 'host'"),
+        (_set_host({"MaskedPaths": []}), "kernel paths are not masked"),
+        (_set_host({"ReadonlyPaths": []}), "kernel paths are not read-only"),
+        (_set_host({"Sysctls": {"kernel.core_pattern": "|/x"}}), "container has sysctls"),
+        (_set_host({"Runtime": "nvidia"}), "container runtime is 'nvidia'"),
+        (
+            _set_host({"Tmpfs": {"/tmp": "rw,nosuid,nodev,exec,size=99999m"}}),
+            "scratch space /tmp is not capped",
+        ),
+        (
+            _set_host({"LogConfig": {"Type": "json-file", "Config": {}}}),
+            "container log is not rotated",
+        ),
+        (_set_host({"Ulimits": None}), "per-file size limit is not"),
     ],
 )
 def test_a_container_weaker_than_the_profile_is_removed_and_never_started_or_recorded(
@@ -586,7 +639,10 @@ def test_write_receipt_replaces_atomically_with_a_private_file_and_leaves_no_tem
 
     assert _receipt(spec).started_at == "2030-01-01T00:00:00Z"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert [entry.name for entry in path.parent.iterdir()] == [path.name]
+    assert sorted(entry.name for entry in path.parent.iterdir()) == [
+        path.name,
+        f"{path.name}.outcome.json",
+    ]
 
 
 # --- opening the tree up ---------------------------------------------------------------
@@ -932,6 +988,7 @@ def _real_spec(
     profile: RunnerProfile,
     **overrides: Any,
 ) -> LaunchSpec:
+    overrides.setdefault("permissions", PERMISSIONS_WITHOUT_ARGUMENTS)
     return make_spec(
         root, operation_id=operation, image=standin_image, profile=profile, **overrides
     )

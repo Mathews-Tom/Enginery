@@ -6,7 +6,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from enginery.adapters.oci.launcher import write_outcome
 from enginery.adapters.runner_launch import runner_container_name, runner_receipt_path
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.runner import (
@@ -17,6 +19,8 @@ from enginery.domain.runner import (
     EffectiveContainer,
     EngineIdentity,
     ImageIdentity,
+    LaunchOutcome,
+    OutcomeState,
     PermissionMapping,
     RunnerContext,
     RunnerProfile,
@@ -24,10 +28,12 @@ from enginery.domain.runner import (
     RunnerSelection,
     TrustMode,
     isolated_permission_mapping,
+    outcome_path_for,
 )
 from tests.support.execution import selection_for
 
 IMAGE_ID = "sha256:" + "a" * 64
+LAUNCH_NONCE = "launch-nonce-0123456789"
 
 
 def isolated_context(receipt_root: Path, *, docker_context: str | None = None) -> RunnerContext:
@@ -101,6 +107,7 @@ def runner_receipt(
     context: RunnerContext, operation_id: str, *, permissions: PermissionMapping
 ) -> RunnerReceipt:
     assert context.selection.image is not None
+    host = load_execution_catalog().host(permissions.harness)
     return RunnerReceipt(
         operation_id=operation_id,
         trust_mode=TrustMode.ISOLATED_OCI,
@@ -120,31 +127,59 @@ def runner_receipt(
         host={"os": "linux"},
         effective=clean_effective_container(context.profile),
         permissions=permissions,
-        harness_version="test",
-        harness_protocol=None,
+        harness_version=host.tested_executable_version,
+        harness_protocol=host.protocol_fingerprint,
         started_at="2026-10-13T00:00:00Z",
     )
 
 
-def write_runner_receipt(context: RunnerContext, operation_id: str, harness: str) -> RunnerReceipt:
-    """Write, where the launcher would, a valid runner receipt for one operation."""
+def write_launch_outcome(
+    context: RunnerContext,
+    operation_id: str,
+    *,
+    state: OutcomeState = OutcomeState.EXITED,
+    nonce: str = LAUNCH_NONCE,
+) -> LaunchOutcome:
+    """Write, where the launcher would, the host-only outcome of one launch."""
+    outcome = LaunchOutcome(
+        operation_id=operation_id,
+        nonce=nonce,
+        state=state,
+        exit_code=0 if state is OutcomeState.EXITED else None,
+    )
+    write_outcome(outcome_path_for(runner_receipt_path(context, operation_id)), outcome)
+    return outcome
+
+
+def write_runner_receipt(
+    context: RunnerContext, operation_id: str, harness: str, *, exited: bool = True
+) -> RunnerReceipt:
+    """Write, where the launcher would, a valid runner receipt (and its exited outcome)."""
     receipt = runner_receipt(
         context, operation_id, permissions=isolated_permission_mapping(harness)
     )
     path = Path(runner_receipt_path(context, operation_id))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt.to_state(), sort_keys=True), encoding="utf-8")
+    if exited:
+        write_launch_outcome(context, operation_id)
     return receipt
 
 
 def write_worker_result(
-    path: Path, *, operation_id: str, output: str, terminal_status: str = "succeeded"
+    path: Path,
+    *,
+    operation_id: str,
+    output: str,
+    terminal_status: str = "succeeded",
+    nonce: str = LAUNCH_NONCE,
 ) -> None:
     """Write a worker result file in the schema the in-container supervisor produces."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
+                "nonce": nonce,
                 "operation_id": operation_id,
                 "output": output,
                 "schema_version": 1,

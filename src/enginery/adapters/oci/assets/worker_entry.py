@@ -13,8 +13,10 @@ Behaviour, in order:
    sends SIGTERM to the whole group, then SIGKILL after a grace period.
 4. When a bundle was requested, ``git bundle create BASE..BRANCH`` packages the committed work
    for the host. A bundle failure is logged to stderr and never changes the terminal status.
-5. The result JSON (``operation_id``, ``output``, ``schema_version``, ``terminal_status``) is
-   written atomically. Output is *not* redacted here; the host redacts on collection.
+5. The result JSON (``operation_id``, ``output``, ``schema_version``, ``terminal_status`` and,
+   when ``--nonce`` was given, ``nonce``) is written atomically. Output is *not* redacted
+   here; the host redacts on collection. The nonce is the launcher's per-attempt value: the
+   host accepts only a result that echoes the nonce it minted for this launch.
 
 The process exit code is the command's return code, or ``128 + signal`` when it was killed by a
 signal; a deadline that ended in a clean exit still exits 124.
@@ -126,15 +128,22 @@ def _write_atomic(path: Path, payload: bytes) -> None:
         raise
 
 
-def _encode_result(operation_id: str, terminal_status: str, output: str) -> bytes:
-    """Serialize the result, shrinking ``output`` until the file fits the host's size cap."""
+def _encode_result(
+    operation_id: str, terminal_status: str, output: str, nonce: str | None = None
+) -> bytes:
+    """Serialize the result, shrinking ``output`` until the file fits the host's size cap.
+
+    ``nonce`` (the launcher's per-attempt value) is echoed as a ``nonce`` key when given.
+    """
     while True:
-        document = {
+        document: dict[str, object] = {
             "operation_id": operation_id,
             "output": output,
             "schema_version": RESULT_SCHEMA_VERSION,
             "terminal_status": terminal_status,
         }
+        if nonce is not None:
+            document["nonce"] = nonce
         encoded = (
             json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
         ).encode("utf-8")
@@ -150,8 +159,10 @@ def _encode_result(operation_id: str, terminal_status: str, output: str) -> byte
         )
 
 
-def _write_result(path: Path, operation_id: str, terminal_status: str, output: str) -> None:
-    _write_atomic(path, _encode_result(operation_id, terminal_status, output))
+def _write_result(
+    path: Path, operation_id: str, terminal_status: str, output: str, nonce: str | None = None
+) -> None:
+    _write_atomic(path, _encode_result(operation_id, terminal_status, output, nonce))
 
 
 def _write_seed_files(seeds: Sequence[str]) -> None:
@@ -279,6 +290,7 @@ def _parse_arguments(arguments: Sequence[str]) -> tuple[argparse.Namespace, list
         wrapper, command = wrapper[:split], wrapper[split + 1 :]
     parser = argparse.ArgumentParser(prog="worker_entry.py")
     parser.add_argument("--operation-id", required=True)
+    parser.add_argument("--nonce")
     parser.add_argument("--result", required=True)
     parser.add_argument("--deadline-seconds", required=True, type=float)
     parser.add_argument("--bundle-branch")
@@ -291,6 +303,8 @@ def _parse_arguments(arguments: Sequence[str]) -> tuple[argparse.Namespace, list
     parsed = parser.parse_args(wrapper)
     if not parsed.operation_id.strip():
         parser.error("--operation-id must be non-blank")
+    if parsed.nonce is not None and not parsed.nonce.strip():
+        parser.error("--nonce must be non-blank")
     if not parsed.deadline_seconds > 0:
         parser.error("--deadline-seconds must be positive")
     if parsed.kill_grace_seconds < 0:
@@ -312,7 +326,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         _write_seed_files(parsed.seed_file)
     except (OSError, ValueError) as error:
-        _write_result(result_path, parsed.operation_id, "failed", f"seed file failed: {error}\n")
+        _write_result(
+            result_path,
+            parsed.operation_id,
+            "failed",
+            f"seed file failed: {error}\n",
+            parsed.nonce,
+        )
         return 1
     output, exit_code, _note = _run_command(
         command,
@@ -329,6 +349,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         parsed.operation_id,
         "succeeded" if exit_code == 0 else "failed",
         output,
+        parsed.nonce,
     )
     return exit_code
 

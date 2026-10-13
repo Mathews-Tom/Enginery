@@ -10,6 +10,12 @@
 # command that carries no shell control syntax (`;`, `&&`, `|`, redirection, substitution), so a
 # narrow allow can never smuggle a second command. A command that matches nothing needs approval
 # and is therefore refused.
+#
+# This narrows the tool surface; it is not the security boundary. No test runner or linter is
+# allowed (they execute code from the workspace), and git hooks are disabled for the worker
+# through its environment, but an allowed git command still honours repository-local
+# configuration that the worker can write. Containment is the container: it holds no
+# credentials, no remote and no route out.
 tools:
   approval:
     # A repository setting of `bash: allow` would otherwise grant every shell command.
@@ -46,13 +52,3 @@ bash:
     - {match: "git branch*", approval: allow}
     - {match: "git rev-parse*", approval: allow}
     - {match: "git ls-files*", approval: allow}
-    # Test and lint runners.
-    - {match: "pytest*", approval: allow}
-    - {match: "python3 -m pytest*", approval: allow}
-    - {match: "python -m pytest*", approval: allow}
-    - {match: "uv run pytest*", approval: allow}
-    - {match: "uv run ruff*", approval: allow}
-    - {match: "uv run mypy*", approval: allow}
-    - {match: "ruff check*", approval: allow}
-    - {match: "ruff format*", approval: allow}
-    - {match: "mypy*", approval: allow}

@@ -815,13 +815,29 @@ respect is refused and removed.
 
 The worker never sees your repository's `.git`, hooks, or configuration. The
 workspace is a self-contained clone with no remote and no reference to the host
-repository. When the worker finishes it hands back its branch as a git bundle;
-the host imports that bundle into an intake repository it created itself,
-verifies the branch there (name, ancestry from the run's base revision, a
-non-empty change), and never runs git inside the worker's repository, whose
-configuration and hooks the worker controls. An isolated worker commits locally
-and holds no remote and no credentials; its branch is not on any remote until
-the verified branch is published by a separate, host-side step.
+repository, and it contains only what is reachable from the run's base revision:
+the base is resolved once to a full object id when the run is reserved, published
+under a temporary branch for a `--no-local --single-branch --no-tags` clone, and
+the temporary branch is removed again, so unreachable objects, stashes, other
+branches and tags of your repository never reach the workspace. The workspace,
+its result directory and its intake repository live side by side in one parent
+directory that must be a real directory owned by the operator with mode `0700`; an
+existing parent that is laxer is refused rather than re-permissioned. When the
+worker finishes it hands back its branch as a git bundle; the host imports that
+bundle into an intake repository it created itself, verifies the branch there
+(name, ancestry from the resolved base object id, a non-empty change, and a bound
+of 200,000 tree entries and 2 GiB of blob data on the branch's recursive tree,
+enforced while the tree is streamed so a tree that expands from a few objects is
+stopped early), and never runs git inside the worker's repository, whose
+configuration and hooks the worker controls. That includes recovery after a worker
+failure, cancel, human wait or retry: for a task-local clone the host proves the
+launcher is gone (and, where an engine probe is wired, that the runner container is
+gone) and checks `.git/index.lock` with a non-following `lstat`; it never runs
+`git status` there. Host git in linked worktrees (the `trusted-local` backend) runs with
+`core.fsmonitor=false`, `core.hooksPath=/dev/null` and an allowlisted environment. An
+isolated worker commits locally and holds no remote and no credentials; its branch
+is not on any remote until the verified branch is published by a separate,
+host-side step.
 
 Validation commands for an isolated run execute inside the same restricted
 runner against the task-local workspace, never on the host. They run offline:
@@ -842,6 +858,61 @@ each mapping is recorded in the runner receipt:
   into the image that allows the same git and test commands and denies the
   rest; the repository's own settings cannot widen it.
 
+### Launcher outcome, result intake and resource bounds
+
+The host-side launcher records how every attempt ended in its own file beside the
+runner receipt (outside both worker mounts, mode `0600`): refused, hard deadline,
+stopped, faulted, killed for outgrowing a disk bound, or "the container exited
+with N". Collection and isolated validation classify an attempt from that record
+and never from the launcher's process exit status, because the contained command
+can exit with any status, including the launcher's own `124` and `125`. A refused,
+timed-out, stopped, faulted or unfinished launch is a worker failure; a worker that
+outgrew a disk bound is held for the operator.
+
+Everything the worker wrote is untrusted input. The host opens the result file
+relative to its directory with `O_NOFOLLOW | O_NONBLOCK`, checks the open
+descriptor is a regular file within the size cap, and never follows a symlink or
+waits on a FIFO. Before it starts the container the launcher removes any result,
+bundle, receipt and outcome an earlier attempt of the same operation left behind,
+and it mints a per-launch nonce that it passes to the in-image wrapper; a result
+is accepted only if it echoes that nonce, so a result replayed from another attempt
+is refused.
+
+The container's log is rotated (`json-file`, 2 files of at most 1 MiB), so a
+process that writes to the container's stdout cannot fill the engine's disk. The
+workspace and result directories are bounded by size and entry count (4 GiB and
+500,000 entries for the workspace, 1 GiB and 100,000 entries for the result
+directory by default; a profile can lower them). A capped store is not available
+for a bind mount of a host directory on Docker Desktop, so the launcher measures
+both trees every couple of seconds while the worker runs (symlinks never followed,
+hard links counted once, an unreadable directory counts as over the bound) and
+kills the container when either is exceeded; each file is additionally limited to
+the smaller of the two size bounds by the kernel's per-file size limit, so one
+write cannot run far ahead of the measurement. The receipt records the mechanism
+(`host-monitor-kill-hold`) and the numbers. The bound holds to within one polling
+interval of writes, not exactly.
+
+The workspace, result and intake directories must sit in one private parent
+(operator-owned, mode `0700`); the launcher refuses a launch otherwise. Where the
+engine presents a bind mount to the container user with the operator's own
+authority (Docker Desktop), no permission is opened; where the container's uid is
+a different host uid (rootless or rootful Docker on Linux), the trees are opened
+`a+rwX` inside that private parent, and the worker creates everything with umask 0
+so the host can always delete it again.
+
+The launcher labels each container with its own pid, start identity and host. A
+launcher that is killed outright (a SIGKILL after the stop grace, a crash) leaves
+its container running; every launch first removes runner containers whose launcher
+is provably gone, and `python -m enginery.adapters.oci.launcher --reconcile
+[--docker-context NAME]` does the same on demand. A container whose launcher is
+still the same live process is never touched, and a container that names no
+launcher on this host is reported and left alone. The launcher also refuses a
+permission mapping that is an unconditional bypass and a command that does not
+carry the mapping's arguments, and rejects an engine-created container with
+`seccomp` or `apparmor` unconfined, `label=disable`, unmasked kernel paths,
+sysctls, a host cgroup namespace, a runtime other than `runc`, or scratch space of
+a different size than the profile's.
+
 ### Receipts
 
 Every isolated attempt retains a runner receipt, digest-identified in the
@@ -849,7 +920,8 @@ artifact store and referenced from the attempt's execution receipt: engine kind,
 version and security options, image id and recipe digest, profile digest, host
 identity, the container's effective flags as the engine reported them (never
 the requested ones), the permission mapping, and environment key names (never
-values). `enginery stage1 watch` prints the reference.
+values), and the disk and log bounds the attempt ran under with the mechanism that
+enforces the disk bound. `enginery stage1 watch` prints the reference.
 
 Model access for an isolated worker is not part of this profile: with only the
 internal network attached, a worker has no route to any model until a model

@@ -1,11 +1,15 @@
 # Isolated runner worker image.
 #
 # Every input is pinned: the base by multi-arch index digest, the Debian packages by an archive
-# snapshot plus exact versions, uv by image digest, and the coding harnesses by exact version.
-# Nothing secret is ever baked in; credentials reach a worker only through a runtime allowlist.
+# snapshot plus exact versions, uv by image digest, and the coding harnesses with all of their
+# transitive npm dependencies by a lockfile of integrity hashes. Nothing secret is ever baked in;
+# credentials reach a worker only through a runtime allowlist.
 #
-# The image is built from a context containing exactly this file and worker_entry.py. It runs
-# with a read-only root filesystem, no capabilities, uid/gid 65532, and tmpfs /tmp + /home/worker.
+# The harness versions below are also the labels the image carries and must equal both the
+# package manifest and the execution catalog (checked by the recipe tests). The image is built
+# from a context containing exactly the recipe files (this file, worker_entry.py, the omp
+# permission overlay, and the npm manifest and lockfile). It runs with a read-only root
+# filesystem, no capabilities, uid/gid 65532, and tmpfs /tmp + /home/worker.
 ARG NODE_BASE_IMAGE=node:22-bookworm-slim
 ARG NODE_BASE_DIGEST=sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0
@@ -60,14 +64,23 @@ RUN set -eu; \
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
-# Harness packages, installed as root and read-only to the worker at runtime. bun is required
-# by the omp launcher (`#!/usr/bin/env bun`); claude-code resolves its platform binary through
-# optional dependencies, which exist for linux arm64 and x64.
+# Harness packages, installed as root and read-only to the worker at runtime. They are installed
+# from the lockfile shipped next to this file (`npm ci`), so every transitive package, including
+# the platform binaries, is the exact tarball whose integrity hash is recorded there; the lock and
+# its manifest are part of the recipe digest. bun is required by the omp launcher
+# (`#!/usr/bin/env bun`); claude-code and bun resolve their platform binary through optional
+# dependencies, which exist for linux arm64 and x64. The packages' install scripts only link those
+# already-fetched binaries, except onnxruntime-node's optional CUDA download on linux x64: that
+# one is not part of the lock, so it is switched off and the CPU binaries inside the tarball are
+# used.
+COPY package.json package-lock.json /opt/enginery/harness/
 RUN set -eu; \
-    npm install --global --no-audit --no-fund --loglevel=error "bun@${BUN_VERSION}"; \
-    npm install --global --no-audit --no-fund --loglevel=error \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"; \
+    cd /opt/enginery/harness; \
+    ONNXRUNTIME_NODE_INSTALL_CUDA=skip \
+      npm ci --omit=dev --no-audit --no-fund --loglevel=error; \
+    for bin in bun omp claude; do \
+      ln -s "/opt/enginery/harness/node_modules/.bin/${bin}" "/usr/local/bin/${bin}"; \
+    done; \
     npm cache clean --force; \
     rm -rf /root/.npm /root/.cache /tmp/*
 

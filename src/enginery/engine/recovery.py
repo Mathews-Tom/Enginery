@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import subprocess
-from collections.abc import Mapping
+import stat
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
-from enginery.domain.errors import HumanActionRequiredError, InternalInvariantViolationError
+from enginery.domain.errors import (
+    ExternalConflictError,
+    HumanActionRequiredError,
+    InternalInvariantViolationError,
+)
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
 from enginery.engine.supervisor import (
@@ -20,11 +24,18 @@ from enginery.engine.supervisor import (
     identity_from_state,
     probe_presence,
 )
+from enginery.engine.task_repository import run_worktree_git
+from enginery.engine.workspace import (
+    WORKSPACE_MODE_GIT_WORKTREE,
+    WORKSPACE_MODE_TASK_LOCAL_CLONE,
+    GitWorktreeBackend,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.process_manager import ProcessManagerStateRecord, ProcessManagerStateWrite
 from enginery.ledger.service import LedgerService
 
 _SUPERVISOR_NAME = "worker-supervisor"
+_GIT_TIMEOUT_SECONDS = 5.0
 
 
 class WorkerLiveness(StrEnum):
@@ -53,10 +64,37 @@ class RecoveryAssessment:
 class RecoveryCoordinator:
     """Re-lease only after durable orphan and workspace proof succeeds."""
 
-    def __init__(self, ledger: LedgerService, coordinator: Coordinator) -> None:
+    def __init__(
+        self,
+        ledger: LedgerService,
+        coordinator: Coordinator,
+        *,
+        container_gone: Callable[[str], bool] | None = None,
+    ) -> None:
         self._ledger = ledger
         self._coordinator = coordinator
         self._leases = FencedNodeLeases(ledger, coordinator)
+        self._container_gone = container_gone
+
+    def _mode_for(self, workspace_path: Path, explicit: str | None) -> str:
+        """The workspace mode recorded for ``workspace_path``; explicit wins, else the reservation.
+
+        A path that any durable reservation records as a task-local clone is one, so recovery
+        never runs git there. A path no reservation names was not created by the engine's
+        clone path and is handled as a linked worktree.
+        """
+        if explicit is not None:
+            return explicit
+        modes = {
+            reservation.mode
+            for reservation in GitWorktreeBackend(
+                self._ledger, self._coordinator
+            ).list_reservations()
+            if reservation.workspace_path == workspace_path
+        }
+        if WORKSPACE_MODE_TASK_LOCAL_CLONE in modes:
+            return WORKSPACE_MODE_TASK_LOCAL_CLONE
+        return WORKSPACE_MODE_GIT_WORKTREE
 
     def re_lease(
         self,
@@ -70,6 +108,7 @@ class RecoveryCoordinator:
         expected_attempt_version: int,
         operation_id: str,
         workspace_path: Path,
+        workspace_mode: str | None = None,
     ) -> FencedNodeLease:
         process_state = self._ledger.read_process_manager_state(
             process_manager_name="worker-supervisor", state_key=f"{run_id}:{node_id}"
@@ -80,7 +119,12 @@ class RecoveryCoordinator:
             raise HumanActionRequiredError(
                 "prior worker must be reconciled before replacement lease issuance"
             )
-        assessment = assess_orphan(process_state=process_state, workspace_path=workspace_path)
+        assessment = assess_orphan(
+            process_state=process_state,
+            workspace_path=workspace_path,
+            workspace_mode=self._mode_for(workspace_path, workspace_mode),
+            container_gone=self._container_gone,
+        )
         if not assessment.ready_to_release:
             raise HumanActionRequiredError(
                 "automatic recovery blocked pending human reconciliation",
@@ -98,7 +142,13 @@ class RecoveryCoordinator:
         )
 
     def reconcile(
-        self, *, lease: FencedNodeLease, workspace_path: Path, epoch: int, now: datetime
+        self,
+        *,
+        lease: FencedNodeLease,
+        workspace_path: Path,
+        epoch: int,
+        now: datetime,
+        workspace_mode: str | None = None,
     ) -> RecoveryAssessment:
         """Record observed prior-worker absence under the replacement epoch."""
         record = self._ledger.read_process_manager_state(
@@ -110,7 +160,12 @@ class RecoveryCoordinator:
             return RecoveryAssessment(False, "worker_attempt_identity_mismatch")
         if record.state.get("status") == "exit_reconciled":
             return RecoveryAssessment(True, "already_reconciled")
-        assessment = assess_orphan(process_state=record, workspace_path=workspace_path)
+        assessment = assess_orphan(
+            process_state=record,
+            workspace_path=workspace_path,
+            workspace_mode=self._mode_for(workspace_path, workspace_mode),
+            container_gone=self._container_gone,
+        )
         if not assessment.ready_to_release:
             return assessment
         state = dict(record.state)
@@ -186,13 +241,20 @@ GONE = frozenset({WorkerLiveness.EXITED, WorkerLiveness.PID_REUSED, WorkerLivene
 
 
 def assess_orphan(
-    *, process_state: ProcessManagerStateRecord, workspace_path: Path
+    *,
+    process_state: ProcessManagerStateRecord,
+    workspace_path: Path,
+    workspace_mode: str = WORKSPACE_MODE_GIT_WORKTREE,
+    container_gone: Callable[[str], bool] | None = None,
 ) -> RecoveryAssessment:
     """Prove a prior worker is absent and its workspace is quiescent.
 
     A worker is absent when its pid is free, held by a different process, or its host has
     rebooted since it launched. A malformed or foreign-machine record, a live process, a Git
-    failure or an in-progress Git lock blocks automatic recovery.
+    failure or an in-progress Git lock blocks automatic recovery. For a task-local clone the
+    supervised process is the launcher that owns the runner container, so its absence plus
+    (when ``container_gone`` is supplied) the absence of that operation's container is the
+    proof; no git runs inside the worker-writable workspace.
     """
     liveness = assess_worker(process_state.state).liveness
     if liveness is WorkerLiveness.UNVERIFIABLE:
@@ -201,18 +263,36 @@ def assess_orphan(
         return RecoveryAssessment(False, "worker_host_identity_differs")
     if liveness is WorkerLiveness.ALIVE:
         return RecoveryAssessment(False, "process_still_running")
-    return assess_workspace_quiescence(workspace_path)
+    if workspace_mode == WORKSPACE_MODE_TASK_LOCAL_CLONE and container_gone is not None:
+        operation_id = process_state.state.get("operation_id")
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            return RecoveryAssessment(False, "runner_container_unverifiable")
+        try:
+            gone = container_gone(operation_id)
+        except Exception:
+            return RecoveryAssessment(False, "runner_container_unverifiable")
+        if not gone:
+            return RecoveryAssessment(False, "runner_container_present")
+    return assess_workspace_quiescence(workspace_path, workspace_mode=workspace_mode)
 
 
-def assess_workspace_quiescence(workspace_path: Path) -> RecoveryAssessment:
+def assess_workspace_quiescence(
+    workspace_path: Path, *, workspace_mode: str = WORKSPACE_MODE_GIT_WORKTREE
+) -> RecoveryAssessment:
+    if workspace_mode == WORKSPACE_MODE_TASK_LOCAL_CLONE:
+        return _assess_task_local_quiescence(workspace_path)
+    if workspace_mode != WORKSPACE_MODE_GIT_WORKTREE:
+        return RecoveryAssessment(False, "workspace_mode_unknown")
     if not workspace_path.is_dir():
         return RecoveryAssessment(False, "workspace_missing")
-    lock = subprocess.run(
-        ["git", "-C", str(workspace_path), "rev-parse", "--git-path", "index.lock"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        lock = run_worktree_git(
+            ["rev-parse", "--git-path", "index.lock"],
+            cwd=workspace_path,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except ExternalConflictError:
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
     if lock.returncode != 0:
         return RecoveryAssessment(False, "workspace_identity_unreadable")
     lock_path = Path(lock.stdout.strip())
@@ -220,16 +300,46 @@ def assess_workspace_quiescence(workspace_path: Path) -> RecoveryAssessment:
         lock_path = workspace_path / lock_path
     if lock_path.exists():
         return RecoveryAssessment(False, "workspace_git_lock_present")
-    status = subprocess.run(
-        ["git", "-C", str(workspace_path), "status", "--porcelain"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
+    try:
+        status = run_worktree_git(
+            ["status", "--porcelain"], cwd=workspace_path, timeout=_GIT_TIMEOUT_SECONDS
+        )
+    except ExternalConflictError:
+        return RecoveryAssessment(False, "workspace_inspection_failed")
     if status.returncode != 0:
         return RecoveryAssessment(False, "workspace_inspection_failed")
     return RecoveryAssessment(True, "process_absent_workspace_quiescent")
+
+
+def _assess_task_local_quiescence(workspace_path: Path) -> RecoveryAssessment:
+    """Quiescence of a worker-writable clone, proven without running any git in it.
+
+    The worker controls the clone's configuration, so even ``git status`` could execute its
+    ``core.fsmonitor``. Only non-following ``lstat`` calls are made: the workspace and its
+    ``.git`` must be real directories and ``.git/index.lock`` must be absent.
+    """
+    try:
+        workspace_info = workspace_path.lstat()
+    except FileNotFoundError:
+        return RecoveryAssessment(False, "workspace_missing")
+    except OSError:
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
+    if not stat.S_ISDIR(workspace_info.st_mode):
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
+    git_dir = workspace_path / ".git"
+    try:
+        git_info = git_dir.lstat()
+    except OSError:
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
+    if not stat.S_ISDIR(git_info.st_mode):
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
+    try:
+        (git_dir / "index.lock").lstat()
+    except FileNotFoundError:
+        return RecoveryAssessment(True, "process_absent_workspace_quiescent")
+    except OSError:
+        return RecoveryAssessment(False, "workspace_identity_unreadable")
+    return RecoveryAssessment(False, "workspace_git_lock_present")
 
 
 __all__ = [

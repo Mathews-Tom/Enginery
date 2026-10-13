@@ -262,3 +262,29 @@ def test_isolated_harness_refuses_a_bypass_override(tmp_path: Path) -> None:
             permissions=trusted_local_permission_mapping("claude-code"),
             runner=isolated_context(tmp_path / "receipts"),
         )
+
+
+_WORKSPACE_CODE_RUNNERS = ("pytest", "python", "uv ", "mypy", "ruff", "make", "npm", "bun", "node")
+
+
+def test_no_allowed_command_runs_code_from_the_workspace() -> None:
+    """A test runner or interpreter executes workspace files, which no deny entry can stop."""
+    arguments = isolated_permission_mapping("claude-code").arguments
+    allowed_shell = [
+        entry for entry in _values_after(arguments, "--allowedTools") if entry.startswith("Bash(")
+    ]
+
+    assert allowed_shell  # local version control stays available
+    assert all(entry.startswith("Bash(git ") for entry in allowed_shell)
+    assert not [
+        entry
+        for entry in allowed_shell
+        if any(entry.startswith(f"Bash({name}") for name in _WORKSPACE_CODE_RUNNERS)
+    ]
+
+
+def test_the_rationale_names_containment_not_the_allow_list_as_the_boundary() -> None:
+    rationale = isolated_permission_mapping("claude-code").rationale
+
+    assert "not the boundary" in rationale
+    assert "Containment is the container" in rationale

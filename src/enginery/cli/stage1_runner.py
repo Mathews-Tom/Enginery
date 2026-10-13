@@ -18,7 +18,6 @@ from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.probe import OciProbeRunner
 from enginery.adapters.oci.validation import OciValidationRunner
 from enginery.application.runner_ports import IsolatedCommandRunner, RunnerAdmissionPort
-from enginery.domain.errors import HumanActionRequiredError
 from enginery.domain.runner import RunnerContext, RunnerProfile
 from enginery.workflows.stage1 import Stage1RunRequest
 
@@ -35,29 +34,34 @@ class IsolatedWiring:
     validation: IsolatedCommandRunner
 
 
+@dataclass(frozen=True, slots=True)
+class DriftedRunnerWiring:
+    """A run bound to a runner profile that is no longer the current one.
+
+    Only the admission is wired, so the run can be diagnosed and its hold reported with the
+    retained binding intact. There is no context, probe or validation runner, so nothing can
+    be launched under restrictions the run was not bound to.
+    """
+
+    admission: RunnerAdmissionPort
+
+
 def isolated_wiring(
     request: Stage1RunRequest, *, create_directories: bool
-) -> IsolatedWiring | None:
+) -> IsolatedWiring | DriftedRunnerWiring | None:
     """Return the isolated wiring for a run, or None for a trusted-local run.
 
-    A bound profile that is not the current one raises the same hold admission reports, so a
-    diagnostic and a launch agree and neither runs the worker under different restrictions.
-    ``create_directories`` makes the receipt directory only for an advancing service; a
-    read-only diagnostic never creates harness state.
+    A bound profile that is not the current one yields admission-only wiring: the service then
+    reports the same ``runner_fingerprint_drift`` hold admission reports, in every command that
+    reads the run, and no launch is possible. ``create_directories`` makes the receipt directory
+    only for an advancing service; a read-only diagnostic never creates harness state.
     """
     selection = request.runner
     if not selection.isolated_mode or selection.image is None:
         return None
     profile = RunnerProfile()
     if selection.profile_digest != profile.digest:
-        raise HumanActionRequiredError(
-            "the run is bound to a runner profile that is not the current one; it is held, not "
-            "run under different restrictions",
-            details={
-                "bound_profile_digest": str(selection.profile_digest),
-                "current_profile_digest": str(profile.digest),
-            },
-        )
+        return DriftedRunnerWiring(admission=OciRunnerAdmission(profile=profile))
     receipt_root = request.execution_configuration.artifact_root / _RECEIPT_DIRECTORY
     if create_directories:
         receipt_root.mkdir(parents=True, exist_ok=True)
@@ -71,4 +75,4 @@ def isolated_wiring(
     )
 
 
-__all__ = ["IsolatedWiring", "isolated_wiring"]
+__all__ = ["DriftedRunnerWiring", "IsolatedWiring", "isolated_wiring"]

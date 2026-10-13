@@ -135,6 +135,14 @@ class PermissionMapping:
         )
 
 
+_DISK_BOUND_DEFAULTS: dict[str, int] = {
+    "workspace_mib": 4096,
+    "out_mib": 1024,
+    "workspace_inodes": 500_000,
+    "out_inodes": 100_000,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceLimits:
     """Hard container limits; every one is enforced by the engine and observed back."""
@@ -145,12 +153,18 @@ class ResourceLimits:
     tmp_mib: int = 512
     home_mib: int = 512
     stop_grace_seconds: int = 10
+    workspace_mib: int = 4096
+    out_mib: int = 1024
+    workspace_inodes: int = 500_000
+    out_inodes: int = 100_000
 
     def __post_init__(self) -> None:
         if self.memory_mib < 64 or self.pids < 8 or self.cpus <= 0:
             raise InvalidInputError("runner resource limits must be positive and usable")
         if self.tmp_mib < 1 or self.home_mib < 1 or self.stop_grace_seconds < 1:
             raise InvalidInputError("runner scratch sizes and stop grace must be positive")
+        if min(self.workspace_mib, self.out_mib, self.workspace_inodes, self.out_inodes) < 1:
+            raise InvalidInputError("runner workspace and result bounds must be positive")
 
     @property
     def memory_bytes(self) -> int:
@@ -161,7 +175,7 @@ class ResourceLimits:
         return round(self.cpus * 1_000_000_000)
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "memory_mib": self.memory_mib,
             "cpus": self.cpus,
             "pids": self.pids,
@@ -169,6 +183,13 @@ class ResourceLimits:
             "home_mib": self.home_mib,
             "stop_grace_seconds": self.stop_grace_seconds,
         }
+        # The disk bounds are omitted at their defaults so a profile persisted before they
+        # existed keeps its digest; a non-default bound is always part of the state.
+        for key, default in _DISK_BOUND_DEFAULTS.items():
+            value = getattr(self, key)
+            if value != default:
+                state[key] = value
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> ResourceLimits:
@@ -176,6 +197,10 @@ class ResourceLimits:
         cpus = data.get("cpus")
         if not isinstance(cpus, int | float) or isinstance(cpus, bool):
             raise InvalidInputError("resource limits cpus must be a number")
+        bounds = {
+            key: _integer(data, key, "resource limits") if key in data else default
+            for key, default in _DISK_BOUND_DEFAULTS.items()
+        }
         return cls(
             memory_mib=_integer(data, "memory_mib", "resource limits"),
             cpus=float(cpus),
@@ -183,6 +208,7 @@ class ResourceLimits:
             tmp_mib=_integer(data, "tmp_mib", "resource limits"),
             home_mib=_integer(data, "home_mib", "resource limits"),
             stop_grace_seconds=_integer(data, "stop_grace_seconds", "resource limits"),
+            **bounds,
         )
 
 
@@ -199,6 +225,9 @@ DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
     "GIT_COMMITTER_NAME",
     "GIT_COMMITTER_EMAIL",
     "GIT_TERMINAL_PROMPT",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
     "CLAUDE_CONFIG_DIR",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -410,9 +439,9 @@ class EngineIdentity:
         return cls(
             kind=_text(data, "kind", "engine identity"),
             server_version=_text(data, "server_version", "engine identity"),
-            operating_system=str(data.get("operating_system", "")),
-            kernel_version=str(data.get("kernel_version", "")),
-            cgroup_version=str(data.get("cgroup_version", "")),
+            operating_system=_text(data, "operating_system", "engine identity"),
+            kernel_version=_text(data, "kernel_version", "engine identity"),
+            cgroup_version=_text(data, "cgroup_version", "engine identity"),
             security_options=_texts(data, "security_options", "engine identity"),
             rootless=rootless,
             context=_optional_text(data, "context", "engine identity"),
@@ -445,6 +474,11 @@ class ImageIdentity:
         versions = data.get("harness_versions")
         if not isinstance(versions, Mapping):
             raise InvalidInputError("image identity harness_versions must be a mapping")
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in versions.items()
+        ):
+            raise InvalidInputError("image identity harness_versions must map text to text")
         return cls(
             image_id=_text(data, "image_id", "image identity"),
             recipe_digest=_text(data, "recipe_digest", "image identity"),
@@ -545,9 +579,14 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
     """Return every way the observed container is weaker than the profile; empty means exact.
 
     A launch with any violation is refused and the container removed. The checks are the
-    acceptance criteria for an isolated worker: non-root, no capabilities, no privilege
-    escalation, read-only rootfs, enforced memory/cpu/pids limits, only the internal network,
-    no devices, and exactly the two admitted writable mounts.
+    acceptance criteria for an isolated worker that ``EffectiveContainer`` can express:
+    non-root, no capabilities, no privilege escalation, no security option beyond the profile's
+    (so no ``seccomp=unconfined``, ``apparmor=unconfined``, ``label=disable`` or
+    ``systempaths=unconfined``), read-only rootfs, enforced memory/swap/cpu/pids limits, only the
+    internal network, no devices, no unadmitted mount, and no environment outside the allowlist.
+    The facts the engine reports outside ``EffectiveContainer`` (namespaces, masked paths,
+    sysctls, runtime, tmpfs sizes, log and ulimit bounds) are checked by the launcher's
+    ``launch_violations``.
     """
     problems: list[str] = []
     expected_user = f"{profile.uid}:{profile.gid}"
@@ -562,6 +601,9 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
     for option in profile.security_options:
         if option not in effective.security_options:
             problems.append(f"security option {option!r} is not set")
+    for option in effective.security_options:
+        if option not in profile.security_options:
+            problems.append(f"security option {option!r} is outside the profile")
     if not effective.read_only_rootfs:
         problems.append("root filesystem is writable")
     limits = profile.resources
@@ -599,6 +641,66 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
 _IMAGE_ENV_KEYS = frozenset({"HOSTNAME", "NODE_VERSION", "YARN_VERSION", "BUN_INSTALL", "PWD"})
 
 
+DISK_BOUND_HOST_MONITOR = "host-monitor-kill-hold"
+"""Disk bound mechanism: a host process measures the two bind-mounted trees and kills the
+container when either exceeds its cap. A capped store is not available for a bind mount of a
+host directory on Docker Desktop (the engine VM cannot quota a host path)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceBounds:
+    """The disk and log bounds one attempt ran under, and the mechanism that enforces them."""
+
+    disk_mechanism: str
+    workspace_bytes: int
+    out_bytes: int
+    workspace_inodes: int
+    out_inodes: int
+    poll_seconds: float
+    max_file_bytes: int
+    log_driver: str
+    log_max_size: str
+    log_max_file: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.disk_mechanism, "resource bounds disk mechanism")
+        _require_text(self.log_driver, "resource bounds log driver")
+        _require_text(self.log_max_size, "resource bounds log size")
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "disk_mechanism": self.disk_mechanism,
+            "workspace_bytes": self.workspace_bytes,
+            "out_bytes": self.out_bytes,
+            "workspace_inodes": self.workspace_inodes,
+            "out_inodes": self.out_inodes,
+            "poll_seconds": self.poll_seconds,
+            "max_file_bytes": self.max_file_bytes,
+            "log_driver": self.log_driver,
+            "log_max_size": self.log_max_size,
+            "log_max_file": self.log_max_file,
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> ResourceBounds:
+        data = _mapping(state, "resource bounds")
+        poll = data.get("poll_seconds")
+        if not isinstance(poll, int | float) or isinstance(poll, bool):
+            raise InvalidInputError("resource bounds poll_seconds must be a number")
+        return cls(
+            disk_mechanism=_text(data, "disk_mechanism", "resource bounds"),
+            workspace_bytes=_integer(data, "workspace_bytes", "resource bounds"),
+            out_bytes=_integer(data, "out_bytes", "resource bounds"),
+            workspace_inodes=_integer(data, "workspace_inodes", "resource bounds"),
+            out_inodes=_integer(data, "out_inodes", "resource bounds"),
+            poll_seconds=float(poll),
+            max_file_bytes=_integer(data, "max_file_bytes", "resource bounds"),
+            log_driver=_text(data, "log_driver", "resource bounds"),
+            log_max_size=_text(data, "log_max_size", "resource bounds"),
+            log_max_file=_integer(data, "log_max_file", "resource bounds"),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerReceipt:
     """Retained proof of what one isolated worker attempt actually ran under."""
@@ -616,9 +718,14 @@ class RunnerReceipt:
     harness_version: str | None
     harness_protocol: str | None
     started_at: str
+    bounds: ResourceBounds | None = None
+
+    def __post_init__(self) -> None:
+        if self.trust_mode is TrustMode.ISOLATED_OCI and self.permissions.unconditional_bypass:
+            raise InvalidInputError("an isolated runner receipt cannot record a permission bypass")
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "schema_version": RUNNER_RECEIPT_SCHEMA_VERSION,
             "operation_id": self.operation_id,
             "trust_mode": self.trust_mode.value,
@@ -634,6 +741,9 @@ class RunnerReceipt:
             "harness_protocol": self.harness_protocol,
             "started_at": self.started_at,
         }
+        if self.bounds is not None:  # omitted when absent so an earlier receipt keeps its digest
+            state["bounds"] = self.bounds.to_state()
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> RunnerReceipt:
@@ -661,11 +771,101 @@ class RunnerReceipt:
             harness_version=_optional_text(data, "harness_version", "runner receipt"),
             harness_protocol=_optional_text(data, "harness_protocol", "runner receipt"),
             started_at=_text(data, "started_at", "runner receipt"),
+            bounds=None
+            if data.get("bounds") is None
+            else ResourceBounds.from_state(data.get("bounds")),
         )
 
     @property
     def digest(self) -> Digest:
         return Digest.of_json(self.to_state())
+
+
+OUTCOME_SCHEMA_VERSION = 1
+
+
+def outcome_path_for(receipt_path: str) -> str:
+    """Where the launcher records its own outcome, next to (and as private as) the receipt."""
+    return f"{receipt_path}.outcome.json"
+
+
+class OutcomeState(enum.Enum):
+    """How one launcher run ended, as the launcher itself observed it."""
+
+    LAUNCHING = "launching"
+    RUNNING = "running"
+    EXITED = "exited"
+    REFUSED = "refused"
+    DEADLINE = "deadline"
+    INTERRUPTED = "interrupted"
+    BOUND_EXCEEDED = "bound-exceeded"
+    FAULTED = "faulted"
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchOutcome:
+    """What the host-side launcher itself concluded about one attempt.
+
+    The launcher writes this to a host-only file outside every worker mount. Collection
+    classifies an attempt from it, never from the launcher's process exit status (which a
+    contained command can imitate: ``124`` and ``125`` are ordinary exit codes) and never from
+    the worker-written result file. ``nonce`` is minted per launch and passed to the worker,
+    which echoes it in its result so a result left by an earlier attempt cannot be replayed.
+    """
+
+    operation_id: str
+    nonce: str
+    state: OutcomeState
+    exit_code: int | None = None
+    detail: str = ""
+    violations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.operation_id, "launch outcome operation id")
+        _require_text(self.nonce, "launch outcome nonce")
+        if (self.state is OutcomeState.EXITED) != (self.exit_code is not None):
+            raise InvalidInputError("only an exited launch outcome carries an exit code")
+
+    @property
+    def final(self) -> bool:
+        return self.state not in (OutcomeState.LAUNCHING, OutcomeState.RUNNING)
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "schema_version": OUTCOME_SCHEMA_VERSION,
+            "operation_id": self.operation_id,
+            "nonce": self.nonce,
+            "state": self.state.value,
+            "exit_code": self.exit_code,
+            "detail": self.detail,
+            "violations": list(self.violations),
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> LaunchOutcome:
+        data = _mapping(state, "launch outcome")
+        if data.get("schema_version") != OUTCOME_SCHEMA_VERSION:
+            raise InvalidInputError("launch outcome schema version is unsupported")
+        try:
+            outcome_state = OutcomeState(_text(data, "state", "launch outcome"))
+        except ValueError as error:
+            raise InvalidInputError("launch outcome state is unknown") from error
+        exit_code = data.get("exit_code")
+        if exit_code is not None and (
+            not isinstance(exit_code, int) or isinstance(exit_code, bool)
+        ):
+            raise InvalidInputError("launch outcome exit code must be an integer or null")
+        detail = data.get("detail", "")
+        if not isinstance(detail, str):
+            raise InvalidInputError("launch outcome detail must be text")
+        return cls(
+            operation_id=_text(data, "operation_id", "launch outcome"),
+            nonce=_text(data, "nonce", "launch outcome"),
+            state=outcome_state,
+            exit_code=exit_code,
+            detail=detail,
+            violations=_texts(data, "violations", "launch outcome"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -692,6 +892,10 @@ class LaunchSpec:
     bundle_branch: str | None = None
     bundle_base: str | None = None
     docker_context: str | None = None
+    harness_version: str | None = None
+    """The in-image harness version the adapter probed; the launcher records it."""
+    harness_protocol: str | None = None
+    """The in-image harness protocol fingerprint the adapter probed; the launcher records it."""
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -724,7 +928,7 @@ class LaunchSpec:
             )
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "operation_id": self.operation_id,
             "container_name": self.container_name,
             "image": self.image,
@@ -742,6 +946,12 @@ class LaunchSpec:
             "bundle_base": self.bundle_base,
             "docker_context": self.docker_context,
         }
+        # The probed in-image harness identity is recorded only when the adapter verified it.
+        if self.harness_version is not None:
+            state["harness_version"] = self.harness_version
+        if self.harness_protocol is not None:
+            state["harness_protocol"] = self.harness_protocol
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> LaunchSpec:
@@ -779,6 +989,8 @@ class LaunchSpec:
             bundle_branch=_optional_text(data, "bundle_branch", "launch spec"),
             bundle_base=_optional_text(data, "bundle_base", "launch spec"),
             docker_context=_optional_text(data, "docker_context", "launch spec"),
+            harness_version=_optional_text(data, "harness_version", "launch spec"),
+            harness_protocol=_optional_text(data, "harness_protocol", "launch spec"),
         )
 
 
@@ -854,8 +1066,15 @@ _TRUSTED_LOCAL_PERMISSIONS: dict[str, PermissionMapping] = {
 # Claude Code runs with `--restricted` (file tools confined to the workspace; user, project and
 # local settings files ignored, so a repository cannot widen the rules) and `dontAsk` with
 # `--permission-prompts none` (anything not allowed is denied, nothing ever waits for an answer).
-# Bash is allowed only for local version control and test/lint runners; pushing, remotes,
-# config, fetching and network tools are denied outright and the web tools are not offered.
+# Bash is allowed only for local version control: pushing, remotes, config, fetching and network
+# tools are denied outright and the web tools are not offered. No entry runs a test runner or a
+# linter: those execute code from the workspace (conftest, plugins, config), which a deny entry
+# for publishing would not stop, and the worker image does not carry them. Git hooks are disabled
+# for the worker through command-scoped configuration in its environment.
+#
+# These lists narrow the tool surface; they are not the security boundary. Allowed git commands
+# still honour repository-local configuration (diff drivers, fsmonitor) that the worker can write.
+# What keeps a worker from publishing or reaching anything is the container.
 #
 # omp has no path-scoped or flag-level allow-list: its fine-grained surface is settings. It runs
 # with `--approval-mode write` (read and write tools are auto-approved, every other tool call is
@@ -897,15 +1116,6 @@ _ISOLATED_PERMISSIONS: dict[str, PermissionMapping] = {
             "Bash(git branch:*)",
             "Bash(git rev-parse:*)",
             "Bash(git ls-files:*)",
-            "Bash(pytest:*)",
-            "Bash(python3 -m pytest:*)",
-            "Bash(python -m pytest:*)",
-            "Bash(uv run pytest:*)",
-            "Bash(uv run ruff:*)",
-            "Bash(uv run mypy:*)",
-            "Bash(ruff check:*)",
-            "Bash(ruff format:*)",
-            "Bash(mypy:*)",
             "--disallowedTools",
             "Bash(git push:*)",
             "Bash(git remote:*)",
@@ -924,8 +1134,11 @@ _ISOLATED_PERMISSIONS: dict[str, PermissionMapping] = {
         rationale=(
             "restricted mode confines file tools to the workspace and ignores repository "
             "settings; dontAsk with no prompts denies everything not in the allow list; shell "
-            "access is limited to local git and test runners and publishing and network tools "
-            "are denied"
+            "access is limited to local git commands and publishing and network tools are "
+            "denied. This narrows the worker's tool surface (defence in depth); it is not the "
+            "boundary: an allowed git command can still run code that the repository's own "
+            "configuration names, and the file tools can write it. Containment is the "
+            "container, which holds no credentials, no remote and no route out"
         ),
     ),
     "omp": PermissionMapping(
@@ -942,9 +1155,12 @@ _ISOLATED_PERMISSIONS: dict[str, PermissionMapping] = {
         unconditional_bypass=False,
         rationale=(
             "write approval mode refuses every tool call above workspace writes because a "
-            "headless run cannot ask; the read-only image overlay allows only local git and "
-            "test runners, denies publishing and network commands, and wins over repository "
-            "settings; only file and shell tools are offered"
+            "headless run cannot ask, and the read-only image overlay allows only local git "
+            "commands and denies publishing and network commands. This narrows the worker's "
+            "tool surface (defence in depth); it is not the boundary: an allowed git command "
+            "can still run code that the repository's own configuration names, and the file "
+            "tools can write it. Containment is the container, which holds no credentials, no "
+            "remote and no route out"
         ),
     ),
 }

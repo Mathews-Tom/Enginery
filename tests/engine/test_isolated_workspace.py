@@ -682,3 +682,138 @@ def test_a_worktree_mode_reservation_still_cleans_through_git_worktree_remove(
     assert str(workspace) not in _git("worktree", "list", cwd=repository)
     # Only the task-local mode owns sibling out/intake directories; the worktree path leaves them.
     assert sentinel.is_dir()
+
+
+# --- base revision resolved once ----------------------------------------------------------
+
+
+def test_a_symbolic_base_is_resolved_once_and_verification_survives_the_name_moving(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    repository, oid = _repository(tmp_path)
+    _git("branch", "-M", "main", cwd=repository)
+    workspace = tmp_path / "workspaces" / "run-1"
+    runtime, dispatched = _dispatch_clone(
+        ledger_service,
+        repository=repository,
+        base="main",
+        workspace=workspace,
+        command=_worker_command(oid, tmp_path / "marker", "implement"),
+    )
+    _await_exit(dispatched)
+    # The symbolic name moves after the run started: verification must still bind to the base
+    # the worker was given, not to wherever "main" points by now.
+    (repository / "README").write_text("main moved on\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "main moves", cwd=repository)
+    assert _git("rev-parse", "main", cwd=repository) != oid
+
+    reservation = _backend(ledger_service, runtime).read_reservation(REPOSITORY_ID)
+    assert reservation is not None
+    assert reservation.base_revision == "main"
+    assert reservation.base_oid == oid
+    assert reservation.resolved_base_revision == oid
+    stored = ledger_service.read_process_manager_state(
+        process_manager_name="workspace-reservations", state_key=REPOSITORY_ID
+    )
+    assert stored is not None
+    assert stored.state["base_revision"] == "main"
+    assert stored.state["base_oid"] == oid
+
+    head = runtime.verify_implementation_branch(run_id="run-1", head_branch=BRANCH)
+
+    assert (
+        _git("--git-dir", str(intake_path_for(workspace)), "rev-parse", f"{head}^", cwd=tmp_path)
+        == oid
+    )
+
+
+def test_a_full_object_id_base_keeps_the_legacy_stored_shape(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    repository, oid = _repository(tmp_path)
+    runtime, dispatched = _dispatch_clone(
+        ledger_service, repository=repository, base=oid, workspace=tmp_path / "workspaces" / "w"
+    )
+    _await_exit(dispatched)
+
+    stored = ledger_service.read_process_manager_state(
+        process_manager_name="workspace-reservations", state_key=REPOSITORY_ID
+    )
+    reservation = _backend(ledger_service, runtime).read_reservation(REPOSITORY_ID)
+
+    assert stored is not None and reservation is not None
+    assert "base_oid" not in stored.state
+    assert reservation.base_oid is None
+    assert reservation.resolved_base_revision == oid
+
+
+def test_a_reservation_persisted_without_a_resolved_base_decodes_unchanged(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="legacy-base",
+            events=(
+                EventWrite(
+                    "workspace",
+                    "legacy-base-repository",
+                    0,
+                    "workspace.materialized",
+                    1,
+                    {"repository_id": "legacy-base-repository"},
+                ),
+            ),
+            process_manager_updates=(
+                ProcessManagerStateWrite(
+                    process_manager_name="workspace-reservations",
+                    state_key="legacy-base-repository",
+                    expected_version=0,
+                    state={
+                        "repository_id": "legacy-base-repository",
+                        "run_id": "legacy-run",
+                        "repository_path": str(tmp_path / "repository"),
+                        "workspace_path": str(tmp_path / "workspace"),
+                        "base_revision": "main",
+                        "status": "materialized",
+                    },
+                ),
+            ),
+        )
+    )
+    coordinator = Coordinator(ledger_service, owner="coordinator")
+
+    reservation = GitWorktreeBackend(ledger_service, coordinator).read_reservation(
+        "legacy-base-repository"
+    )
+
+    assert reservation is not None
+    assert reservation.base_oid is None
+    assert reservation.resolved_base_revision == "main"
+
+
+def test_a_worktree_reservation_records_the_resolved_base_when_it_materializes(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    repository, oid = _repository(tmp_path)
+    _git("branch", "-M", "main", cwd=repository)
+    coordinator = Coordinator(ledger_service, owner="coordinator")
+    epoch = coordinator.acquire(now=NOW, heartbeat_window=timedelta(seconds=60))
+    backend = GitWorktreeBackend(ledger_service, coordinator)
+    reserved = backend.reserve(
+        repository_id=REPOSITORY_ID,
+        run_id="run-1",
+        repository_path=repository,
+        workspace_path=tmp_path / "worktree",
+        base_revision="main",
+        epoch=epoch.epoch,
+        now=NOW,
+    )
+    assert reserved.base_oid is None
+
+    materialized = backend.materialize(reserved, epoch=epoch.epoch, now=NOW)
+    (repository / "README").write_text("main moved on\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "main moves", cwd=repository)
+
+    assert materialized.base_oid == oid
+    assert backend.read_reservation(REPOSITORY_ID) == materialized
+    assert _git("rev-parse", "HEAD", cwd=materialized.workspace_path) == oid

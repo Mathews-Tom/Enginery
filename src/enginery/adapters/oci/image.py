@@ -1,9 +1,10 @@
 """Build and verify the isolated worker image.
 
-The recipe is the packaged ``Dockerfile.worker`` plus the files it copies in (``worker_entry.py``
-and the omp permission overlay). Its digest is stamped
-on the image as a label at build time and re-derived from the installed package at verification
-time, so an image built from a different recipe than the one this installation ships is refused.
+The recipe is the packaged ``Dockerfile.worker`` plus the files it copies in (``worker_entry.py``,
+the omp permission overlay, and the npm manifest and lockfile that pin every harness package and
+all of its transitive dependencies by integrity hash). Its digest is stamped on the image as a
+label at build time and re-derived from the installed package at verification time, so an image
+built from a different recipe than the one this installation ships is refused.
 """
 
 from __future__ import annotations
@@ -24,7 +25,15 @@ from enginery.domain.runner import ImageIdentity
 DOCKERFILE_NAME = "Dockerfile.worker"
 WORKER_ENTRY_NAME = "worker_entry.py"
 OMP_POLICY_NAME = "omp-isolated-policy.yml"
-RECIPE_FILES: tuple[str, ...] = (DOCKERFILE_NAME, WORKER_ENTRY_NAME, OMP_POLICY_NAME)
+PACKAGE_MANIFEST_NAME = "package.json"
+PACKAGE_LOCK_NAME = "package-lock.json"
+RECIPE_FILES: tuple[str, ...] = (
+    DOCKERFILE_NAME,
+    WORKER_ENTRY_NAME,
+    OMP_POLICY_NAME,
+    PACKAGE_MANIFEST_NAME,
+    PACKAGE_LOCK_NAME,
+)
 
 RECIPE_DIGEST_LABEL = "dev.enginery.recipe-digest"
 RUNNER_IMAGE_LABEL = "dev.enginery.runner-image"

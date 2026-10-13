@@ -29,6 +29,9 @@ PROBE_LABEL = "dev.enginery.probe"
 OPERATION_LABEL = "dev.enginery.operation"
 """Label carrying the operation id a worker container belongs to."""
 
+LAUNCHER_LABEL = "dev.enginery.launcher"
+"""Label carrying the pid, start identity and host of the launcher process that owns a worker."""
+
 ENGINE_ENVIRONMENT_KEYS: tuple[str, ...] = (
     "PATH",
     "HOME",

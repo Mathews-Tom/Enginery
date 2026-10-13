@@ -58,7 +58,24 @@ PERMISSIONS = PermissionMapping(
     unconditional_bypass=False,
     rationale="test mapping",
 )
-INNER = ("omp", "-p", "do the thing")
+PERMISSIONS_WITHOUT_ARGUMENTS = PermissionMapping(
+    harness="omp",
+    name="omp-isolated-test-no-arguments",
+    arguments=(),
+    unconditional_bypass=False,
+    rationale="test mapping that adds no harness arguments",
+)
+MASKED_PATHS = (
+    "/proc/acpi",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/sys/firmware",
+)
+READONLY_PATHS = ("/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger")
+INNER = ("omp", "--approval", "ask", "-p", "do the thing")
+NONCE = "n" * 32
 
 
 def image_identity(image_id: str = IMAGE_ID) -> ImageIdentity:
@@ -135,6 +152,10 @@ _VALUE_FLAGS = frozenset(
         "-e",
         "--device",
         "--pid",
+        "--cgroupns",
+        "--log-driver",
+        "--log-opt",
+        "--ulimit",
     }
 )
 _BOOLEAN_FLAGS = frozenset({"--read-only", "--init", "--privileged"})
@@ -176,7 +197,7 @@ class FakeDocker:
 
     def create_worker(self, spec: LaunchSpec, inner: Sequence[str] = INNER) -> None:
         """Create ``spec``'s worker container exactly as the launcher would."""
-        completed = self.engine().run_cli(create_arguments(spec, inner))
+        completed = self.engine().run_cli(create_arguments(spec, inner, nonce=NONCE))
         assert completed.returncode == 0, completed.stderr
 
     def finish(self, name: str, exit_code: int) -> None:
@@ -409,6 +430,8 @@ class FakeDocker:
             "labels": {},
             "env": [],
             "devices": [],
+            "log_opts": {},
+            "ulimits": [],
             "read_only": False,
             "init": False,
             "privileged": False,
@@ -440,6 +463,11 @@ class FakeDocker:
                     parsed["env"].append(value)
                 elif token == "--device":
                     parsed["devices"].append(value)
+                elif token == "--log-opt":
+                    key, _, option = value.partition("=")
+                    parsed["log_opts"][key] = option
+                elif token == "--ulimit":
+                    parsed["ulimits"].append(value)
                 else:
                     parsed[token.lstrip("-").replace("-", "_")] = value
             else:
@@ -484,6 +512,19 @@ class FakeDocker:
                     for device in parsed["devices"]
                 ],
                 "IpcMode": parsed.get("ipc", "private"),
+                "CgroupnsMode": parsed.get("cgroupns", "private"),
+                "MaskedPaths": list(MASKED_PATHS),
+                "ReadonlyPaths": list(READONLY_PATHS),
+                "Sysctls": None,
+                "Runtime": "runc",
+                "LogConfig": {
+                    "Type": parsed.get("log_driver", "json-file"),
+                    "Config": dict(parsed["log_opts"]),
+                },
+                "Ulimits": [
+                    {"Name": name, "Soft": int(limit), "Hard": int(limit)}
+                    for name, _, limit in (item.partition("=") for item in parsed["ulimits"])
+                ],
                 "PidMode": parsed.get("pid", ""),
                 "UTSMode": "",
                 "UsernsMode": "",

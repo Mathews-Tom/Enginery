@@ -239,3 +239,96 @@ def test_a_malformed_runner_receipt_reference_is_rejected(state: object) -> None
 
     with pytest.raises(InvalidInputError):
         RunnerReceiptRef.from_state(state)
+
+
+_IMAGE = "sha256:" + "a" * 64
+
+
+def _reference(**overrides: str) -> dict[str, str]:
+    state = {
+        "trust_mode": "isolated-oci",
+        "receipt_digest": str(Digest.of_bytes(b"r")),
+        "image_id": _IMAGE,
+        "profile_digest": str(Digest.of_bytes(b"p")),
+    }
+    state.update(overrides)
+    return state
+
+
+@pytest.mark.parametrize("trust_mode", ["trusted-local", "isolated-oci"])
+def test_a_runner_receipt_reference_accepts_every_trust_mode_value(trust_mode: str) -> None:
+    from enginery.domain.execution_receipt import RunnerReceiptRef
+
+    assert RunnerReceiptRef.from_state(_reference(trust_mode=trust_mode)).trust_mode == trust_mode
+
+
+@pytest.mark.parametrize("trust_mode", ["mystery", "Isolated-OCI", " isolated-oci", ""])
+def test_a_runner_receipt_reference_refuses_a_trust_mode_that_is_not_a_trust_mode(
+    trust_mode: str,
+) -> None:
+    from enginery.domain.execution_receipt import RunnerReceiptRef
+
+    with pytest.raises(InvalidInputError, match="trust mode"):
+        RunnerReceiptRef.from_state(_reference(trust_mode=trust_mode))
+
+
+@pytest.mark.parametrize(
+    "image_id",
+    ["latest", "sha256:abc", "sha256:" + "A" * 64, "sha256:" + "a" * 65, "sha1:" + "a" * 64, " "],
+)
+def test_a_runner_receipt_reference_refuses_an_image_id_that_is_not_an_exact_sha256_id(
+    image_id: str,
+) -> None:
+    from enginery.domain.execution_receipt import RunnerReceiptRef
+
+    with pytest.raises(InvalidInputError, match="image id"):
+        RunnerReceiptRef.from_state(_reference(image_id=image_id))
+
+
+def test_a_worker_reported_model_is_labelled_and_the_label_round_trips() -> None:
+    observed = EffectiveControl.observed(MODEL, source="message_end.message.model")
+
+    labelled = observed.worker_reported()
+
+    assert labelled.reported_by == "worker"
+    assert labelled.value == MODEL and labelled.source == observed.source
+    assert EffectiveControl.from_state(labelled.to_state(), name="effective_model") == labelled
+    assert labelled.to_state()["reported_by"] == "worker"
+
+
+def test_the_worker_reported_label_is_omitted_by_default_so_legacy_receipts_are_unchanged() -> None:
+    observed = EffectiveControl.observed(MODEL, source="evidence")
+    legacy_state = {"state": "observed", "value": MODEL, "source": "evidence"}
+
+    assert observed.to_state() == legacy_state
+    decoded = EffectiveControl.from_state(legacy_state, name="effective_model")
+    assert decoded == observed and decoded.reported_by is None
+    legacy = replace(_receipt(None), effective_model=observed)
+    assert "reported_by" not in legacy.to_state()["effective_model"]  # type: ignore[operator]
+    assert ExecutionReceipt.from_state(legacy.to_state()) == legacy
+
+
+def test_an_unknown_control_asserts_nothing_so_it_is_never_labelled() -> None:
+    unknown = EffectiveControl.unknown(reason="no event reported a model")
+
+    assert unknown.worker_reported() is unknown
+    with pytest.raises(InvalidInputError, match="observed"):
+        EffectiveControl(state=unknown.state, value=None, source="reason", reported_by="worker")
+
+
+@pytest.mark.parametrize("reported_by", ["", "  ", 7])
+def test_a_malformed_reported_by_is_refused(reported_by: object) -> None:
+    state = {"state": "observed", "value": MODEL, "source": "evidence", "reported_by": reported_by}
+
+    with pytest.raises(InvalidInputError):
+        EffectiveControl.from_state(state, name="effective_model")
+
+
+def test_a_worker_reported_model_still_satisfies_an_exact_strict_match() -> None:
+    selection = selection_for("omp", model=MODEL, strict_effective=True)
+    receipt = _receipt(
+        selection.digest,
+        model=EffectiveControl.observed(MODEL, source="evidence").worker_reported(),
+    )
+
+    assert evaluate_effective_requirement(selection, receipt) is None

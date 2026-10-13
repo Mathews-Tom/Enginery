@@ -14,8 +14,9 @@ built (for queued work, when it was queued). The observed version is never prese
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -24,8 +25,14 @@ from enginery.domain.execution_selection import (
     ExecutionSelection,
     HoldReason,
 )
+from enginery.domain.runner import TrustMode
 
 EXECUTION_RECEIPT_SCHEMA_VERSION = 1
+
+WORKER_REPORTED = "worker"
+"""``EffectiveControl.reported_by`` for a value the harness itself printed."""
+
+_IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class EffectiveState(enum.Enum):
@@ -46,6 +53,8 @@ class EffectiveControl:
     state: EffectiveState
     value: str | None
     source: str
+    reported_by: str | None = None
+    """Who asserted an observed value: ``worker`` when the harness itself printed it."""
 
     def __post_init__(self) -> None:
         if not self.source.strip():
@@ -55,6 +64,10 @@ class EffectiveControl:
                 raise InvalidInputError("an observed effective control requires a value")
         elif self.value is not None:
             raise InvalidInputError("an unknown effective control cannot carry a value")
+        if self.reported_by is not None and (
+            self.state is not EffectiveState.OBSERVED or not self.reported_by.strip()
+        ):
+            raise InvalidInputError("only an observed effective control can name who reported it")
 
     @classmethod
     def observed(cls, value: str, *, source: str) -> EffectiveControl:
@@ -64,8 +77,28 @@ class EffectiveControl:
     def unknown(cls, *, reason: str) -> EffectiveControl:
         return cls(state=EffectiveState.UNKNOWN, value=None, source=reason)
 
+    def worker_reported(self) -> EffectiveControl:
+        """The same observation, labelled as asserted by the worker itself.
+
+        A value read from the worker's own output is the worker's claim, not an attested fact:
+        a worker that is not trusted can print any model id. An unknown control stays unlabelled
+        because it asserts nothing.
+        """
+        if self.state is not EffectiveState.OBSERVED:
+            return self
+        return replace(self, reported_by=WORKER_REPORTED)
+
     def to_state(self) -> dict[str, object]:
-        return {"state": self.state.value, "value": self.value, "source": self.source}
+        state: dict[str, object] = {
+            "state": self.state.value,
+            "value": self.value,
+            "source": self.source,
+        }
+        if self.reported_by is not None:
+            # Omitted for every receipt written before attribution was recorded, so those
+            # keep decoding and their digests do not change.
+            state["reported_by"] = self.reported_by
+        return state
 
     @classmethod
     def from_state(cls, state: object, *, name: str) -> EffectiveControl:
@@ -74,17 +107,19 @@ class EffectiveControl:
         value = state.get("value")
         source = state.get("source")
         raw_state = state.get("state")
+        reported_by = state.get("reported_by")
         if (
             (value is not None and not isinstance(value, str))
             or not isinstance(source, str)
             or not isinstance(raw_state, str)
+            or (reported_by is not None and not isinstance(reported_by, str))
         ):
             raise InvalidInputError(f"execution receipt {name} is malformed")
         try:
             effective_state = EffectiveState(raw_state)
         except ValueError as error:
             raise InvalidInputError(f"execution receipt {name} state is unknown") from error
-        return cls(state=effective_state, value=value, source=source)
+        return cls(state=effective_state, value=value, source=source, reported_by=reported_by)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,8 +180,13 @@ class RunnerReceiptRef:
     profile_digest: Digest
 
     def __post_init__(self) -> None:
-        if not self.trust_mode.strip() or not self.image_id.strip():
-            raise InvalidInputError("runner receipt reference must name its mode and image")
+        if self.trust_mode not in {mode.value for mode in TrustMode}:
+            raise InvalidInputError(
+                "runner receipt reference trust mode is unknown",
+                details={"trust_mode": self.trust_mode},
+            )
+        if not _IMAGE_ID_PATTERN.fullmatch(self.image_id):
+            raise InvalidInputError("runner receipt reference image id must be sha256:<64 hex>")
 
     def to_state(self) -> dict[str, object]:
         return {
@@ -315,6 +355,7 @@ def evaluate_effective_requirement(
 
 __all__ = [
     "EXECUTION_RECEIPT_SCHEMA_VERSION",
+    "WORKER_REPORTED",
     "EffectiveControl",
     "EffectiveState",
     "ExecutionReceipt",

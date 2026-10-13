@@ -5,6 +5,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,7 @@ _IDENTITY = {
 }
 
 
-def _git(*args: str, cwd: Path, check: bool = True) -> str:
+def _git(*args: str, cwd: Path, check: bool = True, stdin: str | None = None) -> str:
     env = {
         "PATH": os.environ["PATH"],
         "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -39,7 +40,13 @@ def _git(*args: str, cwd: Path, check: bool = True) -> str:
         **_IDENTITY,
     }
     completed = subprocess.run(
-        ["git", *args], cwd=cwd, env=env, check=check, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        check=check,
+        capture_output=True,
+        text=True,
+        input=stdin,
     )
     return completed.stdout.strip()
 
@@ -238,7 +245,8 @@ def test_symbolic_base_revision_is_resolved_against_the_source(
 def test_materialization_accepts_an_empty_directory_only(
     repository: Path, base: str, workspace: Path
 ) -> None:
-    workspace.mkdir(parents=True)
+    workspace.parent.mkdir(mode=0o700)
+    workspace.mkdir()
     materialize_task_local_repository(
         repository_path=repository, workspace_path=workspace, base_revision=base
     )
@@ -789,3 +797,213 @@ def test_cleanup_retains_a_really_immutable_entry(materialized: Path) -> None:
     finally:
         os.chflags(stuck, 0)  # type: ignore[attr-defined,unused-ignore]
         shutil.rmtree(materialized, ignore_errors=True)
+
+
+# --- base-only clone (no host object leakage) ----------------------------------------------
+
+
+def _object_ids(repository: Path) -> set[str]:
+    listing = _git("cat-file", "--batch-all-objects", "--batch-check=%(objectname)", cwd=repository)
+    return set(listing.split())
+
+
+def test_the_clone_holds_only_what_is_reachable_from_the_base(
+    repository: Path, base: str, workspace: Path
+) -> None:
+    canary_blob = _git("hash-object", "-w", "--stdin", cwd=repository, stdin="unreachable canary\n")
+    (repository / "README").write_text("stashed\n", encoding="utf-8")
+    _git("stash", "push", "-q", cwd=repository)
+    stash = _git("rev-parse", "refs/stash", cwd=repository)
+    _git("checkout", "-q", "-b", "unrelated", cwd=repository)
+    _commit_file(repository, "branch-only.txt", "branch canary\n", "unrelated branch")
+    branch_commit = _git("rev-parse", "HEAD", cwd=repository)
+    _git("tag", "canary-tag", cwd=repository)
+    _git("tag", "-a", "-m", "annotated canary", "canary-annotated", cwd=repository)
+    annotated = _git("rev-parse", "canary-annotated", cwd=repository)
+    _git("checkout", "-q", "main", cwd=repository)
+    canaries = {canary_blob, stash, branch_commit, annotated}
+    assert canaries <= _object_ids(repository), "the canaries exist in the host repository"
+
+    materialize_task_local_repository(
+        repository_path=repository, workspace_path=workspace, base_revision=base
+    )
+
+    clone_objects = _object_ids(workspace)
+    for canary in canaries:
+        assert canary not in clone_objects, canary
+        assert (
+            subprocess.run(
+                ["git", "cat-file", "-e", canary],
+                cwd=workspace,
+                env={"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": "/dev/null"},
+                capture_output=True,
+                check=False,
+            ).returncode
+            != 0
+        ), canary
+    reachable = {
+        entry
+        for entry in _git("rev-list", "--objects", base, cwd=repository).split()
+        if len(entry) in {40, 64}
+    }
+    assert clone_objects == reachable
+    assert _git("for-each-ref", "--format=%(refname)", cwd=workspace) == "", (
+        "the clone carries no branch, tag, stash or remote-tracking ref"
+    )
+
+
+def test_materialization_leaves_no_temporary_reference_in_the_host_repository(
+    repository: Path, base: str, workspace: Path
+) -> None:
+    before = _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=repository)
+
+    materialize_task_local_repository(
+        repository_path=repository, workspace_path=workspace, base_revision=base
+    )
+
+    assert _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=repository) == before
+
+
+def test_a_failed_clone_still_removes_the_temporary_reference(
+    repository: Path, base: str, tmp_path: Path
+) -> None:
+    before = _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=repository)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    occupied = parent / "workspace-1"
+    occupied.write_text("a file blocks the clone target", encoding="utf-8")
+
+    with pytest.raises(ExternalConflictError):
+        materialize_task_local_repository(
+            repository_path=repository, workspace_path=occupied, base_revision=base
+        )
+
+    assert _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=repository) == before
+
+
+# --- private parent directory -------------------------------------------------------------
+
+
+def test_materialization_creates_the_parent_directory_operator_private(
+    repository: Path, base: str, workspace: Path
+) -> None:
+    materialize_task_local_repository(
+        repository_path=repository, workspace_path=workspace, base_revision=base
+    )
+
+    info = workspace.parent.lstat()
+    assert stat.S_IMODE(info.st_mode) == 0o700
+    assert info.st_uid == os.geteuid()
+
+
+def test_a_laxer_existing_parent_is_refused_and_nothing_is_cloned(
+    repository: Path, base: str, workspace: Path
+) -> None:
+    workspace.parent.mkdir()
+    workspace.parent.chmod(0o755)
+
+    with pytest.raises(ExternalConflictError, match="mode 0700"):
+        materialize_task_local_repository(
+            repository_path=repository, workspace_path=workspace, base_revision=base
+        )
+
+    assert not workspace.exists()
+
+
+def test_a_symlinked_parent_is_refused(
+    repository: Path, base: str, workspace: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    workspace.parent.symlink_to(target)
+
+    with pytest.raises(ExternalConflictError, match="mode 0700"):
+        materialize_task_local_repository(
+            repository_path=repository, workspace_path=workspace, base_revision=base
+        )
+
+    assert list(target.iterdir()) == []
+
+
+# --- intake tree bounds (git bombs) -------------------------------------------------------
+
+
+def _bundle_branch_with_tree(
+    workspace: Path, base: str, tree: str, branch: str = "feature"
+) -> None:
+    commit = _git("commit-tree", "-p", base, "-m", "bomb", tree, cwd=workspace)
+    _git("update-ref", f"refs/heads/{branch}", commit, cwd=workspace)
+    out = out_path_for(workspace)
+    out.mkdir(exist_ok=True)
+    _git("bundle", "create", "-q", str(out / BUNDLE_FILE_NAME), f"{base}..{branch}", cwd=workspace)
+
+
+def _flat_tree(workspace: Path, *, files: int, size: int) -> str:
+    blob = _git("hash-object", "-w", "--stdin", cwd=workspace, stdin="x" * size)
+    listing = "".join(f"100644 blob {blob}\tfile-{index:05d}\n" for index in range(files))
+    return _git("mktree", cwd=workspace, stdin=listing)
+
+
+def test_a_branch_tree_over_the_entry_count_is_refused_before_verification_passes(
+    repository: Path, base: str, materialized: Path
+) -> None:
+    _bundle_branch_with_tree(materialized, base, _flat_tree(materialized, files=150, size=1))
+    _intake(repository, materialized, base)
+    intake = intake_path_for(materialized)
+
+    with pytest.raises(ExternalConflictError, match="entry-count or size limit"):
+        verify_intake_branch(
+            intake_path=intake, head_branch="feature", base_revision=base, max_tree_entries=100
+        )
+    assert verify_intake_branch(
+        intake_path=intake, head_branch="feature", base_revision=base, max_tree_entries=150
+    ) == _git("rev-parse", "refs/heads/feature", cwd=intake)
+
+
+def test_a_branch_tree_over_the_total_size_is_refused(
+    repository: Path, base: str, materialized: Path
+) -> None:
+    _bundle_branch_with_tree(materialized, base, _flat_tree(materialized, files=10, size=1000))
+    _intake(repository, materialized, base)
+
+    with pytest.raises(ExternalConflictError, match="entry-count or size limit"):
+        verify_intake_branch(
+            intake_path=intake_path_for(materialized),
+            head_branch="feature",
+            base_revision=base,
+            max_tree_bytes=9_999,
+        )
+
+
+def test_a_tree_that_expands_to_millions_of_entries_from_a_few_objects_is_stopped(
+    repository: Path, base: str, materialized: Path
+) -> None:
+    """A real git bomb: 8 small objects whose recursive listing is 10**6 entries."""
+    blob = _git("hash-object", "-w", "--stdin", cwd=materialized, stdin="x")
+    tree = _git("mktree", cwd=materialized, stdin=f"100644 blob {blob}\tleaf\n")
+    for _level in range(6):
+        listing = "".join(f"040000 tree {tree}\td{index}\n" for index in range(10))
+        tree = _git("mktree", cwd=materialized, stdin=listing)
+    _bundle_branch_with_tree(materialized, base, tree)
+    _intake(repository, materialized, base)
+
+    started = time.monotonic()
+    with pytest.raises(ExternalConflictError, match="entry-count or size limit"):
+        verify_intake_branch(
+            intake_path=intake_path_for(materialized), head_branch="feature", base_revision=base
+        )
+    assert time.monotonic() - started < 120
+
+
+def test_the_default_tree_bounds_accept_an_ordinary_change(
+    repository: Path, base: str, materialized: Path
+) -> None:
+    head = _worker_commit(materialized, "feature", base=base)
+    _intake(repository, materialized, base)
+
+    assert (
+        verify_intake_branch(
+            intake_path=intake_path_for(materialized), head_branch="feature", base_revision=base
+        )
+        == head
+    )

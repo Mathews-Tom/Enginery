@@ -35,7 +35,7 @@ from enginery.application.work_ports import (
 )
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import HumanActionRequiredError
+from enginery.domain.errors import HumanActionRequiredError, MissingPrerequisiteError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
@@ -130,10 +130,19 @@ class ScriptedAdmission:
 
 @dataclass
 class RecordingHarness:
-    """A supervised-harness stand-in whose worker is a trivial local command."""
+    """A supervised-harness stand-in whose worker is a trivial local command.
+
+    ``installed`` is what its in-image probe reports: by default exactly the catalog's omp.
+    """
 
     artifact_store: ArtifactStore
     command: tuple[str, ...] = (sys.executable, "-c", "pass")
+    installed: InstalledHost | Exception | None = field(
+        default_factory=lambda: InstalledHost(
+            executable_version="18.10.3", protocol_fingerprint="json-protocol=3"
+        )
+    )
+    probes: int = 0
     result_paths: list[Path] = field(default_factory=list)
 
     def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
@@ -141,7 +150,10 @@ class RecordingHarness:
         return self.command
 
     def installed_host(self) -> InstalledHost | None:
-        return None
+        self.probes += 1
+        if isinstance(self.installed, Exception):
+            raise self.installed
+        return self.installed
 
     def collect_supervised(
         self,
@@ -424,6 +436,100 @@ def test_an_isolated_run_with_no_admission_configured_is_held_not_run_locally(
         built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
 
     assert ledger_service.read_projection(aggregate_type="run", aggregate_id=RUN_ID) is None
+
+
+def _started_isolated(ledger_service: LedgerService, tmp_path: Path) -> Harnessed:
+    built = _build(ledger_service, tmp_path, runner=_isolated(), admission=ScriptedAdmission())
+    assert not built.request.execution_selection.requires_native_controls  # a host default
+    built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+    return built
+
+
+@pytest.mark.parametrize(
+    ("reported", "observed_version", "observed_protocol"),
+    [
+        (InstalledHost("18.10.4", "json-protocol=3"), "18.10.4", "json-protocol=3"),
+        (InstalledHost("18.10.3", "json-protocol=2"), "18.10.3", "json-protocol=2"),
+        (None, "unobservable", "unobservable"),
+    ],
+)
+def test_an_isolated_host_default_run_holds_when_the_image_harness_drifts_from_the_catalog(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    reported: InstalledHost | None,
+    observed_version: str,
+    observed_protocol: str,
+) -> None:
+    built = _started_isolated(ledger_service, tmp_path)
+    built.harness.installed = reported
+
+    progression = built.service.next_action(built.request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    hold = progression.hold
+    assert hold is not None
+    assert hold.reason is HoldReason.RUNNER_FINGERPRINT_DRIFT
+    assert hold.details == {
+        "harness": "omp",
+        "accepted_executable_versions": ">=18.10.3,<19.0.0",
+        "tested_executable_version": "18.10.3",
+        "catalog_protocol_fingerprint": "json-protocol=3",
+        "image_executable_version": observed_version,
+        "image_protocol_fingerprint": observed_protocol,
+    }
+    with pytest.raises(HumanActionRequiredError, match="inside the pinned runner image"):
+        _dispatch(built)
+    assert built.harness.result_paths == []  # nothing was launched
+
+
+def test_an_isolated_host_default_run_is_probed_and_proceeds_when_the_image_matches(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _started_isolated(ledger_service, tmp_path)
+
+    progression = built.service.next_action(built.request.run.id)
+
+    assert progression.hold is None
+    assert progression.action is Stage1ProgressionAction.QUALIFY
+    assert built.harness.probes >= 1
+
+
+def test_a_trusted_local_host_default_run_never_probes_the_harness(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _build(ledger_service, tmp_path, runner=RunnerSelection.trusted_local())
+    built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
+
+    built.service.next_action(built.request.run.id)
+
+    assert built.harness.probes == 0
+
+
+def test_an_image_harness_that_cannot_be_probed_holds_as_unqualified(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _started_isolated(ledger_service, tmp_path)
+    built.harness.installed = MissingPrerequisiteError("the probe container could not be started")
+
+    progression = built.service.next_action(built.request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.RUNNER_UNQUALIFIED
+    assert "could not be probed" in progression.hold.message
+
+
+def test_an_isolated_run_with_no_way_to_probe_the_image_harness_is_held(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    built = _started_isolated(ledger_service, tmp_path)
+    unprobed = replace(built.service, harness=None, host_probe=None)
+
+    progression = unprobed.next_action(built.request.run.id)
+
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.RUNNER_UNQUALIFIED
+    assert "cannot be probed" in progression.hold.message
 
 
 def test_a_run_that_binds_no_trust_mode_cannot_start(

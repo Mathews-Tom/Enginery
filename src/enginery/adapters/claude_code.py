@@ -10,17 +10,17 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
 from enginery.adapters.runner_launch import (
-    MAX_RESULT_BYTES,
     isolated_command,
     publish_runner_receipt,
-    read_bounded_text,
+    read_attempt_result,
     require_isolated_permissions,
+    verified_image_host,
     worker_environment,
 )
 from enginery.application.adapter_types import (
@@ -137,6 +137,7 @@ class ClaudeCodeHarness:
     _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _commands: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
     _launch_versions: dict[str, str | None] = field(default_factory=dict, init=False)
+    _image_host: InstalledHost | None = field(default=None, init=False)
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _processes: dict[str, _ClaudeCodeProcess] = field(default_factory=dict, init=False)
     _collected: dict[str, tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]] = field(
@@ -195,8 +196,16 @@ class ClaudeCodeHarness:
         )
 
     def installed_host(self) -> InstalledHost | None:
-        """Return the probed executable version and the adapter's declared protocol."""
-        return probe_installed_host(self.config.executable, self.command_runner)
+        """Return the probed executable version and the adapter's declared protocol.
+
+        An isolated harness is probed inside the pinned image, never on the host. The image is
+        immutable for the run, so one probe is kept for the harness's lifetime.
+        """
+        if self.runner is None:
+            return probe_installed_host(self.config.executable, self.command_runner)
+        if self._image_host is None:
+            self._image_host = probe_installed_host(self.config.executable, self.command_runner)
+        return self._image_host
 
     def start(self, task: HarnessTask) -> HarnessSession:
         if self.runner is not None:
@@ -318,7 +327,7 @@ class ClaudeCodeHarness:
         observed_at_launch: str | None,
         runner: RunnerReceiptRef | None = None,
     ) -> ExecutionReceipt:
-        return build_receipt(
+        receipt = build_receipt(
             task.selection,
             harness=_HARNESS_ID,
             catalog=self.catalog,
@@ -326,6 +335,18 @@ class ClaudeCodeHarness:
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
             observed_at_launch=observed_at_launch,
             runner=runner,
+        )
+        if runner is None:
+            return receipt
+        # An isolated worker is not trusted: the model id it printed is its own claim.
+        return replace(receipt, effective_model=receipt.effective_model.worker_reported())
+
+    def _catalog_host(self) -> InstalledHost:
+        """The identity an isolated worker's runner receipt must record: the tested one."""
+        host = self.catalog.host(_HARNESS_ID)
+        return InstalledHost(
+            executable_version=host.tested_executable_version,
+            protocol_fingerprint=host.protocol_fingerprint,
         )
 
     def _require_session(self, session: HarnessSession) -> None:
@@ -340,6 +361,7 @@ class ClaudeCodeHarness:
         which harness CLI is being wrapped.
         """
         if self.runner is not None:
+            image_host = verified_image_host(self.catalog.host(_HARNESS_ID), self.installed_host())
             return isolated_command(
                 runner=self.runner,
                 harness=_HARNESS_ID,
@@ -348,6 +370,7 @@ class ClaudeCodeHarness:
                 permissions=self.resolved_permissions(),
                 environment=self.container_environment(task),
                 inner_command=self.command_for(task),
+                image_host=image_host,
             )
         if not result_path.is_absolute():
             raise InvalidInputError("Claude Code worker result path must be absolute")
@@ -379,7 +402,7 @@ class ClaudeCodeHarness:
         runner receipt the launcher wrote for it.
         """
         try:
-            payload = json.loads(self._read_result(result_path))
+            payload = json.loads(self._read_result(task, result_path))
         except json.JSONDecodeError as error:
             raise WorkerFailureError(
                 "Claude Code supervised worker did not retain a valid result"
@@ -411,13 +434,21 @@ class ClaudeCodeHarness:
                 "Claude Code supervised worker result operation does not match task"
             )
         runner_ref: RunnerReceiptRef | None = None
+        observed_at_launch = launch_observation(launched_command)
         if self.runner is not None:
             if terminal_status not in {"succeeded", "failed"}:
                 raise WorkerFailureError(
                     "Claude Code supervised worker terminal status is unsupported"
                 )
             output = redact_credential_shaped_text(output)
-            runner_ref = publish_runner_receipt(self.runner, task, self.artifact_store)
+            image_host = self._catalog_host()
+            runner_ref = publish_runner_receipt(
+                self.runner, task, self.artifact_store, expected_host=image_host
+            )
+            # The launcher recorded the harness it saw in the container, and the receipt
+            # was just required to equal the tested identity, so that is the version
+            # observed at launch; a host command carries it in the wrapper instead.
+            observed_at_launch = image_host.executable_version
         digest = self.artifact_store.publish_bytes(
             output.encode("utf-8"), media_type="application/json"
         )
@@ -438,16 +469,16 @@ class ClaudeCodeHarness:
                     task,
                     events,
                     launched_command,
-                    observed_at_launch=launch_observation(launched_command),
+                    observed_at_launch=observed_at_launch,
                     runner=runner_ref,
                 ),
             ),
         )
 
-    def _read_result(self, result_path: Path) -> str:
+    def _read_result(self, task: HarnessTask, result_path: Path) -> str:
         if self.runner is not None:
-            return read_bounded_text(
-                result_path, limit=MAX_RESULT_BYTES, what="Claude Code supervised worker result"
+            return read_attempt_result(
+                self.runner, task, result_path, what="Claude Code supervised worker"
             )
         try:
             return result_path.read_text(encoding="utf-8")

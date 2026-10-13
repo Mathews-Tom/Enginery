@@ -504,3 +504,79 @@ def test_a_permission_mapping_state_with_a_non_boolean_bypass_is_refused() -> No
 
 def test_digest_type_is_used_for_profile_digest() -> None:
     assert isinstance(PROFILE.digest, Digest)
+
+
+def test_a_launch_spec_records_the_probed_harness_identity_only_when_it_has_one() -> None:
+    bare = _spec().to_state()
+    assert "harness_version" not in bare and "harness_protocol" not in bare  # legacy shape
+
+    spec = _spec(harness_version="2.1.296", harness_protocol="stream-json=1")
+    state = spec.to_state()
+
+    assert state["harness_version"] == "2.1.296"
+    assert state["harness_protocol"] == "stream-json=1"
+    assert LaunchSpec.from_state(json.loads(json.dumps(state))) == spec
+    assert LaunchSpec.from_state(bare).harness_version is None
+
+
+@pytest.mark.parametrize("missing", ["operating_system", "kernel_version", "cgroup_version"])
+@pytest.mark.parametrize("bad", ["absent", "", "   ", 3, None])
+def test_an_engine_identity_with_a_missing_or_blank_value_is_refused_not_defaulted(
+    missing: str, bad: object
+) -> None:
+    state = _receipt().to_state()["engine"]
+    assert isinstance(state, dict)
+    state = {k: v for k, v in state.items() if k != missing}
+    if bad != "absent":
+        state[missing] = bad
+
+    with pytest.raises(InvalidInputError, match=missing):
+        EngineIdentity.from_state(state)
+
+
+def test_a_complete_engine_identity_still_decodes() -> None:
+    state = _receipt().to_state()["engine"]
+
+    decoded = EngineIdentity.from_state(state)
+
+    assert decoded.operating_system == "linux"
+    assert decoded.to_state() == state
+
+
+@pytest.mark.parametrize("versions", [{"omp": 1}, {1: "omp"}, {"omp": None}, [("omp", "1")]])
+def test_an_image_identity_with_non_text_harness_versions_is_refused(versions: object) -> None:
+    state = {"image_id": IMAGE, "recipe_digest": "sha256:" + "b" * 64, "harness_versions": versions}
+
+    with pytest.raises(InvalidInputError):
+        ImageIdentity.from_state(state)
+
+
+def test_an_isolated_runner_receipt_cannot_record_a_permission_bypass() -> None:
+    with pytest.raises(InvalidInputError, match="bypass"):
+        replace(_receipt(), permissions=trusted_local_permission_mapping("claude-code"))
+    state = _receipt().to_state()
+    state["permissions"] = trusted_local_permission_mapping("claude-code").to_state()
+    with pytest.raises(InvalidInputError, match="bypass"):
+        RunnerReceipt.from_state(state)
+    # trusted-local keeps declaring its bypass in its own mapping: only isolated is refused
+    assert trusted_local_permission_mapping("omp").unconditional_bypass is True
+
+
+def test_the_worker_environment_allowlist_names_the_git_hook_override_keys() -> None:
+    from enginery.domain.runner import DEFAULT_ENV_ALLOWLIST
+
+    assert {"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} <= set(
+        DEFAULT_ENV_ALLOWLIST
+    )
+
+
+@pytest.mark.parametrize("harness", ["claude-code", "omp"])
+def test_no_isolated_permission_entry_runs_code_from_the_workspace(harness: str) -> None:
+    arguments = isolated_permission_mapping(harness).arguments
+    runners = ("pytest", "python", "uv ", "mypy", "ruff")
+
+    assert not [
+        argument for argument in arguments if any(name in argument.lower() for name in runners)
+    ]
+    rationale = isolated_permission_mapping(harness).rationale
+    assert "not the boundary" in rationale and "Containment is the container" in rationale

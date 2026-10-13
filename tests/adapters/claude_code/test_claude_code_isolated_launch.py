@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from tests.support.runner_context import (
     harness_task,
     isolated_context,
+    runner_receipt,
+    write_launch_outcome,
     write_runner_receipt,
     write_worker_result,
 )
@@ -36,6 +39,9 @@ _PLANTED_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
 _PLANTED_ASSIGNMENT = "API_KEY=sk-live-0123456789abcdefghijklmnop"
 
 
+_IMAGE_CLAUDE = "2.1.296 (Claude Code)\n"
+
+
 def _events(extra: str = "") -> str:
     records: list[dict[str, object]] = [
         {"type": "system", "subtype": "init"},
@@ -52,7 +58,9 @@ def _harness(
 
     def run(arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         probes.append(arguments)
-        return subprocess.CompletedProcess(arguments, 0, stdout=installed or "", stderr="")
+        return subprocess.CompletedProcess(
+            arguments, 0, stdout=installed or _IMAGE_CLAUDE, stderr=""
+        )
 
     harness = ClaudeCodeHarness(
         ClaudeCodeAdapterConfig(credential_reference="claude-auth-profile:default"),
@@ -161,12 +169,20 @@ def test_container_environment_is_an_explicit_allowlisted_set_without_credential
     assert "GIT_CONFIG_NOSYSTEM" not in environment  # the image's system safe.directory must apply
     assert environment["GIT_AUTHOR_NAME"] == environment["GIT_COMMITTER_NAME"] == "Enginery Worker"
     assert environment["GIT_AUTHOR_EMAIL"] == environment["GIT_COMMITTER_EMAIL"]
+    # Git hooks are disabled with command-scoped config that a planted repository config cannot
+    # override, so an allowed `git commit` never runs a hook the worker wrote.
+    assert environment["GIT_CONFIG_COUNT"] == "1"
+    assert environment["GIT_CONFIG_KEY_0"] == "core.hooksPath"
+    assert environment["GIT_CONFIG_VALUE_0"] == "/dev/null"
     assert environment["CLAUDE_CONFIG_DIR"] == "/home/worker/.claude"
     assert environment["DISABLE_TELEMETRY"] == "1"
     assert environment["DISABLE_AUTOUPDATER"] == "1"
     assert environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     # Model access is granted by a separate, explicit step; none of it is part of this set.
-    assert not {key for key in environment if "TOKEN" in key or "KEY" in key or "URL" in key}
+    credential_shaped = {
+        key for key in environment if "TOKEN" in key or "KEY" in key or "URL" in key
+    }
+    assert credential_shaped == {"GIT_CONFIG_KEY_0"}  # a config key *name*, not a credential
     assert "ANTHROPIC_API_KEY" not in environment
     assert "PI_CODING_AGENT_DIR" not in environment
 
@@ -273,10 +289,12 @@ def test_collect_reads_submitted_arguments_only_after_the_first_boundary(tmp_pat
 
 
 def test_collect_without_a_runner_receipt_is_a_worker_failure(tmp_path: Path) -> None:
-    harness, _ = _harness(tmp_path)
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
     task = harness_task(tmp_path / "workspace", "claude-code", operation_id="op-missing-1")
     result_path = tmp_path / "out" / "result.json"
     write_worker_result(result_path, operation_id="op-missing-1", output=_events())
+    write_launch_outcome(runner, "op-missing-1")
 
     with pytest.raises(WorkerFailureError, match="runner receipt is missing"):
         harness.collect_supervised(task, result_path=result_path)
@@ -291,6 +309,7 @@ def test_collect_rejects_a_receipt_for_another_attempt(tmp_path: Path) -> None:
     other = write_runner_receipt(runner, "op-other-1", "claude-code")
     stolen = Path(runner_receipt_path(runner, "op-real-1"))
     stolen.write_text(json.dumps(other.to_state()), encoding="utf-8")
+    write_launch_outcome(runner, "op-real-1")
 
     with pytest.raises(WorkerFailureError, match="does not match"):
         harness.collect_supervised(task, result_path=result_path)
@@ -305,6 +324,7 @@ def test_collect_rejects_a_malformed_receipt(tmp_path: Path) -> None:
     path = Path(runner_receipt_path(runner, "op-bad-1"))
     path.parent.mkdir(parents=True)
     path.write_text('{"schema_version": 1}', encoding="utf-8")
+    write_launch_outcome(runner, "op-bad-1")
 
     with pytest.raises(WorkerFailureError, match="malformed"):
         harness.collect_supervised(task, result_path=result_path)
@@ -367,3 +387,143 @@ def test_an_isolated_harness_refuses_an_explicit_unconditional_bypass_mapping(
             runner=isolated_context(tmp_path),
             permissions=trusted_local_permission_mapping("claude-code"),
         )
+
+
+def _model_events() -> str:
+    records: list[dict[str, object]] = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"model": "claude-haiku-4-5-20251001", "content": []}},
+        {"type": "result", "subtype": "success", "is_error": False},
+    ]
+    return "\n".join(json.dumps(record) for record in records)
+
+
+def test_the_launch_spec_records_the_probed_harness_identity_even_without_a_pin(
+    tmp_path: Path,
+) -> None:
+    harness, probes = _harness(tmp_path)
+    task = harness_task(tmp_path / "workspace", "claude-code")  # host default: nothing pinned
+
+    spec = _spec_from(harness.supervised_command(task, result_path=tmp_path / "out" / "r.json"))
+
+    host = harness.catalog.host("claude-code")
+    assert probes == [("claude", "--version")]
+    assert spec.harness_version == host.tested_executable_version == "2.1.296"
+    assert spec.harness_protocol == host.protocol_fingerprint
+
+
+def test_the_image_is_probed_once_for_all_launches_of_one_harness(tmp_path: Path) -> None:
+    harness, probes = _harness(tmp_path)
+
+    for operation_id in ("op-one-1", "op-two-1"):
+        task = harness_task(tmp_path / "workspace", "claude-code", operation_id=operation_id)
+        harness.supervised_command(task, result_path=tmp_path / "out" / "r.json")
+
+    assert len(probes) == 1
+
+
+@pytest.mark.parametrize(
+    "reported", ["2.1.297 (Claude Code)\n", "3.0.0 (Claude Code)\n", "not claude at all\n"]
+)
+def test_a_drifted_or_unidentifiable_image_harness_is_never_launched(
+    tmp_path: Path, reported: str
+) -> None:
+    harness, _ = _harness(tmp_path, installed=reported)
+    task = harness_task(tmp_path / "workspace", "claude-code")  # no pin
+
+    with pytest.raises(MissingPrerequisiteError, match="claude-code"):
+        harness.supervised_command(task, result_path=tmp_path / "out" / "r.json")
+
+
+def test_the_retained_runner_receipt_records_the_probed_harness_identity(tmp_path: Path) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "claude-code", operation_id="op-identity-1")
+    result_path = tmp_path / "out" / "result.json"
+    write_worker_result(result_path, operation_id="op-identity-1", output=_events())
+    write_runner_receipt(runner, "op-identity-1", "claude-code")
+
+    _, result = harness.collect_supervised(task, result_path=result_path)
+
+    reference = _execution_receipt(result).runner
+    assert reference is not None
+    stored = json.loads(harness.artifact_store.read_bytes(reference.receipt_digest))
+    assert stored["harness_version"] == "2.1.296"
+    assert stored["harness_protocol"] == harness.catalog.host("claude-code").protocol_fingerprint
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"harness_version": None},
+        {"harness_protocol": None},
+        {"harness_version": "2.1.295"},
+        {"harness_protocol": "stream-json=0"},
+    ],
+)
+def test_collect_rejects_a_receipt_that_does_not_prove_the_cataloged_harness(
+    tmp_path: Path, overrides: dict[str, str | None]
+) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "claude-code", operation_id="op-proof-1")
+    result_path = tmp_path / "out" / "result.json"
+    write_worker_result(result_path, operation_id="op-proof-1", output=_events())
+    receipt = replace(
+        runner_receipt(
+            runner, "op-proof-1", permissions=isolated_permission_mapping("claude-code")
+        ),
+        **overrides,
+    )
+    path = Path(runner_receipt_path(runner, "op-proof-1"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(receipt.to_state()), encoding="utf-8")
+    write_launch_outcome(runner, "op-proof-1")
+
+    with pytest.raises(WorkerFailureError, match="does not match") as raised:
+        harness.collect_supervised(task, result_path=result_path)
+
+    assert next(iter(overrides)) in str(raised.value.details["mismatches"])
+
+
+def test_an_isolated_workers_model_id_is_labelled_as_worker_reported(tmp_path: Path) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "claude-code", operation_id="op-model-1")
+    result_path = tmp_path / "out" / "result.json"
+    write_worker_result(result_path, operation_id="op-model-1", output=_model_events())
+    write_runner_receipt(runner, "op-model-1", "claude-code")
+
+    _, result = harness.collect_supervised(task, result_path=result_path)
+
+    receipt = _execution_receipt(result)
+    assert receipt.effective_model.value == "claude-haiku-4-5-20251001"
+    assert receipt.effective_model.reported_by == "worker"
+    assert receipt.to_state()["effective_model"]["reported_by"] == "worker"  # type: ignore[index]
+    assert receipt.effective_effort.reported_by is None  # an unknown control asserts nothing
+
+
+def test_a_trusted_local_models_receipt_is_unlabelled_and_unchanged(tmp_path: Path) -> None:
+    harness = ClaudeCodeHarness(
+        ClaudeCodeAdapterConfig(credential_reference="claude-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+    )
+    task = harness_task(tmp_path / "workspace", "claude-code", operation_id="op-local-1")
+    result_path = tmp_path / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "operation_id": "op-local-1",
+                "output": _model_events(),
+                "schema_version": 1,
+                "terminal_status": "succeeded",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, result = harness.collect_supervised(task, result_path=result_path)
+
+    receipt = _execution_receipt(result)
+    assert receipt.effective_model.value == "claude-haiku-4-5-20251001"
+    assert "reported_by" not in receipt.to_state()["effective_model"]  # type: ignore[operator]

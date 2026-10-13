@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import copy
+import dataclasses
 import itertools
 import json
 import os
@@ -24,12 +26,13 @@ from enginery.adapters.oci.launcher import make_tree_writable
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.runner import (
     DEFAULT_ENV_ALLOWLIST,
+    LaunchSpec,
     ResourceLimits,
     RunnerProfile,
     profile_violations,
 )
 
-from .support import IMAGE_ID, INNER, FakeDocker, make_spec
+from .support import IMAGE_ID, INNER, NONCE, FakeDocker, make_spec
 
 # --- names ---------------------------------------------------------------------------
 
@@ -58,7 +61,7 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
         env=(("HOME", "/home/worker"), ("ANTHROPIC_BASE_URL", "http://relay.internal:8080")),
     )
 
-    arguments = create_arguments(spec, INNER)
+    arguments = create_arguments(spec, INNER, nonce=NONCE)
 
     assert arguments == (
         "create",
@@ -86,6 +89,16 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
         "--ipc",
         "private",
         "--init",
+        "--cgroupns",
+        "private",
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        "max-size=1m",
+        "--log-opt",
+        "max-file=2",
+        "--ulimit",
+        "fsize=1073741824",
         "-v",
         f"{tmp_path / 'workspace'}:/workspace:rw",
         "-v",
@@ -107,6 +120,8 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
         "/opt/enginery/worker_entry.py",
         "--operation-id",
         "op-1",
+        "--nonce",
+        NONCE,
         "--result",
         "/out/result.json",
         "--deadline-seconds",
@@ -124,7 +139,7 @@ def _values_of(arguments: Sequence[str], flag: str) -> list[str]:
 
 
 def test_create_arguments_never_grant_what_the_profile_forbids(tmp_path: Path) -> None:
-    arguments = create_arguments(make_spec(tmp_path), INNER)
+    arguments = create_arguments(make_spec(tmp_path), INNER, nonce=NONCE)
     engine_part = arguments[: arguments.index(IMAGE_ID)]
 
     for forbidden in (
@@ -157,7 +172,7 @@ def test_create_arguments_follow_the_profile_limits(tmp_path: Path) -> None:
         ),
     )
 
-    arguments = create_arguments(make_spec(tmp_path, profile=profile, env=()), INNER)
+    arguments = create_arguments(make_spec(tmp_path, profile=profile, env=()), INNER, nonce=NONCE)
 
     def after(flag: str) -> str:
         return arguments[arguments.index(flag) + 1]
@@ -180,7 +195,9 @@ def test_cpu_counts_are_written_so_the_engine_reads_back_the_profile_value(
 ) -> None:
     for cpus, text in ((2.0, "2"), (1.5, "1.5"), (0.333333333, "0.333333333"), (0.1, "0.1")):
         profile = RunnerProfile(resources=ResourceLimits(cpus=cpus))
-        arguments = create_arguments(make_spec(tmp_path, profile=profile, env=()), INNER)
+        arguments = create_arguments(
+            make_spec(tmp_path, profile=profile, env=()), INNER, nonce=NONCE
+        )
         assert arguments[arguments.index("--cpus") + 1] == text
 
 
@@ -194,7 +211,7 @@ def test_worker_command_carries_bundle_seed_files_and_the_inner_command(tmp_path
         time_budget_seconds=90,
     )
 
-    command = worker_command(spec, ("claude", "-p", "--", "weird"))
+    command = worker_command(spec, ("claude", "-p", "--", "weird"), nonce=NONCE)
 
     assert command[:2] == ("python3", "/opt/enginery/worker_entry.py")
     separator = command.index("--")
@@ -212,7 +229,7 @@ def test_worker_command_carries_bundle_seed_files_and_the_inner_command(tmp_path
 
 
 def test_worker_command_without_a_bundle_asks_for_none(tmp_path: Path) -> None:
-    command = worker_command(make_spec(tmp_path), INNER)
+    command = worker_command(make_spec(tmp_path), INNER, nonce=NONCE)
 
     assert "--bundle-branch" not in command
     assert "--seed-file" not in command
@@ -228,7 +245,7 @@ def test_create_arguments_reassert_the_environment_allowlist(tmp_path: Path) -> 
     object.__setattr__(spec, "env", (("HOME", "/home/worker"), ("GH_TOKEN", secret)))
 
     with pytest.raises(InvalidInputError, match="allowlist") as raised:
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
     assert raised.value.details == {"key": "GH_TOKEN"}
     assert secret not in str(raised.value)
@@ -238,7 +255,7 @@ def test_create_arguments_reassert_the_environment_allowlist(tmp_path: Path) -> 
 def test_every_allowlisted_key_is_accepted(tmp_path: Path, key: str) -> None:
     assert key in DEFAULT_ENV_ALLOWLIST
 
-    arguments = create_arguments(make_spec(tmp_path, env=((key, "value"),)), INNER)
+    arguments = create_arguments(make_spec(tmp_path, env=((key, "value"),)), INNER, nonce=NONCE)
 
     assert ("-e", f"{key}=value") == arguments[arguments.index("-e") : arguments.index("-e") + 2]
 
@@ -248,7 +265,7 @@ def test_create_arguments_refuse_a_repeated_environment_key(tmp_path: Path) -> N
     object.__setattr__(spec, "env", (("HOME", "/a"), ("HOME", "/b")))
 
     with pytest.raises(InvalidInputError, match="repeated"):
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
 
 def test_create_arguments_refuse_a_container_name_not_derived_from_the_operation(
@@ -257,7 +274,7 @@ def test_create_arguments_refuse_a_container_name_not_derived_from_the_operation
     spec = make_spec(tmp_path, container_name="enginery-" + "0" * 24)
 
     with pytest.raises(InvalidInputError, match="container name"):
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
 
 def test_create_arguments_refuse_identical_workspace_and_result_directories(
@@ -266,7 +283,7 @@ def test_create_arguments_refuse_identical_workspace_and_result_directories(
     spec = make_spec(tmp_path, out_path=str(tmp_path / "workspace"))
 
     with pytest.raises(InvalidInputError, match="different directories"):
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
 
 @pytest.mark.parametrize("bad", ["/tmp/a:b", "/tmp/with\nnewline", "/tmp/tab\there"])
@@ -276,7 +293,7 @@ def test_create_arguments_refuse_host_paths_that_could_rewrite_a_mount(
     spec = make_spec(tmp_path, workspace_path=bad)
 
     with pytest.raises(InvalidInputError, match="cannot be bind-mounted"):
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
 
 @pytest.mark.parametrize("inner", [(), ("",), ("omp", "")])
@@ -284,7 +301,7 @@ def test_create_arguments_refuse_a_blank_inner_command(
     tmp_path: Path, inner: Sequence[str]
 ) -> None:
     with pytest.raises(InvalidInputError, match="inner command"):
-        create_arguments(make_spec(tmp_path), inner)
+        create_arguments(make_spec(tmp_path), inner, nonce=NONCE)
 
 
 @pytest.mark.parametrize(
@@ -295,14 +312,14 @@ def test_create_arguments_refuse_malformed_seed_file_paths(
     tmp_path: Path, seed: tuple[str, str]
 ) -> None:
     with pytest.raises(InvalidInputError, match="seed file"):
-        create_arguments(make_spec(tmp_path, seed_files=(seed,)), INNER)
+        create_arguments(make_spec(tmp_path, seed_files=(seed,)), INNER, nonce=NONCE)
 
 
 def test_create_arguments_refuse_an_operation_id_that_reads_as_a_flag(tmp_path: Path) -> None:
     spec = make_spec(tmp_path, operation_id="--deadline-seconds")
 
     with pytest.raises(InvalidInputError, match="not a flag"):
-        create_arguments(spec, INNER)
+        create_arguments(spec, INNER, nonce=NONCE)
 
 
 # --- what the engine reports back ----------------------------------------------------
@@ -380,7 +397,7 @@ def test_a_container_missing_any_hardening_flag_is_reported_as_a_violation(
     fake_docker: FakeDocker, tmp_path: Path, flag: str, has_value: bool, violation: str
 ) -> None:
     spec = make_spec(tmp_path)
-    arguments = _without(create_arguments(spec, INNER), flag, has_value=has_value)
+    arguments = _without(create_arguments(spec, INNER, nonce=NONCE), flag, has_value=has_value)
     assert fake_docker.engine().run_cli(arguments).returncode == 0
 
     effective = read_effective(fake_docker.engine(), spec.container_name)
@@ -402,7 +419,7 @@ def test_a_container_with_an_extra_grant_is_reported_as_a_violation(
     fake_docker: FakeDocker, tmp_path: Path, extra: tuple[str, ...], violation: str
 ) -> None:
     spec = make_spec(tmp_path)
-    arguments = create_arguments(spec, INNER)
+    arguments = create_arguments(spec, INNER, nonce=NONCE)
     assert fake_docker.engine().run_cli(("create", *extra, *arguments[1:])).returncode == 0
 
     effective = read_effective(fake_docker.engine(), spec.container_name)
@@ -482,33 +499,141 @@ def test_an_unreadable_engine_report_never_looks_hardened() -> None:
     assert any("internal runner network" in problem for problem in problems)
 
 
-def test_launch_violations_catch_namespace_link_port_and_image_grants(tmp_path: Path) -> None:
+def _clean_container(fake: FakeDocker, spec: LaunchSpec) -> dict[str, Any]:
+    fake.create_worker(spec)
+    return copy.deepcopy(fake.containers[spec.container_name].inspect)
+
+
+def _weakened(container: dict[str, Any], **host_changes: Any) -> dict[str, Any]:
+    weakened = copy.deepcopy(container)
+    weakened["HostConfig"].update(host_changes)
+    return weakened
+
+
+def test_a_container_the_launcher_asked_for_has_no_launch_violation(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
     spec = make_spec(tmp_path)
-    clean = {
-        "Image": IMAGE_ID,
-        "HostConfig": {"IpcMode": "private", "PidMode": "", "UTSMode": "", "UsernsMode": ""},
-    }
-    assert launch_violations(spec, clean) == ()
 
-    weakened: dict[str, dict[str, Any]] = {
-        "host pid": {"PidMode": "host"},
-        "host ipc": {"IpcMode": "host"},
-        "host uts": {"UTSMode": "host"},
-        "userns": {"UsernsMode": "host"},
-        "volumes from": {"VolumesFrom": ["other"]},
-        "links": {"Links": ["other:alias"]},
-        "gpu": {"DeviceRequests": [{"Driver": "nvidia"}]},
-        "ports": {"PortBindings": {"80/tcp": [{"HostPort": "80"}]}},
-        "publish all": {"PublishAllPorts": True},
-    }
-    for label, change in weakened.items():
-        container = {**clean, "HostConfig": {**clean["HostConfig"], **change}}  # type: ignore[dict-item]
-        assert launch_violations(spec, container), label
+    assert launch_violations(spec, _clean_container(fake_docker, spec)) == ()
 
-    other_image = {**clean, "Image": "sha256:" + "9" * 64}
-    assert launch_violations(spec, other_image) == (
+
+@pytest.mark.parametrize(
+    ("label", "change"),
+    [
+        ("host pid", {"PidMode": "host"}),
+        ("host ipc", {"IpcMode": "host"}),
+        ("host uts", {"UTSMode": "host"}),
+        ("userns", {"UsernsMode": "host"}),
+        ("host cgroup namespace", {"CgroupnsMode": "host"}),
+        ("unset cgroup namespace", {"CgroupnsMode": ""}),
+        ("volumes from", {"VolumesFrom": ["other"]}),
+        ("links", {"Links": ["other:alias"]}),
+        ("gpu", {"DeviceRequests": [{"Driver": "nvidia"}]}),
+        ("ports", {"PortBindings": {"80/tcp": [{"HostPort": "80"}]}}),
+        ("publish all", {"PublishAllPorts": True}),
+        ("sysctls", {"Sysctls": {"net.ipv4.ip_forward": "1"}}),
+        ("unmasked paths", {"MaskedPaths": []}),
+        ("masked paths missing", {"MaskedPaths": None}),
+        ("masked paths partly removed", {"MaskedPaths": ["/proc/acpi"]}),
+        ("writable system paths", {"ReadonlyPaths": []}),
+        ("read-only paths missing", {"ReadonlyPaths": None}),
+        ("another runtime", {"Runtime": "kata"}),
+        ("no runtime reported", {"Runtime": ""}),
+        ("log driver none", {"LogConfig": {"Type": "none", "Config": {}}}),
+        ("unbounded log", {"LogConfig": {"Type": "json-file", "Config": {}}}),
+        (
+            "log size unbounded",
+            {"LogConfig": {"Type": "json-file", "Config": {"max-file": "2"}}},
+        ),
+        (
+            "log file count",
+            {"LogConfig": {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "9"}}},
+        ),
+        ("no per-file limit", {"Ulimits": None}),
+        (
+            "larger per-file limit",
+            {"Ulimits": [{"Name": "fsize", "Soft": 1 << 40, "Hard": 1 << 40}]},
+        ),
+        ("tmp too large", {"Tmpfs": {"/tmp": "rw,nosuid,nodev,exec,size=4096m"}}),
+        ("tmp unsized", {"Tmpfs": {"/tmp": "rw,nosuid,nodev,exec"}}),
+        ("tmp suid", {"Tmpfs": {"/tmp": "rw,nodev,exec,size=512m"}}),
+        ("tmp with devices", {"Tmpfs": {"/tmp": "rw,nosuid,exec,size=512m"}}),
+        ("tmp missing", {"Tmpfs": {}}),
+        (
+            "home too large",
+            {"Tmpfs": {"/home/worker": "rw,nosuid,nodev,exec,size=9999m,uid=65532,gid=65532"}},
+        ),
+        (
+            "home owned by someone else",
+            {"Tmpfs": {"/home/worker": "rw,nosuid,nodev,exec,size=512m,uid=0,gid=0"}},
+        ),
+    ],
+)
+def test_launch_violations_catch_every_weaker_container(
+    fake_docker: FakeDocker, tmp_path: Path, label: str, change: dict[str, Any]
+) -> None:
+    spec = make_spec(tmp_path)
+    container = _clean_container(fake_docker, spec)
+    host_changes = dict(change)
+    if change.get("Tmpfs"):  # a partial change keeps the other scratch mount as created
+        host_changes["Tmpfs"] = {**container["HostConfig"]["Tmpfs"], **change["Tmpfs"]}
+
+    assert launch_violations(spec, _weakened(container, **host_changes)), label
+
+
+def test_tmpfs_sizes_are_read_back_whatever_unit_the_engine_reports(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    container = _clean_container(fake_docker, spec)
+    resources = spec.profile.resources
+    reported = {
+        "/tmp": f"rw,nosuid,nodev,exec,size={resources.tmp_mib * 1024}k",
+        "/home/worker": (
+            f"rw,nosuid,nodev,exec,size={resources.home_mib * 1024 * 1024},uid=65532,gid=65532"
+        ),
+    }
+
+    assert launch_violations(spec, _weakened(container, Tmpfs=reported)) == ()
+
+
+def test_launch_violations_catch_a_container_from_another_image(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    container = _clean_container(fake_docker, spec)
+    container["Image"] = "sha256:" + "9" * 64
+
+    assert launch_violations(spec, container) == (
         "container was not created from the pinned image id",
     )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "seccomp=unconfined",
+        "apparmor=unconfined",
+        "label=disable",
+        "systempaths=unconfined",
+        "seccomp=/tmp/permissive.json",
+    ],
+)
+def test_a_security_option_beyond_the_profile_is_a_violation(option: str) -> None:
+    profile = RunnerProfile()
+    effective = dataclasses.replace(
+        effective_from_inspect(
+            {
+                "HostConfig": {"SecurityOpt": ["no-new-privileges", option]},
+                "Config": {"User": "65532:65532"},
+            }
+        ),
+    )
+
+    problems = profile_violations(profile, effective)
+
+    assert any(option in problem for problem in problems)
 
 
 # --- a real engine -------------------------------------------------------------------
@@ -535,7 +660,9 @@ def test_real_engine_container_from_create_arguments_satisfies_the_profile(
     )
     real_engine.ensure_internal_network(real_profile.network)
 
-    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", "print(1)")))
+    created = real_engine.run_cli(
+        create_arguments(spec, ("python3", "-c", "print(1)"), nonce=NONCE)
+    )
     assert created.returncode == 0, created.stderr
     assert created.stderr == ""
 
@@ -559,7 +686,7 @@ def test_real_engine_reports_a_container_with_an_added_capability_as_weaker(
         real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
     )
     real_engine.ensure_internal_network(real_profile.network)
-    arguments = create_arguments(spec, ("python3", "-c", "print(1)"))
+    arguments = create_arguments(spec, ("python3", "-c", "print(1)"), nonce=NONCE)
 
     created = real_engine.run_cli(("create", "--cap-add", "NET_ADMIN", *arguments[1:]))
     assert created.returncode == 0, created.stderr
@@ -600,7 +727,7 @@ def test_real_worker_runs_as_the_profile_uid_writes_the_workspace_and_the_host_c
     (real_root / "workspace" / "existing.txt").chmod(0o600)
     make_tree_writable(spec.workspace_path)
     make_tree_writable(spec.out_path)
-    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script)))
+    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script), nonce=NONCE))
     assert created.returncode == 0, created.stderr
 
     code, result = _start_and_collect(real_engine, spec.container_name, real_root / "out")
@@ -651,7 +778,7 @@ def test_real_worker_cannot_reach_the_internet_on_the_internal_network(
     real_engine.ensure_internal_network(real_profile.network)
     make_tree_writable(spec.workspace_path)
     make_tree_writable(spec.out_path)
-    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script)))
+    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script), nonce=NONCE))
     assert created.returncode == 0, created.stderr
 
     code, result = _start_and_collect(real_engine, spec.container_name, real_root / "out")

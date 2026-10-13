@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters.oci import image
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError, StaleEvidenceError
 
 IMAGE_ID = "sha256:" + "ab" * 32
@@ -147,6 +148,76 @@ def test_packaged_recipe_pins_every_input() -> None:
     assert re.search(r"^CMD \[\]$", text, re.MULTILINE)
     assert re.search(r"^FROM \$\{NODE_BASE_IMAGE\}@\$\{NODE_BASE_DIGEST\}$", text, re.MULTILINE)
     assert re.search(r"^USER \$\{WORKER_UID\}:\$\{WORKER_GID\}$", text, re.MULTILINE)
+
+
+def test_dockerfile_harness_pins_equal_the_execution_catalog() -> None:
+    """The image carries exactly the harness versions the catalog tested, inside its range."""
+    pins = dict(image.pinned_args(image.load_recipe()[image.DOCKERFILE_NAME]))
+    catalog = load_execution_catalog()
+
+    for harness, pin in (("omp", "OMP_VERSION"), ("claude-code", "CLAUDE_CODE_VERSION")):
+        host = catalog.host(harness)
+        assert pins[pin] == host.tested_executable_version
+        assert host.version.accepts(pins[pin])
+
+
+def _manifest_and_lock() -> tuple[dict[str, object], dict[str, object]]:
+    files = image.load_recipe()
+    return (
+        json.loads(files[image.PACKAGE_MANIFEST_NAME]),
+        json.loads(files[image.PACKAGE_LOCK_NAME]),
+    )
+
+
+def test_npm_manifest_pins_equal_the_dockerfile_pins() -> None:
+    manifest, _ = _manifest_and_lock()
+    pins = dict(image.pinned_args(image.load_recipe()[image.DOCKERFILE_NAME]))
+
+    assert manifest["dependencies"] == {
+        "@anthropic-ai/claude-code": pins["CLAUDE_CODE_VERSION"],
+        "@oh-my-pi/pi-coding-agent": pins["OMP_VERSION"],
+        "bun": pins["BUN_VERSION"],
+    }
+
+
+def test_the_lockfile_locks_every_transitive_package_by_integrity() -> None:
+    manifest, lock = _manifest_and_lock()
+    packages = lock["packages"]
+    assert isinstance(packages, dict)
+    pins = dict(image.pinned_args(image.load_recipe()[image.DOCKERFILE_NAME]))
+
+    assert lock["lockfileVersion"] == 3
+    assert packages[""]["dependencies"] == manifest["dependencies"]
+    assert len(packages) > 100  # the transitive closure, not just the three top-level packages
+    unlocked = [
+        name
+        for name, entry in packages.items()
+        if name
+        and not (
+            str(entry.get("integrity", "")).startswith("sha512-")
+            and str(entry.get("resolved", "")).startswith("https://registry.npmjs.org/")
+        )
+    ]
+    assert unlocked == []
+    assert (
+        packages["node_modules/@anthropic-ai/claude-code"]["version"] == pins["CLAUDE_CODE_VERSION"]
+    )
+    assert packages["node_modules/@oh-my-pi/pi-coding-agent"]["version"] == pins["OMP_VERSION"]
+    assert packages["node_modules/bun"]["version"] == pins["BUN_VERSION"]
+
+
+def test_the_dockerfile_installs_harnesses_only_from_the_lockfile() -> None:
+    text = image.load_recipe()[image.DOCKERFILE_NAME].decode()
+
+    assert re.search(r"^COPY package\.json package-lock\.json /opt/enginery/harness/$", text, re.M)
+    assert "npm ci " in text
+    assert "npm install" not in text
+
+
+@pytest.mark.parametrize("name", [image.PACKAGE_MANIFEST_NAME, image.PACKAGE_LOCK_NAME])
+def test_the_lock_assets_are_part_of_the_recipe(name: str) -> None:
+    assert name in image.RECIPE_FILES
+    assert name in image.load_recipe()
 
 
 def test_worker_entry_uses_only_the_standard_library() -> None:

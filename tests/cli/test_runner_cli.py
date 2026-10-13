@@ -18,7 +18,8 @@ from enginery.adapters.oci import image as oci_image
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
 from enginery.cli.main import main
-from enginery.domain.runner import ImageIdentity, RunnerProfile
+from enginery.domain.execution_catalog import InstalledHost
+from enginery.domain.runner import ImageIdentity, ResourceLimits, RunnerProfile
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import stage1_request_from_state
 from tests.adapters.oci.support import IMAGE_ID, FakeDocker, image_identity
@@ -441,3 +442,74 @@ def test_starting_an_isolated_request_on_a_qualified_engine_records_the_run(
     assert exit_code == 0
     assert _run_exists(tmp_path)
     assert any(call[:2] == ("image", "inspect") for call in fake.calls)
+
+
+# --- stage1 watch of an isolated run ----------------------------------------------------
+
+
+def _watch_argv(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "stage1",
+        "watch",
+        "--database",
+        str(tmp_path / "ledger.db"),
+        "--owner",
+        "operator",
+        "--run-id",
+        "run-1",
+        *extra,
+    ]
+
+
+def _started_isolated_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request = _isolated_request(tmp_path)
+    fake = _runner_image_fake()
+    monkeypatch.setattr("enginery.cli.stage1_runner.OciRunnerAdmission", _admission_factory(fake))
+    assert main(_start_argv(tmp_path, request)) == 0
+
+
+def _drift_the_current_profile(monkeypatch: pytest.MonkeyPatch) -> RunnerProfile:
+    stricter = RunnerProfile(resources=ResourceLimits(memory_mib=2048))
+    assert stricter.digest != RunnerProfile().digest
+    monkeypatch.setattr("enginery.cli.stage1_runner.RunnerProfile", lambda: stricter)
+    return stricter
+
+
+@pytest.mark.parametrize("extra", [(), ("--advance",)])
+def test_watch_reports_the_hold_of_a_run_bound_to_a_profile_that_is_no_longer_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: tuple[str, ...],
+) -> None:
+    _started_isolated_run(tmp_path, monkeypatch)
+    bound = RunnerProfile().digest
+    stricter = _drift_the_current_profile(monkeypatch)
+    capsys.readouterr()
+
+    exit_code = main(_watch_argv(tmp_path, *extra))
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["next_action"] == "hold"
+    assert report["hold"]["reason"] == "runner_fingerprint_drift"
+    assert report["hold"]["details"] == {"bound": str(bound), "current": str(stricter.digest)}
+    assert report["execution"]["runner"]["trust_mode"] == "isolated-oci"
+    assert report["nodes"] == []  # the hold launched nothing, even when asked to advance
+
+
+def test_watch_of_a_run_whose_profile_still_matches_reports_no_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _started_isolated_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "enginery.cli.stage1.probe_installed_omp",
+        lambda executable, runner=None: InstalledHost("18.10.3", "json-protocol=3"),
+    )
+    capsys.readouterr()
+
+    assert main(_watch_argv(tmp_path)) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["hold"] is None
+    assert report["next_action"] == "qualify"

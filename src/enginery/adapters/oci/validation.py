@@ -20,7 +20,10 @@ from enginery.adapters.oci.launch import container_name_for
 from enginery.adapters.runner_launch import (
     LAUNCHER_MODULE,
     MAX_RESULT_BYTES,
+    bind_result_to_attempt,
     read_bounded_text,
+    read_launch_outcome,
+    require_exited,
     worker_environment,
 )
 from enginery.domain.errors import WorkerFailureError
@@ -35,7 +38,7 @@ from enginery.ledger.redaction import redact_credential_shaped_text
 _HARNESS = "validation"
 _DEFAULT_TIME_BUDGET_SECONDS = 900
 _RESULT_NAME = "result.json"
-_EXIT_LAUNCHER_FAULT = 125
+
 
 LauncherProcess = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -109,29 +112,33 @@ class OciValidationRunner:
                 *command,
             )
         )
-        if completed.returncode == _EXIT_LAUNCHER_FAULT:
-            # The container never ran the command: a refused launch is not a failed validation.
-            raise WorkerFailureError(
-                "the isolated runner refused to launch the validation command",
-                details={"stderr": completed.stderr.strip()[-2000:]},
+        receipt_path = spec.receipt_path
+        try:
+            outcome = read_launch_outcome(
+                receipt_path, operation_id=operation_id, what="isolated validation"
             )
-        output = _worker_output(out_path / _RESULT_NAME)
+            exit_code = require_exited(outcome, what="isolated validation")
+        except WorkerFailureError as failure:
+            # The container never ran the command to completion: a refused or lost launch is
+            # not a failed validation. Classified from the launcher's own outcome, never from
+            # its exit status, which the contained command can imitate.
+            raise WorkerFailureError(
+                str(failure),
+                details={**failure.details, "stderr": completed.stderr.strip()[-2000:]},
+            ) from failure
+        output = _worker_output(out_path / _RESULT_NAME, nonce=outcome.nonce)
         return subprocess.CompletedProcess(
             args=command,
-            returncode=completed.returncode,
+            returncode=exit_code,
             stdout=redact_credential_shaped_text(output),
             stderr="",
         )
 
 
-def _worker_output(result_path: Path) -> str:
+def _worker_output(result_path: Path, *, nonce: str) -> str:
     """Read the in-container wrapper's captured output; the file is untrusted worker data."""
-    try:
-        payload = json.loads(
-            read_bounded_text(result_path, limit=MAX_RESULT_BYTES, what="validation result")
-        )
-    except json.JSONDecodeError as error:
-        raise WorkerFailureError("the isolated validation result is not valid JSON") from error
+    text = read_bounded_text(result_path, limit=MAX_RESULT_BYTES, what="validation result")
+    payload = json.loads(bind_result_to_attempt(text, nonce=nonce, what="validation result"))
     output = payload.get("output") if isinstance(payload, dict) else None
     if not isinstance(output, str):
         raise WorkerFailureError("the isolated validation result has no output")

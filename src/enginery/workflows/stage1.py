@@ -32,6 +32,7 @@ from enginery.domain.errors import (
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
+    OperationTimeoutError,
     StaleEvidenceError,
 )
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
@@ -463,11 +464,15 @@ class Stage1RunService:
         return held
 
     def _binding_check(self, request: Stage1RunRequest) -> _BindingCheck:
-        """Return a catalog drift hold, else a host fingerprint drift hold, else no hold.
+        """Return a catalog drift hold, else a runner or host fingerprint drift hold, else none.
 
-        The host is only probed when the run selected a native control, so a host-default
-        run never depends on the installed version. The version that probe observed is
-        returned with the verdict instead of being discarded, so a diagnostic can show it.
+        A trusted-local run probes the host only when it selected a native control, so a
+        host-default run never depends on the installed version. An isolated run always probes
+        the harness inside its pinned image and holds when it is not the catalog's tested
+        executable and protocol, whether or not a native control was selected: the worker's
+        version and protocol are part of what the runner receipt must prove. The version that
+        probe observed is returned with the verdict instead of being discarded, so a
+        diagnostic can show it.
         """
         hold = self._catalog_hold(request)
         if hold is not None:
@@ -476,17 +481,80 @@ class Stage1RunService:
         if runner_hold is not None:
             return _BindingCheck(runner_hold)
         selection = request.execution_selection
-        if selection.legacy or not selection.requires_native_controls:
+        if selection.legacy:
             return _BindingCheck(None)
         probe = self.host_probe
         if probe is None and self.harness is not None:
             probe = self.harness.installed_host
-        if probe is None:
+        if request.runner.isolated_mode:
+            return self._image_harness_check(selection, probe)
+        if not selection.requires_native_controls or probe is None:
             return _BindingCheck(None)
         installed = probe()
         return _BindingCheck(
             detect_host_drift(selection, installed=installed),
             None if installed is None else installed.executable_version,
+        )
+
+    def _image_harness_check(
+        self,
+        selection: ExecutionSelection,
+        probe: Callable[[], InstalledHost | None] | None,
+    ) -> _BindingCheck:
+        """Hold unless the harness in the pinned image is the catalog's tested one.
+
+        The image pins exactly the version the catalog tested, so a version merely inside
+        the accepted range does not qualify an isolated run; the probed version is returned
+        with the verdict so a diagnostic can show it.
+        """
+        if probe is None:
+            return _BindingCheck(
+                ExecutionHold(
+                    reason=HoldReason.RUNNER_UNQUALIFIED,
+                    message=(
+                        "the run requires the isolated runner but the harness inside its image "
+                        "cannot be probed; it is held, not run unverified"
+                    ),
+                    details={"harness": selection.harness},
+                )
+            )
+        host = self._current_catalog().host(selection.harness)
+        try:
+            installed = probe()
+        except (MissingPrerequisiteError, OperationTimeoutError) as error:
+            return _BindingCheck(
+                ExecutionHold(
+                    reason=HoldReason.RUNNER_UNQUALIFIED,
+                    message=(
+                        f"the harness inside the pinned runner image could not be probed: "
+                        f"{error}; the run is held, not run unverified"
+                    ),
+                    details={"harness": selection.harness},
+                )
+            )
+        observed = None if installed is None else installed.executable_version
+        if installed is not None and host.matches_tested(installed):
+            return _BindingCheck(None, observed)
+        return _BindingCheck(
+            ExecutionHold(
+                reason=HoldReason.RUNNER_FINGERPRINT_DRIFT,
+                message=(
+                    f"the {selection.harness} inside the pinned runner image is not the "
+                    "tested executable and protocol the execution catalog names; the run is "
+                    "held and its original binding is retained. Rebuild the runner image from "
+                    "the current recipe or restore the catalog it was bound to"
+                ),
+                details={
+                    "harness": selection.harness,
+                    **host.version.details(),
+                    "catalog_protocol_fingerprint": host.protocol_fingerprint,
+                    "image_executable_version": "unobservable" if observed is None else observed,
+                    "image_protocol_fingerprint": (
+                        "unobservable" if installed is None else installed.protocol_fingerprint
+                    ),
+                },
+            ),
+            observed,
         )
 
     def _runner_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:

@@ -10,20 +10,31 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 
-from enginery.adapters.oci.engine import OPERATION_LABEL, PROBE_LABEL, RUNNER_LABEL, OciEngine
+from enginery.adapters.oci.engine import (
+    LAUNCHER_LABEL,
+    OPERATION_LABEL,
+    PROBE_LABEL,
+    RUNNER_LABEL,
+    OciEngine,
+)
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.runner import (
+    DISK_BOUND_HOST_MONITOR,
     OUT_MOUNT,
     WORKER_HOME,
     WORKER_TMP,
     WORKSPACE_MOUNT,
     EffectiveContainer,
     LaunchSpec,
+    ResourceBounds,
     RunnerProfile,
 )
+from enginery.engine.supervisor import ProcessIdentity
 
 WORKER_ENTRY_PATH = "/opt/enginery/worker_entry.py"
 """The in-image supervisor every isolated worker command is wrapped in."""
@@ -36,7 +47,16 @@ _CONTAINER_NAME_PREFIX = "enginery-"
 _NAME_DIGEST_CHARS = 24
 _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NO_NEW_PRIVILEGES = re.compile(r"^no-new-privileges[:=]true$")
+_NONCE = re.compile(r"^[A-Za-z0-9]{16,128}$")
 _NANOS = 1_000_000_000
+
+LOG_DRIVER = "json-file"
+LOG_MAX_SIZE = "1m"
+LOG_MAX_FILE = 2
+"""The container log is rotated and capped at ``LOG_MAX_FILE`` files of ``LOG_MAX_SIZE``."""
+DISK_POLL_SECONDS = 2.0
+"""How often the launcher measures the workspace and result trees while a worker runs."""
+_MIB = 1024 * 1024
 
 
 def container_name_for(operation_id: str) -> str:
@@ -53,6 +73,33 @@ def _cpus(nano_cpus: int) -> str:
     if fraction == 0:
         return str(whole)
     return f"{whole}.{fraction:09d}".rstrip("0")
+
+
+def max_file_bytes(profile: RunnerProfile) -> int:
+    """The largest single file a worker process may write (``RLIMIT_FSIZE``).
+
+    A kernel limit per file, so one runaway write cannot outrun the host-side measurement of
+    the two bind-mounted trees by more than a single file's worth.
+    """
+    limits = profile.resources
+    return min(limits.workspace_mib, limits.out_mib) * _MIB
+
+
+def resource_bounds(profile: RunnerProfile) -> ResourceBounds:
+    """The disk and log bounds a launch runs under, as recorded in its receipt."""
+    limits = profile.resources
+    return ResourceBounds(
+        disk_mechanism=DISK_BOUND_HOST_MONITOR,
+        workspace_bytes=limits.workspace_mib * _MIB,
+        out_bytes=limits.out_mib * _MIB,
+        workspace_inodes=limits.workspace_inodes,
+        out_inodes=limits.out_inodes,
+        poll_seconds=DISK_POLL_SECONDS,
+        max_file_bytes=max_file_bytes(profile),
+        log_driver=LOG_DRIVER,
+        log_max_size=LOG_MAX_SIZE,
+        log_max_file=LOG_MAX_FILE,
+    )
 
 
 def hardening_arguments(profile: RunnerProfile, *, network: str) -> tuple[str, ...]:
@@ -85,6 +132,16 @@ def hardening_arguments(profile: RunnerProfile, *, network: str) -> tuple[str, .
         "--ipc",
         "private",
         "--init",
+        "--cgroupns",
+        "private",
+        "--log-driver",
+        LOG_DRIVER,
+        "--log-opt",
+        f"max-size={LOG_MAX_SIZE}",
+        "--log-opt",
+        f"max-file={LOG_MAX_FILE}",
+        "--ulimit",
+        f"fsize={max_file_bytes(profile)}",
     ]
     return tuple(arguments)
 
@@ -124,8 +181,19 @@ def _environment_arguments(spec: LaunchSpec) -> tuple[str, ...]:
     return tuple(arguments)
 
 
-def worker_command(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[str, ...]:
-    """The command run inside the container: the in-image supervisor, then the harness."""
+def _nonce_value(nonce: str) -> str:
+    if not _NONCE.fullmatch(nonce):
+        raise InvalidInputError("the attempt nonce must be 16 to 128 letters or digits")
+    return nonce
+
+
+def worker_command(
+    spec: LaunchSpec, inner_command: Sequence[str], *, nonce: str
+) -> tuple[str, ...]:
+    """The command run inside the container: the in-image supervisor, then the harness.
+
+    ``nonce`` is the launcher's per-attempt value; the supervisor echoes it in its result.
+    """
     if not inner_command or any(not part for part in inner_command):
         raise InvalidInputError("the isolated worker needs a non-blank inner command")
     command = [
@@ -133,6 +201,8 @@ def worker_command(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[str,
         WORKER_ENTRY_PATH,
         "--operation-id",
         _flag_value(spec.operation_id, "--operation-id"),
+        "--nonce",
+        _nonce_value(nonce),
         "--result",
         f"{OUT_MOUNT}/{_flag_value(spec.result_name, '--result')}",
         "--deadline-seconds",
@@ -160,11 +230,35 @@ def worker_command(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[str,
     return tuple(command)
 
 
-def create_arguments(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[str, ...]:
+def launcher_label(launcher: ProcessIdentity) -> str:
+    """The label value that names the launcher process a container belongs to."""
+    host = launcher.host
+    return json.dumps(
+        {
+            "pid": launcher.pid,
+            "pgid": launcher.process_group_id,
+            "start": launcher.start_identity,
+            "machine": "" if host is None else host.machine_id,
+            "boot": "" if host is None else host.boot_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def create_arguments(
+    spec: LaunchSpec,
+    inner_command: Sequence[str],
+    *,
+    nonce: str,
+    launcher: ProcessIdentity | None = None,
+) -> tuple[str, ...]:
     """The complete ``docker create`` arguments for one isolated worker container.
 
     Excludes the ``docker`` executable and ``--context``. The environment is exactly
-    ``spec.env``, re-checked here against the profile allowlist; nothing is inherited.
+    ``spec.env``, re-checked here against the profile allowlist; nothing is inherited. When
+    ``launcher`` is given, the container is labelled with that process so a later reconcile can
+    tell a live attempt from one whose launcher died.
     """
     expected_name = container_name_for(spec.operation_id)
     if spec.container_name != expected_name:
@@ -176,7 +270,10 @@ def create_arguments(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[st
     workspace = _plain_path(spec.workspace_path, "workspace")
     out = _plain_path(spec.out_path, "result")
     environment = _environment_arguments(spec)
-    command = worker_command(spec, inner_command)
+    command = worker_command(spec, inner_command, nonce=nonce)
+    launcher_labels = (
+        ("--label", f"{LAUNCHER_LABEL}={launcher_label(launcher)}") if launcher else ()
+    )
     return (
         "create",
         *hardening_arguments(spec.profile, network=spec.profile.network),
@@ -190,6 +287,7 @@ def create_arguments(spec: LaunchSpec, inner_command: Sequence[str]) -> tuple[st
         f"{RUNNER_LABEL}=1",
         "--label",
         f"{OPERATION_LABEL}={spec.operation_id}",
+        *launcher_labels,
         "--name",
         spec.container_name,
         *environment,
@@ -335,9 +433,89 @@ def read_effective(engine: OciEngine, name: str) -> EffectiveContainer:
     return effective_from_inspect(container, image)
 
 
+_REQUIRED_MASKED_PATHS = frozenset(
+    {"/proc/kcore", "/proc/keys", "/proc/sched_debug", "/sys/firmware"}
+)
+_REQUIRED_READONLY_PATHS = frozenset({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys"})
+_TMPFS_UNITS = {"": 1, "k": 1024, "m": _MIB, "g": 1024 * _MIB}
+_TMPFS_SIZE = re.compile(r"^size=(\d+)([kmg]?)$", re.IGNORECASE)
+
+
+def _tmpfs_options(host: Mapping[str, object], destination: str) -> tuple[str, ...] | None:
+    options = _map(host.get("Tmpfs")).get(destination)
+    if not isinstance(options, str):
+        return None
+    return tuple(option for option in options.split(",") if option)
+
+
+def _tmpfs_size_bytes(options: Sequence[str]) -> int | None:
+    for option in options:
+        found = _TMPFS_SIZE.fullmatch(option)
+        if found is not None:
+            return int(found.group(1)) * _TMPFS_UNITS[found.group(2).lower()]
+    return None
+
+
+def _scratch_violations(
+    host: Mapping[str, object], destination: str, *, size_mib: int, owner: str | None
+) -> list[str]:
+    options = _tmpfs_options(host, destination)
+    if options is None:
+        return [f"scratch space {destination} is not a tmpfs"]
+    problems: list[str] = []
+    if _tmpfs_size_bytes(options) != size_mib * _MIB:
+        problems.append(f"scratch space {destination} is not capped at {size_mib} MiB")
+    for required in ("nosuid", "nodev"):
+        if required not in options:
+            problems.append(f"scratch space {destination} is not mounted {required}")
+    if owner is not None and owner not in ",".join(options):
+        problems.append(f"scratch space {destination} is not owned by the worker ({owner})")
+    return problems
+
+
+def _paths(value: object) -> frozenset[str]:
+    return frozenset(_texts(value))
+
+
+def _decimal(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
+
+
+def _log_violations(host: Mapping[str, object]) -> list[str]:
+    config = _map(host.get("LogConfig"))
+    options = _map(config.get("Config"))
+    problems: list[str] = []
+    if config.get("Type") != LOG_DRIVER:
+        problems.append(f"log driver is {config.get('Type')!r}, expected {LOG_DRIVER!r}")
+    if options.get("max-size") != LOG_MAX_SIZE or _decimal(options.get("max-file")) != LOG_MAX_FILE:
+        problems.append("container log is not rotated at the profile's size and file count")
+    return problems
+
+
+def _ulimit_violations(host: Mapping[str, object], profile: RunnerProfile) -> list[str]:
+    expected = max_file_bytes(profile)
+    fsize = [
+        _map(item) for item in _items(host.get("Ulimits")) if _map(item).get("Name") == "fsize"
+    ]
+    if len(fsize) != 1 or fsize[0].get("Soft") != expected or fsize[0].get("Hard") != expected:
+        return [f"the per-file size limit is not {expected} bytes"]
+    return []
+
+
 def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tuple[str, ...]:
     """Ways the created container departs from the launch beyond what ``EffectiveContainer``
-    records: the wrong image, or an engine-level namespace, link, port or device grant."""
+    records.
+
+    Checked from the engine's own report: the wrong image; a shared pid, ipc, uts, user or
+    cgroup namespace; links, volumes from another container, device requests or rules,
+    published ports; sysctls; a masked- or read-only-path set that is empty or missing the
+    core entries (``systempaths=unconfined``); a runtime other than ``runc``; tmpfs scratch
+    space that is not the profile's size (or is not nosuid/nodev, or the home tmpfs not owned by
+    the worker); and a container log or per-file size limit that is not the profile's.
+    """
     host = _map(container.get("HostConfig"))
     problems: list[str] = []
     if container.get("Image") != spec.image:
@@ -350,15 +528,34 @@ def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tupl
         problems.append("container shares the host uts namespace")
     if host.get("UsernsMode") not in ("", None):
         problems.append("container uses a non-default user namespace mode")
+    if host.get("CgroupnsMode") != "private":
+        problems.append(f"cgroup namespace is {host.get('CgroupnsMode')!r}, expected 'private'")
     for key, label in (
         ("VolumesFrom", "volumes from another container"),
         ("Links", "container links"),
         ("DeviceRequests", "device requests"),
         ("DeviceCgroupRules", "device cgroup rules"),
         ("PortBindings", "published ports"),
+        ("Sysctls", "sysctls"),
     ):
         if host.get(key):
             problems.append(f"container has {label}")
     if host.get("PublishAllPorts") is True:
         problems.append("container publishes all exposed ports")
+    if not _paths(host.get("MaskedPaths")) >= _REQUIRED_MASKED_PATHS:
+        problems.append("kernel paths are not masked (masked paths missing or emptied)")
+    if not _paths(host.get("ReadonlyPaths")) >= _REQUIRED_READONLY_PATHS:
+        problems.append("kernel paths are not read-only (read-only paths missing or emptied)")
+    if host.get("Runtime") != "runc":
+        problems.append(f"container runtime is {host.get('Runtime')!r}, expected 'runc'")
+    resources = spec.profile.resources
+    problems += _scratch_violations(host, WORKER_TMP, size_mib=resources.tmp_mib, owner=None)
+    problems += _scratch_violations(
+        host,
+        WORKER_HOME,
+        size_mib=resources.home_mib,
+        owner=f"uid={spec.profile.uid}",
+    )
+    problems += _log_violations(host)
+    problems += _ulimit_violations(host, spec.profile)
     return tuple(problems)

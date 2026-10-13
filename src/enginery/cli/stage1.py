@@ -20,7 +20,7 @@ from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
-from enginery.cli.stage1_runner import IsolatedWiring, isolated_wiring
+from enginery.cli.stage1_runner import DriftedRunnerWiring, IsolatedWiring, isolated_wiring
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
@@ -164,6 +164,18 @@ def _harness_for(
     )
 
 
+def _once(probe: Callable[[], InstalledHost | None]) -> Callable[[], InstalledHost | None]:
+    """Run ``probe`` at most once: the pinned image is immutable, so one answer holds for a run."""
+    answers: list[InstalledHost | None] = []
+
+    def probed() -> InstalledHost | None:
+        if not answers:
+            answers.append(probe())
+        return answers[0]
+
+    return probed
+
+
 def _host_probe_for(
     configuration: Stage1ExecutionConfiguration, wiring: IsolatedWiring | None
 ) -> Callable[[], InstalledHost | None]:
@@ -176,11 +188,11 @@ def _host_probe_for(
     if configuration.harness_provider == "omp":
         if wiring is None:
             return lambda: probe_installed_omp(configuration.harness_executable)
-        return lambda: probe_installed_omp(configuration.harness_executable, wiring.probe)
+        return _once(lambda: probe_installed_omp(configuration.harness_executable, wiring.probe))
     if configuration.harness_provider == "claude-code":
         if wiring is None:
             return lambda: probe_installed_claude(configuration.harness_executable)
-        return lambda: probe_installed_claude(configuration.harness_executable, wiring.probe)
+        return _once(lambda: probe_installed_claude(configuration.harness_executable, wiring.probe))
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
         details={"harness_provider": configuration.harness_provider},
@@ -192,6 +204,8 @@ def _read_only_service(
 ) -> Stage1RunService:
     """A service for diagnostics and decisions that must never create harness state."""
     wiring = isolated_wiring(request, create_directories=False)
+    if isinstance(wiring, DriftedRunnerWiring):
+        return Stage1RunService(runtime=runtime, ledger=ledger, runner_admission=wiring.admission)
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
@@ -211,15 +225,21 @@ def _advancing_service(
         executable=configuration.github_executable,
     )
     pull_requests = GitHubPullRequests(github)
+    # A run bound to a profile that is no longer current gets no harness and no validation
+    # runner: it can only report its hold, and nothing can launch under other restrictions.
+    harness = (
+        None if isinstance(wiring, DriftedRunnerWiring) else _harness_for(configuration, wiring)
+    )
+    isolated_validation = wiring.validation if isinstance(wiring, IsolatedWiring) else None
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
         pull_requests=pull_requests,
-        harness=_harness_for(configuration, wiring),
+        harness=harness,
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
         runner_admission=None if wiring is None else wiring.admission,
-        isolated_command_runner=None if wiring is None else wiring.validation,
+        isolated_command_runner=isolated_validation,
     )
 
 

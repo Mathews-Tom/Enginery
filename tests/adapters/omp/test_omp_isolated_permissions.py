@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import textwrap
 from dataclasses import dataclass
@@ -282,3 +283,67 @@ def test_real_omp_with_default_approval_would_have_run_the_refused_calls(tmp_pat
     assert completed.returncode == 0, completed.stderr[-500:]
     assert (proof.workspace / "shell-marker").exists()
     assert proof.remote_refs() != ""
+
+
+_WORKSPACE_CODE_RUNNERS = ("pytest", "python", "uv ", "mypy", "ruff", "make", "npm", "bun", "node")
+
+
+def test_no_allowed_command_runs_code_from_the_workspace() -> None:
+    """A test runner or interpreter executes workspace files, which no deny entry can stop."""
+    policy = yaml.safe_load(POLICY_ASSET.read_text(encoding="utf-8"))
+    allowed = [rule["match"] for rule in policy["bash"]["patterns"] if rule["approval"] == "allow"]
+
+    assert allowed  # local version control stays available
+    assert all(match.startswith("git ") for match in allowed)
+    assert not [
+        match
+        for match in allowed
+        if any(match.startswith(name) for name in _WORKSPACE_CODE_RUNNERS)
+    ]
+
+
+def test_the_rationale_names_containment_not_the_allow_list_as_the_boundary() -> None:
+    rationale = isolated_permission_mapping("omp").rationale
+
+    assert "not the boundary" in rationale
+    assert "Containment is the container" in rationale
+
+
+def test_a_planted_hook_is_not_run_by_an_allowed_git_commit(tmp_path: Path) -> None:
+    """`git commit` runs `.git/hooks/pre-commit` unless hooks are disabled out of band.
+
+    The worker can write that file with its file tools, so the permission lists alone cannot
+    keep it from running. The worker environment disables hooks with command-scoped config.
+    """
+    harness = _isolated_harness(tmp_path)
+    git_environment = {
+        key: value
+        for key, value in harness.container_environment(harness_task(tmp_path, "omp"))
+        if key.startswith("GIT_")
+    }
+
+    def commit(extra: dict[str, str]) -> Path:
+        repository = tmp_path / ("hooked" if extra else "control")
+        repository.mkdir()
+        marker = repository / "hook-ran"
+        base = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+        }
+        environment = {**base, **extra}
+        for step in (("init", "-q"), ("config", "user.name", "w"), ("config", "user.email", "w@x")):
+            subprocess.run(["git", *step], cwd=repository, env=environment, check=True)
+        hook = repository / ".git" / "hooks" / "pre-commit"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+        hook.chmod(0o755)
+        (repository / "file.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "file.txt"], cwd=repository, env=environment, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "work"], cwd=repository, env=environment, check=True
+        )
+        return marker
+
+    assert commit({}).exists()  # the control: without the environment the hook runs
+    assert not commit(git_environment).exists()
