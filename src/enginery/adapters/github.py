@@ -36,6 +36,7 @@ from enginery.domain.errors import (
     AuthenticationFailureError,
     ExternalConflictError,
     InvalidInputError,
+    MissingPrerequisiteError,
     RateLimitError,
     StaleEvidenceError,
     TransientProviderFailureError,
@@ -61,6 +62,16 @@ _RISK_LABELS = {
     "enginery/risk/medium": RiskClass.MEDIUM,
 }
 _CLASSIFICATION_PREFIXES = ("enginery/work-kind/", "enginery/risk/")
+
+
+class GitHubCliUnavailableError(MissingPrerequisiteError, OSError):
+    """The configured ``gh`` executable could not be run at all.
+
+    It is classified, so a command that needs GitHub exits with the missing-prerequisite
+    code and a message naming the executable instead of a traceback. It is also an
+    ``OSError``, which is how the adapters' ``probe`` methods already report an unavailable
+    CLI, so they keep doing so.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,7 +931,13 @@ def _run(
     command_runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]],
     arguments: tuple[str, ...],
 ) -> subprocess.CompletedProcess[str]:
-    result = command_runner(arguments)
+    try:
+        result = command_runner(arguments)
+    except OSError as error:
+        raise GitHubCliUnavailableError(
+            f"GitHub CLI {arguments[0]!r} could not be run: {error.strerror or error}",
+            details={"executable": arguments[0]},
+        ) from error
     if result.returncode != 0 and arguments[1:] == ("--version",):
         _raise_github_failure(result.stderr)
     return result

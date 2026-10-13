@@ -143,7 +143,7 @@ script against a command that is not listed above.
 | `enginery ledger restore --backup PATH --database PATH [--artifacts PATH]` | Restore a ledger from a backup directory. |
 | `enginery ledger rebuild-projections --database PATH` | Rebuild ledger projections from stored events. |
 | `enginery policy explain REQUEST [--json]` | Explain a policy decision for a request document without authorizing it. |
-| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus compose a `--request` document from flags (below). |
+| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus build a `--request` document from a GitHub issue (below). |
 | `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
 | `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report fail-closed G4 readiness from classified completed runs and recorded authority evidence. |
@@ -303,27 +303,43 @@ flowchart LR
 ### Composing a request
 
 `stage1 start --request` needs a JSON document decodable by
-`stage1_request_from_state`. `enginery stage1 build-request` writes one
-from flags instead of hand-writing the Python composition
-[`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness)
-documents:
+`stage1_request_from_state`. `enginery stage1 build-request` writes one for a
+GitHub issue, instead of the hand-written Python composition in
+[`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness):
 
 ```bash
 uv run enginery stage1 build-request \
   --output request.json \
   --run-id issue-142 \
   --repository <owner>/<repo> \
-  --external-reference "https://github.com/<owner>/<repo>/issues/142" \
-  --source-snapshot-reference "issue:142@<observed-revision>" \
-  --source-revision <observed-revision> \
+  --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> \
-  --title "<issue title>" \
-  --objective "<what a merge-ready PR must accomplish>" \
-  --acceptance-criterion "<criterion 1>" --acceptance-criterion "<criterion 2>" \
   --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
   --artifact-root <absolute path to an artifact directory>
 ```
+
+What the issue decides is not a flag. `build-request` reads the issue named by
+`--external-reference` (`OWNER/REPO#N`, not an issue URL) through the same GitHub
+adapter `stage1 watch --advance` qualifies with — the `gh` named by
+`--github-executable` (default `gh`), the `--github-credential-reference`
+(default `operator-gh-cli`), and the repository from `--github-repository`
+(default `--repository`) — and writes the snapshot it returns exactly as returned:
+the title, the body (which is also the run's single acceptance criterion), the source
+URL and revision, and the declared classification from the issue's one
+`enginery/work-kind/*` label (`issue` or `plan`) and one `enginery/risk/*` label
+(`low` or `medium`). The request therefore carries the digest that qualification
+recomputes from the same issue, and `watch --advance` qualifies it. If the issue
+changes after the request is built (its body, its labels, or its update time), the
+next `watch --advance` reports stale evidence (exit code 10) instead of qualifying,
+and the request must be rebuilt. An issue without exactly one declared work-kind
+and one declared risk label, or with a label outside that vocabulary, is refused
+with exit code 2 and no file is written. `--inapplicable-criterion INDEX` marks a
+criterion of the issue as not applicable to this run (`0` for the issue body).
+`--work-item-id`, `--source-provider`, `--work-kind`, `--source-snapshot-reference`,
+`--source-revision`, `--title`, `--objective`, `--acceptance-criterion`,
+`--constraint`, and `--risk-class` no longer exist; a command line that passes one is
+rejected as an unrecognized argument.
 
 Every field not shown above defaults to the same values
 `docs/examples.md` documents (`policy-v1`, `uv run pytest -q`,
@@ -339,9 +355,10 @@ no-capabilities-locked sentinel otherwise.
 bind the two remaining opaque `Run` digests to real bytes when a real
 environment manifest or configuration snapshot exists; omitted, they
 fall back to the same fixed local-environment/local-configuration
-sentinels the documented manual script uses. The command never
-contacts GitHub, OMP, or any external provider — it only writes a
-local file.
+sentinels the documented manual script uses. The only provider the command
+contacts is GitHub, through `gh`, to read the issue (after it has validated the
+pins, so a rejected `--model` or `--effort` never reaches GitHub); it never runs
+OMP or Claude Code, and it writes only the local request file.
 
 A new `stage1 start` accepts only a request whose manifest binds the current check
 contracts. Requests written by `v0.5.0`'s `stage1 build-request` (manifest schema 1)

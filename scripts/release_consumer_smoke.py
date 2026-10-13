@@ -10,8 +10,8 @@ requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged
 acceptance baseline and execution catalog, and the fail-closed G4 gate.
 
-No hosted model or GitHub call is made and nothing is written outside the
-temporary directory.
+No hosted model or GitHub call is made and nothing is written outside the temporary
+directory: the request commands read their issue from a stand-in `gh` written there.
 """
 
 from __future__ import annotations
@@ -133,6 +133,49 @@ def _check_help(executable: Path, *, root: Path) -> None:
     _note("gate and stage1 build-request help; --model/--effort/--strict-effective listed")
 
 
+_STAND_IN_GITHUB = """#!__PYTHON__
+import json
+import sys
+
+arguments = sys.argv[1:]
+endpoint = arguments[-1] if arguments[:1] == ["api"] else ""
+path, _, query = endpoint.partition("?")
+parts = path.split("/")
+if len(parts) in (5, 6) and parts[0] == "repos" and parts[3] == "issues" and parts[4].isdecimal():
+    if len(parts) == 5:
+        print(
+            json.dumps(
+                {
+                    "url": "https://api.github.com/" + path,
+                    "number": int(parts[4]),
+                    "title": "Consumer smoke",
+                    "body": "Exercise the installed build-request command.",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            )
+        )
+        raise SystemExit(0)
+    if parts[5] == "labels":
+        page = int(dict(pair.split("=") for pair in query.split("&") if pair).get("page", "1"))
+        labels = ["enginery/work-kind/issue", "enginery/risk/low"] if page == 1 else []
+        print(json.dumps([{"name": name} for name in labels]))
+        raise SystemExit(0)
+sys.stderr.write("HTTP 404: Not Found\\n")
+raise SystemExit(1)
+"""
+
+
+def _stand_in_github(root: Path) -> Path:
+    """Write (once) a `gh` that serves one labelled issue, so `build-request` needs no network."""
+    executable = root / "gh"
+    if not executable.exists():
+        executable.write_text(
+            _STAND_IN_GITHUB.replace("__PYTHON__", sys.executable), encoding="utf-8"
+        )
+        executable.chmod(0o755)
+    return executable
+
+
 def _build_request_command(executable: Path, *, root: Path, output: Path) -> list[str]:
     return [
         str(executable),
@@ -145,19 +188,11 @@ def _build_request_command(executable: Path, *, root: Path, output: Path) -> lis
         "--repository",
         "example/repo",
         "--external-reference",
-        "https://github.com/example/repo/issues/1",
-        "--source-snapshot-reference",
-        "consumer-smoke-snapshot",
-        "--source-revision",
-        "0123456789abcdef0123456789abcdef01234567",
+        "example/repo#1",
+        "--github-executable",
+        str(_stand_in_github(root)),
         "--base-revision",
         "89abcdef0123456789abcdef0123456789abcdef",
-        "--title",
-        "Consumer smoke",
-        "--objective",
-        "Exercise the installed build-request command.",
-        "--acceptance-criterion",
-        "The request is written.",
         "--repository-path",
         str(root / "repository"),
         "--workspace-path",

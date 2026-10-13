@@ -26,6 +26,7 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     stage1_request_from_state,
 )
+from tests.support.github import write_stand_in_gh
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
 
 OMP_MODEL = "openai/gpt-5.2"
@@ -70,18 +71,10 @@ def _build_argv(tmp_path: Path, *extra: str, output: Path | None = None) -> list
         "owner/repo",
         "--external-reference",
         "owner/repo#1",
-        "--source-snapshot-reference",
-        "issue:1@1",
-        "--source-revision",
-        "1",
+        "--github-executable",
+        str(write_stand_in_gh(tmp_path / "github").executable),
         "--base-revision",
         base_revision,
-        "--title",
-        "Bounded change",
-        "--objective",
-        "Change one bounded behavior.",
-        "--acceptance-criterion",
-        "observable result",
         "--repository-path",
         str(repository),
         "--workspace-path",

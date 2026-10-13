@@ -6,12 +6,18 @@ from collections.abc import Callable
 
 import pytest
 
-from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.github import (
+    GitHubAdapterConfig,
+    GitHubCliUnavailableError,
+    GitHubWorkLedger,
+)
+from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.work_ports import LifecycleProjection
 from enginery.domain.errors import (
     AuthenticationFailureError,
     ExternalConflictError,
     InvalidInputError,
+    MissingPrerequisiteError,
     RateLimitError,
     StaleEvidenceError,
 )
@@ -301,3 +307,24 @@ def test_smoke_repository_must_match_static_allowlist() -> None:
 
     with pytest.raises(InvalidInputError, match="allowlisted"):
         disallowed.require_smoke_repository()
+
+
+def _unrunnable(arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    raise FileNotFoundError(2, "No such file or directory", arguments[0])
+
+
+def test_a_github_cli_that_cannot_be_run_is_a_classified_error_naming_the_executable() -> None:
+    ledger = GitHubWorkLedger(_config(), command_runner=_unrunnable)
+
+    with pytest.raises(MissingPrerequisiteError, match="'gh' could not be run") as raised:
+        ledger.fetch("Mathews-Tom/enginery-provider-smoke#7")
+
+    assert isinstance(raised.value, GitHubCliUnavailableError)
+    assert raised.value.details == {"executable": "gh"}
+
+
+def test_probe_still_reports_a_github_cli_that_cannot_be_run_as_unavailable() -> None:
+    status = GitHubWorkLedger(_config(), command_runner=_unrunnable).probe()
+
+    assert status.availability is AdapterAvailability.UNAVAILABLE
+    assert status.fingerprint is None

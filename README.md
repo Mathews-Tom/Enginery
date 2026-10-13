@@ -100,10 +100,8 @@ uv run enginery adapter doctor --json
 uv run enginery ledger verify --database ledger.db
 uv run enginery policy explain request.json
 uv run enginery stage1 build-request --output request.json --run-id issue-1 \
-  --repository owner/repo --external-reference "..." \
-  --source-snapshot-reference "..." --source-revision "..." \
-  --base-revision "..." --title "..." --objective "..." \
-  --acceptance-criterion "..." --repository-path /path/to/repo \
+  --repository owner/repo --external-reference "owner/repo#1" \
+  --base-revision "..." --repository-path /path/to/repo \
   --workspace-path /path/to/workspace --artifact-root /path/to/artifacts
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json
 uv run enginery stage2 status --database ledger.db --owner operator --stack-id ID
