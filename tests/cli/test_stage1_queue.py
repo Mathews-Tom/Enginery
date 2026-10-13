@@ -264,7 +264,9 @@ def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
     )
     assert code == 2
     assert not output.exists()
-    # An explicit id is the operator's choice and bypasses derivation.
+    # An explicit first-attempt id does not exempt the repair ids, which are always derived
+    # from the run id, and the message must not advise a flag that cannot fix that.
+    capsys.readouterr()
     code = main(
         _build_argv(
             tmp_path,
@@ -272,6 +274,31 @@ def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
             long_run_id,
             "--implementation-attempt-id",
             "short-attempt",
+            output=output,
+        )
+    )
+    assert code == 2
+    assert not output.exists()
+    message = capsys.readouterr().err
+    assert "run id is too long" in message
+    assert "--implementation-attempt-id" not in message
+    # With no repair attempts possible the first id is the only one, and the flag does help.
+    capsys.readouterr()
+    code = main(
+        _build_argv(tmp_path, "--run-id", long_run_id, "--repair-limit", "0", output=output)
+    )
+    assert code == 2
+    assert "--implementation-attempt-id" in capsys.readouterr().err
+    # With no repair attempts possible, an explicit id is the operator's choice.
+    code = main(
+        _build_argv(
+            tmp_path,
+            "--run-id",
+            long_run_id,
+            "--implementation-attempt-id",
+            "short-attempt",
+            "--repair-limit",
+            "0",
             output=output,
         )
     )

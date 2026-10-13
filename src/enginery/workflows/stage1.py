@@ -410,6 +410,7 @@ class Stage1RunService:
         manual case. A run projection that is not a Stage 1 request has no catalog binding.
         """
         held: dict[str, str] = {}
+        catalog = self._current_catalog()
         for projection in self.ledger.list_projections(aggregate_type=RUN_AGGREGATE_TYPE):
             try:
                 run = _run_from_state(
@@ -417,7 +418,7 @@ class Stage1RunService:
                 )
             except (InvalidInputError, InternalInvariantViolationError):
                 continue
-            hold = self._catalog_hold(run.request)
+            hold = detect_catalog_drift(run.request.execution_selection, current=catalog)
             if hold is not None:
                 held[projection.aggregate_id] = hold.message
         return held
@@ -1291,8 +1292,7 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
         NodeAttemptId(attempt_id)
     except InvalidInputError as error:
         raise InvalidInputError(
-            "run id is too long to derive a valid implementation attempt id; "
-            "use a shorter run id or pass --implementation-attempt-id",
+            "run id is too long to derive a valid implementation attempt id; use a shorter run id",
             details={"run_id": run_id, "attempt_id": attempt_id},
         ) from error
     return attempt_id

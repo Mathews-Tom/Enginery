@@ -237,10 +237,17 @@ def _harness_executable(args: argparse.Namespace, harness: str) -> str:
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     """Construct one durable Stage 1 request from ``build-request`` flags."""
     run_id = args.run_id
-    if args.implementation_attempt_id is None:
-        attempt_id = implementation_attempt_id(run_id, 0)
-        # Validate the longest repair id now, so a run that could never repair fails here.
+    if args.repair_limit > 0:
+        # Repair attempt ids are always derived from the run id, whatever the first attempt's
+        # id is, so the longest one must be valid for the run to be able to repair.
         implementation_attempt_id(run_id, args.repair_limit)
+    if args.implementation_attempt_id is None:
+        try:
+            attempt_id = implementation_attempt_id(run_id, 0)
+        except InvalidInputError as error:
+            raise InvalidInputError(
+                f"{error}, or pass --implementation-attempt-id", details=error.details
+            ) from error
     else:
         attempt_id = args.implementation_attempt_id
     work_item_id = args.work_item_id or f"work-{run_id}"
