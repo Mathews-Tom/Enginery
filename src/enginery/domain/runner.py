@@ -38,6 +38,20 @@ WORKER_TMP = "/tmp"
 ISOLATED_PROFILE_NAME = "enginery-isolated-oci-v1"
 TRUSTED_LOCAL_PROFILE_NAME = "enginery-trusted-local-v1"
 
+MODEL_ACCESS_NONE = "none"
+MODEL_ACCESS_RELAY = "relay"
+MODEL_ACCESS_MODES: tuple[str, ...] = (MODEL_ACCESS_NONE, MODEL_ACCESS_RELAY)
+"""How an isolated worker reaches a model: not at all, or only through the operator's relay."""
+
+RELAY_HOSTNAME = "enginery-relay"
+"""The relay's network alias on the profile's internal network (also its container name)."""
+
+RELAY_PORT = 8080
+RELAY_DUMMY_CREDENTIAL = "enginery-relay"
+"""The only credential a worker holds: a fixed, non-secret placeholder the relay never honors."""
+
+_RELAY_URL_PATTERN = re.compile(r"^http://[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$")
+
 _IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -323,6 +337,7 @@ class RunnerSelection:
     image: str | None = None
     docker_context: str | None = None
     legacy: bool = False
+    model_access: str = MODEL_ACCESS_NONE
 
     def __post_init__(self) -> None:
         _require_text(self.profile_name, "runner selection profile")
@@ -339,6 +354,13 @@ class RunnerSelection:
             raise InvalidInputError("a trusted-local selection carries no image, profile or engine")
         if self.docker_context is not None and not self.docker_context.strip():
             raise InvalidInputError("docker context must be null or non-blank")
+        if self.model_access not in MODEL_ACCESS_MODES:
+            raise InvalidInputError(
+                "runner selection model access is unknown",
+                details={"model_access": self.model_access},
+            )
+        if self.model_access != MODEL_ACCESS_NONE and self.trust_mode is not TrustMode.ISOLATED_OCI:
+            raise InvalidInputError("model access through the relay applies only to isolated runs")
 
     @classmethod
     def trusted_local(cls, *, legacy: bool = False) -> RunnerSelection:
@@ -350,7 +372,12 @@ class RunnerSelection:
 
     @classmethod
     def isolated(
-        cls, *, image: str, profile: RunnerProfile, docker_context: str | None = None
+        cls,
+        *,
+        image: str,
+        profile: RunnerProfile,
+        docker_context: str | None = None,
+        model_access: str = MODEL_ACCESS_NONE,
     ) -> RunnerSelection:
         return cls(
             trust_mode=TrustMode.ISOLATED_OCI,
@@ -358,6 +385,7 @@ class RunnerSelection:
             profile_digest=profile.digest,
             image=image,
             docker_context=docker_context,
+            model_access=model_access,
         )
 
     @property
@@ -365,7 +393,7 @@ class RunnerSelection:
         return self.trust_mode is TrustMode.ISOLATED_OCI
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "schema_version": RUNNER_SELECTION_SCHEMA_VERSION,
             "trust_mode": self.trust_mode.value,
             "profile": self.profile_name,
@@ -373,6 +401,10 @@ class RunnerSelection:
             "image": self.image,
             "docker_context": self.docker_context,
         }
+        if self.model_access != MODEL_ACCESS_NONE:
+            # Absent means no model access, so a selection without it keeps its persisted shape.
+            state["model_access"] = self.model_access
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> RunnerSelection:
@@ -395,6 +427,8 @@ class RunnerSelection:
             profile_digest=digest,
             image=_optional_text(data, "image", "runner selection"),
             docker_context=_optional_text(data, "docker_context", "runner selection"),
+            model_access=_optional_text(data, "model_access", "runner selection")
+            or MODEL_ACCESS_NONE,
         )
 
 
@@ -993,6 +1027,28 @@ class LaunchSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class RelayEndpoint:
+    """Where an isolated worker reaches the operator's model-access relay, and what it holds.
+
+    The credential is a fixed placeholder that identifies nothing: the relay discards every
+    inbound credential and injects the gateway bearer itself, so a worker never holds a secret.
+    """
+
+    url: str = f"http://{RELAY_HOSTNAME}:{RELAY_PORT}"
+    dummy_credential: str = RELAY_DUMMY_CREDENTIAL
+
+    def __post_init__(self) -> None:
+        if not _RELAY_URL_PATTERN.fullmatch(self.url):
+            raise InvalidInputError(
+                "relay url must be http://host:port without path or credentials"
+            )
+        if not self.dummy_credential or not self.dummy_credential.isascii():
+            raise InvalidInputError("relay dummy credential must be non-empty ASCII")
+        if self.dummy_credential != RELAY_DUMMY_CREDENTIAL:
+            raise InvalidInputError("a worker is only ever given the fixed relay placeholder")
+
+
+@dataclass(frozen=True, slots=True)
 class RunnerContext:
     """What a harness adapter needs to launch its worker in the isolated profile."""
 
@@ -1000,6 +1056,8 @@ class RunnerContext:
     profile: RunnerProfile
     receipt_root: str
     """Absolute host directory the launcher writes receipts into (outside every worker mount)."""
+    relay: RelayEndpoint | None = None
+    """Set exactly when the selection grants model access through the relay."""
 
     def __post_init__(self) -> None:
         if not self.selection.isolated_mode:
@@ -1008,6 +1066,11 @@ class RunnerContext:
             raise InvalidInputError("runner context profile does not match its selection")
         if not self.receipt_root.startswith("/"):
             raise InvalidInputError("runner context receipt root must be absolute")
+        if (self.relay is not None) != (self.selection.model_access == MODEL_ACCESS_RELAY):
+            raise InvalidInputError(
+                "a runner context carries a relay endpoint exactly when its selection grants "
+                "model access through the relay"
+            )
 
 
 def isolated_permission_mapping(harness: str) -> PermissionMapping:

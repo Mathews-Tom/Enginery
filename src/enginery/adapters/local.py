@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from enginery.application.work_ports import (
     WorkspaceHandle,
     WorkspaceRequest,
 )
+from enginery.application.worker_environment import build_worker_environment
 from enginery.domain.digests import Digest
 from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.ids import OperationId
@@ -165,6 +167,7 @@ class LocalWorkspace:
         )
 
     def create(self, request: WorkspaceRequest) -> WorkspaceHandle:
+        environment = build_worker_environment(os.environ, request.permitted_environment_keys)
         reservation_id = f"workspace-{request.operation_id}"
         path = self.root / reservation_id
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +179,7 @@ class LocalWorkspace:
             repository_id=request.repository_id,
             path=path,
             base_revision=request.base_revision,
+            environment=tuple(sorted(environment.items())),
         )
         self._workspaces[reservation_id] = workspace
         _record(self._outcomes, request.operation_id)

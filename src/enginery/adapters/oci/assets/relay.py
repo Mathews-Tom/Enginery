@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""Operator-owned model-access relay (standard library only, Python 3.12).
+
+A worker container has no route to the model gateway and holds no gateway credential. It talks
+to this relay, which is the only process that holds the gateway bearer. The relay forwards
+exactly three routes and nothing else:
+
+    POST /v1/messages     Anthropic messages (Claude Code)
+    POST /v1/pi/stream    pi-native stream (omp)
+    GET  /v1/models       model list, filtered to the permitted providers
+
+Every other method and path is refused locally and never reaches the gateway. The relay answers
+``GET /healthz`` itself. For the two POST routes it reads the model the gateway would route on
+(with the gateway's own precedence), refuses anything outside ``anthropic/`` and
+``openai-codex/``, and rewrites a bare ``claude-*`` id on ``/v1/messages`` to
+``anthropic/<id>`` because the gateway's other providers share bare ids. It strips every inbound
+credential header and injects ``Authorization: Bearer <token>``, reading the token file again
+on every request. Neither the token nor a request body is ever logged.
+
+Configuration (environment): ``RELAY_UPSTREAM`` (``http://host:port``, required),
+``RELAY_TOKEN_FILE`` (default ``/run/relay/gateway-token``), ``RELAY_LISTEN_HOST`` (default
+``0.0.0.0``), ``RELAY_LISTEN_PORT`` (default ``8080``; ``0`` picks a free port and is announced
+on stdout), ``RELAY_CONNECT_TIMEOUT`` (seconds, default 10), ``RELAY_READ_TIMEOUT`` (seconds,
+default 900).
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import sys
+import urllib.parse
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, NoReturn
+
+ALLOWED_MODEL_PREFIXES = ("anthropic/", "openai-codex/")
+BARE_CLAUDE_PREFIX = "claude-"
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_MODELS_BYTES = 16 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 1024 * 1024
+MAX_TOKEN_FILE_BYTES = 4096
+MAX_MODEL_ID_CHARS = 256
+STREAM_CHUNK_BYTES = 64 * 1024
+CLIENT_SOCKET_TIMEOUT_SECONDS = 120
+
+DEFAULT_TOKEN_FILE = "/run/relay/gateway-token"
+DEFAULT_LISTEN_HOST = "0.0.0.0"
+DEFAULT_LISTEN_PORT = 8080
+DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_READ_TIMEOUT = 900.0
+
+ROUTE_MESSAGES = "/v1/messages"
+ROUTE_PI_STREAM = "/v1/pi/stream"
+ROUTE_MODELS = "/v1/models"
+ROUTE_HEALTH = "/healthz"
+FORWARDED_ROUTES = {
+    ROUTE_MESSAGES: "POST",
+    ROUTE_PI_STREAM: "POST",
+    ROUTE_MODELS: "GET",
+}
+DENIED_ROUTES = frozenset({"/v1/credentials/check", "/v1/usage"})
+
+# Hop-by-hop headers (RFC 9110 section 7.6.1) plus the ones the relay sets itself.
+_DROPPED_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "expect",
+        "host",
+        "content-length",
+        "authorization",
+        "x-api-key",
+        "api-key",
+        "cookie",
+        "set-cookie",
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    }
+)
+_CREDENTIAL_HEADER_MARKERS = ("authorization", "api-key", "apikey", "auth-token", "cookie")
+
+
+class RelayConfigError(Exception):
+    """The relay was started with unusable configuration."""
+
+
+@dataclass(frozen=True)
+class RelayConfig:
+    upstream_scheme: str
+    upstream_host: str
+    upstream_port: int
+    token_file: str
+    listen_host: str
+    listen_port: int
+    connect_timeout: float
+    read_timeout: float
+
+    @property
+    def upstream_netloc(self) -> str:
+        default = 443 if self.upstream_scheme == "https" else 80
+        host = f"[{self.upstream_host}]" if ":" in self.upstream_host else self.upstream_host
+        return host if self.upstream_port == default else f"{host}:{self.upstream_port}"
+
+
+def parse_config(environ: dict[str, str]) -> RelayConfig:
+    upstream = environ.get("RELAY_UPSTREAM", "")
+    parts = urllib.parse.urlsplit(upstream)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise RelayConfigError("RELAY_UPSTREAM must be http(s)://host[:port]")
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username:
+        raise RelayConfigError("RELAY_UPSTREAM must carry no path, query or credentials")
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        listen_port = int(environ.get("RELAY_LISTEN_PORT", str(DEFAULT_LISTEN_PORT)))
+        connect_timeout = float(environ.get("RELAY_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT))
+        read_timeout = float(environ.get("RELAY_READ_TIMEOUT", DEFAULT_READ_TIMEOUT))
+    except ValueError as error:
+        raise RelayConfigError(f"relay configuration is malformed: {error}") from error
+    if not 0 <= listen_port <= 65535 or connect_timeout <= 0 or read_timeout <= 0:
+        raise RelayConfigError("relay port or timeouts are out of range")
+    return RelayConfig(
+        upstream_scheme=parts.scheme,
+        upstream_host=parts.hostname,
+        upstream_port=port,
+        token_file=environ.get("RELAY_TOKEN_FILE", DEFAULT_TOKEN_FILE),
+        listen_host=environ.get("RELAY_LISTEN_HOST", DEFAULT_LISTEN_HOST),
+        listen_port=listen_port,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
+
+
+# --- policy ---------------------------------------------------------------------------------
+
+
+def _clean_text(value: object) -> str | None:
+    """``value`` when it is a non-empty ASCII string without controls or edge whitespace."""
+    if not isinstance(value, str) or not value or len(value) > MAX_MODEL_ID_CHARS:
+        return None
+    if not value.isascii() or value != value.strip():
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return None
+    return value
+
+
+def requested_model(route: str, body: dict[str, Any]) -> object:
+    """The model identifier the gateway would route ``body`` on.
+
+    ``/v1/messages`` routes on the top-level ``model`` string. ``/v1/pi/stream`` takes a
+    non-empty ``modelId`` string, else a non-empty ``model`` string, else a non-empty
+    ``model.id`` string: the same precedence the gateway applies. ``None`` when there is none.
+    """
+    if route == ROUTE_MESSAGES:
+        model = body.get("model")
+        return model if isinstance(model, str) else None
+    model_id = body.get("modelId")
+    if isinstance(model_id, str) and model_id:
+        return model_id
+    model = body.get("model")
+    if isinstance(model, str) and model:
+        return model
+    if isinstance(model, dict):
+        nested = model.get("id")
+        if isinstance(nested, str) and nested:
+            return nested
+    return None
+
+
+def canonical_model(route: str, raw: object) -> str | None:
+    """The permitted, canonical model id for ``raw``, or ``None`` when the relay must refuse it.
+
+    Matching is exact on the raw string: no stripping, no case folding, ASCII only. Only
+    ``/v1/messages`` accepts a bare ``claude-*`` id (rewritten to ``anthropic/<id>``); every
+    other bare id is ambiguous across the gateway's providers and is refused.
+    """
+    text = _clean_text(raw)
+    if text is None:
+        return None
+    for prefix in ALLOWED_MODEL_PREFIXES:
+        if text.startswith(prefix) and len(text) > len(prefix):
+            return text
+    if route == ROUTE_MESSAGES and text.startswith(BARE_CLAUDE_PREFIX):
+        return f"anthropic/{text}"
+    return None
+
+
+def filter_models(document: object) -> dict[str, Any] | None:
+    """``document`` with ``data`` reduced to permitted-provider models; ``None`` if malformed."""
+    if not isinstance(document, dict) or not isinstance(document.get("data"), list):
+        return None
+    rows: list[Any] = []
+    for row in document["data"]:
+        if not isinstance(row, dict):
+            return None
+        model_id = row.get("id")
+        if isinstance(model_id, str) and model_id.startswith(ALLOWED_MODEL_PREFIXES):
+            rows.append(row)
+    return {**document, "data": rows}
+
+
+def forwardable_headers(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Inbound headers that may reach the gateway: no hop-by-hop and no credential of any kind."""
+    kept: list[tuple[str, str]] = []
+    for name, value in items:
+        lowered = name.lower()
+        if lowered in _DROPPED_HEADERS:
+            continue
+        if any(marker in lowered for marker in _CREDENTIAL_HEADER_MARKERS):
+            continue
+        kept.append((name, value))
+    return kept
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def parse_json_object(raw: bytes) -> dict[str, Any]:
+    """Strictly decode a request body into a JSON object (UTF-8, no duplicate keys)."""
+    try:
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise ValueError("request body is not a valid JSON object") from error
+    if not isinstance(document, dict):
+        raise ValueError("request body is not a JSON object")
+    return document
+
+
+def read_token(path: str) -> str | None:
+    """The gateway token, read afresh; ``None`` when the file is missing, empty or unusable."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_TOKEN_FILE_BYTES:
+        return None
+    try:
+        token = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if not token or any(ord(char) < 33 or ord(char) == 127 for char in token):
+        return None
+    return token
+
+
+# --- server ---------------------------------------------------------------------------------
+
+
+class RefusalError(Exception):
+    def __init__(self, status: int, error_type: str, message: str, decision: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.error_type = error_type
+        self.message = message
+        self.decision = decision
+
+
+class RelayServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(self, config: RelayConfig) -> None:
+        self.config = config
+        super().__init__((config.listen_host, config.listen_port), RelayHandler)
+
+
+class RelayHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "enginery-relay"
+    sys_version = ""
+    timeout = CLIENT_SOCKET_TIMEOUT_SECONDS
+    server: RelayServer
+
+    # -- logging: method, path (no query), decision, status; never a header or a body ----------
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+    def _log(self, decision: str, status: int) -> None:
+        path = self.path.partition("?")[0]
+        safe = "".join(char if 32 < ord(char) < 127 else "?" for char in path)[:128]
+        sys.stderr.write(f"relay {self.command} {safe} {decision} {status}\n")
+        sys.stderr.flush()
+
+    # -- verbs ---------------------------------------------------------------------------------
+
+    def do_GET(self) -> None:
+        self._handle()
+
+    def do_POST(self) -> None:
+        self._handle()
+
+    def do_PUT(self) -> None:
+        self._handle()
+
+    def do_DELETE(self) -> None:
+        self._handle()
+
+    def do_PATCH(self) -> None:
+        self._handle()
+
+    def do_HEAD(self) -> None:
+        self._handle()
+
+    def do_OPTIONS(self) -> None:
+        self._handle()
+
+    def do_TRACE(self) -> None:
+        self._handle()
+
+    def do_CONNECT(self) -> None:
+        self._handle()
+
+    # -- responses -----------------------------------------------------------------------------
+
+    def _send_json(
+        self,
+        status: int,
+        document: object,
+        decision: str,
+        headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        for name, value in headers:
+            self.send_header(name, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+        self._log(decision, status)
+
+    def _refuse(self, refusal: RefusalError, headers: tuple[tuple[str, str], ...] = ()) -> None:
+        document = {"error": {"type": refusal.error_type, "message": refusal.message}}
+        self._send_json(refusal.status, document, refusal.decision, headers)
+
+    # -- dispatch ------------------------------------------------------------------------------
+
+    def _handle(self) -> None:
+        self.close_connection = True
+        target = self.path
+        if not target.startswith("/") or target.startswith("//"):
+            self._refuse(
+                RefusalError(400, "invalid_request_error", "bad request target", "bad-target")
+            )
+            return
+        route, _, query = target.partition("?")
+        try:
+            if route == ROUTE_HEALTH:
+                self._health()
+            elif route in DENIED_ROUTES:
+                raise RefusalError(
+                    403, "permission_error", "route is denied by the relay", "denied"
+                )
+            elif route in FORWARDED_ROUTES:
+                self._forward_route(route, query)
+            else:
+                raise RefusalError(404, "not_found_error", "no such route", "unknown-route")
+        except RefusalError as refusal:
+            allow: tuple[tuple[str, str], ...] = ()
+            if refusal.status == 405:
+                allowed = "GET" if route == ROUTE_HEALTH else FORWARDED_ROUTES[route]
+                allow = (("Allow", allowed),)
+            self._refuse(refusal, allow)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
+        except Exception:  # last resort: never leak internals, never hang the client
+            self._send_json(
+                500, {"error": {"type": "api_error", "message": "relay error"}}, "internal-error"
+            )
+
+    def _health(self) -> None:
+        if self.command != "GET":
+            raise RefusalError(405, "invalid_request_error", "method not allowed", "method")
+        if read_token(self.server.config.token_file) is None:
+            self._send_json(
+                503,
+                {
+                    "status": "unavailable",
+                    "reason": "the gateway token file is missing, unreadable or empty",
+                },
+                "health",
+            )
+            return
+        self._send_json(200, {"status": "ok", "service": "enginery-relay"}, "health")
+
+    def _forward_route(self, route: str, query: str) -> None:
+        if self.command != FORWARDED_ROUTES[route]:
+            raise RefusalError(405, "invalid_request_error", "method not allowed", "method")
+        if "transfer-encoding" in {name.lower() for name in self.headers}:
+            raise RefusalError(411, "invalid_request_error", "content-length is required", "length")
+        body = self._read_body(route)
+        decision = "forward"
+        if route != ROUTE_MODELS:
+            assert body is not None
+            try:
+                document = parse_json_object(body)
+            except ValueError as error:
+                raise RefusalError(400, "invalid_request_error", str(error), "bad-json") from error
+            raw_model = requested_model(route, document)
+            model = canonical_model(route, raw_model)
+            if model is None:
+                raise RefusalError(
+                    403, "permission_error", "model is not permitted by the relay", "model-denied"
+                )
+            if route == ROUTE_MESSAGES and model != raw_model:
+                document["model"] = model
+                body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+                decision = "forward-canonicalized"
+        token = read_token(self.server.config.token_file)
+        if token is None:
+            raise RefusalError(
+                503, "api_error", "the relay has no usable gateway token", "token-unavailable"
+            )
+        self._proxy(route, query, body, token, decision)
+
+    def _read_body(self, route: str) -> bytes | None:
+        raw_length = self.headers.get("Content-Length")
+        if route == ROUTE_MODELS:
+            if raw_length not in (None, "0"):
+                raise RefusalError(400, "invalid_request_error", "unexpected request body", "body")
+            return None
+        if raw_length is None:
+            raise RefusalError(411, "invalid_request_error", "content-length is required", "length")
+        if not raw_length.isascii() or not raw_length.isdigit():
+            raise RefusalError(400, "invalid_request_error", "content-length is invalid", "length")
+        length = int(raw_length)
+        if length > MAX_REQUEST_BYTES:
+            raise RefusalError(
+                413, "invalid_request_error", "request body is too large", "too-large"
+            )
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise RefusalError(
+                400, "invalid_request_error", "request body is truncated", "truncated"
+            )
+        return body
+
+    # -- forwarding ----------------------------------------------------------------------------
+
+    def _upstream_connection(self) -> http.client.HTTPConnection:
+        config = self.server.config
+        connection_type = (
+            http.client.HTTPSConnection
+            if config.upstream_scheme == "https"
+            else http.client.HTTPConnection
+        )
+        connection = connection_type(
+            config.upstream_host, config.upstream_port, timeout=config.connect_timeout
+        )
+        connection.connect()
+        if connection.sock is not None:
+            connection.sock.settimeout(config.read_timeout)
+        return connection
+
+    def _proxy(self, route: str, query: str, body: bytes | None, token: str, decision: str) -> None:
+        config = self.server.config
+        headers = forwardable_headers(list(self.headers.items()))
+        outbound: dict[str, str] = {}
+        for name, value in headers:
+            outbound[name] = value
+        if route == ROUTE_MODELS:
+            for name in [name for name in outbound if name.lower() == "accept-encoding"]:
+                del outbound[name]
+            outbound["Accept-Encoding"] = "identity"
+        outbound["Host"] = config.upstream_netloc
+        outbound["Authorization"] = f"Bearer {token}"
+        outbound["Connection"] = "close"
+        if body is not None:
+            outbound["Content-Length"] = str(len(body))
+        target = route + (f"?{query}" if query else "")
+        connection: http.client.HTTPConnection | None = None
+        try:
+            try:
+                connection = self._upstream_connection()
+                connection.request(self.command, target, body=body, headers=outbound)
+                response = connection.getresponse()
+            except (ValueError, http.client.InvalidURL) as error:
+                raise RefusalError(
+                    400, "invalid_request_error", "request is malformed", "bad-request"
+                ) from error
+            except (OSError, http.client.HTTPException) as error:
+                raise RefusalError(
+                    502, "api_error", "the upstream gateway is unreachable", "upstream-error"
+                ) from error
+            if route == ROUTE_MODELS:
+                self._respond_models(response, decision)
+            else:
+                self._respond_stream(response, decision)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _response_headers(self, response: http.client.HTTPResponse) -> list[tuple[str, str]]:
+        return [
+            (name, value)
+            for name, value in response.getheaders()
+            if name.lower() not in _DROPPED_HEADERS and name.lower() not in ("server", "date")
+        ]
+
+    def _respond_models(self, response: http.client.HTTPResponse, decision: str) -> None:
+        try:
+            raw = response.read(MAX_MODELS_BYTES + 1)
+        except (OSError, http.client.HTTPException) as error:
+            raise RefusalError(
+                502, "api_error", "the upstream gateway failed", "upstream-error"
+            ) from error
+        if len(raw) > MAX_MODELS_BYTES:
+            raise RefusalError(
+                502, "api_error", "the upstream model list is too large", "upstream-error"
+            )
+        status = response.status
+        if status == 200:
+            if response.getheader("Content-Encoding") not in (None, "", "identity"):
+                raise RefusalError(
+                    502, "api_error", "unexpected upstream encoding", "upstream-error"
+                )
+            try:
+                filtered = filter_models(json.loads(raw.decode("utf-8")))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                filtered = None
+            if filtered is None:
+                raise RefusalError(
+                    502, "api_error", "unexpected upstream model list", "upstream-error"
+                )
+            payload = json.dumps(filtered, separators=(",", ":")).encode("utf-8")
+            kept = [("Content-Type", "application/json")]
+        else:
+            payload = raw[:MAX_ERROR_BODY_BYTES]
+            kept = [
+                (name, value)
+                for name, value in self._response_headers(response)
+                if name.lower() == "content-type"
+            ]
+        self.close_connection = True
+        self.send_response(status)
+        for name, value in kept:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+        self._log(decision, status)
+
+    def _respond_stream(self, response: http.client.HTTPResponse, decision: str) -> None:
+        status = response.status
+        length = response.getheader("Content-Length")
+        bodyless = status in (204, 304) or 100 <= status < 200
+        chunked = length is None and not bodyless
+        self.close_connection = True
+        self.send_response(status)
+        for name, value in self._response_headers(response):
+            self.send_header(name, value)
+        if length is not None and length.isdigit():
+            self.send_header("Content-Length", length)
+        elif chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.flush()
+        self._log(decision, status)
+        if bodyless:
+            return
+        try:
+            while True:
+                chunk = response.read1(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if chunked:
+                    self.wfile.write(f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n")
+                else:
+                    self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, http.client.HTTPException):
+            # Headers are already sent: end the connection without a terminating chunk so the
+            # client sees a truncated stream, never a clean end.
+            return
+        if chunked:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+
+def serve(config: RelayConfig) -> NoReturn:
+    server = RelayServer(config)
+    address = server.server_address
+    sys.stdout.write(f"relay listening {address[0]!s}:{address[1]}\n")
+    sys.stdout.flush()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    raise SystemExit(0)
+
+
+def main() -> int:
+    try:
+        config = parse_config(dict(os.environ))
+    except RelayConfigError as error:
+        sys.stderr.write(f"relay: {error}\n")
+        return 2
+    serve(config)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

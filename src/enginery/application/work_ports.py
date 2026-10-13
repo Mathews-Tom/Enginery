@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from enginery.application.adapter_types import AdapterStatus, NormalizedAdapterEvent
+from enginery.application.worker_environment import build_worker_environment
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.digests import Digest
 from enginery.domain.execution_receipt import ExecutionReceipt
@@ -219,7 +220,12 @@ class HarnessPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRequest:
-    """An exclusive workspace materialization request at one source revision."""
+    """An exclusive workspace materialization request at one source revision.
+
+    ``permitted_environment_keys`` is the allowlist of host variables the workspace's worker
+    environment may carry. It is consumed, not advisory: the materialized handle carries exactly
+    the permitted keys the host defines, and a credential-shaped key can never be permitted.
+    """
 
     run_id: RunId
     repository_id: str
@@ -235,22 +241,29 @@ class WorkspaceRequest:
             raise ValueError("workspace repository_path must be absolute")
         if any(not key.strip() for key in self.permitted_environment_keys):
             raise ValueError("workspace environment keys must be non-blank")
+        build_worker_environment({}, self.permitted_environment_keys)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceHandle:
-    """An exclusive materialized workspace."""
+    """An exclusive materialized workspace.
+
+    ``environment`` is the worker environment the workspace was materialized for: exactly the
+    permitted keys the host defined, as sorted name/value pairs, and nothing else.
+    """
 
     reservation_id: str
     repository_id: str
     path: Path
     base_revision: str
+    environment: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reservation_id.strip() or not self.repository_id.strip():
             raise ValueError("workspace reservation and repository identifiers must be non-blank")
         if not self.path.is_absolute() or not self.base_revision.strip():
             raise ValueError("workspace path must be absolute and base revision non-blank")
+        build_worker_environment({}, (name for name, _ in self.environment))
 
 
 class WorkspacePort(Protocol):

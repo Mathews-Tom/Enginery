@@ -180,8 +180,8 @@ def test_build_request_defaults_match_documented_example(tmp_path: Path) -> None
     assert request.required_checks == ("CI",)
     assert request.repair_limit == 1
     assert request.implementation.time_budget_seconds == 1800
-    assert request.implementation.cost_budget is not None
-    assert str(request.implementation.cost_budget) == "5.0"
+    assert request.implementation.cost_budget is None
+    assert raw["implementation"]["cost_budget"] is None
     assert request.implementation.permitted_capabilities == ("git",)
     assert request.implementation.evidence_requirements == ("redacted harness transcript",)
     assert request.execution_configuration.github_credential_reference == "operator-gh-cli"
@@ -290,22 +290,7 @@ def test_build_request_marks_inapplicable_criteria(tmp_path: Path) -> None:
     assert request.applicable_criteria == (False,)
 
 
-def test_build_request_no_cost_budget_flag_omits_cost_budget(tmp_path: Path) -> None:
-    repository, base_revision = _repository(tmp_path)
-    output = tmp_path / "request.json"
-    argv = _minimal_argv(
-        tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
-    )
-    argv.append("--implementation-no-cost-budget")
-
-    main(argv)
-
-    raw = json.loads(output.read_text(encoding="utf-8"))
-    request = stage1_request_from_state(raw)
-    assert request.implementation.cost_budget is None
-
-
-def test_build_request_rejects_invalid_cost_budget(
+def test_build_request_no_longer_offers_a_flag_to_drop_the_cost_budget(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repository, base_revision = _repository(tmp_path)
@@ -313,12 +298,33 @@ def test_build_request_rejects_invalid_cost_budget(
     argv = _minimal_argv(
         tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
     )
-    argv += ["--implementation-cost-budget", "not-a-decimal"]
+    argv.append("--implementation-no-cost-budget")
+
+    with pytest.raises(SystemExit) as stopped:
+        main(argv)
+
+    assert stopped.value.code == 2
+    assert "--implementation-no-cost-budget" in capsys.readouterr().err
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("value", ["5.0", "0", "not-a-decimal"])
+def test_build_request_refuses_any_hard_dollar_budget_naming_that_no_adapter_enforces_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    repository, base_revision = _repository(tmp_path)
+    output = tmp_path / "request.json"
+    argv = _minimal_argv(
+        tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
+    )
+    argv += ["--implementation-cost-budget", value]
 
     exit_code = main(argv)
 
-    assert exit_code != 0
-    assert "must be a decimal" in capsys.readouterr().err
+    assert exit_code == exit_code_for(FailureClass.INVALID_INPUT)
+    error = capsys.readouterr().err
+    assert "no supported harness enforces a hard-dollar budget" in error
+    assert "--implementation-time-budget-seconds" in error
     assert not output.exists()
 
 

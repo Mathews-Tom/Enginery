@@ -189,9 +189,19 @@ class GitWorktreeBackend:
         return materialized
 
     def verify_implementation_branch(
-        self, reservation: WorkspaceReservation, *, head_branch: str
+        self,
+        reservation: WorkspaceReservation,
+        *,
+        head_branch: str,
+        require_remote: bool = True,
     ) -> str:
-        """Verify one implemented, pushed branch remains bound to this workspace base."""
+        """Verify one implemented branch remains bound to this workspace base.
+
+        With ``require_remote`` the branch must also be on ``origin`` at the verified revision,
+        which is the contract of a worker that pushes its own branch. Without it the remote is
+        not consulted: the operator publishes the verified branch afterwards, so there is
+        nothing on the remote to find yet.
+        """
         if reservation.status not in {"materialized", "retained"}:
             raise InvalidInputError("only a materialized workspace can verify its branch")
         _require_text(head_branch, "head_branch")
@@ -233,22 +243,23 @@ class GitWorktreeBackend:
                 "workspace change verification failed",
                 details={"stderr": changed.stderr.strip()},
             )
-        remote = self._run_git(
-            reservation.workspace_path,
-            "ls-remote",
-            "--exit-code",
-            "origin",
-            f"refs/heads/{head_branch}",
-        )
-        remote_revision = remote.partition("\t")[0]
-        if remote_revision != head_revision:
-            raise ExternalConflictError(
-                "origin branch differs from the verified workspace revision",
-                details={
-                    "expected_head_revision": head_revision,
-                    "remote_head_revision": remote_revision,
-                },
+        if require_remote:
+            remote = self._run_git(
+                reservation.workspace_path,
+                "ls-remote",
+                "--exit-code",
+                "origin",
+                f"refs/heads/{head_branch}",
             )
+            remote_revision = remote.partition("\t")[0]
+            if remote_revision != head_revision:
+                raise ExternalConflictError(
+                    "origin branch differs from the verified workspace revision",
+                    details={
+                        "expected_head_revision": head_revision,
+                        "remote_head_revision": remote_revision,
+                    },
+                )
         return head_revision
 
     def _verify_task_local_branch(

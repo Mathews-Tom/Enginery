@@ -233,7 +233,9 @@ def test_runner_without_a_subcommand_asks_for_one(capsys: pytest.CaptureFixture[
     exit_code = main(["runner"])
 
     assert exit_code == HOLD_EXIT
-    assert "build-image or status" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "runner requires a subcommand" in error
+    assert "custody-receipt" in error
 
 
 # --- stage1 build-request --------------------------------------------------------------

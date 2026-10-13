@@ -13,7 +13,6 @@ import subprocess
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +21,7 @@ from tests.adapters.oci.support import IMAGE_ID as FAKE_IMAGE_ID
 from tests.adapters.oci.support import FakeDocker
 from tests.engine.test_isolated_workspace import _WORKER as WORKER_SCRIPT
 from tests.support.execution import selection_for
+from tests.support.verified_implementation import verified_head
 
 from enginery.adapters.oci import image as oci_image
 from enginery.adapters.oci.admission import OciRunnerAdmission
@@ -46,9 +46,10 @@ from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.task_repository import intake_path_for, out_path_for
+from enginery.engine.task_repository import intake_path_for, out_path_for, validation_path_for
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
@@ -272,7 +273,7 @@ def _request(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-isolated"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -762,7 +763,7 @@ def test_a_later_attempt_reuses_the_first_resolved_base_after_the_base_name_move
     assert built.service._implementation_base(built.request) == first
 
 
-def test_a_trusted_local_worker_still_pushes_and_carries_no_bundle_binding(
+def test_a_trusted_local_worker_is_told_the_same_it_commits_locally_and_never_pushes(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     built = _build(ledger_service, tmp_path, runner=RunnerSelection.trusted_local())
@@ -772,8 +773,11 @@ def test_a_trusted_local_worker_still_pushes_and_carries_no_bundle_binding(
     _reap(dispatch)
 
     task = dispatch.task
-    assert task.constraints[-1].endswith("commit and push the completed change to origin.")
-    assert task.head_branch is None
+    constraint = task.constraints[-1]
+    assert "commit the completed change locally" in constraint
+    assert "do not push" in constraint
+    assert "push the completed change to origin" not in constraint
+    assert task.head_branch is None, "no bundle binding: the trusted worker is not bundled"
     assert task.base_revision is None
 
 
@@ -890,6 +894,39 @@ def _host_marker_command(marker: Path) -> tuple[str, ...]:
     )
 
 
+def _verify_implementation(built: Harnessed) -> str:
+    """Leave what a collected isolated implementation leaves: a host-verified head, recorded.
+
+    A real worker clone commits on the head branch and bundles it; the host imports the bundle
+    into its own intake repository, verifies it there, and records the verified head on the
+    implementation attempt, exactly as collection does.
+    """
+    head_revision = verified_head(
+        repository=built.repository,
+        base_revision=built.request.run.base_revision,
+        workspace_path=built.request.workspace_path,
+        head_branch=built.request.head_branch,
+        committed={"feature.txt": "implemented\n"},
+        leftovers={"scratch.txt": "left behind by the worker\n"},
+    )
+    built.ledger.append(
+        AppendCommand(
+            correlation_id="implementation-verified-head",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id="implement-0",
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"result": {"head_revision": head_revision}},
+                ),
+            ),
+        )
+    )
+    return head_revision
+
+
 def test_isolated_validation_runs_only_in_the_isolated_runner_never_on_the_host(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
@@ -906,12 +943,15 @@ def test_isolated_validation_runs_only_in_the_isolated_runner_never_on_the_host(
     )
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
     _complete_through_implement(built)
+    head_revision = _verify_implementation(built)
 
     result = built.service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
     )
 
-    assert runner.calls == [(_host_marker_command(marker), built.request.workspace_path)]
+    checkout = validation_path_for(built.request.workspace_path)
+    assert runner.calls == [(_host_marker_command(marker), checkout)]
+    assert not checkout.exists(), "the verified-head checkout is removed afterwards"
     assert not marker.exists(), "validation must never execute on the host"
     node = ledger_service.read_projection(
         aggregate_type="runtime_node", aggregate_id=f"{RUN_ID}:validate"
@@ -919,6 +959,7 @@ def test_isolated_validation_runs_only_in_the_isolated_runner_never_on_the_host(
     assert node is not None
     assert node.state["status"] == "passed"
     assert node.state["workspace_mode"] == WORKSPACE_MODE_TASK_LOCAL_CLONE
+    assert node.state["validated_revision"] == head_revision
     assert result.passed is True
 
 
@@ -938,6 +979,7 @@ def test_a_failing_isolated_validation_is_a_failed_node_not_a_host_run(
     )
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
     _complete_through_implement(built)
+    _verify_implementation(built)
 
     result = built.service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT

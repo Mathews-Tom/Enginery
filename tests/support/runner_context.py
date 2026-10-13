@@ -12,6 +12,8 @@ from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.runner import (
+    MODEL_ACCESS_NONE,
+    MODEL_ACCESS_RELAY,
     OUT_MOUNT,
     WORKER_HOME,
     WORKER_TMP,
@@ -22,6 +24,7 @@ from enginery.domain.runner import (
     LaunchOutcome,
     OutcomeState,
     PermissionMapping,
+    RelayEndpoint,
     RunnerContext,
     RunnerProfile,
     RunnerReceipt,
@@ -36,15 +39,21 @@ IMAGE_ID = "sha256:" + "a" * 64
 LAUNCH_NONCE = "launch-nonce-0123456789"
 
 
-def isolated_context(receipt_root: Path, *, docker_context: str | None = None) -> RunnerContext:
+def isolated_context(
+    receipt_root: Path, *, docker_context: str | None = None, relay: bool = False
+) -> RunnerContext:
     """An isolated runner context pinned to a placeholder image id."""
     profile = RunnerProfile()
     return RunnerContext(
         selection=RunnerSelection.isolated(
-            image=IMAGE_ID, profile=profile, docker_context=docker_context
+            image=IMAGE_ID,
+            profile=profile,
+            docker_context=docker_context,
+            model_access=MODEL_ACCESS_RELAY if relay else MODEL_ACCESS_NONE,
         ),
         profile=profile,
         receipt_root=str(receipt_root),
+        relay=RelayEndpoint() if relay else None,
     )
 
 

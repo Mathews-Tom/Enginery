@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,6 +11,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from enginery.application.work_ports import WorkLedgerSnapshot
+from enginery.application.worker_environment import (
+    TRUSTED_LOCAL_WORKER_KEYS,
+    build_worker_environment,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
@@ -75,6 +80,25 @@ def _run_validation_command(
     return subprocess.run(command, cwd=workspace_path, capture_output=True, check=False, text=True)
 
 
+def run_sanitized_validation_command(
+    command: tuple[str, ...], workspace_path: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run a host-side validation command with an explicit environment, not the ambient one.
+
+    Validation executes candidate-authored code. Run for a trusted-local run it still runs as the
+    operator, but only with the variables the trusted-local worker itself is allowed: the
+    operator's SCM, factory, broker, cloud and publishing credentials are not inherited.
+    """
+    return subprocess.run(
+        command,
+        cwd=workspace_path,
+        capture_output=True,
+        check=False,
+        text=True,
+        env=build_worker_environment(os.environ, TRUSTED_LOCAL_WORKER_KEYS),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Stage1ValidationResult:
     """Durable outcome and redacted artifact for one validation command set."""
@@ -101,8 +125,14 @@ class Stage1ValidationExecutor:
         commands: tuple[tuple[str, ...], ...],
         now: datetime,
         heartbeat_window: timedelta,
+        working_directory: Path | None = None,
+        validated_revision: str | None = None,
     ) -> Stage1ValidationResult:
-        """Persist validation intent, run commands, and retain redacted output."""
+        """Persist validation intent, run commands, and retain redacted output.
+
+        Commands run in ``working_directory`` when given and otherwise in the node's own
+        workspace. ``validated_revision`` records the exact revision the commands ran against.
+        """
         if not commands or any(
             not command or any(not argument for argument in command) for command in commands
         ):
@@ -111,7 +141,8 @@ class Stage1ValidationExecutor:
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
         results = tuple(
-            self.command_runner(command, dispatch.request.workspace_path) for command in commands
+            self.command_runner(command, working_directory or dispatch.request.workspace_path)
+            for command in commands
         )
         artifact_digest = self.artifact_store.publish_bytes(
             _redacted_validation_report(commands, results),
@@ -127,6 +158,9 @@ class Stage1ValidationExecutor:
             extra={
                 "validation_artifact_digest": str(artifact_digest),
                 "validation_command_count": len(commands),
+                **(
+                    {} if validated_revision is None else {"validated_revision": validated_revision}
+                ),
             },
         )
         return Stage1ValidationResult(passed=passed, artifact_digest=artifact_digest)

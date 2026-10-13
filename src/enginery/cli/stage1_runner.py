@@ -19,7 +19,13 @@ from enginery.adapters.oci.probe import OciProbeRunner
 from enginery.adapters.oci.validation import OciValidationRunner
 from enginery.adapters.runner_launch import runner_container_name
 from enginery.application.runner_ports import IsolatedCommandRunner, RunnerAdmissionPort
-from enginery.domain.runner import RunnerContext, RunnerProfile, RunnerSelection
+from enginery.domain.runner import (
+    MODEL_ACCESS_RELAY,
+    RelayEndpoint,
+    RunnerContext,
+    RunnerProfile,
+    RunnerSelection,
+)
 from enginery.workflows.stage1 import Stage1RunRequest
 
 _RECEIPT_DIRECTORY = "runner-receipts"
@@ -66,7 +72,12 @@ def isolated_wiring(
     receipt_root = request.execution_configuration.artifact_root / _RECEIPT_DIRECTORY
     if create_directories:
         receipt_root.mkdir(parents=True, exist_ok=True)
-    context = RunnerContext(selection=selection, profile=profile, receipt_root=str(receipt_root))
+    context = RunnerContext(
+        selection=selection,
+        profile=profile,
+        receipt_root=str(receipt_root),
+        relay=RelayEndpoint() if selection.model_access == MODEL_ACCESS_RELAY else None,
+    )
     engine = OciEngine(context=selection.docker_context)
     return IsolatedWiring(
         context=context,

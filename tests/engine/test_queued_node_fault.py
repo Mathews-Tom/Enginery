@@ -18,7 +18,6 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -159,7 +158,7 @@ def _qualified_request(tmp_path: Path, name: str = "fault") -> Stage1RunRequest:
             attempt_id=f"{name}-implement-0",
             operation_id=OperationId(f"implement:run-{name}"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -948,6 +947,14 @@ def test_a_worker_that_published_its_result_but_has_not_exited_is_waited_on_then
     lingering.mkdir()
     (lingering / "sitecustomize.py").write_text(
         "import atexit, time\natexit.register(time.sleep, 4.0)\n", encoding="utf-8"
+    )
+    # A new run's worker receives only allowlisted variables, so the lingering hook has to ride
+    # on one: PYTHONPATH is added to the trusted-local allowlist for this test alone.
+    from enginery.application.worker_environment import TRUSTED_LOCAL_WORKER_KEYS
+
+    monkeypatch.setattr(
+        "enginery.workflows.stage1.TRUSTED_LOCAL_WORKER_KEYS",
+        (*TRUSTED_LOCAL_WORKER_KEYS, "PYTHONPATH"),
     )
     monkeypatch.setenv("PYTHONPATH", str(lingering))
     now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)

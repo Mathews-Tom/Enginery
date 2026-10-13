@@ -18,11 +18,11 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
 from tests.support.execution import selection_for
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger, _snapshot
 
@@ -104,7 +104,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-dogfood"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -133,6 +133,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             ledger=ledger,
             work_ledger=cast(WorkLedgerPort, work_ledger),
             pull_requests=cast(PullRequestPort, pull_requests),
+            branch_publisher=RecordingBranchPublisher(),
             outcomes=outcomes,
         )
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -185,7 +186,10 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
                         expected_version=0,
                         event_type="node_attempt.result_ingested",
                         schema_version=1,
-                        payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                        payload={
+                            "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                            "result": {"head_revision": HEAD_REVISION},
+                        },
                     ),
                 ),
             )

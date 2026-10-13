@@ -138,7 +138,6 @@ type directly, and let it emit the JSON:
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from pathlib import Path
 
 from enginery.application.execution_catalog import load_execution_catalog
@@ -220,7 +219,7 @@ request = Stage1RunRequest(
         attempt_id=f"{run_id}-implement-0",
         operation_id=f"implement:{run_id}",
         time_budget_seconds=1800,
-        cost_budget=Decimal("5.0"),
+        cost_budget=None,  # no supported harness enforces a dollar budget; the time budget does
         permitted_capabilities=("git",),
         evidence_requirements=("redacted harness transcript",),
     ),

@@ -30,7 +30,7 @@ flowchart LR
 
 ### What Enginery sends to an agent
 
-Enginery creates a typed task envelope. It contains the work objective, acceptance criteria, constraints, bound repository revision, allowed capabilities, evidence requirements, artifact-return locations, and time/cost budgets. It does not ask an agent to reconstruct workflow state from a conversation.
+Enginery creates a typed task envelope. It contains the work objective, acceptance criteria, constraints, bound repository revision, allowed capabilities, evidence requirements, artifact-return locations, and time budget (no supported harness enforces a dollar budget, so new runs bind none). It does not ask an agent to reconstruct workflow state from a conversation.
 
 ### What Enginery receives from an agent
 

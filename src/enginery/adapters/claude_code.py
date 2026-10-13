@@ -19,6 +19,7 @@ from enginery.adapters.runner_launch import (
     isolated_command,
     publish_runner_receipt,
     read_attempt_result,
+    relay_claude_environment,
     require_isolated_permissions,
     verified_image_host,
     worker_environment,
@@ -315,6 +316,7 @@ class ClaudeCodeHarness:
                 ("CLAUDE_CONFIG_DIR", f"{WORKER_HOME}/.claude"),
                 ("DISABLE_AUTOUPDATER", "1"),
                 ("DISABLE_TELEMETRY", "1"),
+                *relay_claude_environment(self.runner),
             )
         )
 

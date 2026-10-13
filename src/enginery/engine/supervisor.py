@@ -93,8 +93,15 @@ class WorkerSupervisor:
         cwd: Path,
         now: datetime,
         stderr_log: Path | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> ProcessIdentity:
-        """Persist launch intent before spawning so crash recovery fails closed."""
+        """Persist launch intent before spawning so crash recovery fails closed.
+
+        ``environment`` is exactly the worker's environment when given. ``None`` is the legacy
+        path: the worker inherits the coordinator's ambient environment, kept only so a run
+        persisted before environment allowlists existed resumes unchanged. Every new run passes
+        an explicit environment built from an allowlist.
+        """
         if not command:
             raise InvalidInputError("worker command must not be empty")
         probe_host()  # fail closed before launch if this host cannot be identified
@@ -144,6 +151,7 @@ class WorkerSupervisor:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr,
+                    env=None if environment is None else dict(environment),
                 )
             finally:
                 if log_handle is not None:

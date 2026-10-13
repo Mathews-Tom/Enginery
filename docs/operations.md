@@ -344,8 +344,8 @@ rejected as an unrecognized argument.
 
 Every field not shown above defaults to the same values
 `docs/examples.md` documents (`policy-v1`, `uv run pytest -q`,
-`repair-limit 1`, a 1800-second/`5.0`-cost-budget OMP implementation
-attempt, `operator-gh-cli`/`operator-harness-session` credential
+`repair-limit 1`, a 1800-second OMP implementation attempt with no cost budget
+(see [Authority separation](#authority-separation)), `operator-gh-cli`/`operator-harness-session` credential
 references). `--capability-lockfile` (default
 `.enginery/capabilities.lock.json`) binds the request's
 `capability_lock_digest` to the real lockfile `enginery capability
@@ -760,6 +760,10 @@ without mutating anything and is safe to run at any time, including
 against a live ledger. Run `verify` after any restore and before resuming
 a run against a restored ledger.
 
+For the operator-side flow (pause, drain, verified backup, restore that keeps the
+prior ledger and starts paused) see [Operator recovery entry
+point](#operator-recovery-entry-point).
+
 `ledger rebuild-projections` recomputes every projection from the stored
 event log; use it if a projection appears stale or inconsistent after a
 manual intervention. It never rewrites historical events.
@@ -771,11 +775,12 @@ trust mode. `enginery stage1 build-request` requires the choice:
 
 ```bash
 uv run enginery stage1 build-request ... --runner trusted-local
-uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sha256:<image id> [--docker-context NAME]
+uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sha256:<image id> [--docker-context NAME] [--model-access none|relay]
 ```
 
 - **`trusted-local`** runs the worker as you, in a git worktree of your
-  repository, with your environment and filesystem. It is explicitly the
+  repository, with your filesystem and an explicit allowlist of your environment
+  (see [Authority separation](#authority-separation)). It is explicitly the
   weaker mode and is never containment. Its harness permission mapping is
   declared rather than implicit: Claude Code runs with `--permission-mode
   bypassPermissions` and omp with its headless default approval mode, both of
@@ -838,13 +843,68 @@ recovery) and checks `.git/index.lock` with a non-following `lstat`; it never ru
 `git status` there. Host git in linked worktrees (the `trusted-local` backend) runs with
 `core.fsmonitor=false`, `core.hooksPath=/dev/null` and an allowlisted environment. An
 isolated worker commits locally and holds no remote and no credentials; its branch
-is not on any remote until the verified branch is published by a separate,
-host-side step.
+is not on any remote until the operator side publishes the verified branch (see
+[Authority separation](#authority-separation)).
 
 Validation commands for an isolated run execute inside the same restricted
-runner against the task-local workspace, never on the host. They run offline:
-the repository's validation must work with what the image and the workspace
-provide.
+runner, never on the host, against a fresh checkout of the verified head that the
+host makes from its own intake repository (see [Authority separation](#authority-separation)).
+They run offline: the repository's validation must work with what the image and
+the checkout provide.
+
+### Authority separation
+
+A new run (one bound to a trust mode) separates what the worker may do from what
+only the operator side may do, in both trust modes. A run persisted before trust
+modes keeps the contract it was launched under, byte for byte, so an in-flight
+run resumes unchanged.
+
+- **The worker's environment is an explicit allowlist.** The worker process is
+  launched with exactly the allowlisted variables the host defines, never the
+  host's ambient environment, and a credential-shaped name (a name containing
+  `TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE`, `API_KEY` or `CREDENTIAL`, the `GH_`,
+  `GITHUB_`, `AWS_`, `AZURE_`, `GOOGLE_`, `UV_PUBLISH_` and `PYPI_` prefixes, or
+  `SSH_AUTH_SOCK`) can never be permitted: naming one is an error. A trusted-local
+  worker gets `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`,
+  `LC_CTYPE`, `TERM`, `TMPDIR`, `TZ`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`,
+  `PI_CONFIG_DIR`, the four `XDG_*` base directories, `SSL_CERT_FILE` and
+  `SSL_CERT_DIR`. The process that launches an isolated worker needs only to reach
+  the container engine and gets `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TZ` and the `DOCKER_*` and `XDG_RUNTIME_DIR`
+  engine variables; the container's own environment is a separate explicit list
+  that never derives from the host's. Host-side validation of a trusted-local run
+  uses the trusted-local allowlist, and the launcher used for isolated validation
+  uses the launcher allowlist. A run persisted before this existed inherits the
+  ambient environment, as it always did, and is reported as the legacy path.
+- **The worker commits locally and never pushes.** Its task says so in both
+  modes. After the host verifies the branch (in the host-owned intake repository
+  for an isolated run, in the workspace for a trusted-local one), `open_pr` first
+  publishes exactly that revision to `refs/heads/<head branch>` of the remote the
+  *host* repository's `origin` names, then creates or updates the pull request.
+  The push runs with hooks disabled, only that one refspec, a sanitized
+  environment (`PATH`, `HOME`, `USER`, `LANG`, `SSH_AUTH_SOCK`, `GH_TOKEN`,
+  `GITHUB_TOKEN`, no prompts: the source-host authority a worker never holds) and
+  `--force-with-lease` against the head it expects: the remote branch must be
+  absent on the first publication, or at the head the previous repair generation's
+  verified attempt published. A remote branch anywhere else is an external
+  conflict, never overwritten, and no pull request is created. The publication is
+  idempotent (a remote already at the revision is success without a push) and a
+  timed-out push is reported as an ambiguous effect to reconcile. The open
+  pull-request node records `published_revision`. A new run without a configured
+  publisher stops with a missing prerequisite.
+- **Validation sees the verified head.** An isolated run's validation commands run
+  in the isolated runner against `<workspace>.validate`, a fresh self-contained
+  checkout of the verified head made from the intake repository and removed
+  afterwards, so uncommitted or untracked leftovers in the worker's workspace
+  cannot influence the verdict. The validation node records `validated_revision`.
+- **Hard-dollar budgets are refused, not carried.** No supported harness enforces
+  a dollar budget, so `stage1 build-request` refuses `--implementation-cost-budget`
+  (and `--implementation-no-cost-budget` no longer exists: a new request binds no
+  cost budget), and `stage1 start` and implementation dispatch refuse a new run that
+  binds one. The time budget (`--implementation-time-budget-seconds`) remains
+  enforced. A request persisted before this keeps decoding and its digest, and
+  `stage1 watch` reports its number as `"cost_budget": {"value": "5.0",
+  "enforced": false}`, never as a limit.
 
 ### Harness permissions
 
@@ -968,9 +1028,234 @@ the requested ones), the permission mapping, and environment key names (never
 values), and the disk and log bounds the attempt ran under with the mechanism that
 enforces the disk bound. `enginery stage1 watch` prints the reference.
 
-Model access for an isolated worker is not part of this profile: with only the
-internal network attached, a worker has no route to any model until a model
-relay is configured.
+## Model access through the relay
+
+An isolated worker has no route to any model. The only network it is attached
+to is `--internal`, so by default (`--model-access none`) it can run local
+tools and nothing else. `--model-access relay` binds the run to the
+model-access relay, the one path from a worker to a model.
+
+The relay is a separate container that you run, not part of any worker. It is
+the only thing that holds the model gateway's bearer token; a worker holds only
+the fixed placeholder credential `enginery-relay`, which the relay discards. It
+is attached to the runner's internal network, where workers reach it as
+`http://enginery-relay:8080`, and to a separate bridge network
+(`enginery-runner-egress`) that gives it, and only it, a route to the gateway.
+
+```bash
+uv run enginery runner build-relay-image [--docker-context NAME]    # prints the exact relay image id
+uv run enginery runner relay up --relay-image sha256:<relay image id> \
+  --upstream http://host.docker.internal:<gateway port> \
+  --token-file /absolute/path/to/gateway-token [--docker-context NAME] [--recreate]
+uv run enginery runner relay status [--docker-context NAME]         # exit 5 unless healthy
+uv run enginery runner relay down [--docker-context NAME]
+```
+
+- **Image.** `build-relay-image` builds the relay from the packaged recipe (a
+  Python 3.12 slim base pinned by index digest and the standard-library-only
+  `relay.py`, no package installs) and prints the exact image id and recipe
+  digest. `relay up` refuses an image that was built from any other recipe.
+- **Token file.** `--token-file` is an absolute path to a regular file you own
+  with mode `0600` (not a symbolic link). It is mounted read-only into the
+  relay and only its metadata is ever inspected by Enginery: the relay process
+  reads the content itself, again on every request, and nothing ever logs,
+  prints or records it. The mount follows the file's inode, so after
+  regenerating the gateway token run `relay up --recreate`.
+- **Hardening.** The relay container carries the worker profile's flags: no
+  capabilities, `no-new-privileges`, a read-only root filesystem, tmpfs scratch,
+  and small memory/CPU/pids limits. It publishes no port, mounts nothing but the
+  token file, and runs as uid 65532 — except on a rootless engine, where only
+  container root maps to you and so can read a `0600` file; there it runs as
+  that mapped root with every capability still dropped. After creating it, the
+  engine's own report of the container is checked against the profile, and a
+  weaker container is refused and removed. `relay up` starts it only after
+  that check and waits for the relay's own health answer.
+- **Upstream.** `--upstream` is the gateway as the *relay container* reaches it.
+  The name `host.docker.internal` is mapped to the host for you; any other host
+  must resolve from inside a container (an IP address always does, which is what
+  to use for a gateway on another machine or on a Lima host).
+
+What the relay forwards, and everything else it refuses without contacting the
+gateway:
+
+| Request | Result |
+| --- | --- |
+| `POST /v1/messages` (any query) | forwarded; the body's top-level `model` must be `anthropic/…` or `openai-codex/…`; a bare `claude-…` id is rewritten to `anthropic/claude-…` |
+| `POST /v1/pi/stream` | forwarded; the model is `modelId`, else `model`, else `model.id` (the gateway's own order) and must be `anthropic/…` or `openai-codex/…` |
+| `GET /v1/models` | forwarded; the answer keeps only `anthropic/…` and `openai-codex/…` models |
+| `GET /healthz` | answered by the relay itself; `503` when the token file is missing, unreadable or empty |
+| `/v1/credentials/check`, `/v1/usage` | `403` |
+| any other path, or a known path with another method | `404` / `405` |
+
+A model matches only by exact, case-sensitive prefix on an ASCII string with no
+surrounding whitespace or control characters; any other bare id,
+`google-antigravity/…` (which the broker holds but the relay denies) and every
+other provider is `403`. A request needs a `Content-Length` of at most 32 MiB
+and a JSON object body with no duplicate keys, else `400`/`411`/`413`. The relay
+strips every inbound `Authorization`, `Proxy-Authorization`, `X-Api-Key` and
+cookie header and injects the gateway bearer; server-sent events are streamed
+through without buffering. It logs only method, path (without the query),
+decision and status.
+
+For a run bound to `relay`, Claude Code is started with `ANTHROPIC_BASE_URL`
+set to the relay, `ANTHROPIC_AUTH_TOKEN` set to the placeholder,
+`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+`DISABLE_AUTOUPDATER` set to `1`, and never `ANTHROPIC_API_KEY`. omp is seeded
+with a task-local `models.yml` in its agent directory that points its
+`anthropic` and `openai-codex` providers at the relay with `transport:
+pi-native` and the placeholder `apiKey`. Neither the placeholder nor the relay
+address is a secret.
+
+Admission applies the same check as `relay status`: a run bound to `relay` is
+*held*, never run without model access, when the relay container is absent,
+stopped, not on the internal and egress networks, not hardened as above, not
+answering its health check, or built from a different recipe
+(`runner_unqualified` or `runner_fingerprint_drift`).
+
+Limits: the relay narrows *which* models and routes a worker can use; it does
+not read prompts, cap spend, or stop a worker from using the permitted accounts'
+quota. Whoever can reach the relay's internal network can use it, and anyone who
+compromises the relay process or can inspect its container's mounts as you can
+read the bearer.
+
+## Operator recovery entry point
+
+`enginery-operator` is a separate console script for the person operating the
+host. It is meant to be run by you, outside any coding-agent session, and it
+imports only the domain, the ledger, the engine control modules and the OCI
+adapter used to qualify an image — never the workflow code — so it keeps working
+when a workflow is broken or a run is wedged. Every subcommand takes
+`--database PATH`, prints JSON on stdout, prints a JSON error on stderr on
+failure, and uses the exit codes of `enginery` (`2` invalid input, `3` missing
+prerequisite, `5` human action required, `12` validation failure, `13`
+timeout).
+
+```bash
+uv run enginery-operator status --database ledger.db [--artifacts artifacts-dir]
+uv run enginery-operator pause  --database ledger.db [--reason TEXT]
+uv run enginery-operator resume --database ledger.db
+uv run enginery-operator drain  --database ledger.db (--wait-seconds N | --stop) [--owner NAME] [--docker-context NAME]
+uv run enginery-operator select-runner --database ledger.db --image sha256:<image id> [--docker-context NAME]
+uv run enginery-operator backup  --database ledger.db --output backup-dir [--artifacts artifacts-dir]
+uv run enginery-operator restore --database ledger.db --backup backup-dir [--artifacts artifacts-dir] [--force-unpaused]
+```
+
+- **`status`** reports whether dispatch is paused (and why), the supervised
+  workers that have not been reconciled with what their process shows now
+  (`present`, `absent`, `pid-reused`, `foreign-host`, ...), the selected runner,
+  how many workspaces are retained (and every workspace count by status), and a
+  ledger verification summary. It exits `12` when the ledger is unhealthy. It
+  never creates or migrates a ledger: a missing or stale-schema ledger is a
+  missing prerequisite.
+- **`pause`** stores one durable flag in the ledger (the `operator-control`
+  process-manager record) together with an `operator.paused` event, in one
+  atomic append. While it is set, every worker launch — the fixture runtime and
+  therefore every Stage 1 dispatch and queued redispatch — refuses with `dispatch
+  is paused by the operator` (exit `5`) and launches nothing. Workers that are
+  already running are not touched, and a node that was registered but not
+  launched stays queued. `resume` clears the flag. Both are idempotent.
+- **`drain`** pauses, then needs an explicit mode (there is no default).
+  `--wait-seconds N` waits up to `N` seconds for the running workers to exit on
+  their own and exits `13` if any is still running; it signals nothing.
+  `--stop` stops each running worker through the existing supervisor cancel path
+  (the same one `stage1 cancel` uses): exact-identity process-group termination,
+  durable cancellation of the node and release of its workspace. Because it is
+  fenced by the coordinator epoch, pass `--owner` equal to the owner that holds
+  the active epoch (the `--owner` you gave `stage1`), or wait for that epoch to
+  lapse; otherwise the worker is reported as not stopped (`external_conflict`)
+  and the exit is `5`. For isolated workers the supervised process is the
+  container launcher, which kills and removes its container when it is
+  terminated; when a runner has been selected (or `--docker-context` is given)
+  `drain --stop` additionally removes each stopped worker's container by its
+  deterministic name and fails loudly if it cannot. A worker whose process
+  already exited but has not been reconciled is left for `stage1 watch
+  --advance`, so an unreconciled result is never discarded.
+- **`select-runner`** qualifies the engine and the pinned image exactly as
+  `runner status` does (admission), and only then records the image id, engine
+  context and the identities that proved it as the operator's selected runner —
+  an `operator.runner_selected` event plus the same control record, so it is
+  atomic and auditable. `status` shows it. It is a record of which retained
+  pinned image you chose, by digest; there is no registry and nothing upgrades
+  it automatically. A held admission records nothing and exits `5`.
+- **`backup`** verifies the ledger (and `--artifacts`) first, takes the
+  snapshot, then verifies the backup; any unhealthy result is a validation
+  failure (`12`) and an unhealthy source writes nothing.
+- **`restore`** verifies the backup before touching `--database`, requires the
+  current ledger to be paused with no running worker (or `--force-unpaused`,
+  which is also required when the current ledger cannot be read), moves the
+  current ledger aside to `<database>.pre-restore-<UTC time>` (it is never
+  deleted), restores, and verifies the restored ledger. If the restored ledger
+  fails verification the prior ledger is put back and the failed copy is kept as
+  `<database>.failed-restore-<UTC time>`. A successful restore leaves the
+  restored ledger **paused**: run `ledger verify`, check `status`, then
+  `resume`.
+
+## Auth-custody receipt
+
+An isolated worker never holds a provider credential. The model gateway and the
+auth broker run on the macOS host and hold every provider grant; a relay owned by
+the operator holds the gateway bearer; a worker holds only a dummy credential.
+`enginery runner custody-receipt` records that arrangement for one host as a
+retained receipt:
+
+```bash
+uv run enginery runner custody-receipt --host macos|ubuntu-lima \
+  --gateway-url http://127.0.0.1:7011 --broker-url http://127.0.0.1:7012 \
+  --token-file PATH --output receipt.json [--decision "2026-10-13: label" ...]
+```
+
+The receipt records the grant scope (`anthropic` and `openai-codex` reachable
+through the relay allowlist; `google-antigravity` held by the broker but denied
+by the relay), the gateway and broker endpoints, the custody location (`macos`:
+gateway and broker on the macOS host; `ubuntu-lima`: custody stays on the macOS
+host and the VM holds only a token copy, reached through `host.lima.internal`,
+which must be mode `0600`), the allowed exposure, how credentials are refreshed
+(the broker on the host), revoked (`omp auth-gateway token --regenerate`, then
+restart the gateway) and cleaned up (stop the relay, regenerate or delete the
+token, remove the VM copy), and the owner decision references (`--decision`,
+repeatable; default is the recorded 2026-10-13 set).
+
+For the token file it records **metadata only**: whether it exists, whether it
+is a regular file, whether it is a symlink, its mode and its size. The command
+never opens the file, and the receipt contains neither the token nor any hash of
+it. A gateway or broker URL carrying userinfo, a query or a fragment is refused.
+
+The output is canonical JSON (sorted keys, compact separators) created
+atomically with mode `0644` — it is not secret — and an existing output is never
+replaced. The file's `sha256` equals the digest the command prints. A host that
+does not conform (a missing or non-regular token file, or on `ubuntu-lima` a
+token copy that is not `0600`) still gets a receipt, with the deviation listed
+in `findings` and `conforms: false`, and the command exits `12`.
+
+An abridged receipt for the Lima host:
+
+```json
+{
+  "schema_version": 1,
+  "host": "ubuntu-lima",
+  "created_at": "2026-10-13T12:00:00+00:00",
+  "grant_scope": {
+    "relay_providers": ["anthropic", "openai-codex"],
+    "broker_only_providers": ["google-antigravity"]
+  },
+  "endpoints": {
+    "gateway": {"url": "http://host.lima.internal:7011", "scheme": "http", "host": "host.lima.internal", "port": 7011},
+    "broker": {"url": "http://host.lima.internal:7012", "scheme": "http", "host": "host.lima.internal", "port": 7012}
+  },
+  "custody": {
+    "location": "remote-through-macos-gateway",
+    "description": "custody stays on the macOS host: the VM reaches the macOS gateway through host.lima.internal and holds only a token copy at /home/user.linux/.config/enginery/gateway.token (mode 0600)",
+    "token_file": {"path": "/home/user.linux/.config/enginery/gateway.token", "exists": true, "regular_file": true, "symlink": false, "mode": "0600", "size_bytes": 43}
+  },
+  "exposure": ["the relay holds the gateway bearer token", "workers hold only the dummy credential ...", "..."],
+  "refresh": "the broker on the macOS host refreshes provider credentials; ...",
+  "revocation": ["on the macOS host: omp auth-gateway token --regenerate (...)", "restart the macOS gateway ..."],
+  "cleanup": ["stop the relay in the VM: enginery runner relay down", "...", "remove the VM token copy at ..."],
+  "owner_decisions": ["2026-10-13: auth-custody design approved", "..."],
+  "findings": [],
+  "conforms": true
+}
+```
 
 ## Security limits
 

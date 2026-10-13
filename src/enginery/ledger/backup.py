@@ -134,4 +134,21 @@ def restore_ledger(
     return manifest
 
 
-__all__ = ["BackupManifest", "backup_ledger", "read_backup_manifest", "restore_ledger"]
+def backup_database_path(backup_dir: Path) -> Path:
+    """The ledger snapshot inside a backup directory."""
+    return backup_dir / _DATABASE_NAME
+
+
+def backup_artifacts_path(backup_dir: Path) -> Path:
+    """The artifact-store copy inside a backup directory (present only if it was included)."""
+    return backup_dir / _ARTIFACTS_DIRNAME
+
+
+__all__ = [
+    "BackupManifest",
+    "backup_artifacts_path",
+    "backup_database_path",
+    "backup_ledger",
+    "read_backup_manifest",
+    "restore_ledger",
+]

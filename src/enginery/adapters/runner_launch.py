@@ -86,6 +86,47 @@ def worker_environment(
     )
 
 
+OMP_MODELS_PATH = f"{WORKER_HOME}/.omp/agent/models.yml"
+"""Where omp reads its provider overrides; the agent directory is task-local tmpfs."""
+
+_OMP_RELAY_PROVIDERS = ("anthropic", "openai-codex")
+
+
+def relay_claude_environment(runner: RunnerContext) -> tuple[tuple[str, str], ...]:
+    """Claude Code's model endpoint and placeholder credential, or nothing without a relay.
+
+    The harness-level switches that keep it from phoning home (telemetry, updater, nonessential
+    traffic) are part of the harness environment itself. ``ANTHROPIC_API_KEY`` is never set.
+    """
+    relay = runner.relay
+    if relay is None:
+        return ()
+    return (
+        ("ANTHROPIC_AUTH_TOKEN", relay.dummy_credential),
+        ("ANTHROPIC_BASE_URL", relay.url),
+    )
+
+
+def relay_omp_seed_files(runner: RunnerContext) -> tuple[tuple[str, str], ...]:
+    """The task-local ``models.yml`` that points omp's providers at the relay, or nothing.
+
+    Each provider uses the pi-native transport, so omp posts ``/v1/pi/stream`` to the relay with
+    ``modelId: <provider>/<model>``. The ``apiKey`` is the placeholder credential.
+    """
+    relay = runner.relay
+    if relay is None:
+        return ()
+    lines = ["providers:"]
+    for provider in _OMP_RELAY_PROVIDERS:
+        lines += [
+            f"  {provider}:",
+            f"    baseUrl: {relay.url}",
+            f"    apiKey: {relay.dummy_credential}",
+            "    transport: pi-native",
+        ]
+    return ((OMP_MODELS_PATH, "\n".join(lines) + "\n"),)
+
+
 def require_isolated_permissions(permissions: PermissionMapping) -> None:
     """Refuse an isolated launch that would run with permission checks off."""
     if permissions.unconditional_bypass:
@@ -110,6 +151,7 @@ def isolated_command(
     environment: tuple[tuple[str, str], ...],
     inner_command: tuple[str, ...],
     image_host: InstalledHost | None = None,
+    seed_files: tuple[tuple[str, str], ...] = (),
 ) -> tuple[str, ...]:
     """The supervised host command: the launcher, its spec, ``--``, then the in-container argv.
 
@@ -136,6 +178,7 @@ def isolated_command(
         time_budget_seconds=task.time_budget_seconds,
         permissions=permissions,
         env=environment,
+        seed_files=seed_files,
         bundle_branch=task.head_branch if bundle else None,
         bundle_base=task.base_revision if bundle else None,
         docker_context=runner.selection.docker_context,

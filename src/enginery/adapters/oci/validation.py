@@ -9,6 +9,7 @@ its only writable tree, no credentials, and no route to anything but the interna
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -26,6 +27,7 @@ from enginery.adapters.runner_launch import (
     require_exited,
     worker_environment,
 )
+from enginery.application.worker_environment import LAUNCHER_KEYS, build_worker_environment
 from enginery.domain.errors import WorkerFailureError
 from enginery.domain.runner import (
     LaunchSpec,
@@ -44,6 +46,11 @@ LauncherProcess = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
 def _run_launcher(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run the launcher with only what it needs to reach the engine, not the ambient environment.
+
+    The container's own environment is the spec's explicit one; the launcher process itself holds
+    no source-host, factory, broker or cloud credential either.
+    """
     return subprocess.run(
         list(argv),
         check=False,
@@ -51,6 +58,7 @@ def _run_launcher(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         stdin=subprocess.DEVNULL,
+        env=build_worker_environment(os.environ, LAUNCHER_KEYS),
     )
 
 

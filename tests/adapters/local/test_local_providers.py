@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from tests.support.execution import selection_for
 
 from enginery.adapters.local import (
@@ -11,6 +13,7 @@ from enginery.adapters.local import (
     LocalGit,
     LocalPublication,
     LocalValidation,
+    LocalWorkspace,
     ScriptedHarness,
 )
 from enginery.application.adapter_types import AdapterEventKind, NormalizedAdapterEvent
@@ -22,8 +25,9 @@ from enginery.application.delivery_ports import (
     ValidationRequest,
     ValidationStatus,
 )
-from enginery.application.work_ports import HarnessTask
+from enginery.application.work_ports import HarnessTask, WorkspaceRequest
 from enginery.domain.digests import Digest
+from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
 
@@ -146,6 +150,77 @@ def test_local_publication_requires_destination_verification(tmp_path: Path) -> 
         publisher.reconcile(operation_id=request.operation_id)
         is ReconciliationResult.FOUND_MATCHING
     )
+
+
+def _repository(path: Path) -> tuple[Path, str]:
+    path.mkdir()
+    env = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=path, env=env, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    (path / "README").write_text("fixture\n", encoding="utf-8")
+    git("add", "README")
+    git("commit", "-q", "-m", "fixture")
+    return path, git("rev-parse", "HEAD")
+
+
+def test_local_workspace_hands_back_exactly_the_permitted_environment_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, base = _repository(tmp_path / "repository")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("GH_TOKEN", "must-never-be-copied")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-never-be-copied")
+    monkeypatch.setenv("ENGINERY_UNLISTED", "unlisted")
+    monkeypatch.delenv("TZ", raising=False)
+    workspaces = LocalWorkspace(tmp_path / "workspaces")
+
+    handle = workspaces.create(
+        WorkspaceRequest(
+            run_id=RunId("run-1"),
+            repository_id="org/repo",
+            repository_path=repository,
+            base_revision=base,
+            operation_id=OperationId("op-workspace-env"),
+            permitted_environment_keys=("LANG", "TZ"),
+        )
+    )
+
+    # Only permitted keys the host defines: LANG is present, TZ is permitted but undefined, and
+    # every credential and unlisted variable is absent.
+    assert handle.environment == (("LANG", "C.UTF-8"),)
+    workspaces.cleanup(handle, operation_id=OperationId("op-workspace-env-cleanup"))
+
+
+def test_local_workspace_refuses_a_credential_shaped_permission_before_creating_anything(
+    tmp_path: Path,
+) -> None:
+    repository, base = _repository(tmp_path / "repository")
+    root = tmp_path / "workspaces"
+
+    with pytest.raises(InvalidInputError, match="credential-shaped"):
+        LocalWorkspace(root).create(
+            WorkspaceRequest(
+                run_id=RunId("run-1"),
+                repository_id="org/repo",
+                repository_path=repository,
+                base_revision=base,
+                operation_id=OperationId("op-workspace-credential"),
+                permitted_environment_keys=("PATH", "GITHUB_TOKEN"),
+            )
+        )
+
+    assert not root.exists()
 
 
 def test_deployment_fixture_rolls_back_known_receipt() -> None:

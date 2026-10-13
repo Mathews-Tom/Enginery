@@ -22,6 +22,7 @@ from enginery.application.work_ports import (
 )
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
+from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId, WorkItemId
 from enginery.domain.work_item import WorkItem, WorkItemState
 
@@ -117,6 +118,38 @@ def test_workspace_handle_rejects_relative_path() -> None:
             repository_id="org/repo",
             path=Path("workspace"),
             base_revision="deadbeef",
+        )
+
+
+@pytest.mark.parametrize("key", ["GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "AWS_PROFILE"])
+def test_workspace_request_never_permits_a_credential_shaped_environment_key(key: str) -> None:
+    with pytest.raises(InvalidInputError, match="credential-shaped"):
+        WorkspaceRequest(
+            run_id=RunId("run-1"),
+            repository_id="org/repo",
+            repository_path=Path("/tmp/repository"),
+            base_revision="deadbeef",
+            operation_id=OperationId("op-workspace-1"),
+            permitted_environment_keys=("PATH", key),
+        )
+
+
+def test_workspace_handle_carries_no_environment_by_default_and_refuses_a_credential() -> None:
+    handle = WorkspaceHandle(
+        reservation_id="reservation-1",
+        repository_id="org/repo",
+        path=Path("/tmp/workspace"),
+        base_revision="deadbeef",
+    )
+    assert handle.environment == ()
+
+    with pytest.raises(InvalidInputError, match="credential-shaped"):
+        WorkspaceHandle(
+            reservation_id="reservation-1",
+            repository_id="org/repo",
+            path=Path("/tmp/workspace"),
+            base_revision="deadbeef",
+            environment=(("GH_TOKEN", "value"),),
         )
 
 
