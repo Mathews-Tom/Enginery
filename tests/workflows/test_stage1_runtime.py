@@ -1863,21 +1863,28 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         requests=(implement_dispatch,),
     )
     lease = tick.dispatched[0].lease
-    time.sleep(0.3)
-    runtime.ingest_result(
-        envelope=WorkerResultEnvelope(
-            run_id=lease.run_id,
-            node_id=lease.node_id,
-            attempt_id=lease.attempt_id,
-            epoch=lease.epoch,
-            fencing_token=lease.fencing_token,
-            operation_id=lease.operation_id,
-            terminal_result="passed",
-            artifact_references=(str(Digest.of_bytes(b"implementation")),),
-            result={"harness_status": "succeeded"},
-        ),
-        now=now,
+    envelope = WorkerResultEnvelope(
+        run_id=lease.run_id,
+        node_id=lease.node_id,
+        attempt_id=lease.attempt_id,
+        epoch=lease.epoch,
+        fencing_token=lease.fencing_token,
+        operation_id=lease.operation_id,
+        terminal_result="passed",
+        artifact_references=(str(Digest.of_bytes(b"implementation")),),
+        result={"harness_status": "succeeded"},
     )
+    # The runtime refuses a result until it has observed the worker's exit; wait for that
+    # rather than guessing how long a process takes to exit.
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            runtime.ingest_result(envelope=envelope, now=now)
+            break
+        except ExternalConflictError as error:
+            if "before supervised process exit" not in str(error) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.01)
 
     service.validate_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
     service.review_implementation(
