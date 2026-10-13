@@ -44,9 +44,11 @@ attempt and return `wait`, never launch a second worker.
 
 ## Procedure
 
-1. **Create a real, low-risk issue** in your target repository. Keep the
-   acceptance criteria simple — a single pure function is enough to
-   exercise the full lifecycle quickly. Record the issue number.
+1. **Create a real, low-risk issue** in your target repository and label it
+   with exactly one `enginery/work-kind/issue` label and one
+   `enginery/risk/low` label. Keep the acceptance criteria simple — a single
+   pure function is enough to exercise the full lifecycle quickly. Record the
+   issue number.
 
 2. **Compose the request.** `enginery stage1 build-request` needs the
    repository, an `owner/repo#issue_number`-shaped `--external-reference`
@@ -54,11 +56,12 @@ attempt and return `wait`, never launch a second worker.
    demonstration's own worked example got wrong on a first attempt; see the
    published write-up), a `--repository-path` pointing at a local clone,
    fresh `--workspace-path`/`--artifact-root` directories, and
-   `--harness-provider omp` or `claude-code`. Pass exactly one
-   `--acceptance-criterion` — a live GitHub-sourced work item always
-   derives its acceptance criteria as the issue body as a single item, so
-   any locally-declared criteria are only placeholders for a real GitHub
-   run; do not pass more than one or `qualify` will reject the mismatch.
+   `--harness-provider omp` or `claude-code`. The title, the body, the
+   source revision, and the declared classification are read from the issue
+   through `gh` and bound exactly as returned: a live GitHub-sourced work
+   item always derives its acceptance criteria as the issue body as a single
+   item, and there are no flags to declare them locally. An issue without
+   exactly one declared work-kind and one declared risk label is refused.
    See [`docs/operations.md`](operations.md#composing-a-request) for the
    full flag reference.
 

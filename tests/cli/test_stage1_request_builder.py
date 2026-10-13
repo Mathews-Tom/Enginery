@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.work_ports import DeclaredWorkClassification
 from enginery.capabilities.lock import (
     CapabilityLock,
     LockedCapability,
@@ -15,6 +17,7 @@ from enginery.capabilities.lock import (
     ProvenanceStatus,
 )
 from enginery.capabilities.serialization import write_lock
+from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.cli.stage1_request import (
     _LOCAL_CONFIGURATION_DIGEST,
@@ -22,8 +25,17 @@ from enginery.cli.stage1_request import (
     _NO_CAPABILITY_LOCK_DIGEST,
 )
 from enginery.domain.digests import Digest
+from enginery.domain.errors import FailureClass
 from enginery.domain.execution_catalog import SupportTier
 from enginery.workflows.stage1 import stage1_request_from_state
+from tests.support.github import (
+    CANONICAL_LABELS,
+    ISSUE_BODY,
+    ISSUE_TITLE,
+    ISSUE_UPDATED_AT,
+    StandInGitHub,
+    write_stand_in_gh,
+)
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -45,8 +57,15 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _minimal_argv(
-    *, tmp_path: Path, repository: Path, base_revision: str, output: Path, run_id: str = "run-1"
+    *,
+    tmp_path: Path,
+    repository: Path,
+    base_revision: str,
+    output: Path,
+    run_id: str = "run-1",
+    github: StandInGitHub | None = None,
 ) -> list[str]:
+    github = github or write_stand_in_gh(tmp_path / "github")
     return [
         "stage1",
         "build-request",
@@ -58,18 +77,10 @@ def _minimal_argv(
         "owner/repo",
         "--external-reference",
         "owner/repo#1",
-        "--source-snapshot-reference",
-        "issue:1@1",
-        "--source-revision",
-        "1",
+        "--github-executable",
+        str(github.executable),
         "--base-revision",
         base_revision,
-        "--title",
-        "Bounded change",
-        "--objective",
-        "Change one bounded behavior.",
-        "--acceptance-criterion",
-        "observable result",
         "--repository-path",
         str(repository),
         "--workspace-path",
@@ -179,7 +190,7 @@ def test_build_request_defaults_match_documented_example(tmp_path: Path) -> None
     assert request.run.capability_lock_digest == _NO_CAPABILITY_LOCK_DIGEST
     assert request.run.environment_manifest_digest == _LOCAL_ENVIRONMENT_DIGEST
     assert request.run.configuration_snapshot_digest == _LOCAL_CONFIGURATION_DIGEST
-    assert request.work_snapshot.work_item.id.value == "work-issue-142"
+    assert request.work_snapshot.work_item.id.value == "github:owner/repo#1"
 
 
 def test_build_request_derives_capability_lock_digest_from_real_lockfile(tmp_path: Path) -> None:
@@ -268,13 +279,13 @@ def test_build_request_marks_inapplicable_criteria(tmp_path: Path) -> None:
     argv = _minimal_argv(
         tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
     )
-    argv += ["--acceptance-criterion", "second criterion", "--inapplicable-criterion", "1"]
+    argv += ["--inapplicable-criterion", "0"]
 
     main(argv)
 
     raw = json.loads(output.read_text(encoding="utf-8"))
     request = stage1_request_from_state(raw)
-    assert request.applicable_criteria == (True, False)
+    assert request.applicable_criteria == (False,)
 
 
 def test_build_request_no_cost_budget_flag_omits_cost_budget(tmp_path: Path) -> None:
@@ -323,3 +334,183 @@ def test_build_request_claude_code_provider_defaults_executable(tmp_path: Path) 
     request = stage1_request_from_state(raw)
     assert request.execution_configuration.harness_provider == "claude-code"
     assert request.execution_configuration.harness_executable == "claude"
+
+
+def _built(tmp_path: Path, *extra: str, github: StandInGitHub | None = None) -> tuple[int, Path]:
+    repository, base_revision = _repository(tmp_path)
+    output = tmp_path / "request.json"
+    argv = _minimal_argv(
+        tmp_path=tmp_path,
+        repository=repository,
+        base_revision=base_revision,
+        output=output,
+        github=github,
+    )
+    return main([*argv, *extra]), output
+
+
+def _start_and_advance(tmp_path: Path, request_path: Path) -> int:
+    database = tmp_path / "ledger.db"
+    assert (
+        main(
+            [
+                "stage1",
+                "start",
+                "--database",
+                str(database),
+                "--owner",
+                "operator",
+                "--request",
+                str(request_path),
+            ]
+        )
+        == 0
+    )
+    return main(
+        [
+            "stage1",
+            "watch",
+            "--database",
+            str(database),
+            "--owner",
+            "operator",
+            "--run-id",
+            "run-1",
+            "--advance",
+        ]
+    )
+
+
+def test_build_request_binds_the_adapter_snapshot_and_its_classification_verbatim(
+    tmp_path: Path,
+) -> None:
+    github = write_stand_in_gh(tmp_path / "github")
+
+    exit_code, output = _built(tmp_path, github=github)
+
+    assert exit_code == 0
+    document = json.loads(output.read_text(encoding="utf-8"))
+    request = stage1_request_from_state(document)
+    fetched = GitHubWorkLedger(
+        GitHubAdapterConfig(
+            repository="owner/repo",
+            credential_reference="operator-gh-cli",
+            executable=str(github.executable),
+        )
+    ).fetch("owner/repo#1")
+    snapshot = request.work_snapshot
+    source_url = "https://api.github.com/repos/owner/repo/issues/1"
+    assert snapshot == fetched
+    assert request.run.work_item_snapshot_digest == fetched.bound_digest
+    assert snapshot.work_item.title == ISSUE_TITLE
+    assert snapshot.work_item.acceptance_criteria == (ISSUE_BODY,)
+    assert snapshot.source_revision.startswith(f"{ISSUE_UPDATED_AT}:sha256:")
+    assert snapshot.classification_provenance == DeclaredWorkClassification(
+        source_provider="github-issues", source_url=source_url, canonical_labels=CANONICAL_LABELS
+    )
+    assert document["classification_provenance"] == {
+        "source_provider": "github-issues",
+        "source_url": source_url,
+        "canonical_labels": list(CANONICAL_LABELS),
+    }
+
+
+@pytest.mark.parametrize(
+    ("labels", "message"),
+    [
+        ((), "exactly one declared work-kind label"),
+        (("enginery/work-kind/issue",), "exactly one declared risk label"),
+        (
+            ("enginery/work-kind/issue", "enginery/risk/low", "enginery/risk/medium"),
+            "exactly one declared risk label",
+        ),
+        (
+            ("enginery/work-kind/issue", "enginery/risk/high"),
+            "risk labels must use the exact declared vocabulary",
+        ),
+        (
+            ("enginery/work-kind/milestone", "enginery/risk/low"),
+            "work-kind labels must use the exact declared vocabulary",
+        ),
+    ],
+    ids=["no-labels", "no-risk", "two-risks", "undeclared-risk", "undeclared-work-kind"],
+)
+def test_build_request_refuses_an_issue_without_one_declared_classification(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], labels: tuple[str, ...], message: str
+) -> None:
+    github = write_stand_in_gh(tmp_path / "github")
+    github.serve(labels=labels)
+
+    exit_code, output = _built(tmp_path, github=github)
+
+    assert exit_code == 2
+    assert message in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_build_request_rejects_a_bad_pin_before_it_reads_the_issue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    github = write_stand_in_gh(tmp_path / "github")
+
+    exit_code, output = _built(
+        tmp_path, "--harness-provider", "claude-code", "--model", "opus", github=github
+    )
+
+    assert exit_code == 2
+    assert "opus" in capsys.readouterr().err
+    assert not output.exists()
+    assert github.calls() == []
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--work-item-id",
+        "--source-provider",
+        "--work-kind",
+        "--source-snapshot-reference",
+        "--source-revision",
+        "--title",
+        "--objective",
+        "--acceptance-criterion",
+        "--constraint",
+        "--risk-class",
+    ],
+)
+def test_build_request_no_longer_accepts_a_flag_the_adapter_now_decides(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _built(tmp_path, flag, "value")
+
+    assert raised.value.code == 2
+    assert f"unrecognized arguments: {flag} value" in capsys.readouterr().err
+    assert not (tmp_path / "request.json").exists()
+
+
+def test_a_built_request_qualifies_against_the_issue_it_was_built_from(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, output = _built(tmp_path)
+    assert exit_code == 0
+    capsys.readouterr()
+
+    assert _start_and_advance(tmp_path, output) == 0
+
+    watched = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert watched["action_taken"] == "qualify"
+
+
+def test_a_built_request_is_stale_once_the_issue_it_was_built_from_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    github = write_stand_in_gh(tmp_path / "github")
+    exit_code, output = _built(tmp_path, github=github)
+    assert exit_code == 0
+    github.serve(updated_at="2026-10-14T00:00:00Z")
+    capsys.readouterr()
+
+    assert _start_and_advance(tmp_path, output) == exit_code_for(FailureClass.STALE_EVIDENCE)
+
+    assert "no longer matches the run request" in capsys.readouterr().err
