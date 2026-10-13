@@ -418,7 +418,7 @@ depends on the reason, and `stage1 resume` does not clear a hold:
 | `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
 | `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
 | `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
-| `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine or boot, its pid is held by another process, or its identity is unreadable. | Check the worker where it was launched, reconcile by hand, then `stage1 cancel --node-id implement` (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |
+| `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine, or its identity is unreadable. (A reused pid or a reboot proves the worker gone and is reconciled instead.) | There is no supported release for it in this release: the node keeps its slot. Deal with the worker where it was launched; `stage1 cancel` refuses without signalling (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |
 
 ## Recovery semantics
 
@@ -525,7 +525,8 @@ a held run could otherwise be the oldest fair winner and keep a slot
 reserved that no command may use, queued nodes of runs held for catalog
 drift are left out of the fair plan: another run can take the slot, and
 the held node records `reason: execution_hold` with the hold message in
-`detail`, not a reservation. This is decided from the ledger's durable
+`detail`, not a reservation, only when another run's tick evaluates
+it. This is decided from the ledger's durable
 run requests and the current catalog alone. A host-fingerprint hold
 (`host_fingerprint_drift`) needs a probe of the installed host and is
 not applied to other runs' planning, so a run held that way and queued
@@ -546,10 +547,14 @@ coordinator owning the ledger does not make it true. `liveness` is:
   running but the coordinator that launched it has lapsed.
 - `exited`: the pid is gone. This is worker death, independent of the
   coordinator heartbeat.
-- `pid_reused`: the pid now belongs to a different process, including
-  one owned by another user that this user cannot signal. The worker is
-  gone, but the pid is not its own: it is held, never terminated.
-- `foreign_host`: the record was written on another machine or boot.
+- `pid_reused`: the pid now belongs to a different process on this host
+  and boot, including one owned by another user that this user cannot
+  signal. The worker is gone, but the pid is not its own: it is
+  reconciled automatically and never terminated.
+- `rebooted`: the record has this machine's id but an earlier boot id,
+  so the worker cannot have survived. It is reconciled as
+  `worker_lost_to_reboot` and never signalled.
+- `foreign_host`: the record was written on another machine.
 - `unverifiable`: the record has no usable identity (for example a
   launch that never recorded one, or an unknown identity version), or
   this host's own identity could not be read.
@@ -565,29 +570,44 @@ fails closed rather than being guessed. Records written before host
 binding carry no host or version; they decode unchanged and are judged
 under single-host semantics, as they always were.
 
-**When a worker dies.** If a `running` implementation has no result
-file and its worker is `exited`, the next `stage1 watch --advance`
-(`next_action: reconcile_worker`) observes the exit, reconciles it
-through the recovery path and records the node as `failed` with
-`failure_reason: worker_exited_without_result` and the worker's pid,
-process group and start identity in `worker_exit_evidence`. The
-workspace is retained, the slot is freed for the next queued run, and
-the worker is never launched again. If a result file exists it is
-collected first. A worker that is alive on this host and boot keeps the
-run at `wait`, including after the 60 second coordinator window: with
-no daemon the epoch that launched it has always lapsed between
-`watch --advance` calls, and that shows only as `lease_epoch_active:
-false` in the worker report. A worker that cannot be proven dead is
-never failed: `next_action` is `hold` with `worker_identity_unprovable`
-and the `liveness` that blocked it (`foreign_host`, `pid_reused`,
-`unverifiable`).
+The worker's start time is read under a fixed time zone and locale
+(`TZ=UTC0`, `LC_ALL=C`), so launching, watching and cancelling from
+shells with different `TZ` or `LANG` agree on whether the same worker is
+alive. Records written before host binding keep the comparison they
+were written with.
 
-**Manual holds.** A `foreign_host` worker is neither provably alive nor
-provably dead from here, because its pid names an unrelated process on
-this machine. Recovery refuses automatic resume, and `stage1 cancel` on
-it fails with a human-action error without signalling anything. Check
-the worker on the machine that launched it, then reconcile by hand.
-`pid_reused` and `unverifiable` records also block automatic recovery.
+**When a worker dies.** If a `running` implementation has no result
+file and its worker is gone (`exited`, `pid_reused` or `rebooted`),
+the next `stage1 watch --advance` (`next_action: reconcile_worker`)
+looks once more for a result, then records the exit, reconciles it
+through the recovery path and records the node as `failed` with
+`failure_reason: worker_exited_without_result` (`worker_lost_to_reboot`
+after a reboot) and the worker's pid, process group, start identity,
+`liveness` and host in `worker_exit_evidence`. The workspace is
+retained, the slot is freed for the next queued run, and the worker is
+never launched again. A pid that now belongs to another process, or a
+host that rebooted, is never signalled. If a result file exists it is
+collected first, including one written between deriving the action and
+acting on it. A worker that is alive on this host and boot keeps the
+run at `wait`, including once 60 seconds pass without the launching
+epoch being renewed: with no daemon that happens between `watch
+--advance` calls, and it shows only as `lease_epoch_active: false` in
+the worker report. A worker that cannot be proven dead is never
+failed: `next_action` is `hold` with `worker_identity_unprovable` and
+the `liveness` that blocked it (`foreign_host`, `unverifiable`). If an
+operator cancel was interrupted after its termination request, the
+next advance finishes it as `cancelled`, never as a worker death.
+
+**Manual holds.** A `foreign_host` worker was recorded on another
+machine, so nothing here can prove whether it is still running; an
+`unverifiable` record has no identity to prove anything from. Recovery
+refuses automatic resume, `stage1 watch --advance` reports the hold
+and `stage1 cancel` refuses, in each case without signalling anything.
+There is no supported release for such a node in this release: it
+keeps its workspace and its slot, and no command frees them. Deal with
+the worker where it was launched. A reused pid and a reboot are not
+holds: both prove the worker gone and are reconciled automatically,
+without a signal.
 
 **Cancel semantics.** `stage1 cancel --node-id implement` is fenced by
 the current coordinator epoch, so it works from a later process or
@@ -632,8 +652,13 @@ and its stdout is discarded.
   winner that is never advanced holds its reservation (see above).
 - A run held for host-fingerprint drift that is the oldest winner
   (see Holds).
-- Workers on another host or boot, `pid_reused` and `unverifiable`
-  records (see above), and a non-quiescent workspace after cancel.
+- A worker recorded on another machine or whose identity is unreadable
+  (`foreign_host`, `unverifiable`): there is no supported release for
+  it in this release, and its node keeps its slot (see Manual holds).
+- A worker that died while its workspace is not quiescent (for example
+  a git lock is held): the node stays `awaiting_human` with
+  `cancellation_cleanup_reason` and `next_action` `wait`. Make the
+  workspace quiescent, then run `stage1 cancel --node-id implement`.
 - Attempt ids are ledger-wide, so `build-request` defaults the
   implementation attempt id to `<run-id>-implement-0` and repair
   attempts are derived as `<run-id>-implement-N`; runs sharing one
