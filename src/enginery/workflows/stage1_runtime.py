@@ -198,15 +198,19 @@ class Stage1ValidationExecutor:
                 for command in commands
             )
         except HumanActionRequiredError as hold:
-            # A hold is not a verdict: nothing is recorded as passed or failed, but the node
-            # waits for a human with the reason on it, so the run does not look merely queued.
-            self.runtime.await_human_node(
+            # A hold is not a verdict, but it is not a decision a human can take either: the
+            # request is digest-bound, so the commands cannot change, and approving a validation
+            # that never ran would let an unvalidated branch reach review and publication. The
+            # node is recorded as blocked with the reason on it, so the run neither looks merely
+            # queued nor offers an approval; only a new run with commands the image can run
+            # proceeds.
+            self.runtime.complete_node(
                 run_id=dispatch.request.run_id,
                 node_id=dispatch.request.node_id,
                 epoch=epoch.epoch,
                 now=now,
-                reason=str(hold),
-                extra=dict(hold.details),
+                outcome="blocked",
+                extra={"blocked_reason": str(hold), **hold.details},
             )
             raise
         artifact_digest = self.artifact_store.publish_bytes(

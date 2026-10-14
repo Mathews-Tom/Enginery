@@ -692,7 +692,11 @@ class Stage1RunService:
             or _generation(_string(validate_state, "attempt_id")) != generation
         ):
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
-        if validate_state.get("status") != "passed":
+        if validate_state.get("status") != "passed" or (
+            not run.request.runner.legacy and "validation_artifact_digest" not in validate_state
+        ):
+            # A validation a human approved without it ever running is not a pass: it carries
+            # no artifact, so it never reaches review or publication.
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
         review_state = self._node_state_optional(run_id, "review")
@@ -1225,6 +1229,7 @@ class Stage1RunService:
         """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "validate")
+        self._require_validation_artifact(request)
         generation = _generation(request.implementation.attempt_id) + repair_attempt
         if generation != self._implement_generation(request.run.id):
             raise InvalidInputError(
@@ -1280,6 +1285,7 @@ class Stage1RunService:
         """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "review")
+        self._require_validation_artifact(request)
         if self._review_outcome(request.run.id) is not ReviewOutcome.APPROVED:
             raise MissingPrerequisiteError("Stage 1 requires an approved independent review")
         publisher = None if request.runner.legacy else self._require_branch_publisher()
@@ -1823,6 +1829,20 @@ class Stage1RunService:
                 "Stage 1 review outcome is invalid",
                 details={"run_id": str(run_id), "review_outcome": value},
             ) from error
+
+    def _require_validation_artifact(self, request: Stage1RunRequest) -> None:
+        """Refuse a passed validation that recorded no artifact: it never actually ran.
+
+        A run persisted while a missing-tool hold could be approved carries such a node. The
+        approval marks it passed, but only a validation that ran records its artifact digest.
+        """
+        if request.runner.legacy:
+            return
+        if "validation_artifact_digest" not in self._node_state(request.run.id, "validate"):
+            raise MissingPrerequisiteError(
+                "Stage 1 requires a recorded validation result, not an approved hold",
+                details={"run_id": str(request.run.id), "node_id": "validate"},
+            )
 
     def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
         projection = self.ledger.read_projection(

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from tests.support.branch_publication import RecordingBranchPublisher
@@ -63,6 +63,7 @@ from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.engine.runtime import (
     BRANCH_PUBLICATION_OPERATOR,
     BRANCH_PUBLICATION_WORKER,
+    CoordinatorRuntime,
     FixtureDispatch,
     WorkflowNodeDispatch,
 )
@@ -1607,13 +1608,122 @@ def test_a_validation_tool_missing_from_the_image_is_a_hold_naming_it_not_a_fail
     )
     node = _node(ledger_service, "validate")
     assert node is not None
-    assert node["status"] == "awaiting_human", "a hold, never a recorded verdict"
+    assert node["status"] == "blocked", "a hold, never a recorded verdict or an approvable wait"
     assert node["tool"] == "pytest"
-    assert "'pytest'" in str(node["human_wait_reason"])
+    assert "'pytest'" in str(node["blocked_reason"])
+    assert "human_wait_reason" not in node
     assert "validation_artifact_digest" not in node
     assert not validation_path_for(built.request.workspace_path).exists()
     action = built.service.next_action(built.request.run.id).action
     assert action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+
+
+def test_a_missing_tool_validation_hold_cannot_be_approved_into_a_publication(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    runner = ToolRunner(returncode=127, output="sh: 1: pytest: not found\n", tool_present=False)
+    built = _ready_to_validate_with(
+        ledger_service, tmp_path, runner, command=("pytest", "-q", "tests")
+    )
+    remote, pushes = _give_origin(built.repository)
+    publisher = _branch_publisher(built.request)
+    assert publisher is not None
+    service = replace(built.service, branch_publisher=cast(BranchPublicationPort, publisher))
+    with pytest.raises(HumanActionRequiredError):
+        _validate(built)
+    now = NOW + timedelta(seconds=11)
+    epoch = built.runtime.claim_epoch(now=now, heartbeat_window=HEARTBEAT)
+
+    with pytest.raises(ExternalConflictError, match="human-waiting"):
+        built.runtime.resolve_human_wait(
+            run_id=RUN_ID,
+            node_id="validate",
+            epoch=epoch.epoch,
+            now=now,
+            outcome="passed",
+            extra={"operator_decision": "approved", "reason": "run it anyway"},
+        )
+
+    node = _node(ledger_service, "validate")
+    assert node is not None and node["status"] == "blocked"
+    assert built.service.next_action(built.request.run.id).action is (
+        Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+    with pytest.raises(MissingPrerequisiteError):
+        service.review_implementation(
+            built.request,
+            ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+            repair_attempt=0,
+            now=NOW + timedelta(seconds=12),
+            heartbeat_window=HEARTBEAT,
+        )
+    with pytest.raises(MissingPrerequisiteError):
+        service.open_pull_request(
+            built.request, now=NOW + timedelta(seconds=13), heartbeat_window=HEARTBEAT
+        )
+    assert pushes.exists() is False
+    assert BRANCH not in git("for-each-ref", "refs/heads", cwd=remote)
+
+
+def test_a_validation_approved_while_it_never_ran_still_never_reaches_review_or_publication(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run persisted while the hold was an approvable human wait: the approval marks the node
+    # passed, but it carries no validation artifact, so nothing downstream accepts it.
+    runner = ToolRunner(returncode=127, output="sh: 1: pytest: not found\n", tool_present=False)
+    built = _ready_to_validate_with(
+        ledger_service, tmp_path, runner, command=("pytest", "-q", "tests")
+    )
+    remote, pushes = _give_origin(built.repository)
+    publisher = _branch_publisher(built.request)
+    assert publisher is not None
+    service = replace(built.service, branch_publisher=cast(BranchPublicationPort, publisher))
+    complete_node = CoordinatorRuntime.complete_node
+
+    def hold_as_human_wait(self: CoordinatorRuntime, **kwargs: Any) -> None:
+        if kwargs.get("outcome") != "blocked":
+            complete_node(self, **kwargs)
+            return
+        self.await_human_node(
+            run_id=kwargs["run_id"],
+            node_id=kwargs["node_id"],
+            epoch=kwargs["epoch"],
+            now=kwargs["now"],
+            reason=str(kwargs["extra"]["blocked_reason"]),
+        )
+
+    monkeypatch.setattr(CoordinatorRuntime, "complete_node", hold_as_human_wait)
+    with pytest.raises(HumanActionRequiredError):
+        _validate(built)
+    monkeypatch.undo()
+    now = NOW + timedelta(seconds=11)
+    epoch = built.runtime.claim_epoch(now=now, heartbeat_window=HEARTBEAT)
+    built.runtime.resolve_human_wait(
+        run_id=RUN_ID,
+        node_id="validate",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="passed",
+        extra={"operator_decision": "approved", "reason": "run it anyway"},
+    )
+
+    node = _node(ledger_service, "validate")
+    assert node is not None and node["status"] == "passed"
+    assert "validation_artifact_digest" not in node
+    assert built.service.next_action(built.request.run.id).action is (
+        Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    )
+    with pytest.raises(MissingPrerequisiteError, match="recorded validation result"):
+        service.review_implementation(
+            built.request,
+            ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
+            repair_attempt=0,
+            now=NOW + timedelta(seconds=12),
+            heartbeat_window=HEARTBEAT,
+        )
+    assert _node(ledger_service, "review") is None
+    assert pushes.exists() is False
+    assert BRANCH not in git("for-each-ref", "refs/heads", cwd=remote)
 
 
 def test_exit_127_from_a_tool_that_exists_is_an_ordinary_failed_validation(
