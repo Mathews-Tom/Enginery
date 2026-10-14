@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -358,6 +359,10 @@ def _render_task(task: HarnessTask) -> str:
     )
 
 
+_CLAUDE_BANNER = re.compile(r"(\S+) \(Claude Code\)")
+"""The exact first line: no whitespace is skipped, so a malformed banner yields no version."""
+
+
 def probe_installed_host(
     executable: str,
     runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] = (
@@ -373,11 +378,12 @@ def probe_installed_host(
         completed = runner((executable, "--version"))
     except OSError:
         return None
-    banner = completed.stdout.strip()
-    if completed.returncode != 0 or "Claude Code" not in banner:
+    lines = completed.stdout.splitlines()
+    banner = _CLAUDE_BANNER.fullmatch(lines[0]) if lines else None
+    if completed.returncode != 0 or banner is None:
         return None
     return InstalledHost(
-        executable_version=banner.split()[0],
+        executable_version=banner.group(1),
         protocol_fingerprint=f"stream-json-schema={_CLAUDE_CODE_EVENT_SCHEMA_VERSION}",
     )
 

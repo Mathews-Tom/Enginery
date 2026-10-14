@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -343,6 +344,10 @@ class OmpHarness:
             raise CancellationError("unknown OMP harness session")
 
 
+_OMP_BANNER = re.compile(r"omp v(\S+)")
+"""The exact first line: no whitespace is skipped, so a malformed banner yields no version."""
+
+
 def probe_installed_host(
     executable: str,
     runner: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] = (
@@ -358,13 +363,13 @@ def probe_installed_host(
         completed = runner((executable, "--help"))
     except OSError:
         return None
-    if completed.returncode != 0 or not completed.stdout.startswith("omp v"):
-        return None
-    version = completed.stdout.splitlines()[0].removeprefix("omp v").strip()
-    if not version:
+    lines = completed.stdout.splitlines()
+    banner = _OMP_BANNER.fullmatch(lines[0]) if lines else None
+    if completed.returncode != 0 or banner is None:
         return None
     return InstalledHost(
-        executable_version=version, protocol_fingerprint=f"json-protocol={_OMP_PROTOCOL_VERSION}"
+        executable_version=banner.group(1),
+        protocol_fingerprint=f"json-protocol={_OMP_PROTOCOL_VERSION}",
     )
 
 

@@ -220,6 +220,8 @@ def test_an_installed_version_inside_the_accepted_range_launches_the_pinned_cont
         ("omp", "omp v18.11.0-beta.1\n"),
         ("omp", "omp v18.11.0+build.7\n"),
         ("omp", "omp v18.10.2\n"),
+        ("omp", "omp v 18.11.0\n"),
+        ("claude-code", " 2.1.300 (Claude Code)\n"),
         ("claude-code", "2.1.300-beta.1 (Claude Code)\n"),
         ("claude-code", "2.1.295 (Claude Code)\n"),
     ],

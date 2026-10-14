@@ -110,6 +110,58 @@ def test_the_omp_probe_reports_an_unidentifiable_host_as_unobservable(runner: ob
     assert omp.probe_installed_host("omp", runner) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "banner",
+    [
+        "omp v 18.11.0\n",
+        "omp v  18.11.0\n",
+        " omp v18.11.0\n",
+        "\nomp v18.11.0\n",
+        "omp v18.11.0 \n",
+        "omp v18.11.0 beta\n",
+        "omp  v18.11.0\n",
+        "OMP v18.11.0\n",
+        "omp/18.11.0\n",
+        "omp v\t18.11.0\n",
+    ],
+)
+def test_the_omp_probe_yields_a_version_only_for_the_exact_banner(banner: str) -> None:
+    assert omp.probe_installed_host("omp", _runner(banner)) is None
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\n\nUSAGE\n", ""])
+def test_the_omp_probe_accepts_the_exact_banner_with_any_line_ending(ending: str) -> None:
+    assert omp.probe_installed_host("omp", _runner(f"omp v18.11.0{ending}")) == InstalledHost(
+        "18.11.0", "json-protocol=3"
+    )
+
+
+@pytest.mark.parametrize(
+    "banner",
+    [
+        " 2.1.300 (Claude Code)\n",
+        "2.1.300  (Claude Code)\n",
+        "2.1.300 (Claude Code) \n",
+        "2.1.300 (claude code)\n",
+        "2.1.300\n",
+        "(Claude Code)\n",
+        "  (Claude Code)\n",
+        "\n2.1.300 (Claude Code)\n",
+        "Claude Code 2.1.300\n",
+        "2.1.300 extra (Claude Code)\n",
+    ],
+)
+def test_the_claude_probe_yields_a_version_only_for_the_exact_banner(banner: str) -> None:
+    assert claude_code.probe_installed_host("claude", _runner(banner)) is None
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", ""])
+def test_the_claude_probe_accepts_the_exact_banner_with_any_line_ending(ending: str) -> None:
+    assert claude_code.probe_installed_host(
+        "claude", _runner(f"2.1.300 (Claude Code){ending}")
+    ) == InstalledHost("2.1.300", "stream-json-schema=1")
+
+
 def test_the_claude_probe_observes_the_version_and_declares_the_protocol() -> None:
     assert claude_code.probe_installed_host(
         "claude", _runner("2.1.296 (Claude Code)\n")
