@@ -171,6 +171,16 @@ def _require_free_space(descriptor: int, needed: int) -> None:
         )
 
 
+def _write_all(descriptor: int, data: bytes) -> None:
+    """Write all of ``data``: ``os.write`` may take only part of it (a signal, a full pipe)."""
+    view = memoryview(data)
+    while view:
+        count = os.write(descriptor, view)
+        if count <= 0:
+            raise TreeTransferError("the host refused to take more of a file")
+        view = view[count:]
+
+
 def _write_file(parent: int, name: str, source: IO[bytes], size: int, mode: int) -> None:
     _require_free_space(parent, size)
     descriptor = os.open(
@@ -182,7 +192,7 @@ def _write_file(parent: int, name: str, source: IO[bytes], size: int, mode: int)
             chunk = source.read(min(_CHUNK, size - written))
             if not chunk:
                 raise TreeTransferError("the archive ended inside a file")
-            os.write(descriptor, chunk)
+            _write_all(descriptor, chunk)
             written += len(chunk)
         os.fchmod(descriptor, (mode & _FILE_BITS) | 0o600)
     finally:

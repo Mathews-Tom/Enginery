@@ -237,6 +237,46 @@ def test_a_truncated_archive_is_refused(tmp_path: Path) -> None:
         _extract(io.BytesIO(whole[:700]), tmp_path / "out")
 
 
+class _ShortWriter:
+    """``os`` as the store sees it, with ``write`` taking at most three bytes per call."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def write(self, descriptor: int, data: bytes | memoryview) -> int:
+        self.calls += 1
+        return os.write(descriptor, bytes(data[:3]))
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def test_a_file_is_written_whole_when_the_host_takes_only_part_of_each_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = bytes(range(256)) * 40
+    writer = _ShortWriter()
+    monkeypatch.setattr(store, "os", writer)
+
+    _extract(_archive(_file("big.bin", content)), tmp_path / "out")
+
+    assert (tmp_path / "out" / "big.bin").read_bytes() == content
+    assert writer.calls >= len(content) // 3
+
+
+def test_a_write_that_makes_no_progress_is_refused_rather_than_spun_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Stuck(_ShortWriter):
+        def write(self, descriptor: int, data: bytes | memoryview) -> int:
+            return 0
+
+    monkeypatch.setattr(store, "os", Stuck())
+
+    with pytest.raises(TreeTransferError, match="refused to take more"):
+        _extract(_archive(_file("a", b"data")), tmp_path / "out")
+
+
 def test_replace_tree_swaps_only_a_complete_extraction(tmp_path: Path) -> None:
     destination = tmp_path / "workspace"
     destination.mkdir()
