@@ -807,8 +807,8 @@ Each worker attempt runs with a non-root uid/gid, every capability dropped,
 `no-new-privileges`, a read-only root filesystem with tmpfs scratch and home,
 hard memory/swap/CPU/pids limits, no devices, no privilege, no Docker socket,
 no host-home mount, a private IPC namespace, and an attachment to a single
-`--internal` container network. The only host paths mounted are the run's
-task-local workspace and a per-attempt result directory, both read-write. The
+`--internal` container network. No host path is mounted: the workspace and the
+result tree are per-attempt tmpfs volumes, both read-write. The
 environment is an explicit allowlist, never inherited from the host. The
 engine's own report of the created container is checked against the profile
 before the worker starts, and a launch that is weaker than the profile in any
@@ -888,12 +888,50 @@ inode cap the kernel enforces (4 GiB and 500,000 entries for the workspace, 1 Gi
 write past a cap fails inside the worker with `ENOSPC`, however many processes write
 at once, and nothing on the host measures or races the worker. This works the same on
 Docker Desktop and on rootless Docker. The receipt records the mechanism
-(`kernel-capped-volume`) and the numbers. tmpfs pages are charged to the container's
-memory limit, so that limit (4 GiB by default) is the real ceiling on what a worker
-can keep in the two volumes together with `/tmp` and the home directory; a worker that
-fills them is ended by the kernel's out-of-memory kill, an ordinary non-zero exit.
-Each file is additionally limited by the kernel's per-file size limit. Orphaned
-volumes of a dead launcher are removed by reconcile.
+(`kernel-capped-volume`) and the numbers. Both volumes are mounted `nosuid,nodev`, so
+a setuid file or device node a worker writes there is inert. The result volume is also
+`noexec`: it holds only the result file and the bundle, which the host reads back as
+data. The workspace cannot be `noexec`, because the worker runs the project's own
+commands, scripts and compiled extensions from it (a `noexec` mount also refuses the
+executable mappings of shared libraries). Each file is additionally limited by the
+kernel's per-file size limit. Orphaned volumes of a dead launcher are removed by
+reconcile.
+
+#### Engine memory
+
+tmpfs pages live in the engine's memory, never on its disk, and are accounted in two
+different ways. Pages the worker writes (into either volume, `/tmp` or its home
+directory) are charged to the worker's memory limit (4 GiB by default), so a worker
+that fills them is ended by the kernel's out-of-memory kill, an ordinary non-zero
+exit. The pages the launcher seeds into the workspace volume with `docker cp` are
+not charged to the worker or to any container, because the engine writes them.
+Measured on Docker Desktop 29.8.2 (20 GiB VM): a container limited to 64 MiB that held
+a 287 MiB seeded volume reported 0 bytes of shmem and 7 MiB of memory in its own
+cgroup, while the VM's shmem rose from 0.5 MiB to 287 MiB. With 200 MiB seeded, a
+worker limited to 64 MiB was killed after it wrote 58.5 MiB beside the seeded
+content, and the VM's shmem was then 259 MiB. One attempt therefore needs, in the
+engine's memory, the seeded workspace plus the worker's memory limit plus headroom
+for the engine itself (1 GiB).
+
+The volume objects persist until they are removed, but their content exists only
+while a container has them mounted. The launcher's store container holds the
+volumes for the attempt; once it is removed the pages are freed at once (measured:
+shmem back to 0.5 MiB). The launcher removes the store container, the worker and
+both volumes after every attempt, and reconcile removes what a dead launcher left,
+so nothing keeps engine memory between attempts.
+
+The engine's memory is the memory of the virtual machine that runs it: Docker
+Desktop's Settings, Resources, Memory (reported as `MemTotal` by `docker info`), or
+the Lima instance's memory (`limactl edit --memory <GiB> <instance>`, then restart
+it). A rootless engine on a Linux host has the host's memory. Admission requires
+`MemTotal` of at least the worker's memory limit plus 1 GiB (5 GiB for the default
+profile) and otherwise holds the run as `runner_unqualified`, naming both numbers and
+never falling back to trusted-local mode. The launcher then caps the seeded workspace
+at `MemTotal` minus that floor (or the volume's cap, if lower) and refuses an attempt
+whose workspace is larger. The check reads total memory, not free memory, and covers
+one attempt: for N attempts at once provision N times the worker limit, plus every
+seeded workspace, plus the headroom. A default-profile worker with a workspace at its
+4 GiB cap needs 9 GiB.
 
 The workspace, result and intake directories must sit in one private parent
 (operator-owned, mode `0700`); the launcher refuses a launch otherwise. No host
