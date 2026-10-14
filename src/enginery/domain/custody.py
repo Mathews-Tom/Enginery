@@ -373,6 +373,15 @@ def build_custody_receipt(
     )
 
 
+def custody_receipt_matches_host(receipt_state: object, host: CustodyHost) -> bool:
+    """Whether a retained receipt was built for ``host`` (a macOS receipt never serves the VM).
+
+    The state is decoded strictly, so a malformed or tampered receipt raises
+    ``InvalidInputError`` rather than matching.
+    """
+    return AuthCustodyReceipt.from_state(receipt_state).host is host
+
+
 def _findings(token_file: TokenFileMetadata) -> tuple[str, ...]:
     """Apply the relay's token-file rules (exists, regular, no symlink, owner, 0600) on any host."""
     if not token_file.exists:
@@ -453,4 +462,5 @@ __all__ = [
     "Endpoint",
     "TokenFileMetadata",
     "build_custody_receipt",
+    "custody_receipt_matches_host",
 ]

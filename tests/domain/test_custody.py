@@ -12,6 +12,7 @@ from enginery.domain.custody import (
     Endpoint,
     TokenFileMetadata,
     build_custody_receipt,
+    custody_receipt_matches_host,
 )
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -193,3 +194,17 @@ def test_token_metadata_must_be_consistent() -> None:
         TokenFileMetadata("/t", False, False, False, "0600", 1)
     with pytest.raises(InvalidInputError):
         TokenFileMetadata("/t", True, True, False, "600", 1)
+
+
+@pytest.mark.parametrize("built_for", list(CustodyHost))
+def test_a_receipt_matches_only_the_host_it_was_built_for(built_for: CustodyHost) -> None:
+    state = json.loads(json.dumps(_receipt(built_for).to_state()))
+    for host in CustodyHost:
+        assert custody_receipt_matches_host(state, host) is (host is built_for)
+
+
+def test_host_comparison_refuses_a_tampered_receipt() -> None:
+    state = json.loads(json.dumps(_receipt().to_state()))
+    state["host"] = "windows"
+    with pytest.raises(InvalidInputError):
+        custody_receipt_matches_host(state, CustodyHost.MACOS)
