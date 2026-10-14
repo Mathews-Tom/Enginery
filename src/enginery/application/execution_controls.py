@@ -43,9 +43,11 @@ def native_control_arguments(
 
 
 OBSERVED_HOST_FLAG = "--observed-host-version"
-"""Worker-wrapper flag that carries the version observed at launch in the persisted command.
+"""Worker-wrapper flag that carries the version observed when the command was built.
 
-The supervised worker ignores it. It exists so the launch-time observation survives in the
+The supervised worker ignores it. It exists so that observation (made when the dispatch
+command was built, which for queued work is when it was queued, not when the process
+later starts) survives in the
 durable dispatch record, from which a later collection reads it back instead of probing a
 host that may have changed since.
 """
@@ -72,7 +74,8 @@ def prepare_native_controls(
     never probed. A selection that asks for any control must name the catalog in use,
     carry exact pins in the host's own vocabulary, and run against a host version the catalog
     accepts and the protocol the flags were tested with; otherwise it is rejected before
-    launch. The probe that proved the host acceptable is the launch-time observation, and is
+    launch. The probe that proved the host acceptable is the observation made while the command is
+    built (for queued work, when it was queued), and is
     returned with the flags.
     """
     require_selection_harness(selection, harness=harness)
@@ -88,7 +91,7 @@ def prepare_native_controls(
 
 
 def launch_observation(command: tuple[str, ...] | None) -> str | None:
-    """Return the launch-time host version recorded in a persisted supervised command.
+    """Return the host version recorded in a persisted supervised command when it was built.
 
     Only the worker wrapper's own arguments, before the first ``--``, are read; the host
     command that follows is never searched.
@@ -161,7 +164,7 @@ def build_receipt(
     evidence description comes from the catalog; effective effort has no extractor, so it is
     unknown and says whether the catalog records any evidence for it. A selection that asks
     for a native control also records the host versions it answers: the bound range, the
-    tested version and the version observed when the host was launched, never one probed
+    tested version and the version observed when the dispatch command was built, never one probed
     later and never reported as tested.
     """
     require_selection_harness(selection, harness=harness)

@@ -7,8 +7,8 @@ explicit UNKNOWN. An effective value is never copied from, defaulted to, or infe
 the request: a host that does not report a control leaves it unknown.
 
 A receipt also records the host versions it answers: the range the catalog accepted, the
-one version the catalog tested, and the version observed when the host was launched. The
-observed version is never presented as tested.
+one version the catalog tested, and the version observed when the dispatch command was
+built (for queued work, when it was queued). The observed version is never presented as tested.
 """
 
 from __future__ import annotations
@@ -93,8 +93,9 @@ class HostObservation:
 
     ``accepted_executable_versions`` is the bound range (absent for an exact-bound
     selection), ``tested_executable_version`` the version the catalog tested, and
-    ``observed_executable_version_at_launch`` the installed version seen when the host was
-    launched, never one probed later, or None when no launch observation was recorded.
+    ``observed_executable_version_at_launch`` the installed version seen when the dispatch
+    command was built (for queued work, when it was queued; not necessarily the moment the
+    process started), never one probed at collection, or None when none was recorded.
     """
 
     accepted_executable_versions: str | None

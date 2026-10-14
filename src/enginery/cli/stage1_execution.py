@@ -74,8 +74,9 @@ def _host(
     The observed version is never presented as tested: an in-range version the catalog
     accepts is reported as accepted and observed, and only the catalog's own tested
     version is reported as tested. The version observed at bind time and the one observed
-    when the host was launched are reported apart, with whether they differ; a change inside
-    the accepted range is a difference to see, not a hold. The version observed by the
+    when the dispatch command was built (for queued work, when it was queued; reported as
+    ``..._at_launch``) are reported apart, with whether they differ; a change inside the
+    accepted range is a difference to see, not a hold. The version observed by the
     binding check this report was produced under (the check every dispatch, resume and
     diagnostic runs) is reported as a third, separate observation.
     """
