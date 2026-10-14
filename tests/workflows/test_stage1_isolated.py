@@ -738,6 +738,30 @@ def test_a_symbolic_base_reaches_the_worker_as_a_full_object_id_and_the_bundle_v
     assert _git("--git-dir", str(intake), "rev-parse", f"{head}^", cwd=tmp_path) == oid
 
 
+def test_a_later_attempt_reuses_the_first_resolved_base_after_the_base_name_moves(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build(
+        ledger_service,
+        tmp_path,
+        runner=_isolated(),
+        admission=ScriptedAdmission(),
+        symbolic_base="main",
+    )
+    first = _git("rev-parse", "main", cwd=built.repository)
+    _qualify(built)
+    dispatch = _dispatch(built)
+    _reap(dispatch)
+    assert dispatch.task.base_revision == first
+    (built.repository / "tracked.txt").write_text("moved\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "the base name moves", cwd=built.repository)
+    assert _git("rev-parse", "main", cwd=built.repository) != first
+    # The reservation is gone by the time a later generation is dispatched or collected.
+    monkeypatch.setattr(built.runtime, "read_workspace_reservation", lambda repository_id: None)
+
+    assert built.service._implementation_base(built.request) == first
+
+
 def test_a_trusted_local_worker_still_pushes_and_carries_no_bundle_binding(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:

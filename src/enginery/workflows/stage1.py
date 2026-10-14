@@ -1496,12 +1496,21 @@ class Stage1RunService:
         """Return the base the implementation worker and its verification must share.
 
         An isolated worker clones only what the base reaches, so a branch or tag name does not
-        resolve inside its clone. The base is therefore a full object id: the one an existing
-        reservation already holds, else the one the repository resolves now, which the new
-        reservation then records verbatim. A trusted-local run keeps the requested revision.
+        resolve inside its clone. The base is therefore a full object id, resolved once: the
+        first implementation dispatch binds it to the run's implementation node, and every later
+        attempt (a repair generation, a retry, the collection of a result) reuses it, so a base
+        name that has since moved cannot change what the run builds on. Before any dispatch the
+        id an existing reservation holds is used, else the one the repository resolves now. A
+        trusted-local run keeps the requested revision.
         """
         if not request.runner.isolated_mode:
             return request.run.base_revision
+        if self._node_state_optional(request.run.id, "implement") is not None:
+            bound = self.runtime.read_node_request(
+                run_id=str(request.run.id), node_id="implement"
+            ).base_revision
+            if bound != request.run.base_revision:
+                return bound
         reservation = self.runtime.read_workspace_reservation(request.repository_id)
         if (
             reservation is not None
