@@ -16,7 +16,7 @@ What the evidence rests on:
 * the gateway token value is searched for in every artifact source, in-process, before any of them
   is scrubbed or cleaned up (the value is never printed);
 * a conforming auth-custody receipt for the host is required (and recorded by digest);
-* a gateway 401/403/429, a missing billing proof or a deadline in a live run is a HOLD with a
+* a gateway 401/403/429, no reported usage figures or a deadline in a live run is a HOLD with a
   stated reason, never a failure of the product.
 """
 
@@ -107,7 +107,6 @@ AUTH_REQUIRED: dict[str, str] = {
     "auth-custody-receipt": (
         "A conforming auth-custody receipt for this host exists and its digest is recorded"
     ),
-    "auth-session-count": "Exactly one authentication session was started",
     "auth-harness-container-count": (
         "Exactly one harness container was created during the session, counted host-side from "
         "the engine's event stream"
@@ -281,6 +280,7 @@ def supervise(
 @dataclass(frozen=True, slots=True)
 class ContainerCount:
     harness: tuple[str, ...]
+    stores: tuple[str, ...]
     others: tuple[str, ...]
 
 
@@ -294,6 +294,7 @@ def count_created_containers(
     are listed separately and never counted.
     """
     harness: list[str] = []
+    stores: list[str] = []
     others: list[str] = []
     for line in events_text.splitlines():
         line = line.strip()
@@ -312,12 +313,17 @@ def count_created_containers(
         name = str(attributes.get("name", ""))
         if name == relay_name:
             continue
+        if name == f"{expected_name}-store":
+            # The attempt's store container seeds and reads back the capped volumes; it is the
+            # launcher's own helper, not a second harness.
+            stores.append(name)
+            continue
         label = name or str(event.get("id", ""))[:12]
         if name == expected_name or attributes.get(OPERATION_LABEL) == operation_id:
             harness.append(label)
         else:
             others.append(label)
-    return ContainerCount(tuple(harness), tuple(others))
+    return ContainerCount(tuple(harness), tuple(stores), tuple(others))
 
 
 def engine_time(gate: Gate) -> str | None:
@@ -426,7 +432,7 @@ def parse_relay_log(text: str) -> list[dict[str, str]]:
 def gateway_hold_reason(
     log: Sequence[Mapping[str, str]], *, live: bool, usage: Mapping[str, Any] | None
 ) -> str | None:
-    """Why the session cannot be judged: the gateway refused it or no billing proof exists.
+    """Why the session cannot be judged: the gateway refused it or no usage was reported.
 
     Only a *forwarded* request's status is the gateway's answer; the relay's own refusals are
     product behaviour and stay failures.
@@ -445,8 +451,8 @@ def gateway_hold_reason(
             )
     if live and not usage:
         return (
-            "no billing proof: the harness output carried no usage figures, so the session cannot "
-            "be shown to have run on the subscription"
+            "no usage figures were reported: the harness output carried none, so the session "
+            "cannot be shown to have run on the subscription"
         )
     return None
 
@@ -486,7 +492,7 @@ def _custody_host() -> CustodyHost:
 
 
 def load_live_custody(
-    path: Path | None, *, gateway_url: str, token_file: Path
+    path: Path | None, *, gateway_url: str, token_file: Path, host: CustodyHost | None = None
 ) -> AuthCustodyReceipt:
     """The operator's receipt, or a ``GateHoldError`` saying exactly what is missing or wrong."""
     if path is None:
@@ -504,6 +510,12 @@ def load_live_custody(
         raise
     except (OSError, ValueError, EngineryError) as error:
         raise GateHoldError(f"the custody receipt cannot be used: {error}") from error
+    gate_host = _custody_host() if host is None else host
+    if receipt.host is not gate_host:
+        raise GateHoldError(
+            f"the custody receipt was made for {receipt.host.value}, but this gate runs on "
+            f"{gate_host.value}; make one on this host"
+        )
     if not receipt.conforms:
         raise GateHoldError(
             "the custody receipt does not conform: " + "; ".join(receipt.findings)[:400]
@@ -886,14 +898,6 @@ def run(gate: Gate) -> None:
         raw_artifacts=[custody_ref],
     )
     recorder.assertion(
-        "auth-session-count",
-        passed=counter.count == 1,
-        commands=session_command,
-        observed={"sessions_started_by_driver": counter.count, "container": container},
-        expected="1",
-        observer={"relay_requests_total": len(log)},
-    )
-    recorder.assertion(
         "auth-harness-container-count",
         passed=created is not None
         and len(created.harness) == 1
@@ -907,6 +911,7 @@ def run(gate: Gate) -> None:
             "window": {"start": window_start, "end": window_end},
             "harness_containers_created": None if created is None else list(created.harness),
             "harness_container_count": None if created is None else len(created.harness),
+            "store_containers_created": None if created is None else list(created.stores),
             "other_containers_created": None if created is None else list(created.others),
             "expected_container": container,
             "events_readable": created is not None,

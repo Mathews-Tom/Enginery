@@ -284,9 +284,10 @@ def test_the_relays_own_refusals_are_not_gateway_holds() -> None:
     assert auth.gateway_hold_reason([_entry("deny", "403")], live=False, usage=None) is None
 
 
-def test_a_live_session_without_usage_has_no_billing_proof() -> None:
+def test_a_live_session_without_usage_is_a_hold_with_an_accurate_reason() -> None:
     reason = auth.gateway_hold_reason([_entry("forward", "200")], live=True, usage=None)
-    assert reason is not None and "billing proof" in reason
+    assert reason is not None and "no usage figures were reported" in reason
+    assert "billing" not in reason
     assert auth.gateway_hold_reason([_entry("forward", "200")], live=True, usage={"x": 1}) is None
     assert auth.gateway_hold_reason([_entry("forward", "200")], live=False, usage=None) is None
 
@@ -343,7 +344,10 @@ def test_a_conforming_receipt_is_accepted_and_has_a_digest(tmp_path: Path) -> No
     token_file = _token_file(tmp_path)
     path = _write_receipt(tmp_path, token_file, "http://gateway.local:8080")
     receipt = auth.load_live_custody(
-        path, gateway_url="http://gateway.local:8080", token_file=token_file
+        path,
+        gateway_url="http://gateway.local:8080",
+        token_file=token_file,
+        host=CustodyHost.MACOS,
     )
     assert receipt.conforms and str(receipt.digest).startswith("sha256:")
 
@@ -357,17 +361,23 @@ def test_a_non_conforming_receipt_is_held(tmp_path: Path) -> None:
     token_file = _token_file(tmp_path, mode=0o644)
     path = _write_receipt(tmp_path, token_file, "http://g:1")
     with pytest.raises(GateHoldError, match="does not conform"):
-        auth.load_live_custody(path, gateway_url="http://g:1", token_file=token_file)
+        auth.load_live_custody(
+            path, gateway_url="http://g:1", token_file=token_file, host=CustodyHost.MACOS
+        )
 
 
 def test_a_receipt_for_another_gateway_or_a_now_loosened_token_file_is_held(tmp_path: Path) -> None:
     token_file = _token_file(tmp_path)
     path = _write_receipt(tmp_path, token_file, "http://g:1")
     with pytest.raises(GateHoldError, match="different gateway"):
-        auth.load_live_custody(path, gateway_url="http://other:1", token_file=token_file)
+        auth.load_live_custody(
+            path, gateway_url="http://other:1", token_file=token_file, host=CustodyHost.MACOS
+        )
     token_file.chmod(0o644)
     with pytest.raises(GateHoldError, match="no longer conforms"):
-        auth.load_live_custody(path, gateway_url="http://g:1", token_file=token_file)
+        auth.load_live_custody(
+            path, gateway_url="http://g:1", token_file=token_file, host=CustodyHost.MACOS
+        )
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o644
 
 
@@ -377,7 +387,30 @@ def test_an_unreadable_or_malformed_receipt_is_held(tmp_path: Path) -> None:
     garbage.write_text("{not json", encoding="utf-8")
     for path in (garbage, tmp_path / "absent.json"):
         with pytest.raises(GateHoldError, match="cannot be used"):
-            auth.load_live_custody(path, gateway_url="http://g:1", token_file=token_file)
+            auth.load_live_custody(
+                path, gateway_url="http://g:1", token_file=token_file, host=CustodyHost.MACOS
+            )
+
+
+def test_a_receipt_for_the_other_host_is_held(tmp_path: Path) -> None:
+    token_file = _token_file(tmp_path)
+    path = _write_receipt(tmp_path, token_file, "http://g:1")
+    with pytest.raises(GateHoldError, match=r"macos.*ubuntu-lima"):
+        auth.load_live_custody(
+            path, gateway_url="http://g:1", token_file=token_file, host=CustodyHost.UBUNTU_LIMA
+        )
+
+
+def test_a_tampered_receipt_is_held(tmp_path: Path) -> None:
+    token_file = _token_file(tmp_path)
+    path = _write_receipt(tmp_path, token_file, "http://g:1")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["host"] = "plan9"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(GateHoldError, match="cannot be used"):
+        auth.load_live_custody(
+            path, gateway_url="http://g:1", token_file=token_file, host=CustodyHost.MACOS
+        )
 
 
 def test_the_local_receipt_is_built_over_the_stub_token_file_and_conforms(tmp_path: Path) -> None:
@@ -421,3 +454,15 @@ def test_a_second_session_is_refused() -> None:
     counter.begin()
     with pytest.raises(RuntimeError):
         counter.begin()
+
+
+def test_the_tautological_session_count_assertion_is_gone() -> None:
+    assert "auth-session-count" not in auth.required_assertions(None)
+
+
+def test_the_attempts_store_container_is_not_a_second_harness() -> None:
+    counted = _count(
+        _create("enginery-me-store", operation="op-1"), _create("enginery-me", operation="op-1")
+    )
+    assert counted.harness == ("enginery-me",)
+    assert counted.stores == ("enginery-me-store",)
