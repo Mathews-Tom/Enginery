@@ -1586,14 +1586,25 @@ a positive control is not claimed for every assertion.
   genuine launcher refusal is classified as a refusal. The engine-side container log
   stays under its cap while a worker spams it. The disk bound of the workspace and
   result volumes is the kernel's: on small capped volumes (16 MiB workspace, 8 MiB
-  result, 4000 and 64 inodes) a write past a cap, an entry burst past an inode cap and
-  a burst of 8 parallel `fallocate` processes all fail with `ENOSPC` inside the worker,
-  no more than the cap is allocated (`statvfs` and allocated blocks inside the
-  container, and the bytes read back on the host), the launcher kills nothing (outcome
-  `exited`), the receipt records `kernel-capped-volume` with the profile's byte and
-  inode numbers, a symlink or FIFO planted in the result volume never reaches the
-  host, and a worker filling a tmpfs volume past its memory limit ends in an ordinary
-  exit 137 (`r-m3-disk-*`, `r-m3-memory-fill-exit-137`). A bundle whose tree exceeds
+  result, 4000 and 64 inodes) a write past a cap and an entry burst past an inode cap
+  fail with `ENOSPC` inside the worker, and so do the allocations of a burst of 8
+  parallel `fallocate` processes that each ask for less than the per-file limit (6 MiB
+  of 8 MiB) but together for more than the workspace holds (48 MiB of 16 MiB): some are
+  granted, the rest are refused with `No space left on device`, and a signal, a
+  missing command or any other failure fails the assertion. No more than the cap is
+  allocated (`statvfs` and allocated blocks inside the container, and the bytes read
+  back on the host), the launcher kills nothing (outcome `exited`), and the receipt
+  records `kernel-capped-volume` with the profile's byte and inode numbers, which equal
+  the totals the kernel reports inside the container (the receipt's bounds are profile
+  values the launcher records after checking the engine's volume options; the `statvfs`
+  totals are the independent check). Each file is also limited by the kernel's per-file
+  limit, the smaller of the two volumes and recorded in the receipt: a file below it
+  is allocated, one above it that the volume would hold is ended by `SIGXFSZ` with
+  nothing allocated (`r-m3-disk-per-file-limit`). A symlink or FIFO planted in the
+  result volume never reaches the host; in the workspace, which is read back as data,
+  a symlink comes back as the same link, never followed, and a FIFO is skipped. A
+  worker filling a tmpfs volume past its memory limit ends in an ordinary exit 137
+  (`r-m3-disk-*`, `r-m3-memory-fill-exit-137`). A bundle whose tree exceeds
   the intake entry cap is refused during host verification before any host checkout.
   A candidate editing `.github/workflows/x.yml` is held with nothing pushed to the
   bare origin and is published only after the explicit approval. In the real image
@@ -1622,7 +1633,7 @@ a positive control is not claimed for every assertion.
 
 ### Which assertions are observed where
 
-The `runner-boundary` scenario records **63 required assertions** (64 with
+The `runner-boundary` scenario records **64 required assertions** (65 with
 `--gateway-url`, which adds `f-relay-real-gateway-models-and-denials`) and **5
 controls** (the positive controls that prove the observers can see what they claim
 to refuse: an unhardened container reaches a host listener, the worker's network code
@@ -1632,7 +1643,7 @@ has no violation, and admission admits the qualified selection). The table
 `scripts/factory_gate_boundary.py` assigns every assertion to exactly one site and a
 test keeps the counts below true.
 
-- **28 are decided from the host alone** (outside the container: the engine's
+- **27 are decided from the host alone** (outside the container: the engine's
   inspect output and event stream, the receipts, host files and hashes, the stub
   listeners' and upstream's logs, `docker logs`): `c-container-profile`,
   `d-network-host-listeners-zero-connections`, `e-bare-origin-unchanged`,
@@ -1640,7 +1651,7 @@ test keeps the counts below true.
   `g-limits-wall-time`, `g-limits-launcher-deadline`, `h-hooks-not-executed-on-host`,
   `h-engine-install-unchanged`, `h-validation-in-runner`, the six `i-*`, the four
   `z-*`, `r-m2-exit-125-spoof-classified`, `r-m3-container-log-bounded`,
-  `r-m3-disk-receipt-and-readback`, `r-m3-memory-fill-exit-137`,
+  `r-m3-memory-fill-exit-137`,
   `r-m4-protected-path-held-then-published`, `r-b1-fsmonitor-not-run-on-host` and
   `r-m7-weaker-container-flagged`.
 - **19 are decided from what the in-container probe itself reports**, which the host
@@ -1650,13 +1661,18 @@ test keeps the counts below true.
   `e-git-push-refused`, `e-scm-and-broker-network-refused`,
   `e-credentials-unreadable`, `h-image-paths-read-only` and
   `f-relay-models-filtered`.
-- **16 need both**, a probe observation and an independent host observation:
+- **18 need both**, a probe observation and an independent host observation:
   `f-relay-hardened-and-reachable`, `f-relay-allowed-routes-forwarded`,
   `f-relay-denied-zero-upstream`, `g-limits-pids`, `g-limits-cpu`,
   `r-m1-no-host-objects-in-workspace` (the container's object scan and the host
   clone's), the three `r-m2-*` result-forgery assertions, `r-m3-disk-enospc-bytes`,
   `r-m3-disk-enospc-inodes`, `r-m3-disk-parallel-fallocate-capped` (`statvfs` inside
-  the container and the bytes read back on the host), `r-m3-git-bomb-refused-at-intake`,
+  the container and the bytes read back on the host), `r-m3-disk-per-file-limit` (the
+  signal that ended the over-limit allocation and `RLIMIT_FSIZE` inside the container,
+  the receipt's recorded limit and the workspace read back on the host),
+  `r-m3-disk-receipt-and-readback` (the receipt's numbers against the kernel's `statvfs`
+  totals inside the container, and the workspace and result directory read back on the
+  host), `r-m3-git-bomb-refused-at-intake`,
   `r-m4-hooks-disabled-in-image` (the hook log is written in the workspace and read
   by the host), `r-m5-validation-and-none-mode-cannot-reach-relay` and
   `r-m5-concurrent-workers-isolated-networks`.
@@ -1777,8 +1793,15 @@ commands it ran, what it observed, what it expected and the independent host
 observation, the controls, the external-effect counts, and a `<name>.raw/`
 directory of raw artifacts beside it. The exit status is `0` only if every
 required assertion ran and passed, `1` if any failed or did not run, `2` for a
-usage error and `3` (verdict `hold`) when the engine, an image or a permission
-is missing. An assertion that cannot run fails or holds the run; none is skipped.
+usage error, `3` (verdict `hold`) when the engine, an image or a permission is
+missing, and `130` when the run was interrupted (Ctrl-C, SIGTERM or SIGHUP; what the
+run created is still removed before it exits). An assertion that cannot run fails or
+holds the run; none is skipped. At the end the run lists the engine's containers (the
+per-attempt store containers included), volumes and networks and fails if any it
+created remains, if it had to remove a store, a volume or an attempt network that the
+launcher should have removed itself, or if the engine could not be listed
+(`z-cleanup-no-stray-containers`). A run killed with SIGKILL cannot clean up: remove
+its `enginery-gate-<id>-*` networks and `enginery-*` containers and volumes by hand.
 
 ### The live authentication scenario
 
