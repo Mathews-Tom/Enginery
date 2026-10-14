@@ -8,6 +8,7 @@ environments the adapter used.
 
 from __future__ import annotations
 
+import base64
 import http.server
 import json
 import os
@@ -708,6 +709,36 @@ def test_a_planted_diff_driver_or_textconv_never_runs_while_paths_are_read(rig: 
     assert not marker.exists()
 
 
+class _AuthenticatingServer(http.server.BaseHTTPRequestHandler):
+    """Answers 401 to everything but one credential, which it answers 403 and records."""
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+def _serve_authenticating(
+    username: str, password: str
+) -> tuple[http.server.HTTPServer, str, list[str]]:
+    """Serve one URL; the list gains an entry for every request that carried the credential."""
+    authorized: list[str] = []
+    accepted = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+
+    class Handler(_AuthenticatingServer):
+        def do_GET(self) -> None:
+            if self.headers.get("Authorization") == accepted:
+                authorized.append(self.path)
+                self.send_response(403)
+            else:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="enginery-test"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}", authorized
+
+
 # --- worker-writable repository configuration ----------------------------------------------------
 
 
@@ -760,6 +791,82 @@ def test_a_credential_helper_planted_in_the_repository_never_runs_but_the_operat
 
     assert not planted_marker.exists(), "a helper from repository config received the credential"
     assert operator_marker.exists(), "the operator's own helper stays in charge"
+
+
+def _without_system_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the publisher see no system git configuration, whatever helper this machine has."""
+    monkeypatch.setattr(
+        git_publication,
+        "PUBLICATION_ENVIRONMENT_KEYS",
+        (*PUBLICATION_ENVIRONMENT_KEYS, "GIT_CONFIG_SYSTEM"),
+    )
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
+def test_an_operator_url_scoped_helper_survives_the_reset_and_a_planted_one_never_runs(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_system_git_config(monkeypatch)
+    planted = rig.root / "planted-helper.sh"
+    operators = rig.root / "operator-helper.sh"
+    planted_marker = rig.root / "planted-ran"
+    operator_marker = rig.root / "operator-ran"
+    _marker_script(planted, planted_marker, output="echo username=evil\necho password=evil\n")
+    _marker_script(operators, operator_marker, output="echo username=op\necho password=secret\n")
+    server, base, authorized = _serve_authenticating("op", "secret")
+    url = f"{base}/org/repo.git"
+    try:
+        git("remote", "set-url", "origin", url, cwd=rig.host)
+        # The shape `gh auth setup-git` writes: an empty reset, then a helper, per host.
+        (rig.home / ".gitconfig").write_text(
+            f'[credential "{base}"]\n\thelper =\n\thelper = !{operators}\n',
+            encoding="utf-8",
+        )
+        for repository in (rig.host, rig.source):
+            git("config", f"credential.{base}.helper", f"!{planted}", cwd=repository)
+            git("config", "credential.helper", f"!{planted}", cwd=repository)
+        head = _implement(rig)
+
+        with pytest.raises(ExternalConflictError):
+            rig.publisher().publish(rig.request(head))
+    finally:
+        server.shutdown()
+
+    assert authorized, "the operator's URL-scoped helper supplied the credential"
+    assert operator_marker.exists()
+    assert not planted_marker.exists(), "a helper from repository config received the credential"
+
+
+def test_url_scoped_helpers_are_re_emitted_after_the_reset_in_configuration_order(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_system_git_config(monkeypatch)
+    (rig.home / ".gitconfig").write_text(
+        "[credential]\n\thelper = generic\n"
+        '[credential "https://github.com"]\n\thelper =\n\thelper = !gh auth git-credential\n'
+        '[credential "https://gist.github.com"]\n\thelper = !gh auth git-credential\n',
+        encoding="utf-8",
+    )
+    git("config", "credential.https://evil.example.helper", "!planted", cwd=rig.host)
+    head = _implement(rig)
+
+    rig.publisher(wrapped=True).publish(rig.request(head))
+
+    (argv,) = (
+        [str(argument) for argument in entry["argv"]]  # type: ignore[attr-defined]
+        for entry in rig.invocations()
+        if "push" in entry["argv"]  # type: ignore[operator]
+    )
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+    helpers = [value for value in overrides if value.startswith("credential.")]
+    assert helpers == [
+        "credential.helper=",
+        "credential.helper=generic",
+        "credential.https://github.com.helper=",
+        "credential.https://github.com.helper=!gh auth git-credential",
+        "credential.https://gist.github.com.helper=!gh auth git-credential",
+    ]
+    assert not any("evil.example" in value or "planted" in value for value in overrides)
 
 
 def test_an_ssh_command_planted_in_the_repository_never_runs(rig: Rig) -> None:

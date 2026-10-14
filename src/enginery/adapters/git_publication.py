@@ -333,6 +333,9 @@ class GitBranchPublisher:
         operator's own user and system configuration says, so a worker-written
         ``credential.helper=!...`` or ``core.sshCommand`` in a shared repository config never
         runs with the operator's credentials while the operator's own helpers keep working.
+        The reset also clears URL-scoped helpers (``credential.https://host.helper``, the form
+        ``gh auth setup-git`` writes), so those entries are re-emitted too, in configuration
+        order and from the system and user files only.
         """
         if self._hardening_arguments is None:
             ssh_commands = self._operator_values("core.sshCommand")
@@ -344,15 +347,40 @@ class GitBranchPublisher:
                 "protocol.fd.allow=never",
                 f"core.sshCommand={ssh_commands[-1] if ssh_commands else 'ssh'}",
                 "credential.helper=",
-                *(
-                    f"credential.helper={helper}"
-                    for helper in self._operator_values("credential.helper")
-                ),
+                *(f"{key}={value}" for key, value in self._operator_credential_helpers()),
             ]
             self._hardening_arguments = tuple(
                 argument for setting in settings for argument in ("-c", setting)
             )
         return self._hardening_arguments
+
+    def _operator_credential_helpers(self) -> list[tuple[str, str]]:
+        """Every ``credential.helper`` and ``credential.<url>.helper`` of the operator, in order.
+
+        Read from the system then user configuration only, never a repository, so a helper a
+        worker planted next to the code is not among them. An empty value is kept: it is how
+        the operator's own configuration clears helpers collected before it.
+        """
+        entries: list[tuple[str, str]] = []
+        for scope in ("--system", "--global"):
+            completed = self._invoke(
+                [
+                    "config",
+                    "--includes",
+                    scope,
+                    "--null",
+                    "--get-regexp",
+                    r"^credential\.(.+\.)?helper$",
+                ],
+                cwd=None,
+            )
+            if completed.returncode != 0:
+                continue
+            for record in completed.stdout.split(b"\x00"):
+                key, separator, value = record.decode("utf-8", "replace").partition("\n")
+                if key and separator:
+                    entries.append((key, value))
+        return entries
 
     def _operator_values(self, key: str) -> list[str]:
         """Read ``key`` from the operator's system then user configuration only, never a repo."""
