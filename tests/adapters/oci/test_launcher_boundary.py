@@ -10,6 +10,7 @@ import dataclasses
 import io
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,18 +23,18 @@ from typing import Any
 
 import pytest
 
-from enginery.adapters.oci.engine import KIND_DOCKER_DESKTOP, OciEngine
+from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import (
     BUNDLE_FILE_NAME,
     create_arguments,
     max_file_bytes,
     resource_bounds,
+    store_names_for,
 )
 from enginery.adapters.oci.launcher import (
     EXIT_DEADLINE,
     EXIT_FAULT,
     StopSignal,
-    needs_open_permissions,
     run_launcher,
 )
 from enginery.adapters.oci.reconcile import reconcile_runner_containers
@@ -43,9 +44,9 @@ from enginery.adapters.runner_launch import (
     read_launch_outcome,
     require_exited,
 )
-from enginery.domain.errors import HumanActionRequiredError, WorkerFailureError
+from enginery.domain.errors import WorkerFailureError
 from enginery.domain.runner import (
-    DISK_BOUND_HOST_MONITOR,
+    DISK_BOUND_KERNEL_VOLUME,
     ImageIdentity,
     LaunchOutcome,
     LaunchSpec,
@@ -61,7 +62,6 @@ from .support import (
     INNER,
     PERMISSIONS,
     PERMISSIONS_WITHOUT_ARGUMENTS,
-    ROOTLESS_INFO,
     FakeDocker,
     host_probe,
     make_spec,
@@ -75,7 +75,6 @@ def _run(
     *,
     inner: tuple[str, ...] = INNER,
     stop: StopSignal | None = None,
-    poll: float = 0.02,
     slack: int = 30,
 ) -> tuple[int, str]:
     stream = io.StringIO()
@@ -88,7 +87,6 @@ def _run(
         stderr=stream,
         stop=stop,
         deadline_slack_seconds=slack,
-        poll_seconds=poll,
     )
     return code, stream.getvalue()
 
@@ -99,7 +97,7 @@ def _outcome(spec: LaunchSpec) -> LaunchOutcome:
 
 
 def _nonce_given_to_the_worker(fake: FakeDocker) -> str:
-    (create,) = fake.calls_of("create")
+    *_, create = fake.calls_of("create")  # the worker is created after the store container
     return create[create.index("--nonce") + 1]
 
 
@@ -252,7 +250,9 @@ def test_the_receipt_records_the_bound_mechanism_and_the_harness_identity(
     assert receipt.harness_version == "2.1.4"
     assert receipt.harness_protocol == "a" * 64
     assert receipt.bounds is not None
-    assert receipt.bounds.disk_mechanism == DISK_BOUND_HOST_MONITOR
+    assert receipt.bounds.disk_mechanism == DISK_BOUND_KERNEL_VOLUME == "kernel-capped-volume"
+    assert receipt.bounds.poll_seconds is None  # nothing on the host measures a kernel cap
+    assert "poll_seconds" not in receipt.bounds.to_state()
     assert receipt.bounds == resource_bounds(spec.profile)
     assert receipt.bounds.workspace_bytes == 4096 * 1024 * 1024
     assert receipt.bounds.out_bytes == 1024 * 1024 * 1024
@@ -311,12 +311,16 @@ def test_a_stale_result_and_bundle_are_removed_before_the_container_starts(
     old_nonce = _plant_stale_attempt(spec)
     at_start: list[tuple[bool, bool, str]] = []
     out = Path(spec.out_path)
-    fake_docker.hooks["start"] = lambda _args: at_start.append(
-        (
-            os.path.lexists(out / spec.result_name),
-            os.path.lexists(out / BUNDLE_FILE_NAME),
-            _outcome(spec).nonce,
+    fake_docker.hooks["start"] = lambda args: (
+        at_start.append(
+            (
+                os.path.lexists(out / spec.result_name),
+                os.path.lexists(out / BUNDLE_FILE_NAME),
+                _outcome(spec).nonce,
+            )
         )
+        if args[1] == spec.container_name
+        else None
     )
 
     code, _ = _run(spec, fake_docker)
@@ -347,8 +351,10 @@ def test_a_stale_result_of_any_kind_is_removed_and_never_followed(
         (result / "inner").write_text("x", encoding="utf-8")
         bundle.mkdir()
     present: list[tuple[bool, bool]] = []
-    fake_docker.hooks["start"] = lambda _args: present.append(
-        (os.path.lexists(result), os.path.lexists(bundle))
+    fake_docker.hooks["start"] = lambda args: (
+        present.append((os.path.lexists(result), os.path.lexists(bundle)))
+        if args[1] == spec.container_name
+        else None
     )
 
     code, _ = _run(spec, fake_docker)
@@ -464,140 +470,88 @@ def test_a_mapping_without_arguments_asks_nothing_of_the_command(
     assert code == 0
 
 
-# --- the disk bound ---------------------------------------------------------------------
+# --- the disk bound: kernel-capped volumes -----------------------------------------------
 
 
-def _write(path: Path, size: int) -> None:
-    with path.open("wb") as handle:
-        handle.write(b"x" * size)
-
-
-def test_a_worker_that_outgrows_the_workspace_bound_is_killed_and_the_attempt_held(
+def test_the_workspace_and_result_trees_are_volumes_capped_at_the_profiles_numbers(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1, stop_grace_seconds=1))
-    spec = make_spec(tmp_path, profile=profile, time_budget_seconds=1)
-    fake_docker.hold_running = True
-    fake_docker.hooks["start"] = lambda _args: _write(tmp_path / "workspace" / "big.bin", 2 << 20)
-
-    code, stderr = _run(spec, fake_docker, slack=0)
-
-    assert code == EXIT_FAULT
-    assert "workspace directory exceeds its 1048576-byte disk bound" in stderr
-    verbs = fake_docker.verbs
-    assert verbs.index("start") < verbs.index("kill") < verbs.index("rm")
-    assert fake_docker.containers == {}
-    outcome = _outcome(spec)
-    assert outcome.state is OutcomeState.BOUND_EXCEEDED
-    with pytest.raises(HumanActionRequiredError, match="disk bound"):
-        require_exited(outcome, what="worker")
-
-
-def test_a_burst_writer_that_exits_before_the_first_measurement_is_still_held(
-    fake_docker: FakeDocker, tmp_path: Path
-) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1, stop_grace_seconds=1))
-    spec = make_spec(tmp_path, profile=profile, time_budget_seconds=1)
-    # The container writes past the cap and exits at once, before any poll could have run.
-    fake_docker.hooks["start"] = lambda _args: _write(tmp_path / "workspace" / "big.bin", 2 << 20)
-
-    code, stderr = _run(spec, fake_docker, slack=0)
-
-    assert code == EXIT_FAULT
-    assert "workspace directory exceeds its 1048576-byte disk bound" in stderr
-    assert _outcome(spec).state is OutcomeState.BOUND_EXCEEDED
-
-
-def test_a_worker_that_outgrows_the_result_bound_is_killed(
-    fake_docker: FakeDocker, tmp_path: Path
-) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(out_mib=1, stop_grace_seconds=1))
-    spec = make_spec(tmp_path, profile=profile, time_budget_seconds=1)
-    fake_docker.hold_running = True
-    fake_docker.hooks["start"] = lambda _args: _write(tmp_path / "out" / "big.bin", 2 << 20)
-
-    code, stderr = _run(spec, fake_docker, slack=0)
-
-    assert code == EXIT_FAULT
-    assert "result directory exceeds its 1048576-byte disk bound" in stderr
-    assert _outcome(spec).state is OutcomeState.BOUND_EXCEEDED
-
-
-def test_a_worker_that_creates_too_many_entries_is_killed(
-    fake_docker: FakeDocker, tmp_path: Path
-) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(workspace_inodes=20, stop_grace_seconds=1))
-    spec = make_spec(tmp_path, profile=profile, time_budget_seconds=1)
-    fake_docker.hold_running = True
-
-    def flood(_args: tuple[str, ...]) -> None:
-        for number in range(50):
-            (tmp_path / "workspace" / f"f{number}").write_bytes(b"")
-
-    fake_docker.hooks["start"] = flood
-
-    code, stderr = _run(spec, fake_docker, slack=0)
-
-    assert code == EXIT_FAULT
-    assert "workspace directory exceeds its 20-entry bound" in stderr
-    assert _outcome(spec).state is OutcomeState.BOUND_EXCEEDED
-
-
-def test_a_tree_the_launcher_cannot_read_cannot_be_bounded_and_is_killed(
-    fake_docker: FakeDocker, tmp_path: Path
-) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(stop_grace_seconds=1))
-    spec = make_spec(tmp_path, profile=profile, time_budget_seconds=1)
-    fake_docker.hold_running = True
-    sealed = tmp_path / "workspace" / "sealed"
-
-    def seal(_args: tuple[str, ...]) -> None:
-        sealed.mkdir()
-        (sealed / "hidden.bin").write_bytes(b"x" * 1024)
-        sealed.chmod(0)
-
-    fake_docker.hooks["start"] = seal
-    try:
-        code, stderr = _run(spec, fake_docker, slack=0)
-    finally:
-        sealed.chmod(0o700)
-
-    assert code == EXIT_FAULT
-    assert "unreadable entry" in stderr
-    assert _outcome(spec).state is OutcomeState.BOUND_EXCEEDED
-
-
-def test_a_worker_within_its_bounds_is_not_disturbed(
-    fake_docker: FakeDocker, tmp_path: Path
-) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1, out_mib=1))
+    profile = RunnerProfile(
+        resources=ResourceLimits(
+            workspace_mib=8, out_mib=2, workspace_inodes=64, out_inodes=16, memory_mib=256
+        )
+    )
     spec = make_spec(tmp_path, profile=profile)
-    fake_docker.hold_running = True
-    fake_docker.hooks["start"] = lambda _args: _write(tmp_path / "workspace" / "ok.bin", 64 << 10)
-    fake_docker.hooks["wait"] = lambda _args: threading.Timer(
-        0.3, fake_docker.finish, (spec.container_name, 0)
-    ).start()
+    names = store_names_for(spec.container_name)
+    held: dict[str, dict[str, Any]] = {}
+    fake_docker.hooks["start"] = lambda args: (
+        held.update(json.loads(json.dumps(fake_docker.volumes)))
+        if args[1] == spec.container_name
+        else None
+    )
 
     code, _ = _run(spec, fake_docker)
 
     assert code == 0
-    assert _outcome(spec).state is OutcomeState.EXITED
+    assert held[names.workspace_volume]["Options"] == {
+        "type": "tmpfs",
+        "device": "tmpfs",
+        "o": "size=8m,nr_inodes=64,uid=65532,gid=65532,mode=0700",
+    }
+    assert held[names.out_volume]["Options"]["o"] == (
+        "size=2m,nr_inodes=16,uid=65532,gid=65532,mode=0700"
+    )
+    bounds = RunnerReceipt.from_state(json.loads(Path(spec.receipt_path).read_text())).bounds
+    assert bounds is not None
+    assert bounds.disk_mechanism == DISK_BOUND_KERNEL_VOLUME
+    assert (bounds.workspace_bytes, bounds.workspace_inodes) == (8 << 20, 64)
+    assert (bounds.out_bytes, bounds.out_inodes) == (2 << 20, 16)
 
 
-def test_a_workspace_that_is_already_over_its_bound_is_refused_before_the_start(
-    fake_docker: FakeDocker, tmp_path: Path
+@pytest.mark.parametrize(
+    ("volume", "change"),
+    [
+        ("workspace", {"o": "size=99999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700"}),
+        ("workspace", {"type": "none", "device": "/host"}),
+        ("out", {"o": "size=1024m,uid=65532,gid=65532,mode=0700"}),
+    ],
+)
+def test_a_volume_that_does_not_carry_the_profiles_cap_is_refused_before_anything_starts(
+    fake_docker: FakeDocker, tmp_path: Path, volume: str, change: dict[str, str]
 ) -> None:
-    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1))
-    spec = make_spec(tmp_path, profile=profile)
-    _write(tmp_path / "workspace" / "already-big.bin", 2 << 20)
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
+    name = names.workspace_volume if volume == "workspace" else names.out_volume
+
+    def tamper(_args: tuple[str, ...]) -> None:
+        fake_docker.volumes[name]["Options"].update(change)
+
+    fake_docker.hooks["volume inspect"] = tamper
 
     code, stderr = _run(spec, fake_docker)
 
     assert code == EXIT_FAULT
-    assert "already over their bound" in stderr
+    assert "volume is not a tmpfs capped at the profile's size and inode count" in stderr
     assert "start" not in fake_docker.verbs
-    assert fake_docker.containers == {}
     assert _outcome(spec).state is OutcomeState.REFUSED
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+
+
+def test_a_worker_the_kernel_kills_for_memory_is_an_ordinary_failed_exit(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    """tmpfs pages are charged to the container's memory, so filling a volume past the memory
+    limit ends in the kernel's OOM kill (137), not in a launcher decision: the outcome is an
+    exit like any other, with nothing held for the operator."""
+    spec = make_spec(tmp_path)
+    fake_docker.exit_code = 137
+
+    code, _ = _run(spec, fake_docker)
+
+    assert code == 137
+    outcome = _outcome(spec)
+    assert outcome.state is OutcomeState.EXITED and outcome.exit_code == 137
+    assert require_exited(outcome, what="worker") == 137
 
 
 def test_disk_bounds_are_omitted_from_the_profile_state_at_their_defaults() -> None:
@@ -616,7 +570,7 @@ def test_disk_bounds_are_omitted_from_the_profile_state_at_their_defaults() -> N
     assert RunnerProfile.from_state(tightened.to_state()) == tightened
 
 
-# --- private roots and uid mapping ------------------------------------------------------
+# --- private roots ------------------------------------------------------
 
 
 def test_a_directory_holding_the_trees_that_others_can_enter_is_refused(
@@ -660,13 +614,6 @@ def test_a_result_directory_outside_the_directory_holding_the_workspace_is_refus
     assert code == EXIT_FAULT
     assert "must live under the directory that holds the workspace" in stderr
     assert fake_docker.calls == []
-
-
-def test_only_engines_that_remap_the_worker_uid_need_the_trees_opened(
-    fake_docker: FakeDocker,
-) -> None:
-    assert needs_open_permissions(fake_docker.engine().identity()) is False
-    assert needs_open_permissions(FakeDocker(info=ROOTLESS_INFO).engine().identity()) is True
 
 
 # --- orphans ----------------------------------------------------------------------------
@@ -716,15 +663,15 @@ def test_a_launch_labels_its_container_with_its_own_identity(
     spec = make_spec(tmp_path)
     (tmp_path / "x").mkdir()
     seen: list[str] = []
-    fake_docker.hooks["start"] = lambda _args: seen.append(
-        fake_docker.containers[spec.container_name].inspect["Config"]["Labels"][LAUNCHER_LABEL]
+    fake_docker.hooks["start"] = lambda args: seen.append(
+        fake_docker.containers[args[1]].inspect["Config"]["Labels"][LAUNCHER_LABEL]
     )
 
     _run(spec, fake_docker)
 
     own = probe_process(os.getpid())
     assert own is not None
-    assert seen == [launcher_label(own)]
+    assert seen == [launcher_label(own)] * 2  # the store container and the worker
     assert reconcile_runner_containers(fake_docker.engine()).removed == ()
 
 
@@ -756,7 +703,6 @@ def _real_run(
         engine=engine,
         verify=_standin_verifier,
         stderr=stream,
-        poll_seconds=options.pop("poll_seconds", 0.2),
         **options,
     )
     return code, stream.getvalue()
@@ -806,13 +752,13 @@ def test_real_a_worker_that_swaps_its_result_for_a_link_or_fifo_cannot_make_the_
     )
 
     assert code == 0, stderr
+    # The planted link or FIFO stays in the volume: the host never receives it, so there is
+    # nothing for it to follow, and no host file was read or replaced.
     result = real_root / "out" / "result.json"
-    mode = os.lstat(result).st_mode
-    assert stat.S_ISLNK(mode) if kind == "symlink" else stat.S_ISFIFO(mode)
-    with pytest.raises(WorkerFailureError) as caught:
+    assert not os.path.lexists(result)
+    assert json.loads(secret.read_text("utf-8"))["output"] == "HOST SECRET"
+    with pytest.raises(WorkerFailureError, match="missing or unreadable"):
         read_bounded_text(result, limit=1 << 20, what="worker result")
-    assert "HOST SECRET" not in str(caught.value)
-    assert "not a regular file" in str(caught.value) or "missing or unreadable" in str(caught.value)
     # The launcher's own outcome is still trustworthy: the container exited zero.
     outcome = read_launch_outcome(spec.receipt_path, operation_id=spec.operation_id, what="worker")
     assert require_exited(outcome, what="worker") == 0
@@ -911,108 +857,158 @@ def test_real_the_container_log_is_bounded_whatever_a_worker_prints_to_it(
         real_engine.remove(spec.container_name)
 
 
-def test_real_a_worker_writing_past_the_workspace_bound_is_killed_and_the_attempt_held(
+_FILL = """
+import errno, os, sys
+role, size = sys.argv[1], int(sys.argv[2])
+directory = '/workspace' if role == 'workspace' else '/out'
+code = 'none'
+paths = []
+try:
+    for index in range(size >> 20):
+        path = '%s/chunk%d' % (directory, index)
+        paths.append(path)
+        with open(path, 'wb') as handle:
+            handle.write(b'x' * (1 << 20))
+except OSError as error:
+    code = errno.errorcode[error.errno]
+if role == 'out':
+    for path in paths:  # leave room for the wrapper's own result file
+        if os.path.exists(path):
+            os.unlink(path)
+print('fill-result', code)
+"""
+
+_FALLOCATE_BURST = """
+import errno, os, subprocess, sys
+children = []
+for index in range(8):
+    children.append(subprocess.Popen(
+        ['fallocate', '-l', '64M', '/workspace/burst%d' % index],
+        stderr=subprocess.PIPE,
+    ))
+failures = sum(1 for child in children if child.wait() != 0)
+total = sum(os.stat('/workspace/' + name).st_size for name in os.listdir('/workspace'))
+print('burst-failures', failures, 'allocated', total)
+"""
+
+_MANY_FILES = """
+import errno, os
+code = 'none'
+try:
+    for index in range(10_000):
+        open('/workspace/f%d' % index, 'w').close()
+except OSError as error:
+    code = errno.errorcode[error.errno]
+print('files-result', code, len(os.listdir('/workspace')))
+"""
+
+
+def _small_caps(profile: RunnerProfile, **limits: int) -> RunnerProfile:
+    return dataclasses.replace(profile, resources=dataclasses.replace(profile.resources, **limits))
+
+
+def _output(real_root: Path, spec: LaunchSpec) -> str:
+    outcome = read_launch_outcome(spec.receipt_path, operation_id=spec.operation_id, what="worker")
+    text = bind_result_to_attempt(
+        read_bounded_text(real_root / "out" / spec.result_name, limit=1 << 20, what="result"),
+        nonce=outcome.nonce,
+        what="result",
+    )
+    return str(json.loads(text)["output"])
+
+
+@pytest.mark.parametrize("role", ["workspace", "out"])
+def test_real_a_write_past_the_volume_cap_fails_with_enospc_and_nothing_is_killed(
     real_engine: OciEngine,
+    real_profile: RunnerProfile,
     real_operation: Callable[[], str],
     standin_image: str,
     real_root: Path,
-    real_profile: RunnerProfile,
+    role: str,
 ) -> None:
-    profile = dataclasses.replace(
-        real_profile, resources=dataclasses.replace(real_profile.resources, workspace_mib=2)
-    )
-    spec = _real_spec(real_root, real_operation(), standin_image, profile, time_budget_seconds=60)
-    fill = (
-        "import os, time\n"
-        "for n in range(400):\n"
-        "    with open('/workspace/fill-%d.bin' % n, 'wb') as handle:\n"
-        "        handle.write(b'x' * 262144)\n"
-        "    time.sleep(0.01)\n"
-        "time.sleep(60)\n"
-    )
+    profile = _small_caps(real_profile, workspace_mib=8, out_mib=8)
+    spec = _real_spec(real_root, real_operation(), standin_image, profile)
 
-    started = time.monotonic()
-    code, stderr = _real_run(spec, real_engine, ("python3", "-c", fill))
+    code, _ = _real_run(spec, real_engine, ("python3", "-c", _FILL, role, str(64 << 20)))
 
-    assert code == EXIT_FAULT, stderr
-    assert "workspace directory exceeds its 2097152-byte disk bound" in stderr
-    assert time.monotonic() - started < 50
+    assert code == 0
+    assert "fill-result ENOSPC" in _output(real_root, spec)
     outcome = read_launch_outcome(spec.receipt_path, operation_id=spec.operation_id, what="worker")
-    assert outcome.state is OutcomeState.BOUND_EXCEEDED
-    with pytest.raises(HumanActionRequiredError):
-        require_exited(outcome, what="worker")
-    assert not real_engine.container_exists(spec.container_name)
+    assert outcome.state is OutcomeState.EXITED
     receipt = RunnerReceipt.from_state(json.loads(Path(spec.receipt_path).read_text("utf-8")))
     assert receipt.bounds is not None
-    assert receipt.bounds.disk_mechanism == DISK_BOUND_HOST_MONITOR
-    # The host can delete everything the killed worker left behind.
-    for entry in (real_root / "workspace").iterdir():
-        entry.unlink()
+    assert receipt.bounds.disk_mechanism == DISK_BOUND_KERNEL_VOLUME
+    # The worker's oversize attempt never reached the host: at most the capped tree came back.
+    returned = sum(
+        entry.stat().st_size for entry in (real_root / "workspace").rglob("*") if entry.is_file()
+    )
+    assert returned <= 8 << 20
 
 
-def test_real_one_file_cannot_outrun_the_measurement_past_the_per_file_limit(
+def test_real_a_parallel_fallocate_burst_is_capped_by_the_kernel(
     real_engine: OciEngine,
+    real_profile: RunnerProfile,
     real_operation: Callable[[], str],
     standin_image: str,
     real_root: Path,
-    real_profile: RunnerProfile,
 ) -> None:
-    profile = dataclasses.replace(
-        real_profile, resources=dataclasses.replace(real_profile.resources, out_mib=2)
-    )
+    """Eight processes each ask for 64 MiB of a 16 MiB workspace at once: the kernel refuses
+    with ENOSPC; allocation never exceeds the cap (no host monitor is outrun, none exists)."""
+    profile = _small_caps(real_profile, workspace_mib=16)
     spec = _real_spec(real_root, real_operation(), standin_image, profile)
-    writer = (
-        "with open('/workspace/one-file.bin', 'wb') as handle:\n"
-        "    for _ in range(64):\n"
-        "        handle.write(b'x' * (1 << 20))\n"
-    )
 
-    code, _ = _real_run(spec, real_engine, ("python3", "-c", writer))
+    code, _ = _real_run(spec, real_engine, ("python3", "-c", _FALLOCATE_BURST))
 
-    assert code != 0  # the write was cut off by RLIMIT_FSIZE (SIGXFSZ) at the per-file limit
-    written = (real_root / "workspace" / "one-file.bin").stat().st_size
-    assert written <= max_file_bytes(profile)
-    (real_root / "workspace" / "one-file.bin").unlink()
+    assert code == 0
+    output = _output(real_root, spec)
+    failures, allocated = [int(token) for token in output.split() if token.isdigit()][:2]
+    assert failures == 8
+    assert allocated <= 16 << 20
 
 
-def test_real_the_worker_trees_stay_private_where_the_engine_needs_no_opening(
+def test_real_the_inode_cap_stops_a_worker_creating_too_many_entries(
     real_engine: OciEngine,
     real_profile: RunnerProfile,
     real_operation: Callable[[], str],
     standin_image: str,
     real_root: Path,
 ) -> None:
-    """On Docker Desktop a 0700 tree owned by the operator is writable by uid 65532 as it is,
-    so nothing is opened up; elsewhere it is opened, inside the private root."""
+    profile = _small_caps(real_profile, workspace_inodes=200)
+    spec = _real_spec(real_root, real_operation(), standin_image, profile)
+
+    code, _ = _real_run(spec, real_engine, ("python3", "-c", _MANY_FILES))
+
+    assert code == 0
+    output = _output(real_root, spec)
+    assert "files-result ENOSPC" in output
+    assert int(output.split("files-result ENOSPC")[1].split()[0]) <= 200
+
+
+def test_real_the_workspace_comes_back_replaced_and_deletable_by_the_host(
+    real_engine: OciEngine,
+    real_profile: RunnerProfile,
+    real_operation: Callable[[], str],
+    standin_image: str,
+    real_root: Path,
+) -> None:
     spec = _real_spec(real_root, real_operation(), standin_image, real_profile)
-    workspace = real_root / "workspace"
-    (workspace / "nested").mkdir()
-    (workspace / "nested" / "host.txt").write_text("host", encoding="utf-8")
-    (workspace / "nested" / "host.txt").chmod(0o600)
-    workspace.chmod(0o700)
-    (workspace / "nested").chmod(0o700)
+    (real_root / "workspace" / "host.txt").write_text("host", encoding="utf-8")
     script = (
         "import os\n"
-        "open('/workspace/nested/worker.txt', 'w').write('uid=%d' % os.getuid())\n"
-        "os.mkdir('/workspace/made-by-worker')\n"
-        "open('/workspace/nested/host.txt', 'a').write('+worker')\n"
+        "open('/workspace/host.txt', 'a').write('+worker')\n"
+        "os.mkdir('/workspace/nested')\n"
+        "open('/workspace/nested/inner.txt', 'w').write('x')\n"
+        "os.chmod('/workspace/nested/inner.txt', 0)\n"
+        "os.chmod('/workspace/nested', 0o500)\n"
     )
 
-    code, stderr = _real_run(spec, real_engine, ("python3", "-c", script))
+    code, _ = _real_run(spec, real_engine, ("python3", "-c", script))
 
-    assert code == 0, stderr
-    assert (workspace / "nested" / "worker.txt").read_text() == "uid=65532"
-    assert (workspace / "nested" / "host.txt").read_text() == "host+worker"
-    opened = bool(stat.S_IMODE(workspace.stat().st_mode) & 0o077)
-    assert opened == needs_open_permissions(real_engine.identity())
-    if real_engine.identity().kind == KIND_DOCKER_DESKTOP:
-        assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
-        assert stat.S_IMODE((workspace / "nested" / "host.txt").stat().st_mode) == 0o600
-    # The host can delete everything the worker made, whatever the permissions it left.
-    for path in sorted(workspace.rglob("*"), reverse=True):
-        path.unlink() if not path.is_dir() else path.rmdir()
-    assert list(workspace.iterdir()) == []
-    assert stat.S_IMODE(real_root.stat().st_mode) == 0o700
+    workspace = real_root / "workspace"
+    assert code == 0
+    assert (workspace / "host.txt").read_text() == "host+worker"
+    assert (workspace / "nested" / "inner.txt").read_text() == "x"
+    shutil.rmtree(workspace / "nested")  # whatever modes the worker chose, the host can delete
 
 
 _GROUP_DRIVER = """

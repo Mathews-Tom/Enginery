@@ -1,11 +1,13 @@
-"""Remove runner containers whose launcher process is gone.
+"""Remove runner containers whose launcher process is gone, and the volumes they leave behind.
 
 Every worker container is created by a launcher process that waits for it and removes it. If
 that launcher is killed outright (SIGKILL after a stop grace, a crash, a reboot) the container
 keeps running with nothing supervising it. The launcher labels each container with its own pid,
 start identity and host; reconcile lists every runner container by label and removes those
 whose launcher is provably gone. A container whose launcher is still the same live process is
-never touched, and one that cannot be attributed is reported, not removed.
+never touched, and one that cannot be attributed is reported, not removed. The capped volumes
+of an attempt are created with its store container, so once their containers are gone they are
+dangling and are removed too.
 """
 
 from __future__ import annotations
@@ -38,7 +40,9 @@ class ReconcileReport:
     unattributed: tuple[str, ...] = ()
     """Containers that name no usable launcher, or one on another host: left alone."""
     failed: tuple[tuple[str, str], ...] = field(default=())
-    """``(name, reason)`` for containers that could not be inspected or removed."""
+    """``(name, reason)`` for containers or volumes that could not be inspected or removed."""
+    volumes_removed: tuple[str, ...] = ()
+    """Runner volumes no container referred to any more."""
 
 
 def _launcher_identity(labels: Mapping[str, object]) -> tuple[ProcessIdentity, str, str] | None:
@@ -117,11 +121,27 @@ def reconcile_runner_containers(
             failed.append((name, str(error)))
             continue
         removed.append(name)
+    volumes_removed: list[str] = []
+    try:
+        dangling = engine.list_dangling_runner_volumes()
+    except EngineryError as error:
+        failed.append(("volumes", str(error)))
+        dangling = ()
+    # A volume is created together with the container that first refers to it, so a dangling
+    # runner volume belongs to a container that is gone (removed just now or earlier).
+    for volume in dangling:
+        try:
+            engine.volume_remove(volume)
+        except EngineryError as error:
+            failed.append((volume, str(error)))
+            continue
+        volumes_removed.append(volume)
     return ReconcileReport(
         removed=tuple(removed),
         kept=tuple(kept),
         unattributed=tuple(unattributed),
         failed=tuple(failed),
+        volumes_removed=tuple(volumes_removed),
     )
 
 

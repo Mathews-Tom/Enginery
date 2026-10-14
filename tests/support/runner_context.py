@@ -93,8 +93,8 @@ def clean_effective_container(profile: RunnerProfile) -> EffectiveContainer:
         network_mode=profile.network,
         networks=(profile.network,),
         mounts=(
-            ("bind", WORKSPACE_MOUNT, True),
-            ("bind", OUT_MOUNT, True),
+            ("volume", WORKSPACE_MOUNT, True),
+            ("volume", OUT_MOUNT, True),
             ("tmpfs", WORKER_TMP, True),
             ("tmpfs", WORKER_HOME, True),
         ),

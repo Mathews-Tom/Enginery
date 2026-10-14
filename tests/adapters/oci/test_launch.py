@@ -5,8 +5,6 @@ import copy
 import dataclasses
 import itertools
 import json
-import os
-import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -20,9 +18,12 @@ from enginery.adapters.oci.launch import (
     effective_from_inspect,
     launch_violations,
     read_effective,
+    store_arguments,
+    store_names_for,
+    store_violations,
+    volume_options,
     worker_command,
 )
-from enginery.adapters.oci.launcher import make_tree_writable
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.runner import (
     DEFAULT_ENV_ALLOWLIST,
@@ -32,6 +33,7 @@ from enginery.domain.runner import (
     profile_violations,
 )
 
+from .real_engine import create_attempt, read_volume, start_and_wait
 from .support import IMAGE_ID, INNER, NONCE, FakeDocker, make_spec
 
 # --- names ---------------------------------------------------------------------------
@@ -99,10 +101,10 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
         "max-file=2",
         "--ulimit",
         "fsize=1073741824",
-        "-v",
-        f"{tmp_path / 'workspace'}:/workspace:rw",
-        "-v",
-        f"{tmp_path / 'out'}:/out:rw",
+        "--mount",
+        f"type=volume,src={container_name_for('op-1')}-workspace,dst=/workspace,volume-nocopy",
+        "--mount",
+        f"type=volume,src={container_name_for('op-1')}-out,dst=/out,volume-nocopy",
         "-w",
         "/workspace",
         "--label",
@@ -155,10 +157,11 @@ def test_create_arguments_never_grant_what_the_profile_forbids(tmp_path: Path) -
         "--net",
     ):
         assert forbidden not in engine_part
-    assert _values_of(arguments, "-v") == [
-        f"{tmp_path / 'workspace'}:/workspace:rw",
-        f"{tmp_path / 'out'}:/out:rw",
+    assert _values_of(arguments, "--mount") == [
+        f"type=volume,src={container_name_for('op-1')}-workspace,dst=/workspace,volume-nocopy",
+        f"type=volume,src={container_name_for('op-1')}-out,dst=/out,volume-nocopy",
     ]
+    assert "-v" not in arguments[: arguments.index(IMAGE_ID)]
     assert "/var/run/docker.sock" not in " ".join(arguments)
 
 
@@ -286,14 +289,121 @@ def test_create_arguments_refuse_identical_workspace_and_result_directories(
         create_arguments(spec, INNER, nonce=NONCE)
 
 
-@pytest.mark.parametrize("bad", ["/tmp/a:b", "/tmp/with\nnewline", "/tmp/tab\there"])
-def test_create_arguments_refuse_host_paths_that_could_rewrite_a_mount(
-    tmp_path: Path, bad: str
+def test_the_store_container_creates_the_two_capped_tmpfs_volumes_and_runs_nothing(
+    tmp_path: Path,
 ) -> None:
-    spec = make_spec(tmp_path, workspace_path=bad)
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
 
-    with pytest.raises(InvalidInputError, match="cannot be bind-mounted"):
-        create_arguments(spec, INNER, nonce=NONCE)
+    arguments = store_arguments(spec)
+
+    assert names.holder == f"{container_name_for('op-1')}-store"
+    mounts = _values_of(arguments, "--mount")
+    assert mounts == [
+        (
+            f"type=volume,src={names.workspace_volume},dst=/workspace,volume-nocopy,"
+            "volume-driver=local,volume-label=dev.enginery.runner=1,volume-opt=type=tmpfs,"
+            'volume-opt=device=tmpfs,"volume-opt=o=size=4096m,nr_inodes=500000,'
+            'uid=65532,gid=65532,mode=0700"'
+        ),
+        (
+            f"type=volume,src={names.out_volume},dst=/out,volume-nocopy,"
+            "volume-driver=local,volume-label=dev.enginery.runner=1,volume-opt=type=tmpfs,"
+            'volume-opt=device=tmpfs,"volume-opt=o=size=1024m,nr_inodes=100000,'
+            'uid=65532,gid=65532,mode=0700"'
+        ),
+    ]
+    assert _values_of(arguments, "--name") == [names.holder]
+    assert _values_of(arguments, "--network") == ["none"]
+    assert arguments[arguments.index(IMAGE_ID) :] == (IMAGE_ID, "sleep", "infinity")
+    for hardening in ("--read-only", "--init", "--cap-drop", "--security-opt", "--user"):
+        assert hardening in arguments
+
+
+def test_volume_options_follow_the_profiles_caps_and_the_workers_owner(tmp_path: Path) -> None:
+    profile = RunnerProfile(
+        uid=70000,
+        gid=70001,
+        resources=ResourceLimits(workspace_mib=8, out_mib=2, workspace_inodes=64, out_inodes=16),
+    )
+
+    assert volume_options(profile, "workspace") == {
+        "type": "tmpfs",
+        "device": "tmpfs",
+        "o": "size=8m,nr_inodes=64,uid=70000,gid=70001,mode=0700",
+    }
+    assert (
+        volume_options(profile, "out")["o"] == "size=2m,nr_inodes=16,uid=70000,gid=70001,mode=0700"
+    )
+
+
+def _store_documents(fake: FakeDocker, spec: LaunchSpec) -> dict[str, dict[str, Any]]:
+    names = store_names_for(spec.container_name)
+    engine = fake.engine()
+    return {
+        volume: dict(engine.volume_inspect(volume))
+        for volume in (names.workspace_volume, names.out_volume)
+    }
+
+
+def test_the_attempts_capped_volumes_leave_no_store_violation(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, container = _created(fake_docker, tmp_path)
+
+    assert store_violations(spec, container, _store_documents(fake_docker, spec)) == ()
+
+
+def test_a_volume_that_is_not_the_capped_tmpfs_is_a_store_violation(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, container = _created(fake_docker, tmp_path)
+    names = store_names_for(spec.container_name)
+    documents = _store_documents(fake_docker, spec)
+    documents[names.workspace_volume]["Options"] = {
+        **documents[names.workspace_volume]["Options"],
+        "o": "size=999999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700",
+    }
+    documents[names.out_volume]["Driver"] = "nfs"
+    documents[names.out_volume]["Labels"] = {}
+
+    assert store_violations(spec, container, documents) == (
+        "the workspace volume is not a tmpfs capped at the profile's size and inode count",
+        "the result volume does not use the local driver",
+        "the result volume does not carry the runner label",
+    )
+
+
+def test_a_worker_mount_that_is_not_the_attempts_volume_is_a_store_violation(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, container = _created(fake_docker, tmp_path)
+    documents = _store_documents(fake_docker, spec)
+    for mount in container["Mounts"]:
+        if mount["Destination"] == "/workspace":
+            mount["Name"] = "some-other-volume"
+        if mount["Destination"] == "/out":
+            mount["Type"] = "bind"
+
+    problems = store_violations(spec, container, documents)
+
+    assert len(problems) == 2
+    assert all("is not the attempt's volume" in problem for problem in problems)
+
+
+def test_the_workers_mounts_join_the_volumes_the_store_container_created(
+    tmp_path: Path,
+) -> None:
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
+
+    worker = create_arguments(spec, INNER, nonce=NONCE)
+
+    assert all("volume-opt" not in mount for mount in _values_of(worker, "--mount"))
+    assert _values_of(worker, "--mount") == [
+        f"type=volume,src={names.workspace_volume},dst=/workspace,volume-nocopy",
+        f"type=volume,src={names.out_volume},dst=/out,volume-nocopy",
+    ]
 
 
 @pytest.mark.parametrize("inner", [(), ("",), ("omp", "")])
@@ -350,10 +460,10 @@ def test_a_container_created_from_the_arguments_satisfies_the_profile_exactly(
     assert effective.network_mode == "enginery-runner-internal"
     assert effective.networks == ("enginery-runner-internal",)
     assert effective.mounts == (
-        ("bind", "/out", True),
-        ("bind", "/workspace", True),
         ("tmpfs", "/home/worker", True),
         ("tmpfs", "/tmp", True),
+        ("volume", "/out", True),
+        ("volume", "/workspace", True),
     )
     assert effective.devices == ()
     assert effective.env_keys == ("DISABLE_TELEMETRY",)
@@ -638,14 +748,15 @@ def test_a_security_option_beyond_the_profile_is_a_violation(option: str) -> Non
 
 # --- a real engine -------------------------------------------------------------------
 
+# --- a real engine -------------------------------------------------------------------
 
-def _start_and_collect(
-    engine: OciEngine, name: str, out: Path, result_name: str = "result.json"
-) -> tuple[int, dict[str, Any]]:
-    engine.start(name)
-    code = engine.wait(name)
-    result = json.loads((out / result_name).read_text(encoding="utf-8"))
-    return code, result
+
+def _volumes(engine: OciEngine, spec: LaunchSpec) -> dict[str, Any]:
+    names = store_names_for(spec.container_name)
+    return {
+        volume: engine.volume_inspect(volume)
+        for volume in (names.workspace_volume, names.out_volume)
+    }
 
 
 def test_real_engine_container_from_create_arguments_satisfies_the_profile(
@@ -660,19 +771,52 @@ def test_real_engine_container_from_create_arguments_satisfies_the_profile(
     )
     real_engine.ensure_internal_network(real_profile.network)
 
-    created = real_engine.run_cli(
-        create_arguments(spec, ("python3", "-c", "print(1)"), nonce=NONCE)
-    )
-    assert created.returncode == 0, created.stderr
-    assert created.stderr == ""
+    create_attempt(real_engine, spec, ("python3", "-c", "print(1)"))
 
     container = real_engine.container_inspect(spec.container_name)
     effective = read_effective(real_engine, spec.container_name)
     assert profile_violations(real_profile, effective) == ()
     assert launch_violations(spec, container) == ()
+    assert store_violations(spec, container, _volumes(real_engine, spec)) == ()
     assert container["State"]["Status"] == "created"
     assert effective.networks == (real_profile.network,)
     assert effective.env_keys == ("DISABLE_TELEMETRY",)
+    assert effective.mounts == (
+        ("tmpfs", "/home/worker", True),
+        ("tmpfs", "/tmp", True),
+        ("volume", "/out", True),
+        ("volume", "/workspace", True),
+    )
+
+
+def test_real_engine_reports_the_capped_tmpfs_volumes_it_created(
+    real_engine: OciEngine,
+    real_profile: RunnerProfile,
+    real_operation: Callable[[], str],
+    standin_image: str,
+    real_root: Path,
+) -> None:
+    profile = dataclasses.replace(
+        real_profile,
+        resources=dataclasses.replace(
+            real_profile.resources, workspace_mib=8, out_mib=2, workspace_inodes=64, out_inodes=16
+        ),
+    )
+    spec = make_spec(real_root, operation_id=real_operation(), image=standin_image, profile=profile)
+
+    create_attempt(real_engine, spec, ("python3", "-c", "print(1)"))
+
+    names = store_names_for(spec.container_name)
+    volumes = _volumes(real_engine, spec)
+    assert volumes[names.workspace_volume]["Options"] == volume_options(profile, "workspace")
+    assert volumes[names.out_volume]["Options"] == volume_options(profile, "out")
+    assert volumes[names.out_volume]["Labels"] == {"dev.enginery.runner": "1"}
+    container = real_engine.container_inspect(spec.container_name)
+    assert store_violations(spec, container, volumes) == ()
+    tampered = {**volumes, names.out_volume: {**volumes[names.out_volume], "Options": {}}}
+    assert store_violations(spec, container, tampered) == (
+        "the result volume is not a tmpfs capped at the profile's size and inode count",
+    )
 
 
 def test_real_engine_reports_a_container_with_an_added_capability_as_weaker(
@@ -686,16 +830,16 @@ def test_real_engine_reports_a_container_with_an_added_capability_as_weaker(
         real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
     )
     real_engine.ensure_internal_network(real_profile.network)
-    arguments = create_arguments(spec, ("python3", "-c", "print(1)"), nonce=NONCE)
 
-    created = real_engine.run_cli(("create", "--cap-add", "NET_ADMIN", *arguments[1:]))
-    assert created.returncode == 0, created.stderr
+    create_attempt(
+        real_engine, spec, ("python3", "-c", "print(1)"), extra=("--cap-add", "NET_ADMIN")
+    )
 
     effective = read_effective(real_engine, spec.container_name)
     assert [capability.removeprefix("CAP_") for capability in effective.cap_add] == ["NET_ADMIN"]
 
 
-def test_real_worker_runs_as_the_profile_uid_writes_the_workspace_and_the_host_can_delete_it(
+def test_real_worker_runs_as_the_profile_uid_and_works_in_a_seeded_capped_workspace(
     real_engine: OciEngine,
     real_profile: RunnerProfile,
     real_operation: Callable[[], str],
@@ -722,31 +866,23 @@ def test_real_worker_runs_as_the_profile_uid_writes_the_workspace_and_the_host_c
         seed_files=(("/workspace/seed.txt", "seed with sémantique ✓"),),
     )
     real_engine.ensure_internal_network(real_profile.network)
-    # The workspace belongs to the operator; the launcher makes it writable for the worker.
+    # The host workspace is seeded into the volume; the host path itself is never mounted.
     (real_root / "workspace" / "existing.txt").write_text("from the host", encoding="utf-8")
     (real_root / "workspace" / "existing.txt").chmod(0o600)
-    make_tree_writable(spec.workspace_path)
-    make_tree_writable(spec.out_path)
-    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script), nonce=NONCE))
-    assert created.returncode == 0, created.stderr
+    create_attempt(real_engine, spec, ("python3", "-c", script))
 
-    code, result = _start_and_collect(real_engine, spec.container_name, real_root / "out")
+    code, result = start_and_wait(real_engine, spec)
 
     assert code == 0
     assert result["terminal_status"] == "succeeded"
     assert "seed with sémantique ✓" in result["output"]
     assert "rootfs 30" in result["output"]  # EROFS: the root filesystem is read-only
-    workspace = real_root / "workspace"
-    assert (workspace / "proof.txt").read_text() == "uid=65532 gid=65532"
-    assert (workspace / "existing.txt").read_text() == "from the host + worker"
-    # Everything the worker made (it runs with umask 0) must be deletable by the host, whatever
-    # owner the engine's file sharing gives new entries: Docker Desktop re-owns them to the
-    # operator, a rootless engine keeps a sub-uid owner.
-    shutil.rmtree(workspace / "nested")
-    (workspace / "proof.txt").unlink()
-    (workspace / "seed.txt").unlink()
-    (real_root / "out" / "result.json").unlink()
-    assert not os.path.lexists(workspace / "nested")
+    workspace = read_volume(real_engine, spec, "/workspace/.")
+    assert workspace["proof.txt"] == b"uid=65532 gid=65532"
+    assert workspace["existing.txt"] == b"from the host + worker"
+    assert workspace["nested/inner.txt"] == b"nested"
+    # Nothing reached the host directory the volume was seeded from.
+    assert sorted(entry.name for entry in (real_root / "workspace").iterdir()) == ["existing.txt"]
 
 
 def test_real_worker_cannot_reach_the_internet_on_the_internal_network(
@@ -776,12 +912,9 @@ def test_real_worker_cannot_reach_the_internet_on_the_internal_network(
         real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
     )
     real_engine.ensure_internal_network(real_profile.network)
-    make_tree_writable(spec.workspace_path)
-    make_tree_writable(spec.out_path)
-    created = real_engine.run_cli(create_arguments(spec, ("python3", "-c", script), nonce=NONCE))
-    assert created.returncode == 0, created.stderr
+    create_attempt(real_engine, spec, ("python3", "-c", script))
 
-    code, result = _start_and_collect(real_engine, spec.container_name, real_root / "out")
+    code, result = start_and_wait(real_engine, spec)
 
     assert code == 0
     output = result["output"]

@@ -9,16 +9,28 @@ flag sees exactly the engine-reported weakness the launcher must refuse. No proc
 from __future__ import annotations
 
 import copy
+import csv
+import io
 import json
+import os
+import shutil
 import subprocess
+import tarfile
+import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
-from enginery.adapters.oci.engine import OciEngine
-from enginery.adapters.oci.launch import container_name_for, create_arguments
+from enginery.adapters.oci.engine import RUNNER_LABEL, OciEngine
+from enginery.adapters.oci.launch import (
+    STORE_HOLDER_COMMAND,
+    container_name_for,
+    create_arguments,
+    store_arguments,
+    store_names_for,
+)
 from enginery.domain.runner import ImageIdentity, LaunchSpec, PermissionMapping, RunnerProfile
 from enginery.engine.supervisor import HostIdentity
 
@@ -125,8 +137,9 @@ def make_spec(
 
 
 class _FakeContainer:
-    def __init__(self, inspect: dict[str, Any]) -> None:
+    def __init__(self, inspect: dict[str, Any], mounts: dict[str, str]) -> None:
         self.inspect = inspect
+        self.mounts = mounts
         self.state = "created"
         self.exit_code = 0
         self.exited = threading.Event()
@@ -146,6 +159,7 @@ _VALUE_FLAGS = frozenset(
         "--network",
         "--ipc",
         "-v",
+        "--mount",
         "-w",
         "--label",
         "--name",
@@ -169,6 +183,24 @@ def _memory_bytes(text: str) -> int:
     return int(text)
 
 
+def _missing_file(path: str, container: str) -> str:
+    return f"Error response from daemon: Could not find the file {path} in container {container}"
+
+
+def _mount_fields(value: str) -> dict[str, Any]:
+    """The fields of one ``--mount`` value (CSV, so a quoted field may hold commas)."""
+    fields: dict[str, Any] = {"_opts": [], "_labels": []}
+    for item in next(csv.reader([value])):
+        key, _, rest = item.partition("=")
+        if key == "volume-opt":
+            fields["_opts"].append(rest)
+        elif key == "volume-label":
+            fields["_labels"].append(rest)
+        else:
+            fields[key] = rest
+    return fields
+
+
 class FakeDocker:
     """An ``EngineRunner`` modelling just enough of docker for the launcher and the adapters."""
 
@@ -189,14 +221,23 @@ class FakeDocker:
         self.failures: dict[str, tuple[int, str]] = {}
         self.unreachable = False
         self.hooks: dict[str, Callable[[tuple[str, ...]], None]] = {}
+        self.volumes: dict[str, dict[str, Any]] = {}
+        self._volume_root = tempfile.TemporaryDirectory(prefix="fake-docker-volumes-")
 
     # --- test controls ----------------------------------------------------------------
 
     def engine(self, *, context: str | None = None) -> OciEngine:
         return OciEngine(context=context, runner=self)
 
+    def create_store(self, spec: LaunchSpec) -> None:
+        """Create ``spec``'s store container (and its capped volumes) as the launcher would."""
+        completed = self.engine().run_cli(store_arguments(spec))
+        assert completed.returncode == 0, completed.stderr
+
     def create_worker(self, spec: LaunchSpec, inner: Sequence[str] = INNER) -> None:
         """Create ``spec``'s worker container exactly as the launcher would."""
+        if store_names_for(spec.container_name).holder not in self.containers:
+            self.create_store(spec)
         completed = self.engine().run_cli(create_arguments(spec, inner, nonce=NONCE))
         assert completed.returncode == 0, completed.stderr
 
@@ -206,17 +247,136 @@ class FakeDocker:
         container.exit_code = exit_code
         container.state = "exited"
         container.exited.set()
+        self._refresh_volumes()
+
+    def volume_path(self, name: str) -> Path:
+        """The directory that stands for volume ``name``'s tmpfs while a container holds it."""
+        return Path(self._volume_root.name) / name
+
+    def workspace_volume(self, spec: LaunchSpec) -> Path:
+        return self.volume_path(store_names_for(spec.container_name).workspace_volume)
+
+    def out_volume(self, spec: LaunchSpec) -> Path:
+        return self.volume_path(store_names_for(spec.container_name).out_volume)
+
+    def _mounted(self, volume: str) -> bool:
+        """Whether a running container has ``volume`` mounted (a tmpfs volume lives only so)."""
+        return any(
+            container.state == "running" and volume in container.mounts.values()
+            for container in self.containers.values()
+        )
+
+    def _refresh_volumes(self) -> None:
+        """A tmpfs volume loses its content when the last container holding it stops."""
+        for volume in self.volumes:
+            if not self._mounted(volume):
+                directory = self.volume_path(volume)
+                shutil.rmtree(directory, ignore_errors=True)
+                directory.mkdir()
 
     @property
     def verbs(self) -> list[str]:
         """Each command as ``verb`` or ``noun verb``, in the order it was issued."""
         return [
-            " ".join(args[:2]) if args[0] in {"network", "image", "container"} else args[0]
+            " ".join(args[:2])
+            if args[0] in {"network", "image", "container", "volume"}
+            else args[0]
             for args in self.calls
         ]
 
     def calls_of(self, verb: str) -> list[tuple[str, ...]]:
         return [args for args, name in zip(self.calls, self.verbs, strict=True) if name == verb]
+
+    # --- CopyRunner -------------------------------------------------------------------
+
+    def _record(self, argv: Sequence[str]) -> tuple[str, ...]:
+        tokens = list(argv)
+        assert tokens[0] == "docker", tokens
+        position = 1
+        if tokens[position] == "--context":
+            self.context = tokens[position + 1]
+            position += 2
+        args = tuple(tokens[position:])
+        self.calls.append(args)
+        hook = self.hooks.get("cp")
+        if hook is not None:
+            hook(args)
+        return args
+
+    def _locate(self, reference: str) -> tuple[str, Path] | tuple[None, str]:
+        """``(container, host path)`` of ``container:/path``, or ``(None, error message)``."""
+        name, _, path = reference.partition(":")
+        container = self.containers.get(name)
+        if container is None:
+            return None, f"Error response from daemon: No such container: {name}"
+        for destination, volume in container.mounts.items():
+            if path == destination or path.startswith(destination + "/"):
+                if not self._mounted(volume):
+                    return (
+                        None,
+                        _missing_file(path, name),
+                    )
+                return name, self.volume_path(volume) / path.removeprefix(destination).lstrip("/")
+        return (
+            None,
+            f"Error response from daemon: Could not find the file {path} in container {name}",
+        )
+
+    def copy_in(
+        self,
+        argv: Sequence[str],
+        writer: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        args = self._record(argv)
+        assert args[:3] == ("cp", "-a", "-"), args
+        injected = self.failures.get("cp")
+        buffer = io.BytesIO()
+        writer(buffer)
+        if injected is not None:
+            return self._done(argv, injected[0], stderr=injected[1])
+        found, target = self._locate(args[3])
+        if found is None:
+            return self._done(argv, 1, stderr=str(target))
+        assert isinstance(target, Path)
+        buffer.seek(0)
+        target.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=buffer, mode="r") as archive:
+            archive.extractall(target, filter="tar")
+        return self._done(argv)
+
+    def copy_out(
+        self,
+        argv: Sequence[str],
+        reader: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        args = self._record(argv)
+        assert args[0] == "cp" and args[-1] == "-", args
+        injected = self.failures.get("cp")
+        if injected is not None:
+            return self._done(argv, injected[0], stderr=injected[1])
+        found, target = self._locate(args[1])
+        if found is None:
+            return self._done(argv, 1, stderr=str(target))
+        assert isinstance(target, Path)
+        if not os.path.lexists(target):
+            return self._done(
+                argv,
+                1,
+                stderr=_missing_file(args[1].partition(":")[2], found),
+            )
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            if args[1].endswith("/."):
+                archive.add(target, arcname=".", recursive=True)
+            else:
+                archive.add(target, arcname=target.name, recursive=False)
+        buffer.seek(0)
+        reader(buffer)
+        return self._done(argv)
 
     # --- EngineRunner -----------------------------------------------------------------
 
@@ -338,7 +498,11 @@ class FakeDocker:
         image = self.images.get(parsed["image"])
         if image is None:
             return self._done(argv, 125, stderr=f"Unable to find image '{parsed['image']}' locally")
-        self.containers[name] = _FakeContainer(self._inspect_document(parsed, image))
+        mounts, created = self._volumes_of(parsed)
+        self.containers[name] = _FakeContainer(self._inspect_document(parsed, image), mounts)
+        self.volumes.update(created)
+        for volume in created:
+            self.volume_path(volume).mkdir(parents=True, exist_ok=True)
         return self._done(argv, stdout=f"{'c' * 64}\n", stderr=self.create_stderr)
 
     def _do_start(
@@ -348,10 +512,12 @@ class FakeDocker:
         if container is None:
             return self._missing(argv, "container", args[1])
         container.state = "running"
-        if not self.hold_running:
+        holds = container.inspect["Config"]["Cmd"] == list(STORE_HOLDER_COMMAND)
+        if not self.hold_running and not holds:
             container.exit_code = self.exit_code
             container.state = "exited"
             container.exited.set()
+            self._refresh_volumes()
         return self._done(argv, stdout=f"{args[1]}\n")
 
     def _do_wait(
@@ -376,6 +542,7 @@ class FakeDocker:
         container.exit_code = 137
         container.state = "exited"
         container.exited.set()
+        self._refresh_volumes()
         return self._done(argv, stdout=f"{args[-1]}\n")
 
     def _do_rm(
@@ -388,9 +555,44 @@ class FakeDocker:
         if container.state == "running" and "--force" not in args:
             return self._done(argv, 1, stderr="cannot remove a running container")
         container.exit_code = 137 if container.state == "running" else container.exit_code
+        container.state = "exited"
         container.exited.set()
         del self.containers[name]
+        self._refresh_volumes()
         return self._done(argv, stdout=f"{name}\n")
+
+    def _do_volume_inspect(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        volume = self.volumes.get(args[2])
+        if volume is None:
+            return self._missing(argv, "volume", args[2])
+        return self._done(argv, stdout=json.dumps([volume]))
+
+    def _do_volume_rm(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        name = args[2]
+        if name not in self.volumes:
+            return self._missing(argv, "volume", name)
+        if any(name in container.mounts.values() for container in self.containers.values()):
+            return self._done(
+                argv, 1, stderr=f"Error response from daemon: remove {name}: volume is in use"
+            )
+        del self.volumes[name]
+        shutil.rmtree(self.volume_path(name), ignore_errors=True)
+        return self._done(argv, stdout=f"{name}\n")
+
+    def _do_volume_ls(
+        self, args: tuple[str, ...], argv: Sequence[str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert "dangling=true" in args and f"label={RUNNER_LABEL}=1" in args, args
+        names = [
+            name
+            for name in self.volumes
+            if not any(name in container.mounts.values() for container in self.containers.values())
+        ]
+        return self._done(argv, stdout="".join(f"{name}\n" for name in names))
 
     def _do_logs(
         self, args: tuple[str, ...], argv: Sequence[str]
@@ -427,6 +629,7 @@ class FakeDocker:
             "security_opt": [],
             "tmpfs": {},
             "binds": [],
+            "mounts": [],
             "labels": {},
             "env": [],
             "devices": [],
@@ -456,6 +659,8 @@ class FakeDocker:
                     parsed["tmpfs"][destination] = options
                 elif token == "-v":
                     parsed["binds"].append(value)
+                elif token == "--mount":
+                    parsed["mounts"].append(_mount_fields(value))
                 elif token == "--label":
                     key, _, label_value = value.partition("=")
                     parsed["labels"][key] = label_value
@@ -475,6 +680,23 @@ class FakeDocker:
                 parsed["command"] = list(tokens[position + 1 :])
                 return parsed
         raise AssertionError(f"create has no image: {tokens}")
+
+    @staticmethod
+    def _volumes_of(parsed: dict[str, Any]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+        """``({destination: volume}, {volume: document})`` for the volumes a create refers to."""
+        mounts: dict[str, str] = {}
+        created: dict[str, dict[str, Any]] = {}
+        for mount in parsed["mounts"]:
+            mounts[mount["dst"]] = mount["src"]
+            if mount["_opts"]:
+                created[mount["src"]] = {
+                    "Name": mount["src"],
+                    "Driver": mount.get("volume-driver", "local"),
+                    "Labels": dict(item.partition("=")[::2] for item in mount["_labels"]),
+                    "Options": dict(item.partition("=")[::2] for item in mount["_opts"]),
+                    "Scope": "local",
+                }
+        return mounts, created
 
     @staticmethod
     def _inspect_document(parsed: dict[str, Any], image: dict[str, Any]) -> dict[str, Any]:
@@ -537,14 +759,28 @@ class FakeDocker:
                 "Init": parsed["init"],
             },
             "Mounts": [
-                {
-                    "Type": "bind",
-                    "Source": bind.split(":")[0],
-                    "Destination": bind.split(":")[1],
-                    "Mode": bind.split(":")[2],
-                    "RW": bind.split(":")[2] == "rw",
-                }
-                for bind in binds
+                *(
+                    {
+                        "Type": "bind",
+                        "Source": bind.split(":")[0],
+                        "Destination": bind.split(":")[1],
+                        "Mode": bind.split(":")[2],
+                        "RW": bind.split(":")[2] == "rw",
+                    }
+                    for bind in binds
+                ),
+                *(
+                    {
+                        "Type": mount.get("type", "volume"),
+                        "Name": mount["src"],
+                        "Source": f"/var/lib/docker/volumes/{mount['src']}/_data",
+                        "Destination": mount["dst"],
+                        "Driver": mount.get("volume-driver", "local"),
+                        "Mode": "z",
+                        "RW": "readonly" not in mount,
+                    }
+                    for mount in parsed["mounts"]
+                ),
             ],
             "NetworkSettings": {"Networks": {network: {"NetworkID": ""}}},
         }

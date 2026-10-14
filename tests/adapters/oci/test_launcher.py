@@ -26,13 +26,13 @@ from enginery.adapters.oci.image import (
     RUNNER_IMAGE_LABEL,
     recipe_digest,
 )
+from enginery.adapters.oci.launch import store_names_for
 from enginery.adapters.oci.launcher import (
     EXIT_DEADLINE,
     EXIT_FAULT,
     StopSignal,
     admit_paths,
     main,
-    make_tree_writable,
     run_launcher,
     write_receipt,
 )
@@ -44,6 +44,7 @@ from enginery.domain.runner import (
     RunnerProfile,
     RunnerReceipt,
     TrustMode,
+    outcome_path_for,
     profile_violations,
 )
 from enginery.engine.supervisor import probe_host
@@ -54,7 +55,6 @@ from .support import (
     INNER,
     PERMISSIONS,
     PERMISSIONS_WITHOUT_ARGUMENTS,
-    ROOTLESS_INFO,
     FakeDocker,
     host_probe,
     image_identity,
@@ -111,13 +111,29 @@ def test_a_successful_run_qualifies_creates_checks_records_starts_waits_and_remo
         "network create",
         "network inspect",
         "container inspect",
+        "container inspect",
+        "volume rm",
+        "volume rm",
         "ps",
+        "volume ls",
+        "create",
+        "volume inspect",
+        "volume inspect",
+        "container inspect",
+        "image inspect",
+        "start",
+        "cp",
         "create",
         "container inspect",
         "image inspect",
         "start",
         "wait",
+        "cp",
+        "cp",
         "rm",
+        "rm",
+        "volume rm",
+        "volume rm",
     ]
     assert fake_docker.containers == {}
     assert fake_docker.networks == {spec.profile.network: True}
@@ -128,8 +144,10 @@ def test_the_receipt_records_what_the_engine_reported_and_is_written_before_the_
 ) -> None:
     spec = make_spec(tmp_path, env=(("ANTHROPIC_AUTH_TOKEN", "dummy-credential-4f8a91c2"),))
     receipt_present_at_start: list[bool] = []
-    fake_docker.hooks["start"] = lambda _args: receipt_present_at_start.append(
-        os.path.exists(spec.receipt_path)
+    fake_docker.hooks["start"] = lambda args: (
+        receipt_present_at_start.append(os.path.exists(spec.receipt_path))
+        if args[1] == spec.container_name
+        else None
     )
 
     code, stderr = _launch(spec, fake_docker)
@@ -182,11 +200,13 @@ def test_the_launcher_asks_the_engine_for_the_exact_hardened_container(
 
     _launch(spec, fake_docker)
 
-    (create,) = fake_docker.calls_of("create")
-    assert create[0] == "create"
-    assert create[create.index("--name") + 1] == spec.container_name
-    assert create[create.index("--network") + 1] == spec.profile.network
-    assert create[create.index(spec.image) :][:3] == (
+    store, worker = fake_docker.calls_of("create")
+    assert store[0] == worker[0] == "create"
+    assert store[store.index("--name") + 1] == f"{spec.container_name}-store"
+    assert worker[worker.index("--name") + 1] == spec.container_name
+    assert worker[worker.index("--network") + 1] == spec.profile.network
+    assert store[store.index("--network") + 1] == "none"
+    assert worker[worker.index(spec.image) :][:3] == (
         spec.image,
         "python3",
         "/opt/enginery/worker_entry.py",
@@ -203,10 +223,14 @@ def test_every_engine_command_runs_under_the_engines_context_and_the_receipt_rec
         "network inspect",
         "network create",
         "container inspect",
+        "volume inspect",
+        "volume rm",
+        "volume ls",
         "ps",
         "create",
         "image inspect",
         "start",
+        "cp",
         "wait",
         "rm",
     ):
@@ -227,46 +251,199 @@ def test_every_engine_command_runs_under_the_engines_context_and_the_receipt_rec
     assert _receipt(spec).engine.context == "lima-rootless"
 
 
-def test_the_workspace_and_result_directories_are_opened_up_where_the_uid_mapping_needs_it(
-    tmp_path: Path,
+def test_the_worker_is_given_a_seeded_workspace_through_the_store_and_never_a_host_path(
+    fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
-    fake_docker = FakeDocker(info=ROOTLESS_INFO)
     spec = make_spec(tmp_path)
     workspace = tmp_path / "workspace"
     (workspace / "src").mkdir()
     (workspace / "src" / "tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     (workspace / "src" / "tool.sh").chmod(0o700)
     (workspace / "notes.txt").write_text("n", encoding="utf-8")
-    (workspace / "notes.txt").chmod(0o400)
-    (workspace / "src").chmod(0o700)
-    (tmp_path / "out").chmod(0o700)
+    (workspace / "link").symlink_to("notes.txt")
+    seen: dict[str, str] = {}
+
+    def at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] == spec.container_name:
+            volume = fake_docker.workspace_volume(spec)
+            seen["tool"] = (volume / "src" / "tool.sh").read_text()
+            seen["notes"] = (volume / "notes.txt").read_text()
+            seen["link"] = os.readlink(volume / "link")
+
+    fake_docker.hooks["start"] = at_worker_start
 
     code, _ = _launch(spec, fake_docker)
 
     assert code == 0
-    assert stat.S_IMODE((workspace / "src").stat().st_mode) == 0o777
-    assert stat.S_IMODE((workspace / "src" / "tool.sh").stat().st_mode) == 0o777
-    assert stat.S_IMODE((workspace / "notes.txt").stat().st_mode) == 0o666
-    assert stat.S_IMODE(workspace.stat().st_mode) == 0o777
-    assert stat.S_IMODE((tmp_path / "out").stat().st_mode) == 0o777
+    assert seen == {"tool": "#!/bin/sh\n", "notes": "n", "link": "notes.txt"}
+    # No engine command ever names a host path: the host trees reach the worker only as a tar
+    # stream through the store container.
+    for call in fake_docker.calls:
+        assert str(tmp_path) not in " ".join(call)
+    worker = fake_docker.calls_of("create")[1]
+    assert "-v" not in worker[: worker.index(spec.image)]
 
 
-def test_nothing_is_opened_up_on_docker_desktop_where_the_operators_own_tree_is_writable(
+def test_the_result_the_bundle_and_the_workspace_come_back_through_the_store(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path, bundle_branch="work", bundle_base="a" * 40)
+    workspace = tmp_path / "workspace"
+    (workspace / "doomed.txt").write_text("host", encoding="utf-8")
+    (workspace / "kept.txt").write_text("before", encoding="utf-8")
+
+    def at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] != spec.container_name:
+            return
+        volume = fake_docker.workspace_volume(spec)
+        (volume / "doomed.txt").unlink()
+        (volume / "kept.txt").write_text("after", encoding="utf-8")
+        (volume / "new").mkdir()
+        (volume / "new" / "file.txt").write_text("created by the worker", encoding="utf-8")
+        out = fake_docker.out_volume(spec)
+        (out / "result.json").write_text('{"ok": true}', encoding="utf-8")
+        (out / "branch.bundle").write_bytes(b"bundle bytes")
+        (out / "ignored.txt").write_text("not a named result", encoding="utf-8")
+
+    fake_docker.hooks["start"] = at_worker_start
+
+    code, _ = _launch(spec, fake_docker)
+
+    assert code == 0
+    assert (tmp_path / "out" / "result.json").read_text() == '{"ok": true}'
+    assert (tmp_path / "out" / "branch.bundle").read_bytes() == b"bundle bytes"
+    assert sorted(path.name for path in (tmp_path / "out").iterdir()) == [
+        "branch.bundle",
+        "result.json",
+    ]
+    assert sorted(path.name for path in workspace.iterdir()) == ["kept.txt", "new"]
+    assert (workspace / "kept.txt").read_text() == "after"
+    assert (workspace / "new" / "file.txt").read_text() == "created by the worker"
+    assert sorted(path.name for path in tmp_path.iterdir() if path.name.startswith(".")) == []
+    state = json.loads(Path(outcome_path_for(spec.receipt_path)).read_text("utf-8"))
+    assert state["state"] == "exited" and state["exit_code"] == 0
+
+
+def test_the_store_container_holds_the_volumes_until_everything_is_copied_out(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
     spec = make_spec(tmp_path)
-    workspace = tmp_path / "workspace"
-    (workspace / "notes.txt").write_text("n", encoding="utf-8")
-    (workspace / "notes.txt").chmod(0o400)
-    workspace.chmod(0o700)
-    (tmp_path / "out").chmod(0o700)
+    names = store_names_for(spec.container_name)
+    removed_while_holding: list[bool] = []
+
+    def at_cp(args: tuple[str, ...]) -> None:
+        removed_while_holding.append(names.holder in fake_docker.containers)
+
+    fake_docker.hooks["cp"] = at_cp
 
     code, _ = _launch(spec, fake_docker)
 
     assert code == 0
-    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
-    assert stat.S_IMODE((workspace / "notes.txt").stat().st_mode) == 0o400
-    assert stat.S_IMODE((tmp_path / "out").stat().st_mode) == 0o700
+    assert removed_while_holding and all(removed_while_holding)
+    assert fake_docker.verbs[-4:] == ["rm", "rm", "volume rm", "volume rm"]
+    assert fake_docker.calls_of("rm")[-1][-1] == names.holder
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+
+
+def test_a_symlink_or_fifo_the_worker_leaves_as_its_result_is_not_copied_to_the_host(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("host secret", encoding="utf-8")
+
+    def at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] == spec.container_name:
+            (fake_docker.out_volume(spec) / "result.json").symlink_to(secret)
+
+    fake_docker.hooks["start"] = at_worker_start
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == 0  # the worker exited; the missing result is collection's refusal
+    assert not os.path.lexists(tmp_path / "out" / "result.json")
+    assert "is not a regular file" in stderr
+    assert secret.read_text() == "host secret"
+
+    def fifo_at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] == spec.container_name:
+            os.mkfifo(fake_docker.out_volume(spec) / "result.json")
+
+    fake_docker.hooks["start"] = fifo_at_worker_start
+    code, _ = _launch(spec, fake_docker)
+    assert code == 0
+    assert not os.path.lexists(tmp_path / "out" / "result.json")
+
+
+def test_a_link_or_special_file_in_the_returned_workspace_never_escapes_the_host_tree(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] != spec.container_name:
+            return
+        volume = fake_docker.workspace_volume(spec)
+        (volume / "hop").symlink_to(outside)
+        os.mkfifo(volume / "pipe")
+        (volume / "real.txt").write_text("ok", encoding="utf-8")
+        os.link(volume / "real.txt", volume / "alias.txt")
+
+    fake_docker.hooks["start"] = at_worker_start
+
+    code, _ = _launch(spec, fake_docker)
+
+    workspace = tmp_path / "workspace"
+    assert code == 0
+    assert os.readlink(workspace / "hop") == str(outside)  # kept as a link, never followed
+    assert not os.path.lexists(workspace / "pipe")
+    assert (workspace / "alias.txt").read_text() == "ok"
+    assert not (workspace / "alias.txt").samefile(workspace / "real.txt")
+    assert list(outside.iterdir()) == []
+
+
+def test_a_workspace_that_does_not_fit_its_volume_is_refused_before_the_worker_exists(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1))
+    spec = make_spec(tmp_path, profile=profile)
+    (tmp_path / "workspace" / "big.bin").write_bytes(b"\0" * (2 << 20))
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "cannot be given to the worker" in stderr
+    assert len(fake_docker.calls_of("create")) == 1  # only the store container was created
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+    assert not os.path.lexists(spec.receipt_path)
+    state = json.loads(Path(outcome_path_for(spec.receipt_path)).read_text("utf-8"))
+    assert state["state"] == "refused"
+
+
+def test_a_returned_workspace_that_cannot_be_taken_back_is_a_fault_not_an_exited_worker(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    profile = RunnerProfile(resources=ResourceLimits(workspace_mib=1))
+    spec = make_spec(tmp_path, profile=profile)
+    (tmp_path / "workspace" / "kept.txt").write_text("before", encoding="utf-8")
+
+    def at_worker_start(args: tuple[str, ...]) -> None:
+        if args[1] == spec.container_name:
+            # A volume that did not enforce its cap: the host must not take the oversize tree.
+            (fake_docker.workspace_volume(spec) / "big.bin").write_bytes(b"\0" * (2 << 20))
+
+    fake_docker.hooks["start"] = at_worker_start
+
+    code, _ = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert (tmp_path / "workspace" / "kept.txt").read_text() == "before"
+    assert sorted(path.name for path in (tmp_path / "workspace").iterdir()) == ["kept.txt"]
+    state = json.loads(Path(outcome_path_for(spec.receipt_path)).read_text("utf-8"))
+    assert state["state"] == "faulted" and state["exit_code"] is None
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
 
 
 # --- exit statuses -------------------------------------------------------------------
@@ -284,7 +461,7 @@ def test_a_failing_container_status_is_the_launchers_status_and_its_output_is_sh
 
     assert code == exit_code
     assert "worker said: build failed" in stderr
-    assert fake_docker.verbs[-2:] == ["logs", "rm"]
+    assert fake_docker.verbs[-5:] == ["logs", "rm", "rm", "volume rm", "volume rm"]
     assert fake_docker.containers == {}
 
 
@@ -390,24 +567,33 @@ def _set_host(change: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
         (_set_host({"Ulimits": None}), "per-file size limit is not"),
     ],
 )
+@pytest.mark.parametrize("target", ["container", "store"])
 def test_a_container_weaker_than_the_profile_is_removed_and_never_started_or_recorded(
     fake_docker: FakeDocker,
     tmp_path: Path,
     tamper: Callable[[dict[str, Any]], None],
     violation: str,
+    target: str,
 ) -> None:
     spec = make_spec(tmp_path)
-    fake_docker.tamper = tamper
+    holder = store_names_for(spec.container_name).holder
+    name = spec.container_name if target == "container" else holder
+    fake_docker.tamper = lambda document: (
+        tamper(document) if document["Name"] == f"/{name}" else None
+    )
 
     code, stderr = _launch(spec, fake_docker)
 
     assert code == EXIT_FAULT
     assert violation in stderr
     assert "profile violation" in stderr
-    assert "start" not in fake_docker.verbs
     assert "wait" not in fake_docker.verbs
-    assert fake_docker.verbs[-1] == "rm"
+    # A weak store container is refused before anything starts; a weak worker is refused after
+    # the store container started to be seeded, and is never started itself.
+    started = [call[1] for call in fake_docker.calls_of("start")]
+    assert started == ([] if target == "store" else [holder])
     assert fake_docker.containers == {}
+    assert fake_docker.volumes == {}
     assert not os.path.lexists(spec.receipt_path)
 
 
@@ -434,7 +620,7 @@ def test_create_failure_and_create_warnings_refuse_the_launch(
     code, stderr = _launch(spec, fake_docker)
 
     assert code == EXIT_FAULT
-    assert "could not create the container" in stderr
+    assert "could not create the store container" in stderr
     assert "boom" in stderr
     assert "start" not in fake_docker.verbs
 
@@ -645,75 +831,14 @@ def test_write_receipt_replaces_atomically_with_a_private_file_and_leaves_no_tem
     ]
 
 
-# --- opening the tree up ---------------------------------------------------------------
-
-
-def test_make_tree_writable_is_chmod_a_plus_rwx_and_never_follows_a_symlink(
-    tmp_path: Path,
-) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    secret = outside / "host-secret.txt"
-    secret.write_text("operator data", encoding="utf-8")
-    secret.chmod(0o600)
-    outside.chmod(0o700)
-    tree = tmp_path / "tree"
-    (tree / "sub" / "deeper").mkdir(parents=True)
-    plain = tree / "sub" / "plain.txt"
-    plain.write_text("p", encoding="utf-8")
-    plain.chmod(0o600)
-    script = tree / "run.sh"
-    script.write_text("#!/bin/sh\n", encoding="utf-8")
-    script.chmod(0o700)
-    readonly = tree / "sub" / "deeper" / "ro.txt"
-    readonly.write_text("r", encoding="utf-8")
-    readonly.chmod(0o444)
-    (tree / "link-to-file").symlink_to(secret)
-    (tree / "link-to-dir").symlink_to(outside, target_is_directory=True)
-    (tree / "dangling").symlink_to(tmp_path / "does-not-exist")
-    fifo = tree / "pipe"
-    os.mkfifo(fifo, 0o600)
-    tree.chmod(0o750)
-    (tree / "sub").chmod(0o700)
-
-    make_tree_writable(str(tree))
-
-    def mode(path: Path) -> int:
-        return stat.S_IMODE(path.lstat().st_mode)
-
-    assert mode(tree) == 0o777
-    assert mode(tree / "sub") == 0o777
-    assert mode(tree / "sub" / "deeper") == 0o777
-    assert mode(plain) == 0o666  # no execute bit anywhere: X adds none
-    assert mode(readonly) == 0o666
-    assert mode(script) == 0o777  # had an execute bit: X grants execute to everyone
-    assert mode(fifo) == 0o600  # not a regular file or directory: left alone
-    # Nothing a symlink points at was touched, and symlinks were not descended into.
-    assert mode(secret) == 0o600
-    assert mode(outside) == 0o700
-
-
-def test_make_tree_writable_reports_a_directory_it_cannot_read(tmp_path: Path) -> None:
-    if os.geteuid() == 0:
-        pytest.skip("root can read every directory")
-    tree = tmp_path / "tree"
-    locked = tree / "locked"
-    locked.mkdir(parents=True)
-    locked.chmod(0)
-    try:
-        with pytest.raises(OSError):
-            make_tree_writable(str(tree))
-    finally:
-        locked.chmod(0o700)
-
-
 # --- idempotency ---------------------------------------------------------------------
 
 
-def test_a_container_left_by_an_earlier_attempt_of_the_same_operation_is_replaced(
+def test_what_an_earlier_attempt_of_the_same_operation_left_is_replaced(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
     spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
     fake_docker.create_worker(spec)
     fake_docker.calls.clear()
 
@@ -721,10 +846,42 @@ def test_a_container_left_by_an_earlier_attempt_of_the_same_operation_is_replace
 
     assert code == 0
     assert "left by an earlier attempt" in stderr
-    assert spec.container_name in stderr
+    assert spec.container_name in stderr and names.holder in stderr
     verbs = fake_docker.verbs
     assert verbs.index("rm") < verbs.index("create")
-    assert verbs.count("create") == 1
+    assert verbs.count("create") == 2  # the store container and the worker, once each
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+
+
+def test_a_volume_left_without_a_container_is_replaced_not_reused(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
+    fake_docker.create_store(spec)
+    fake_docker.engine().remove(names.holder)
+    assert set(fake_docker.volumes) == {names.workspace_volume, names.out_volume}
+
+    code, _ = _launch(spec, fake_docker)
+
+    assert code == 0
+    assert fake_docker.volumes == {}
+
+
+def test_a_volume_in_use_by_another_container_is_never_removed_from_under_it(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
+    fake_docker.create_store(spec)
+    stranger = fake_docker.containers.pop(names.holder)
+    fake_docker.containers["someone-else"] = stranger
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "volume rm" in stderr
+    assert "someone-else" in fake_docker.containers
 
 
 # --- signals and deadlines -----------------------------------------------------------
@@ -758,7 +915,7 @@ def test_a_stop_signal_kills_then_removes_the_container_and_exits_128_plus_the_s
     assert code == expected
     verbs = fake_docker.verbs
     assert verbs.index("start") < verbs.index("kill") < verbs.index("rm")
-    assert verbs[-1] == "rm"
+    assert verbs[-4:] == ["rm", "rm", "volume rm", "volume rm"]
     (kill,) = fake_docker.calls_of("kill")
     assert kill == ("kill", "--signal", "KILL", spec.container_name)
     assert fake_docker.containers == {}
@@ -779,19 +936,29 @@ def test_a_stop_requested_before_anything_started_touches_no_container(
     assert fake_docker.calls == []
 
 
-def test_a_stop_that_arrives_while_the_container_is_created_but_not_started_removes_it(
-    fake_docker: FakeDocker, tmp_path: Path
+@pytest.mark.parametrize("stopped_at", ["store", "worker"])
+def test_a_stop_that_arrives_while_a_container_is_created_but_not_started_removes_it(
+    fake_docker: FakeDocker, tmp_path: Path, stopped_at: str
 ) -> None:
     spec = make_spec(tmp_path)
+    holder = store_names_for(spec.container_name).holder
     stop = StopSignal()
-    fake_docker.hooks["create"] = lambda _args: stop.request(signal.SIGTERM)
+    target = holder if stopped_at == "store" else spec.container_name
+
+    def at_create(args: tuple[str, ...]) -> None:
+        if args[args.index("--name") + 1] == target:
+            stop.request(signal.SIGTERM)
+
+    fake_docker.hooks["create"] = at_create
 
     code, _ = _launch(spec, fake_docker, stop=stop)
 
     assert code == 143
-    assert "start" not in fake_docker.verbs
-    assert fake_docker.verbs[-1] == "rm"
-    assert fake_docker.containers == {}
+    assert [call[1] for call in fake_docker.calls_of("start")] == (
+        [] if stopped_at == "store" else [holder]
+    )
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+    assert fake_docker.verbs[-3:] == ["rm", "volume rm", "volume rm"]
     assert not os.path.lexists(spec.receipt_path)
 
 
@@ -850,7 +1017,7 @@ def test_a_failing_wait_is_a_launcher_fault_and_still_removes_the_container(
 
     assert code == EXIT_FAULT
     assert "connection reset" in stderr
-    assert fake_docker.verbs[-1] == "rm"
+    assert fake_docker.verbs[-4:] == ["rm", "rm", "volume rm", "volume rm"]
     assert fake_docker.containers == {}
 
 
@@ -919,8 +1086,9 @@ def test_main_parses_the_spec_and_runs_it_through_the_real_image_verifier(
     }
     assert receipt.host["machine_id"] == HOST.machine_id
     assert receipt.host["boot_id"] == HOST.boot_id
-    (create,) = fake.calls_of("create")
-    assert create[create.index("--") + 1 :] == INNER
+    store, worker = fake.calls_of("create")
+    assert worker[worker.index("--") + 1 :] == INNER
+    assert store[-2:] == ("sleep", "infinity")
     assert capsys.readouterr().out == ""
 
 

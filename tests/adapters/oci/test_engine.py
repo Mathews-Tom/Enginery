@@ -418,7 +418,9 @@ def test_list_runner_containers_returns_only_labelled_workers_sorted(
 
     names = engine.list_runner_containers()
 
-    assert names == tuple(sorted((container_name_for("op-a"), container_name_for("op-b"))))
+    workers = (container_name_for("op-a"), container_name_for("op-b"))
+    # Each attempt has its worker and its store container; both carry the runner label.
+    assert names == tuple(sorted((*workers, *(f"{worker}-store" for worker in workers))))
     assert "label=dev.enginery.runner=1" in fake_docker.calls_of("ps")[0]
 
 

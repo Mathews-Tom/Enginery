@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from enginery.adapters.oci.engine import EngineCommandError, OciEngine
-from enginery.adapters.oci.launch import container_name_for
+from enginery.adapters.oci.engine import OciEngine
 from enginery.domain.runner import ResourceLimits, RunnerProfile
 
-from .real_engine import build_standin_image, require_real_engine
+from .real_engine import build_standin_image, remove_attempt, require_real_engine
 from .support import FakeDocker
 
 
@@ -54,8 +53,7 @@ def real_operation(
 
     yield mint
     for operation_id in minted:
-        with contextlib.suppress(EngineCommandError):
-            real_engine.remove(container_name_for(operation_id))
+        remove_attempt(real_engine, operation_id)
 
 
 @pytest.fixture

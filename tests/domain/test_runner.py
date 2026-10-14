@@ -50,8 +50,8 @@ def _effective(profile: RunnerProfile = PROFILE) -> EffectiveContainer:
         network_mode=profile.network,
         networks=(profile.network,),
         mounts=(
-            ("bind", WORKSPACE_MOUNT, True),
-            ("bind", OUT_MOUNT, True),
+            ("volume", WORKSPACE_MOUNT, True),
+            ("volume", OUT_MOUNT, True),
             ("tmpfs", WORKER_TMP, True),
             ("tmpfs", WORKER_HOME, True),
         ),
@@ -107,10 +107,10 @@ _MOUNTS = _BASE.mounts
             {"mounts": (*_MOUNTS, ("tmpfs", "/var/tmp", True))},
             "unadmitted mount tmpfs at /var/tmp",
         ),
-        ({"mounts": _MOUNTS[1:]}, "admitted binds"),
-        ({"mounts": (_MOUNTS[0], *_MOUNTS[2:])}, "admitted binds"),
+        ({"mounts": _MOUNTS[1:]}, "admitted volumes"),
+        ({"mounts": (_MOUNTS[0], *_MOUNTS[2:])}, "admitted volumes"),
         (
-            {"mounts": (("bind", WORKSPACE_MOUNT, False), *_MOUNTS[1:])},
+            {"mounts": (("volume", WORKSPACE_MOUNT, False), *_MOUNTS[1:])},
             "unadmitted mount",
         ),
         ({"env_keys": ("HOME", "ANTHROPIC_API_KEY")}, "ANTHROPIC_API_KEY"),
@@ -600,3 +600,30 @@ def test_an_engine_identity_cannot_be_constructed_with_a_value_it_could_not_deco
 
     with pytest.raises(InvalidInputError):
         EngineIdentity(**fields)  # type: ignore[arg-type]
+
+
+def test_resource_bounds_omit_the_poll_interval_for_a_kernel_enforced_cap() -> None:
+    from enginery.domain.runner import (
+        DISK_BOUND_HOST_MONITOR,
+        DISK_BOUND_KERNEL_VOLUME,
+        ResourceBounds,
+    )
+
+    fields: dict[str, Any] = {
+        "workspace_bytes": 1,
+        "out_bytes": 1,
+        "workspace_inodes": 1,
+        "out_inodes": 1,
+        "max_file_bytes": 1,
+        "log_driver": "json-file",
+        "log_max_size": "1m",
+        "log_max_file": 2,
+    }
+    kernel = ResourceBounds(disk_mechanism=DISK_BOUND_KERNEL_VOLUME, **fields)
+    monitored = ResourceBounds(disk_mechanism=DISK_BOUND_HOST_MONITOR, poll_seconds=2.0, **fields)
+
+    assert "poll_seconds" not in kernel.to_state()
+    assert monitored.to_state()["poll_seconds"] == 2.0
+    # A receipt recorded by the earlier monitor still decodes, with the same recorded state.
+    assert ResourceBounds.from_state(monitored.to_state()) == monitored
+    assert ResourceBounds.from_state(kernel.to_state()) == kernel

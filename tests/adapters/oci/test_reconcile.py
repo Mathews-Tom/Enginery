@@ -282,3 +282,28 @@ def test_a_launcher_pid_that_is_alive_in_a_group_is_kept(
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def test_reconcile_removes_runner_volumes_whose_containers_are_gone_and_keeps_held_ones(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    from enginery.adapters.oci.launch import store_names_for
+
+    gone_root, held_root = tmp_path / "gone", tmp_path / "held"
+    gone_root.mkdir()
+    held_root.mkdir()
+    gone = make_spec(gone_root, operation_id="op-gone")
+    held = make_spec(held_root, operation_id="op-held")
+    fake_docker.create_store(gone)
+    fake_docker.create_store(held)
+    fake_docker.engine().remove(store_names_for(gone.container_name).holder)
+
+    report = reconcile_runner_containers(
+        fake_docker.engine(),
+        keep=frozenset({store_names_for(held.container_name).holder}),
+    )
+
+    gone_names, held_names = (store_names_for(spec.container_name) for spec in (gone, held))
+    assert set(report.volumes_removed) == {gone_names.workspace_volume, gone_names.out_volume}
+    assert set(fake_docker.volumes) == {held_names.workspace_volume, held_names.out_volume}
+    assert any("volume" in verb for verb in fake_docker.verbs)

@@ -1,22 +1,26 @@
 """The supervised host process that runs one isolated worker container.
 
 Run as ``python -m enginery.adapters.oci.launcher --spec <launch spec json> -- <inner command>``.
-It qualifies the engine, creates the hardened container, reads back what the engine actually
-created and refuses the launch (removing the container) if that is weaker than the profile,
-writes the runner receipt, starts the container and waits for it. While the worker runs it
-measures the workspace and result trees against their disk bounds and kills the container when
-one is exceeded. Whatever happens, the container is removed before the launcher exits.
+The worker never sees a host path. The launcher creates a store container that owns two tmpfs
+volumes whose size and inode count the kernel enforces (the workspace and the result
+directory), seeds the workspace into the first through it, qualifies the engine, creates the
+hardened worker container over the same volumes, reads back what the engine actually created
+and refuses the launch (removing everything) if that is weaker than the profile, writes the
+runner receipt, starts the worker and waits for it. A write past a cap fails inside the worker
+with ``ENOSPC``; nothing on the host measures or races the worker. When the worker exits on
+its own, the launcher reads the result file, the bundle and the workspace back out of the
+volumes through the store container with an extraction that never follows a symlink. Whatever
+happens, the containers and volumes are removed before the launcher exits.
 
 The launcher records how the attempt ended in its own host-only outcome file (beside the
 receipt, outside every worker mount). Collection classifies the attempt from that file; the
 launcher's process exit status is a courtesy for the supervisor and proves nothing, because a
 contained command can exit with any status. Exit statuses: the container's exit code; ``124`` the
 launcher's hard deadline passed and the container was killed; ``125`` the launcher itself
-faulted, refused the launch or killed a worker that outgrew its disk bound; ``143`` and ``130``
-the launcher was stopped by SIGTERM or SIGINT.
+faulted or refused the launch; ``143`` and ``130`` the launcher was stopped by SIGTERM or SIGINT.
 
 ``python -m enginery.adapters.oci.launcher --reconcile [--docker-context NAME]`` removes runner
-containers whose launcher process is gone.
+containers whose launcher process is gone, and the volumes they leave behind.
 """
 
 from __future__ import annotations
@@ -32,38 +36,52 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import IO, TextIO
 
-from enginery.adapters.oci.diskbound import DiskBound
-from enginery.adapters.oci.engine import KIND_DOCKER_DESKTOP, OciEngine
+from enginery.adapters.oci.engine import ObjectNotFoundError, OciEngine
 from enginery.adapters.oci.image import verify_image
 from enginery.adapters.oci.launch import (
     BUNDLE_FILE_NAME,
-    DISK_POLL_SECONDS,
+    StoreNames,
     create_arguments,
     effective_from_inspect,
     launch_violations,
     resource_bounds,
+    store_arguments,
+    store_names_for,
+    store_violations,
 )
 from enginery.adapters.oci.reconcile import ReconcileReport, reconcile_runner_containers
+from enginery.adapters.oci.store import (
+    TreeTransferError,
+    replace_tree,
+    store_named_file,
+    write_tree_archive,
+)
+from enginery.adapters.runner_launch import MAX_RESULT_BYTES
 from enginery.domain.errors import EngineryError, InvalidInputError
 from enginery.domain.runner import (
-    EngineIdentity,
+    OUT_MOUNT,
+    WORKSPACE_MOUNT,
+    EffectiveContainer,
     ImageIdentity,
     LaunchOutcome,
     LaunchSpec,
     OutcomeState,
     PermissionMapping,
+    ResourceBounds,
+    RunnerProfile,
     RunnerReceipt,
     TrustMode,
     outcome_path_for,
     profile_violations,
 )
 from enginery.engine.supervisor import HostIdentity, ProcessIdentity, probe_host, probe_process
+from enginery.engine.task_repository import MAX_BUNDLE_BYTES
 from enginery.ledger.redaction import redact_credential_shaped_text
 
 EXIT_DEADLINE = 124
@@ -210,20 +228,6 @@ def admit_paths(spec: LaunchSpec) -> None:
             raise InvalidInputError(f"the receipt path must be outside the {role} directory")
 
 
-def _open_up(path: str) -> None:
-    """``chmod a+rwX`` on one regular file or directory; symlinks and specials are skipped."""
-    info = os.lstat(path)
-    if stat.S_ISDIR(info.st_mode):
-        wanted = 0o777
-    elif stat.S_ISREG(info.st_mode):
-        wanted = 0o666 | (0o111 if info.st_mode & 0o111 else 0)
-    else:
-        return
-    current = stat.S_IMODE(info.st_mode)
-    if current & wanted != wanted:
-        os.chmod(path, current | wanted)
-
-
 def _unlink_file(path: str) -> None:
     """Unlink ``path`` unless it is absent or a directory; a symlink is removed itself."""
     try:
@@ -231,36 +235,6 @@ def _unlink_file(path: str) -> None:
             os.unlink(path)
     except FileNotFoundError:
         pass
-
-
-def _raise(error: OSError) -> None:
-    raise error
-
-
-def make_tree_writable(root: str) -> None:
-    """``chmod -R a+rwX`` without ever following a symlink.
-
-    Needed only where the engine maps the container's non-root uid to a uid that does not own
-    the tree (see ``needs_open_permissions``); the worker then creates everything with umask 0,
-    so the host can always delete it again.
-    """
-    _require_directory(root, "tree")
-    for directory, _subdirectories, files in os.walk(root, followlinks=False, onerror=_raise):
-        _open_up(directory)
-        for name in files:
-            _open_up(os.path.join(directory, name))
-
-
-def needs_open_permissions(engine: EngineIdentity) -> bool:
-    """Whether the engine's uid mapping requires the trees to be opened to other uids.
-
-    Docker Desktop runs the containers behind a file-sharing layer that presents a bind mount
-    to the container user with the operator's own authority, so a 0700 tree owned by the
-    operator is writable by the worker as it stands and nothing is opened. On every other
-    engine the container's uid is a different host uid (or an unprivileged sub-uid), so the
-    trees must be world read-write; they sit inside the private root ``admit_paths`` demands.
-    """
-    return engine.kind != KIND_DOCKER_DESKTOP
 
 
 def _discard(path: str) -> None:
@@ -349,27 +323,19 @@ def _require_permission_mapping(permissions: PermissionMapping, inner: Sequence[
 
 @dataclass(frozen=True, slots=True)
 class _Waited:
-    """How waiting for the container ended: its exit code, the deadline, or a disk bound."""
+    """How waiting for the container ended: its exit code, or that the deadline passed."""
 
     code: int | None = None
     deadline: bool = False
-    bound: str | None = None
 
 
 def _await_exit(
-    engine: OciEngine,
-    name: str,
-    *,
-    stop: StopSignal,
-    deadline_seconds: float,
-    bound: DiskBound | None = None,
-    poll_seconds: float = DISK_POLL_SECONDS,
+    engine: OciEngine, name: str, *, stop: StopSignal, deadline_seconds: float
 ) -> _Waited:
-    """Wait for the container to stop, measuring its disk bounds while it runs.
+    """Wait for the container to stop; a stop request raises ``_InterruptedError``.
 
-    A stop request raises ``_InterruptedError``. The measurement is repeated no more often than
-    ``poll_seconds`` and backs off to three times its own duration, so a large tree cannot make
-    the launcher spend its time measuring.
+    The wait runs on its own thread, so the hard deadline and stop signals are serviced whatever
+    the engine is doing.
     """
     outcome: dict[str, object] = {}
     finished = threading.Event()
@@ -386,22 +352,14 @@ def _await_exit(
     thread = threading.Thread(target=waiter, name="oci-wait", daemon=True)
     thread.start()
     deadline = time.monotonic() + deadline_seconds
-    next_measurement = time.monotonic() + poll_seconds
     while True:
         _checkpoint(stop)
         if finished.is_set():
             break
-        now = time.monotonic()
-        if deadline - now <= 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return _Waited(deadline=True)
-        if bound is not None and now >= next_measurement:
-            violation = bound.violation()
-            if violation is not None:
-                return _Waited(bound=violation)
-            next_measurement = time.monotonic() + max(poll_seconds, 3 * (time.monotonic() - now))
-            continue
-        horizon = deadline if bound is None else min(deadline, next_measurement)
-        stop.wake.wait(max(horizon - now, 0.0))
+        stop.wake.wait(remaining)
     thread.join(timeout=5)
     error = outcome.get("error")
     if isinstance(error, BaseException):
@@ -409,13 +367,132 @@ def _await_exit(
     code = outcome.get("code")
     if not isinstance(code, int):
         raise _RefusedError("the engine reported no exit code for the container")
-    if bound is not None:
-        # A writer that outran every poll (a burst before the first measurement, then exit)
-        # still leaves an over-cap tree behind: measure once more after the container stopped.
-        violation = bound.violation()
-        if violation is not None:
-            return _Waited(bound=violation)
     return _Waited(code=code)
+
+
+def _create(engine: OciEngine, arguments: Sequence[str], what: str) -> None:
+    """``docker create``; a failure or any engine warning refuses the launch."""
+    completed = engine.run_cli(arguments)
+    if completed.returncode != 0:
+        raise _RefusedError(
+            f"the engine could not create the {what}: "
+            + redact_credential_shaped_text(completed.stderr.strip()[-2000:])
+        )
+    if completed.stderr.strip():
+        raise _RefusedError(
+            f"the engine warned while creating the {what}, so its limits may not hold: "
+            + redact_credential_shaped_text(completed.stderr.strip()[-2000:])
+        )
+
+
+def _verify(
+    engine: OciEngine,
+    spec: LaunchSpec,
+    container_name: str,
+    profile: RunnerProfile,
+    volumes: Mapping[str, Mapping[str, object]],
+    log: _Log,
+    *,
+    what: str,
+) -> EffectiveContainer:
+    """What the engine holds for ``container_name``, refused unless it is the isolated profile."""
+    container = engine.container_inspect(container_name)
+    effective = effective_from_inspect(container, engine.image_inspect(spec.image))
+    found = (
+        *profile_violations(profile, effective),
+        *launch_violations(spec, container),
+        *store_violations(spec, container, volumes),
+    )
+    if found:
+        for violation in found:
+            log(f"profile violation: {violation}")
+        raise _RefusedError(f"the created {what} is weaker than the isolated profile", found)
+    return effective
+
+
+def _remove_leftovers(engine: OciEngine, worker: str, names: StoreNames, log: _Log) -> None:
+    """Remove what an earlier attempt of this operation left: its containers and volumes."""
+    for container in (worker, names.holder):
+        if engine.container_exists(container):
+            log(f"removing a container left by an earlier attempt of this operation: {container}")
+            engine.remove(container)
+    for volume in (names.workspace_volume, names.out_volume):
+        engine.volume_remove(volume)
+
+
+def _remove_store(engine: OciEngine, names: StoreNames, log: _Log) -> None:
+    """Remove the store container and then its two volumes (a volume in use cannot go)."""
+    try:
+        engine.remove(names.holder, force=True)
+    except EngineryError as error:
+        log(f"the store container could not be removed: {_describe(error)}")
+        return
+    for volume in (names.workspace_volume, names.out_volume):
+        try:
+            engine.volume_remove(volume)
+        except EngineryError as error:
+            log(f"the volume {volume} could not be removed: {_describe(error)}")
+
+
+def _seed_workspace(
+    engine: OciEngine, names: StoreNames, spec: LaunchSpec, bounds: ResourceBounds
+) -> None:
+    """Stream the host workspace into the workspace volume, owned by the worker's uid."""
+
+    def write(stream: IO[bytes]) -> None:
+        write_tree_archive(
+            spec.workspace_path,
+            stream,
+            uid=spec.profile.uid,
+            gid=spec.profile.gid,
+            max_bytes=bounds.workspace_bytes,
+            max_entries=bounds.workspace_inodes - 1,
+        )
+
+    try:
+        engine.copy_in(names.holder, WORKSPACE_MOUNT, write)
+    except TreeTransferError as error:
+        raise _RefusedError(f"the workspace cannot be given to the worker: {error}") from error
+
+
+def _copy_result_file(
+    engine: OciEngine, names: StoreNames, spec: LaunchSpec, file_name: str, limit: int, log: _Log
+) -> None:
+    stored = [False]
+
+    def read(stream: IO[bytes]) -> None:
+        stored[0] = store_named_file(stream, spec.out_path, file_name, limit=limit)
+
+    try:
+        engine.copy_out(names.holder, f"{OUT_MOUNT}/{file_name}", read)
+    except ObjectNotFoundError:
+        return  # no such result: collection reports a missing result as the worker's failure
+    if not stored[0]:
+        log(f"{file_name} in the result volume is not a regular file; it was not copied")
+
+
+def _collect(
+    engine: OciEngine, names: StoreNames, spec: LaunchSpec, bounds: ResourceBounds, log: _Log
+) -> None:
+    """Copy the exited worker's result, bundle and workspace out of the volumes to the host.
+
+    Only the named result files come out of the result volume, and only as regular files; the
+    workspace replaces the host workspace as one complete extraction or not at all. Every byte
+    is extracted by ``store`` without following a link.
+    """
+    _copy_result_file(engine, names, spec, spec.result_name, MAX_RESULT_BYTES, log)
+    if spec.bundle_branch is not None:
+        _copy_result_file(engine, names, spec, BUNDLE_FILE_NAME, MAX_BUNDLE_BYTES, log)
+
+    def take_workspace(stream: IO[bytes]) -> None:
+        replace_tree(
+            stream,
+            spec.workspace_path,
+            max_bytes=bounds.workspace_bytes,
+            max_entries=bounds.workspace_inodes,
+        )
+
+    engine.copy_out(names.holder, f"{WORKSPACE_MOUNT}/.", take_workspace)
 
 
 def run_launcher(
@@ -430,14 +507,15 @@ def run_launcher(
     stop: StopSignal | None = None,
     deadline_slack_seconds: int = DEADLINE_SLACK_SECONDS,
     identify: Identify = _own_identity,
-    poll_seconds: float = DISK_POLL_SECONDS,
 ) -> int:
     """Run one isolated worker attempt and return the launcher's exit status."""
     log = _Log(sys.stderr if stderr is None else stderr)
     stop = StopSignal() if stop is None else stop
     name = spec.container_name
+    names = store_names_for(name)
     nonce = secrets.token_hex(_NONCE_BYTES)
     outcome_path = outcome_path_for(spec.receipt_path)
+    store_created = False
     created = False
     started = False
     recording = False
@@ -485,17 +563,12 @@ def run_launcher(
             raise _RefusedError("the verified image is not the pinned image")
         engine.ensure_internal_network(spec.profile.network)
         _checkpoint(stop)
-        if engine.container_exists(name):
-            log(f"removing a container left by an earlier attempt of this operation: {name}")
-            engine.remove(name)
+        _remove_leftovers(engine, name, names, log)
         # Nothing an earlier attempt left in the result directory may be read as this one's.
         _discard(os.path.join(spec.out_path, spec.result_name))
         _discard(os.path.join(spec.out_path, BUNDLE_FILE_NAME))
-        if needs_open_permissions(identity):
-            make_tree_writable(spec.workspace_path)
-            make_tree_writable(spec.out_path)
         try:
-            reconciled = reconcile_runner_containers(engine, keep=frozenset({name}))
+            reconciled = reconcile_runner_containers(engine, keep=frozenset({name, names.holder}))
         except EngineryError as error:
             log(f"orphaned containers could not be reconciled: {_describe(error)}")
         else:
@@ -503,37 +576,37 @@ def run_launcher(
                 log(f"removed an orphaned container whose launcher is gone: {orphan}")
             for orphan, reason in reconciled.failed:
                 log(f"orphaned container {orphan} could not be reconciled: {reason}")
-
-        created = True  # the engine can hold a container even when create reports failure
-        completed = engine.run_cli(arguments)
-        if completed.returncode != 0:
-            raise _RefusedError(
-                "the engine could not create the container: "
-                + redact_credential_shaped_text(completed.stderr.strip()[-2000:])
-            )
-        if completed.stderr.strip():
-            raise _RefusedError(
-                "the engine warned while creating the container, so its limits may not hold: "
-                + redact_credential_shaped_text(completed.stderr.strip()[-2000:])
-            )
-        _checkpoint(stop)
-
-        container = engine.container_inspect(name)
-        effective = effective_from_inspect(container, engine.image_inspect(spec.image))
-        found = (
-            *profile_violations(spec.profile, effective),
-            *launch_violations(spec, container),
-        )
-        if found:
-            for violation in found:
-                log(f"profile violation: {violation}")
-            raise _RefusedError("the created container is weaker than the isolated profile", found)
+            for volume in reconciled.volumes_removed:
+                log(f"removed an orphaned volume whose container is gone: {volume}")
 
         bounds = resource_bounds(spec.profile)
-        bound = DiskBound(workspace=spec.workspace_path, out=spec.out_path, bounds=bounds)
-        over = bound.violation()
-        if over is not None:
-            raise _RefusedError(f"the worker trees are already over their bound: {over}")
+        # The store container creates the two capped volumes and keeps them mounted; the
+        # worker is created over the same volumes. The engine can hold either even when its
+        # create reports failure, so each is flagged before it is attempted.
+        store_created = True
+        _create(engine, store_arguments(spec, launcher=launcher), "store container")
+        _checkpoint(stop)
+        volumes = {
+            volume: engine.volume_inspect(volume)
+            for volume in (names.workspace_volume, names.out_volume)
+        }
+        _verify(
+            engine,
+            spec,
+            names.holder,
+            replace(spec.profile, network="none"),
+            volumes,
+            log,
+            what="store container",
+        )
+        engine.start(names.holder)
+        _seed_workspace(engine, names, spec, bounds)
+        _checkpoint(stop)
+
+        created = True
+        _create(engine, arguments, "container")
+        _checkpoint(stop)
+        effective = _verify(engine, spec, name, spec.profile, volumes, log, what="container")
 
         host = host_probe()
         receipt = RunnerReceipt(
@@ -567,26 +640,17 @@ def run_launcher(
             + spec.profile.resources.stop_grace_seconds
             + deadline_slack_seconds
         )
-        waited = _await_exit(
-            engine,
-            name,
-            stop=stop,
-            deadline_seconds=deadline,
-            bound=bound,
-            poll_seconds=poll_seconds,
-        )
-        if waited.bound is not None:
-            log(f"{waited.bound}; killing the container")
-            engine.kill(name)
-            state, detail, violations = OutcomeState.BOUND_EXCEEDED, waited.bound, (waited.bound,)
-            code = EXIT_FAULT
-        elif waited.deadline:
+        waited = _await_exit(engine, name, stop=stop, deadline_seconds=deadline)
+        if waited.deadline:
             log(f"hard deadline of {deadline}s passed; killing the container")
             engine.kill(name)
             state, detail = OutcomeState.DEADLINE, f"hard deadline of {deadline}s passed"
             code = EXIT_DEADLINE
         else:
             assert waited.code is not None  # _await_exit raises unless it has a code
+            # The worker stopped on its own: take its result, bundle and workspace back before
+            # the volumes go. If that fails the attempt is a fault, never an exited worker.
+            _collect(engine, names, spec, bounds, log)
             state, exit_code = OutcomeState.EXITED, waited.code
             code = waited.code
     except _InterruptedError as interrupt:
@@ -608,6 +672,8 @@ def run_launcher(
     finally:
         if created:
             _tail_and_remove(engine, name, log, show_logs=started and code != 0)
+        if store_created:
+            _remove_store(engine, names, log)
         if recording:
             # If this write fails the outcome stays "launching"/"running" and collection treats
             # the attempt as unfinished, which is a failure, never an acceptance.
@@ -661,6 +727,8 @@ def _parse(arguments: Sequence[str]) -> tuple[LaunchSpec, tuple[str, ...]]:
 def _print_reconcile(report: ReconcileReport, stream: TextIO) -> None:
     for name in report.removed:
         stream.write(f"removed orphaned runner container {name}\n")
+    for volume in report.volumes_removed:
+        stream.write(f"removed orphaned runner volume {volume}\n")
     for name in report.kept:
         stream.write(f"kept runner container {name} (its launcher is alive)\n")
     for name in report.unattributed:

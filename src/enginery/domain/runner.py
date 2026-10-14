@@ -623,17 +623,17 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
     if effective.devices:
         problems.append("container has host devices")
     allowed_mounts = {
-        ("bind", WORKSPACE_MOUNT, True),
-        ("bind", OUT_MOUNT, True),
+        ("volume", WORKSPACE_MOUNT, True),
+        ("volume", OUT_MOUNT, True),
         ("tmpfs", WORKER_TMP, True),
         ("tmpfs", WORKER_HOME, True),
     }
     for mount in effective.mounts:
         if mount not in allowed_mounts:
             problems.append(f"unadmitted mount {mount[0]} at {mount[1]}")
-    bound = {mount[1] for mount in effective.mounts if mount[0] == "bind"}
-    if bound != {WORKSPACE_MOUNT, OUT_MOUNT}:
-        problems.append("the workspace and result mounts are not exactly the admitted binds")
+    stored = {mount[1] for mount in effective.mounts if mount[0] == "volume"}
+    if stored != {WORKSPACE_MOUNT, OUT_MOUNT}:
+        problems.append("the workspace and result mounts are not exactly the admitted volumes")
     stray_env = sorted(set(effective.env_keys) - set(profile.env_allowlist) - _IMAGE_ENV_KEYS)
     if stray_env:
         problems.append(f"environment keys outside the allowlist: {stray_env}")
@@ -644,26 +644,37 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
 _IMAGE_ENV_KEYS = frozenset({"HOSTNAME", "NODE_VERSION", "YARN_VERSION", "BUN_INSTALL", "PWD"})
 
 
+DISK_BOUND_KERNEL_VOLUME = "kernel-capped-volume"
+"""Disk bound mechanism: the workspace and result trees are tmpfs volumes whose size and inode
+count the kernel enforces, so a write beyond the cap fails with ``ENOSPC`` inside the container.
+Their pages are charged to the container's memory cgroup, which is therefore the real ceiling on
+what a worker can keep in them."""
+
 DISK_BOUND_HOST_MONITOR = "host-monitor-kill-hold"
-"""Disk bound mechanism: a host process measures the two bind-mounted trees and kills the
-container when either exceeds its cap. A capped store is not available for a bind mount of a
-host directory on Docker Desktop (the engine VM cannot quota a host path)."""
+"""Disk bound mechanism of an earlier launcher: a host process measured two bind-mounted trees
+and killed the container when either exceeded its cap. It is no longer used; receipts that
+name it still decode."""
 
 
 @dataclass(frozen=True, slots=True)
 class ResourceBounds:
-    """The disk and log bounds one attempt ran under, and the mechanism that enforces them."""
+    """The disk and log bounds one attempt ran under, and the mechanism that enforces them.
+
+    ``poll_seconds`` is the measurement interval of a host-side monitor and is absent for a
+    mechanism the kernel enforces (it is left out of the recorded state, so receipts that
+    carry it keep their digest).
+    """
 
     disk_mechanism: str
     workspace_bytes: int
     out_bytes: int
     workspace_inodes: int
     out_inodes: int
-    poll_seconds: float
     max_file_bytes: int
     log_driver: str
     log_max_size: str
     log_max_file: int
+    poll_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.disk_mechanism, "resource bounds disk mechanism")
@@ -671,24 +682,26 @@ class ResourceBounds:
         _require_text(self.log_max_size, "resource bounds log size")
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "disk_mechanism": self.disk_mechanism,
             "workspace_bytes": self.workspace_bytes,
             "out_bytes": self.out_bytes,
             "workspace_inodes": self.workspace_inodes,
             "out_inodes": self.out_inodes,
-            "poll_seconds": self.poll_seconds,
             "max_file_bytes": self.max_file_bytes,
             "log_driver": self.log_driver,
             "log_max_size": self.log_max_size,
             "log_max_file": self.log_max_file,
         }
+        if self.poll_seconds is not None:
+            state["poll_seconds"] = self.poll_seconds
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> ResourceBounds:
         data = _mapping(state, "resource bounds")
         poll = data.get("poll_seconds")
-        if not isinstance(poll, int | float) or isinstance(poll, bool):
+        if poll is not None and (not isinstance(poll, int | float) or isinstance(poll, bool)):
             raise InvalidInputError("resource bounds poll_seconds must be a number")
         return cls(
             disk_mechanism=_text(data, "disk_mechanism", "resource bounds"),
@@ -696,11 +709,11 @@ class ResourceBounds:
             out_bytes=_integer(data, "out_bytes", "resource bounds"),
             workspace_inodes=_integer(data, "workspace_inodes", "resource bounds"),
             out_inodes=_integer(data, "out_inodes", "resource bounds"),
-            poll_seconds=float(poll),
             max_file_bytes=_integer(data, "max_file_bytes", "resource bounds"),
             log_driver=_text(data, "log_driver", "resource bounds"),
             log_max_size=_text(data, "log_max_size", "resource bounds"),
             log_max_file=_integer(data, "log_max_file", "resource bounds"),
+            poll_seconds=None if poll is None else float(poll),
         )
 
 

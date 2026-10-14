@@ -12,14 +12,21 @@ can be exercised on an engine without building the multi-gigabyte harness image.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import json
+import tarfile
+from collections.abc import Sequence
 from importlib import resources
 from pathlib import Path
+from typing import IO, Any
 
 import pytest
 
 from enginery.adapters.oci.engine import EngineCommandError, OciEngine
+from enginery.adapters.oci.launch import container_name_for, store_names_for
 from enginery.domain.errors import MissingPrerequisiteError
+from enginery.domain.runner import LaunchSpec
 
 # python:3.12-slim (Debian trixie), multi-arch index digest; present locally on the
 # development engines and pulled by digest elsewhere.
@@ -80,3 +87,80 @@ def build_standin_image(engine: OciEngine, workdir: Path) -> tuple[str, str]:
         )
     image_id = str(engine.image_inspect(tag)["Id"])
     return tag, image_id
+
+
+# --- an attempt's capped store -------------------------------------------------------
+
+
+def create_attempt(
+    engine: OciEngine,
+    spec: LaunchSpec,
+    inner: Sequence[str],
+    *,
+    nonce: str = "n" * 32,
+    extra: Sequence[str] = (),
+) -> None:
+    """Create and start the store container, seed the workspace, create (not start) the worker.
+
+    The same steps the launcher takes, with the real engine; ``extra`` is spliced into the
+    worker's ``docker create`` flags (to create a deliberately weaker container).
+    """
+    from enginery.adapters.oci.launch import create_arguments, store_arguments
+    from enginery.adapters.oci.store import write_tree_archive
+
+    names = store_names_for(spec.container_name)
+    created = engine.run_cli(store_arguments(spec))
+    assert created.returncode == 0, created.stderr
+    engine.start(names.holder)
+    limits = spec.profile.resources
+    engine.copy_in(
+        names.holder,
+        "/workspace",
+        lambda stream: write_tree_archive(
+            spec.workspace_path,
+            stream,
+            uid=spec.profile.uid,
+            gid=spec.profile.gid,
+            max_bytes=limits.workspace_mib * 1024 * 1024,
+            max_entries=limits.workspace_inodes - 1,
+        ),
+    )
+    arguments = create_arguments(spec, inner, nonce=nonce)
+    worker = engine.run_cli((arguments[0], *extra, *arguments[1:]))
+    assert worker.returncode == 0, worker.stderr
+
+
+def remove_attempt(engine: OciEngine, operation_id: str) -> None:
+    """Remove an attempt's worker, store container and volumes, whatever state it is in."""
+    worker = container_name_for(operation_id)
+    names = store_names_for(worker)
+    for container in (worker, names.holder):
+        with contextlib.suppress(EngineCommandError):
+            engine.remove(container)
+    for volume in (names.workspace_volume, names.out_volume):
+        with contextlib.suppress(EngineCommandError):
+            engine.volume_remove(volume)
+
+
+def read_volume(engine: OciEngine, spec: LaunchSpec, path: str) -> dict[str, bytes]:
+    """The regular files under ``path`` of a running store container, by relative name."""
+    holder = store_names_for(spec.container_name).holder
+    found: dict[str, bytes] = {}
+
+    def read(stream: IO[bytes]) -> None:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            for member in archive:
+                extracted = archive.extractfile(member) if member.isreg() else None
+                if extracted is not None:
+                    found[member.name.removeprefix("./")] = extracted.read()
+
+    engine.copy_out(holder, path, read)
+    return found
+
+
+def start_and_wait(engine: OciEngine, spec: LaunchSpec) -> tuple[int, dict[str, Any]]:
+    """Start the worker, wait for it and parse the result file it left in the result volume."""
+    engine.start(spec.container_name)
+    code = engine.wait(spec.container_name)
+    files = read_volume(engine, spec, f"/out/{spec.result_name}")
+    return code, json.loads(files[spec.result_name])

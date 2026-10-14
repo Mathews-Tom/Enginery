@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from enginery.adapters.oci.engine import (
@@ -24,7 +25,7 @@ from enginery.adapters.oci.engine import (
 )
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.runner import (
-    DISK_BOUND_HOST_MONITOR,
+    DISK_BOUND_KERNEL_VOLUME,
     OUT_MOUNT,
     WORKER_HOME,
     WORKER_TMP,
@@ -54,8 +55,8 @@ LOG_DRIVER = "json-file"
 LOG_MAX_SIZE = "1m"
 LOG_MAX_FILE = 2
 """The container log is rotated and capped at ``LOG_MAX_FILE`` files of ``LOG_MAX_SIZE``."""
-DISK_POLL_SECONDS = 2.0
-"""How often the launcher measures the workspace and result trees while a worker runs."""
+STORE_HOLDER_COMMAND = ("sleep", "infinity")
+"""What the store container runs: nothing, so the tmpfs volumes stay mounted while it lives."""
 _MIB = 1024 * 1024
 
 
@@ -78,8 +79,7 @@ def _cpus(nano_cpus: int) -> str:
 def max_file_bytes(profile: RunnerProfile) -> int:
     """The largest single file a worker process may write (``RLIMIT_FSIZE``).
 
-    A kernel limit per file, so one runaway write cannot outrun the host-side measurement of
-    the two bind-mounted trees by more than a single file's worth.
+    A per-file kernel limit on top of the volumes' own size caps.
     """
     limits = profile.resources
     return min(limits.workspace_mib, limits.out_mib) * _MIB
@@ -89,17 +89,53 @@ def resource_bounds(profile: RunnerProfile) -> ResourceBounds:
     """The disk and log bounds a launch runs under, as recorded in its receipt."""
     limits = profile.resources
     return ResourceBounds(
-        disk_mechanism=DISK_BOUND_HOST_MONITOR,
+        disk_mechanism=DISK_BOUND_KERNEL_VOLUME,
         workspace_bytes=limits.workspace_mib * _MIB,
         out_bytes=limits.out_mib * _MIB,
         workspace_inodes=limits.workspace_inodes,
         out_inodes=limits.out_inodes,
-        poll_seconds=DISK_POLL_SECONDS,
         max_file_bytes=max_file_bytes(profile),
         log_driver=LOG_DRIVER,
         log_max_size=LOG_MAX_SIZE,
         log_max_file=LOG_MAX_FILE,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class StoreNames:
+    """The names of one attempt's store container and its two capped volumes."""
+
+    holder: str
+    workspace_volume: str
+    out_volume: str
+
+
+def store_names_for(container_name: str) -> StoreNames:
+    """The store container and volume names that belong to the worker ``container_name``."""
+    return StoreNames(
+        holder=f"{container_name}-store",
+        workspace_volume=f"{container_name}-workspace",
+        out_volume=f"{container_name}-out",
+    )
+
+
+def volume_options(profile: RunnerProfile, role: str) -> dict[str, str]:
+    """The local-driver options that make a volume a tmpfs capped in size and inodes.
+
+    ``role`` is ``"workspace"`` or ``"out"``. The tmpfs root is owned by the worker and closed
+    to everyone else.
+    """
+    limits = profile.resources
+    size, inodes = (
+        (limits.workspace_mib, limits.workspace_inodes)
+        if role == "workspace"
+        else (limits.out_mib, limits.out_inodes)
+    )
+    return {
+        "type": "tmpfs",
+        "device": "tmpfs",
+        "o": f"size={size}m,nr_inodes={inodes},uid={profile.uid},gid={profile.gid},mode=0700",
+    }
 
 
 def hardening_arguments(profile: RunnerProfile, *, network: str) -> tuple[str, ...]:
@@ -146,13 +182,33 @@ def hardening_arguments(profile: RunnerProfile, *, network: str) -> tuple[str, .
     return tuple(arguments)
 
 
-def _plain_path(path: str, role: str) -> str:
-    """A host path safe to embed in a ``-v`` value: no separators or control characters."""
-    if ":" in path or any(ord(char) < 32 or ord(char) == 127 for char in path):
-        raise InvalidInputError(
-            f"{role} path cannot be bind-mounted: it contains ':' or a control character"
-        )
-    return path
+def _csv_field(text: str) -> str:
+    """``text`` as one field of a ``--mount`` value, quoted when it holds a comma or quote."""
+    if "," not in text and '"' not in text:
+        return text
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _creating_mount(spec: LaunchSpec, role: str, volume: str, destination: str) -> str:
+    """The ``--mount`` value that creates one capped tmpfs volume (the store container's)."""
+    fields = [
+        "type=volume",
+        f"src={volume}",
+        f"dst={destination}",
+        "volume-nocopy",
+        "volume-driver=local",
+        f"volume-label={RUNNER_LABEL}=1",
+        *(
+            _csv_field(f"volume-opt={key}={value}")
+            for key, value in volume_options(spec.profile, role).items()
+        ),
+    ]
+    return ",".join(fields)
+
+
+def _joining_mount(volume: str, destination: str) -> str:
+    """The ``--mount`` value that attaches a worker to a volume the store container created."""
+    return f"type=volume,src={volume},dst={destination},volume-nocopy"
 
 
 def _flag_value(value: str, flag: str) -> str:
@@ -267,8 +323,7 @@ def create_arguments(
         )
     if spec.workspace_path == spec.out_path:
         raise InvalidInputError("the workspace and result mounts must be different directories")
-    workspace = _plain_path(spec.workspace_path, "workspace")
-    out = _plain_path(spec.out_path, "result")
+    names = store_names_for(spec.container_name)
     environment = _environment_arguments(spec)
     command = worker_command(spec, inner_command, nonce=nonce)
     launcher_labels = (
@@ -277,10 +332,10 @@ def create_arguments(
     return (
         "create",
         *hardening_arguments(spec.profile, network=spec.profile.network),
-        "-v",
-        f"{workspace}:{WORKSPACE_MOUNT}:rw",
-        "-v",
-        f"{out}:{OUT_MOUNT}:rw",
+        "--mount",
+        _joining_mount(names.workspace_volume, WORKSPACE_MOUNT),
+        "--mount",
+        _joining_mount(names.out_volume, OUT_MOUNT),
         "-w",
         WORKSPACE_MOUNT,
         "--label",
@@ -293,6 +348,46 @@ def create_arguments(
         *environment,
         spec.image,
         *command,
+    )
+
+
+def store_arguments(
+    spec: LaunchSpec, *, launcher: ProcessIdentity | None = None
+) -> tuple[str, ...]:
+    """The ``docker create`` arguments of the store container of one attempt.
+
+    The store container has the worker's hardening, no network and nothing to run: it only keeps
+    the attempt's two capped tmpfs volumes mounted (they are gone while no container has them),
+    and it creates them, so no volume ever exists without a container that refers to it. The
+    host seeds the workspace through it before the worker starts and reads the result and the
+    workspace back through it after the worker exits.
+    """
+    if spec.container_name != container_name_for(spec.operation_id):
+        raise InvalidInputError(
+            "launch spec container name is not the one derived from its operation id"
+        )
+    names = store_names_for(spec.container_name)
+    launcher_labels = (
+        ("--label", f"{LAUNCHER_LABEL}={launcher_label(launcher)}") if launcher else ()
+    )
+    return (
+        "create",
+        *hardening_arguments(spec.profile, network="none"),
+        "--mount",
+        _creating_mount(spec, "workspace", names.workspace_volume, WORKSPACE_MOUNT),
+        "--mount",
+        _creating_mount(spec, "out", names.out_volume, OUT_MOUNT),
+        "-w",
+        WORKSPACE_MOUNT,
+        "--label",
+        f"{RUNNER_LABEL}=1",
+        "--label",
+        f"{OPERATION_LABEL}={spec.operation_id}",
+        *launcher_labels,
+        "--name",
+        names.holder,
+        spec.image,
+        *STORE_HOLDER_COMMAND,
     )
 
 
@@ -558,4 +653,41 @@ def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tupl
     )
     problems += _log_violations(host)
     problems += _ulimit_violations(host, spec.profile)
+    return tuple(problems)
+
+
+def store_violations(
+    spec: LaunchSpec,
+    container: Mapping[str, object],
+    volumes: Mapping[str, Mapping[str, object]],
+) -> tuple[str, ...]:
+    """Ways a container's workspace and result mounts are not the attempt's capped volumes.
+
+    ``volumes`` maps a volume name to the engine's inspect document of it. The caps are checked
+    from what the engine holds: the local driver, a tmpfs of exactly the profile's size and
+    inode count owned by the worker, and the runner label.
+    """
+    names = store_names_for(spec.container_name)
+    mounts = {
+        entry.get("Destination"): entry
+        for entry in (_map(item) for item in _items(container.get("Mounts")))
+    }
+    problems: list[str] = []
+    for role, volume, destination in (
+        ("workspace", names.workspace_volume, WORKSPACE_MOUNT),
+        ("result", names.out_volume, OUT_MOUNT),
+    ):
+        mount = mounts.get(destination, {})
+        if mount.get("Type") != "volume" or mount.get("Name") != volume or mount.get("RW") is False:
+            problems.append(f"the {role} mount is not the attempt's volume {volume}")
+        document = volumes.get(volume, {})
+        if document.get("Driver") != "local":
+            problems.append(f"the {role} volume does not use the local driver")
+        expected = volume_options(spec.profile, "out" if role == "result" else "workspace")
+        if dict(_map(document.get("Options"))) != expected:
+            problems.append(
+                f"the {role} volume is not a tmpfs capped at the profile's size and inode count"
+            )
+        if _map(document.get("Labels")).get(RUNNER_LABEL) != "1":
+            problems.append(f"the {role} volume does not carry the runner label")
     return tuple(problems)
