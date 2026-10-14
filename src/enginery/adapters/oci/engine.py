@@ -9,13 +9,15 @@ refused with the missing requirement named, never worked around.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import IO, Protocol, runtime_checkable
 
 from enginery.domain.errors import (
     InvalidInputError,
@@ -54,6 +56,7 @@ KIND_DOCKER = "docker"
 
 _INFO_TIMEOUT_SECONDS = 30.0
 _COMMAND_TIMEOUT_SECONDS = 120.0
+_COPY_TIMEOUT_SECONDS = 900.0
 _STDERR_DETAIL_CHARS = 2000
 
 _LIMIT_SUPPORT: tuple[tuple[str, str], ...] = (
@@ -118,6 +121,104 @@ def run_subprocess(
     )
 
 
+@runtime_checkable
+class CopyRunner(Protocol):
+    """Move a tar stream into or out of a container with ``docker cp``.
+
+    ``copy_in`` hands the write end of the stream to ``writer``; ``copy_out`` hands the read
+    end to ``reader``. Neither raises on a failed command: the outcome is returned.
+    """
+
+    def copy_in(
+        self,
+        argv: Sequence[str],
+        writer: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+    def copy_out(
+        self,
+        argv: Sequence[str],
+        reader: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+
+_DRAIN_BYTES = 1024 * 1024
+
+
+def _stderr_of(errors: IO[bytes]) -> str:
+    errors.seek(0)
+    return errors.read().decode("utf-8", errors="replace")
+
+
+class SubprocessCopy:
+    """``CopyRunner`` over the docker CLI, run with the minimal engine environment."""
+
+    def copy_in(
+        self,
+        argv: Sequence[str],
+        writer: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=errors,
+                env=engine_environment(),
+            )
+            try:
+                assert process.stdin is not None
+                # A broken pipe means the engine stopped reading; its status and stderr say why.
+                with contextlib.suppress(BrokenPipeError):
+                    writer(process.stdin)
+                with contextlib.suppress(BrokenPipeError):
+                    process.stdin.close()
+                returncode = process.wait(timeout=timeout)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            return subprocess.CompletedProcess(tuple(argv), returncode, "", _stderr_of(errors))
+
+    def copy_out(
+        self,
+        argv: Sequence[str],
+        reader: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                env=engine_environment(),
+            )
+            try:
+                assert process.stdout is not None
+                reader(process.stdout)
+                # A reader may stop at the end of the archive; let the engine finish writing.
+                rest = process.stdout.read(_DRAIN_BYTES)
+                if len(rest) == _DRAIN_BYTES:
+                    process.kill()  # far more than padding: the engine is not done, stop it
+                returncode = process.wait(timeout=timeout)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
+            return subprocess.CompletedProcess(tuple(argv), returncode, "", _stderr_of(errors))
+
+
 def _default_runner() -> EngineRunner:
     return run_subprocess
 
@@ -130,10 +231,15 @@ def _tail(text: str) -> str:
 def _is_missing(stderr: str) -> bool:
     """Whether engine error text says the named object does not exist.
 
-    Containers and images are reported as ``No such ...``, networks as ``... not found``.
+    Containers, images and volumes are reported as ``No such ...``, networks as
+    ``... not found`` and a path inside a container as ``Could not find the file ...``.
     """
     lowered = stderr.lower().strip()
-    return "no such " in lowered or lowered.endswith("not found")
+    return (
+        "no such " in lowered
+        or "could not find the file" in lowered
+        or lowered.endswith("not found")
+    )
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -167,6 +273,7 @@ class OciEngine:
     context: str | None = None
     executable: str = "docker"
     runner: EngineRunner = field(default_factory=_default_runner)
+    copier: CopyRunner | None = None
 
     def run_cli(
         self,
@@ -445,3 +552,102 @@ class OciEngine:
             ("ps", "--all", "--filter", f"label={RUNNER_LABEL}=1", "--format", "{{.Names}}")
         )
         return tuple(sorted(line.strip() for line in completed.stdout.splitlines() if line.strip()))
+
+    # --- volumes and tar streams ----------------------------------------------------
+
+    def volume_inspect(self, name: str) -> Mapping[str, object]:
+        completed = self._checked(("volume", "inspect", name))
+        return self._first(completed.stdout, "volume")
+
+    def volume_remove(self, name: str) -> None:
+        """Remove one volume; an already absent one is not an error, one in use is."""
+        completed = self.run_cli(("volume", "rm", name), timeout=_COMMAND_TIMEOUT_SECONDS)
+        if completed.returncode == 0:
+            return
+        if "no such volume" in completed.stderr.lower():
+            return
+        raise self._failure(("volume", "rm", name), completed)
+
+    def list_dangling_runner_volumes(self) -> tuple[str, ...]:
+        """Names of runner volumes no container refers to any more."""
+        completed = self._checked(
+            (
+                "volume",
+                "ls",
+                "--quiet",
+                "--filter",
+                f"label={RUNNER_LABEL}=1",
+                "--filter",
+                "dangling=true",
+            )
+        )
+        return tuple(sorted(line.strip() for line in completed.stdout.splitlines() if line.strip()))
+
+    def _copier(self) -> CopyRunner:
+        if self.copier is not None:
+            return self.copier
+        if isinstance(self.runner, CopyRunner):
+            return self.runner
+        return SubprocessCopy()
+
+    def _argv(self, args: Sequence[str]) -> tuple[str, ...]:
+        argv = [self.executable]
+        if self.context is not None:
+            argv += ["--context", self.context]
+        return (*argv, *args)
+
+    def copy_in(
+        self,
+        name: str,
+        destination: str,
+        writer: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = _COPY_TIMEOUT_SECONDS,
+    ) -> None:
+        """Stream a tar archive built by ``writer`` into ``destination`` of container ``name``.
+
+        The archive's owners are kept (``docker cp -a``). The container must be running for a
+        path on a tmpfs volume: such a volume is gone while no container has it mounted.
+        """
+        args = ("cp", "-a", "-", f"{name}:{destination}")
+        self._copy(
+            args, lambda argv: self._copier().copy_in(argv, writer, timeout=timeout), timeout
+        )
+
+    def copy_out(
+        self,
+        name: str,
+        source: str,
+        reader: Callable[[IO[bytes]], object],
+        *,
+        timeout: float | None = _COPY_TIMEOUT_SECONDS,
+    ) -> None:
+        """Stream the tar archive of ``source`` in container ``name`` into ``reader``.
+
+        A path that does not exist raises ``ObjectNotFoundError``. A symlink or special file at
+        ``source`` is archived as such, never followed.
+        """
+        args = ("cp", f"{name}:{source}", "-")
+        self._copy(
+            args, lambda argv: self._copier().copy_out(argv, reader, timeout=timeout), timeout
+        )
+
+    def _copy(
+        self,
+        args: Sequence[str],
+        run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+        timeout: float | None,
+    ) -> None:
+        try:
+            completed = run(self._argv(args))
+        except subprocess.TimeoutExpired as error:
+            raise OperationTimeoutError(
+                f"container engine command timed out: {self._summary(args)}",
+                details={"timeout_seconds": str(timeout)},
+            ) from error
+        except OSError as error:
+            raise MissingPrerequisiteError(
+                f"container engine CLI {self.executable!r} cannot be run: {error}"
+            ) from error
+        if completed.returncode != 0:
+            raise self._failure(args, completed)

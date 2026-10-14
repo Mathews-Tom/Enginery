@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+import tarfile
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -504,3 +506,185 @@ def test_an_engine_that_omits_an_identity_field_is_refused_before_any_receipt_ex
         FakeDocker(info=info).engine().qualify()
     with pytest.raises(MissingPrerequisiteError, match="usable identity"):
         FakeDocker(info=info).engine().identity()
+
+
+# --- volumes and tar streams ---------------------------------------------------------
+
+
+class _Copier:
+    """A ``CopyRunner`` that records what it was asked and replays a canned archive."""
+
+    def __init__(self, *, returncode: int = 0, stderr: str = "", archive: bytes = b"") -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.written = b""
+        self.read = b""
+        self.returncode = returncode
+        self.stderr = stderr
+        self.archive = archive
+
+    def copy_in(
+        self, argv: Sequence[str], writer: Any, *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        buffer = io.BytesIO()
+        writer(buffer)
+        self.written = buffer.getvalue()
+        self.calls.append(tuple(argv))
+        return _completed(argv, self.returncode, "", self.stderr)
+
+    def copy_out(
+        self, argv: Sequence[str], reader: Any, *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        reader(io.BytesIO(self.archive))
+        self.calls.append(tuple(argv))
+        return _completed(argv, self.returncode, "", self.stderr)
+
+
+def test_copy_in_streams_an_owner_preserving_archive_to_the_container_path() -> None:
+    copier = _Copier()
+    engine = OciEngine(context="ctx", runner=lambda argv, **_: _completed(argv), copier=copier)
+
+    engine.copy_in("worker", "/workspace", lambda stream: stream.write(b"tar-bytes"))
+
+    assert copier.calls == [("docker", "--context", "ctx", "cp", "-a", "-", "worker:/workspace")]
+    assert copier.written == b"tar-bytes"
+
+
+def test_copy_out_streams_the_archive_of_a_container_path_to_the_reader() -> None:
+    copier = _Copier(archive=b"payload")
+    engine = OciEngine(runner=lambda argv, **_: _completed(argv), copier=copier)
+    received: list[bytes] = []
+
+    engine.copy_out("worker", "/out/result.json", lambda stream: received.append(stream.read()))
+
+    assert copier.calls == [("docker", "cp", "worker:/out/result.json", "-")]
+    assert received == [b"payload"]
+
+
+def test_a_copy_of_a_path_the_container_does_not_have_is_an_object_not_found_error() -> None:
+    copier = _Copier(
+        returncode=1,
+        stderr="Error response from daemon: Could not find the file /out/x in container c",
+    )
+    engine = OciEngine(runner=lambda argv, **_: _completed(argv), copier=copier)
+
+    with pytest.raises(ObjectNotFoundError):
+        engine.copy_out("worker", "/out/x", lambda stream: None)
+
+
+def test_a_failed_copy_in_is_an_engine_error_that_names_the_engines_reason() -> None:
+    copier = _Copier(returncode=1, stderr="no space left on device")
+    engine = OciEngine(runner=lambda argv, **_: _completed(argv), copier=copier)
+
+    with pytest.raises(EngineCommandError) as raised:
+        engine.copy_in("worker", "/workspace", lambda stream: None)
+
+    assert "no space left" in str(raised.value.details["stderr"])
+
+
+def test_a_runner_that_also_copies_is_used_for_copies_without_a_separate_copier() -> None:
+    class Both(_Copier):
+        def __call__(self, argv: Sequence[str], **_: Any) -> subprocess.CompletedProcess[str]:
+            return _completed(argv)
+
+    both = Both()
+
+    OciEngine(runner=both).copy_in("worker", "/workspace", lambda stream: None)
+
+    assert both.calls == [("docker", "cp", "-a", "-", "worker:/workspace")]
+
+
+def test_volume_inspect_returns_the_volume_document() -> None:
+    document = {"Name": "v", "Driver": "local", "Options": {"type": "tmpfs"}}
+    engine = OciEngine(runner=lambda argv, **_: _completed(argv, 0, json.dumps([document])))
+
+    assert dict(engine.volume_inspect("v")) == document
+
+
+def test_removing_an_absent_volume_is_not_an_error_but_a_volume_in_use_is() -> None:
+    absent = OciEngine(
+        runner=lambda argv, **_: _completed(
+            argv, 1, "", "Error response from daemon: get v: no such volume"
+        )
+    )
+    absent.volume_remove("v")
+
+    in_use = OciEngine(
+        runner=lambda argv, **_: _completed(
+            argv, 1, "", "Error response from daemon: remove v: volume is in use"
+        )
+    )
+    with pytest.raises(EngineCommandError):
+        in_use.volume_remove("v")
+
+
+def test_dangling_runner_volumes_are_listed_by_label_and_dangling_filter() -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def runner(argv: Sequence[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(tuple(argv))
+        return _completed(argv, 0, "b\na\n")
+
+    assert OciEngine(runner=runner).list_dangling_runner_volumes() == ("a", "b")
+    assert seen == [
+        (
+            "docker",
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            "label=dev.enginery.runner=1",
+            "--filter",
+            "dangling=true",
+        )
+    ]
+
+
+def test_real_engine_copies_a_tree_through_a_running_container_with_a_capped_tmpfs_volume(
+    real_engine: OciEngine, standin_image: str
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    container = f"enginery-test-copy-{suffix}"
+    volume = f"enginery-test-copy-vol-{suffix}"
+    mount = (
+        f"type=volume,src={volume},dst=/workspace,volume-nocopy,"
+        '"volume-opt=type=tmpfs","volume-opt=device=tmpfs",'
+        '"volume-opt=o=size=8m,nr_inodes=64,uid=65532,gid=65532"'
+    )
+    started = real_engine.run_cli(
+        (
+            *("run", "-d", "--name", container, "--user", "65532:65532", "--network", "none"),
+            *("--mount", mount, standin_image, "sleep", "300"),
+        )
+    )
+    assert started.returncode == 0, started.stderr
+    try:
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as writer:
+            info = tarfile.TarInfo("seed.txt")
+            info.size = 5
+            info.uid = info.gid = 65532
+            writer.addfile(info, io.BytesIO(b"hello"))
+        real_engine.copy_in(
+            container, "/workspace", lambda stream: stream.write(archive.getvalue())
+        )
+
+        names: list[str] = []
+
+        def read(stream: Any) -> None:
+            with tarfile.open(fileobj=stream, mode="r|") as reader:
+                names.extend(member.name for member in reader)
+
+        real_engine.copy_out(container, "/workspace/.", read)
+        assert "./seed.txt" in names or "seed.txt" in names
+
+        with pytest.raises(ObjectNotFoundError):
+            real_engine.copy_out(container, "/workspace/absent", lambda stream: stream.read())
+        volume_document = real_engine.volume_inspect(volume)
+        assert volume_document["Options"] == {
+            "device": "tmpfs",
+            "o": "size=8m,nr_inodes=64,uid=65532,gid=65532",
+            "type": "tmpfs",
+        }
+    finally:
+        real_engine.remove(container)
+        real_engine.volume_remove(volume)
