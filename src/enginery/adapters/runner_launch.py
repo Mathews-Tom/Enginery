@@ -279,14 +279,27 @@ def read_attempt_result(
 
     ``what`` names the worker in messages (``"Claude Code supervised worker"``). Returns the
     result JSON with the nonce removed, ready for the adapter's own validation.
+
+    The nonce proves who wrote the result file, not how the container ended: a worker can read
+    the nonce, write a ``"succeeded"`` result and then die. The supervisor in the image reports
+    ``"succeeded"`` only for a command that exited 0 and exits with that same code, so a
+    ``"succeeded"`` result beside a non-zero container exit cannot come from an honest run. It is
+    refused as a worker failure (not held for the operator): the attempt produced no usable
+    result and the failure path already retries or escalates it.
     """
     operation_id = str(task.operation_id)
     outcome = read_launch_outcome(
         runner_receipt_path(runner, operation_id), operation_id=operation_id, what=what
     )
-    require_exited(outcome, what=what)
+    exit_code = require_exited(outcome, what=what)
     text = read_bounded_text(result_path, limit=MAX_RESULT_BYTES, what=f"{what} result")
-    return bind_result_to_attempt(text, nonce=outcome.nonce, what=f"{what} result")
+    bound = bind_result_to_attempt(text, nonce=outcome.nonce, what=f"{what} result")
+    if exit_code != 0 and json.loads(bound).get("terminal_status") == "succeeded":
+        raise WorkerFailureError(
+            f"the {what} result claims success but its container exited with code {exit_code}",
+            details={"exit_code": str(exit_code)},
+        )
+    return bound
 
 
 def verified_image_host(host: HostCapability, installed: InstalledHost | None) -> InstalledHost:

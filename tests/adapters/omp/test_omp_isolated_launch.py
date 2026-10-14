@@ -323,6 +323,40 @@ def test_collect_reads_submitted_arguments_only_after_the_first_boundary(tmp_pat
     assert extract_native_arguments(command, host=host) == ("--model", "openai/gpt-5.2")
 
 
+def test_a_succeeded_result_beside_a_nonzero_container_exit_is_not_accepted(
+    tmp_path: Path,
+) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "omp", operation_id="op-forged-1")
+    result_path = tmp_path / "out" / "result.json"
+    write_worker_result(result_path, operation_id="op-forged-1", output=_events())
+    write_runner_receipt(runner, "op-forged-1", "omp")
+    # The nonce-bound result says "succeeded", but the container was killed (exit 137).
+    write_launch_outcome(runner, "op-forged-1", exit_code=137)
+
+    with pytest.raises(WorkerFailureError, match="claims success but its container exited"):
+        harness.collect_supervised(task, result_path=result_path)
+
+
+def test_a_failed_result_beside_a_nonzero_container_exit_is_still_collected(
+    tmp_path: Path,
+) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "omp", operation_id="op-failed-1")
+    result_path = tmp_path / "out" / "result.json"
+    write_worker_result(
+        result_path, operation_id="op-failed-1", output=_events(), terminal_status="failed"
+    )
+    write_runner_receipt(runner, "op-failed-1", "omp")
+    write_launch_outcome(runner, "op-failed-1", exit_code=1)
+
+    _, result = harness.collect_supervised(task, result_path=result_path)
+
+    assert result.terminal_status == "failed"
+
+
 def test_collect_without_a_runner_receipt_is_a_worker_failure(tmp_path: Path) -> None:
     runner = isolated_context(tmp_path / "receipts")
     harness, _ = _harness(tmp_path, runner=runner)

@@ -139,13 +139,14 @@ def write_launch_outcome(
     *,
     state: OutcomeState = OutcomeState.EXITED,
     nonce: str = LAUNCH_NONCE,
+    exit_code: int = 0,
 ) -> LaunchOutcome:
     """Write, where the launcher would, the host-only outcome of one launch."""
     outcome = LaunchOutcome(
         operation_id=operation_id,
         nonce=nonce,
         state=state,
-        exit_code=0 if state is OutcomeState.EXITED else None,
+        exit_code=exit_code if state is OutcomeState.EXITED else None,
     )
     write_outcome(outcome_path_for(runner_receipt_path(context, operation_id)), outcome)
     return outcome
