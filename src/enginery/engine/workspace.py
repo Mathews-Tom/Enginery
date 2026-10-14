@@ -24,6 +24,7 @@ from enginery.engine.task_repository import (
     intake_path_for,
     materialize_task_local_repository,
     out_path_for,
+    remove_stale_base_references,
     remove_task_local_workspace,
     resolve_commit,
     run_worktree_git,
@@ -287,6 +288,8 @@ class GitWorktreeBackend:
         )
         self._fault("workspace_cleanup_started")
         if cleaning.mode == WORKSPACE_MODE_TASK_LOCAL_CLONE:
+            if cleaning.repository_path.is_dir():
+                remove_stale_base_references(cleaning.repository_path)
             leftover = remove_task_local_workspace(workspace_path=cleaning.workspace_path)
             if leftover:
                 retained = self._record_status(cleaning, status="retained", epoch=epoch, now=now)

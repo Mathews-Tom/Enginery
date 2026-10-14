@@ -570,6 +570,11 @@ def test_cleanup_removes_the_workspace_the_out_directory_and_the_intake_reposito
     )
     _await_exit(dispatched)
     runtime.verify_implementation_branch(run_id="run-1", head_branch=BRANCH)
+    # A materialization that crashed earlier left its temporary base branch in the host repo.
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    stale_ref = f"enginery-base-{dead.pid}-{'b' * 32}"
+    _git("update-ref", f"refs/heads/{stale_ref}", base, cwd=repository)
     # A hostile worker's leftovers: a mode-000 directory and a read-only file inside it.
     stuck = workspace / "stuck"
     stuck.mkdir()
@@ -588,6 +593,7 @@ def test_cleanup_removes_the_workspace_the_out_directory_and_the_intake_reposito
 
     assert cleaned.status == "cleaned"
     assert cleaned.mode == WORKSPACE_MODE_TASK_LOCAL_CLONE
+    assert stale_ref not in _git("for-each-ref", "--format=%(refname:short)", cwd=repository)
     assert not workspace.exists()
     assert not out_path_for(workspace).exists()
     assert not intake_path_for(workspace).exists()

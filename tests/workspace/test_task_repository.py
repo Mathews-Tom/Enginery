@@ -18,6 +18,7 @@ from enginery.engine.task_repository import (
     intake_path_for,
     materialize_task_local_repository,
     out_path_for,
+    remove_stale_base_references,
     remove_task_local_workspace,
     resolve_commit,
     verify_intake_branch,
@@ -879,6 +880,52 @@ def test_a_failed_clone_still_removes_the_temporary_reference(
         )
 
     assert _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=repository) == before
+
+
+def _dead_pid() -> int:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _plant_base_ref(repository: Path, base: str, pid: int) -> str:
+    name = f"enginery-base-{pid}-{'a' * 32}"
+    _git("update-ref", f"refs/heads/{name}", base, cwd=repository)
+    return name
+
+
+def _branches(repository: Path) -> set[str]:
+    return set(
+        _git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=repository).split()
+    )
+
+
+def test_a_crashed_materializations_temporary_branch_is_swept_and_a_live_ones_is_not(
+    repository: Path, base: str
+) -> None:
+    stale = _plant_base_ref(repository, base, _dead_pid())
+    live = _plant_base_ref(repository, base, os.getpid())
+    other = "enginery-base-notmine"
+    _git("update-ref", f"refs/heads/{other}", base, cwd=repository)
+
+    removed = remove_stale_base_references(repository)
+
+    assert removed == (stale,)
+    remaining = _branches(repository)
+    assert stale not in remaining
+    assert {live, other} <= remaining
+
+
+def test_materialization_sweeps_the_leftover_of_a_crashed_one(
+    repository: Path, base: str, workspace: Path
+) -> None:
+    stale = _plant_base_ref(repository, base, _dead_pid())
+
+    materialize_task_local_repository(
+        repository_path=repository, workspace_path=workspace, base_revision=base
+    )
+
+    assert stale not in _branches(repository)
 
 
 # --- private parent directory -------------------------------------------------------------

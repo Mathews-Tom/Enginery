@@ -47,6 +47,8 @@ _OUT_SUFFIX = ".out"
 _MAX_BRANCH_LENGTH = 200
 _TREE_READ_CHUNK = 1 << 16
 _TREE_MAX_RECORD_BYTES = 1 << 20
+_BASE_BRANCH_PREFIX = "enginery-base-"
+_BASE_BRANCH = re.compile(r"^enginery-base-(?P<pid>[0-9]+)-[0-9a-f]{32}$")
 _FULL_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _BRANCH_FORBIDDEN = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
@@ -72,6 +74,40 @@ def resolve_commit(repository_path: Path, revision: str) -> str:
     )
 
 
+def remove_stale_base_references(repository_path: Path) -> tuple[str, ...]:
+    """Delete temporary base branches a crashed materialization left in the host repository.
+
+    A materialization publishes its base under ``enginery-base-<pid>-<uuid>`` only while the
+    clone runs. A branch whose creating process is gone can never be removed by that process,
+    so it is removed here; one whose process is alive belongs to a live materialization and is
+    left alone. Returns the removed branch names.
+    """
+    listed = _git(
+        ["for-each-ref", "--format=%(refname:strip=2)", f"refs/heads/{_BASE_BRANCH_PREFIX}*"],
+        cwd=repository_path,
+    )
+    if listed.returncode != 0:
+        return ()
+    removed: list[str] = []
+    for name in listed.stdout.split():
+        match = _BASE_BRANCH.fullmatch(name)
+        if match is None or _process_alive(int(match["pid"])):
+            continue
+        if _git(["update-ref", "-d", f"refs/heads/{name}"], cwd=repository_path).returncode == 0:
+            removed.append(name)
+    return tuple(removed)
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def materialize_task_local_repository(
     *, repository_path: Path, workspace_path: Path, base_revision: str
 ) -> None:
@@ -82,6 +118,7 @@ def materialize_task_local_repository(
             "repository path is not a directory", details={"repository_path": str(repository_path)}
         )
     _require_empty_target(workspace_path)
+    remove_stale_base_references(repository_path)
     expected = resolve_commit(repository_path, base_revision)
 
     _ensure_private_parent(workspace_path.parent)
@@ -437,9 +474,11 @@ def _clone_base_only(*, repository_path: Path, workspace_path: Path, base_oid: s
     The base is published under a unique temporary branch so a ``--no-local --single-branch
     --no-tags`` clone transfers exactly its reachable objects: unreachable blobs, stashes,
     other branches and tags of the host repository never reach the workspace. The temporary
-    branch is removed from the host repository again before this returns.
+    branch is removed from the host repository again before this returns. The branch name
+    carries the creating process id so :func:`remove_stale_base_references` can tell the
+    leftover of a crashed materialization from one that is still running.
     """
-    branch = f"enginery-base-{uuid.uuid4().hex}"
+    branch = f"{_BASE_BRANCH_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
     ref = f"refs/heads/{branch}"
     _git_checked(
         ["update-ref", ref, base_oid],
