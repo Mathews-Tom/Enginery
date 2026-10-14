@@ -138,7 +138,10 @@ REQUIRED: dict[str, str] = {
     ),
     "r-m3-disk-receipt-and-readback": (
         "The receipt records the kernel-capped-volume mechanism with the profile's byte and "
-        "inode numbers; a symlink or FIFO planted in the result volume never reaches the host"
+        "inode numbers, which equal the totals the kernel reports for the volumes inside the "
+        "container; a symlink or FIFO planted in the result volume never reaches the host, and "
+        "in the workspace a symlink comes back as the same link, never followed, while a FIFO "
+        "is skipped"
     ),
     "r-m3-memory-fill-exit-137": (
         "A worker filling a tmpfs volume past the memory limit ends in exit 137 recorded as an "
@@ -967,8 +970,53 @@ def _kernel_cap_bounds(attempt: AttemptResult, profile: RunnerProfile) -> dict[s
         and bounds.workspace_bytes == limits.workspace_mib * _MIB
         and bounds.out_bytes == limits.out_mib * _MIB
         and bounds.workspace_inodes == limits.workspace_inodes
-        and bounds.out_inodes == limits.out_inodes
-        and bounds.poll_seconds is None,
+        and bounds.out_inodes == limits.out_inodes,
+    }
+
+
+def _recorded_bound(attempt: AttemptResult, name: str) -> int | None:
+    """One number from the receipt's resource bounds, or ``None`` when there is none."""
+    bounds = None if attempt.receipt is None else attempt.receipt.bounds
+    value = None if bounds is None else getattr(bounds, name)
+    return value if isinstance(value, int) else None
+
+
+def _receipt_equals_kernel(pairs: Mapping[str, tuple[int | None, Any]]) -> bool:
+    """Every number the receipt records equals what the kernel reported for the mounted volume."""
+    return bool(pairs) and all(
+        recorded is not None and recorded == kernel for recorded, kernel in pairs.values()
+    )
+
+
+_PLANTED_LINK_TARGET = "/etc/passwd"
+
+
+def _workspace_readback(workspace: Path) -> dict[str, Any]:
+    """What came back to the host of a workspace in which the worker planted a symlink and a FIFO.
+
+    The workspace is read back as data: a symlink is stored verbatim and never followed, and a FIFO
+    (like a socket or a device) is skipped, so only files, directories and links come back. The
+    planted link must therefore be there, a link, with its target unchanged.
+    """
+    link, fifo = workspace / "gate-link", workspace / "gate-fifo"
+    try:
+        target: str | None = os.readlink(link)
+    except OSError:
+        target = None
+    special = [
+        str(path)
+        for path in workspace.rglob("*")
+        if not (path.is_symlink() or path.is_dir() or path.is_file())
+    ]
+    return {
+        "symlink_is_a_link": link.is_symlink(),
+        "symlink_target": target,
+        "fifo_reached_host": os.path.lexists(fifo),
+        "entries_that_are_not_files_directories_or_links": special,
+        "as_documented": link.is_symlink()
+        and target == _PLANTED_LINK_TARGET
+        and not os.path.lexists(fifo)
+        and not special,
     }
 
 
@@ -991,7 +1039,12 @@ def step_m3_disk(gate: Gate) -> None:
     ws_bytes = gate.attempt(
         "m3-disk-ws-bytes",
         "disk",
-        {"kind": "bytes", "where": "/workspace", "max_mib": 4 * _SMALL_WORKSPACE_MIB},
+        {
+            "kind": "bytes",
+            "where": "/workspace",
+            "max_mib": 4 * _SMALL_WORKSPACE_MIB,
+            "plant_links": True,
+        },
         profile=profile,
         time_budget=120,
     )
@@ -1320,41 +1373,71 @@ def step_m3_disk(gate: Gate) -> None:
     )
 
     # --- receipt bounds and what may come back to the host ------------------------------------
-    bounds = {a.name: _kernel_cap_bounds(a, profile) for a in (ws_bytes, out_bytes, burst)}
+    small = (ws_bytes, out_bytes, ws_entries, out_entries, burst, filesize)
+    bounds = {a.name: _kernel_cap_bounds(a, profile) for a in small}
+    # The receipt's numbers are the profile's: the launcher records them from the profile, after
+    # checking the options of the volumes the engine created. The independent check is what the
+    # kernel reports for the mounted volumes, read inside the container.
+    recorded_vs_kernel = {
+        "workspace_bytes": (
+            _recorded_bound(ws_bytes, "workspace_bytes"),
+            ws_after.get("total_bytes"),
+        ),
+        "out_bytes": (_recorded_bound(out_bytes, "out_bytes"), out_after.get("total_bytes")),
+        "workspace_inodes": (
+            _recorded_bound(ws_entries, "workspace_inodes"),
+            ws_entry_after.get("inodes_total"),
+        ),
+        "out_inodes": (
+            _recorded_bound(out_entries, "out_inodes"),
+            out_entry_after.get("inodes_total"),
+        ),
+    }
+    receipt_equals_kernel = _receipt_equals_kernel(recorded_vs_kernel)
     out_listing_ok = out_listing == ["result.json"]
+    workspace_readback = _workspace_readback(ws_bytes.workspace)
     _assert(
         gate,
         "r-m3-disk-receipt-and-readback",
         passed=all(entry["matches"] for entry in bounds.values())
+        and receipt_equals_kernel
         and out_listing_ok
         and not (out_bytes.out / "gate-link").is_symlink()
         and not os.path.lexists(out_bytes.out / "gate-fifo")
-        and not (ws_bytes.workspace / "gate-fill").is_symlink()
-        and all(
-            not path.is_symlink() and not stat.S_ISFIFO(path.lstat().st_mode)
-            for path in ws_bytes.workspace.rglob("*")
-        ),
+        and workspace_readback["as_documented"],
         commands=[
-            *_attempt_commands(gate, ws_bytes, out_bytes, burst),
+            *_attempt_commands(gate, *small),
             "[in container] ln -s /etc/passwd /out/gate-link ; mkfifo /out/gate-fifo",
-            "RunnerReceipt.bounds  # disk mechanism and the byte and inode caps, as read back",
+            "[in container] ln -s /etc/passwd /workspace/gate-link ; mkfifo /workspace/gate-fifo",
+            "[in container] os.statvfs(/workspace) ; os.statvfs(/out)",
+            "RunnerReceipt.bounds  # disk mechanism and the byte and inode caps, as recorded",
         ],
         observed={
             "receipt_bounds": bounds,
+            "receipt_vs_kernel_totals": {
+                key: {"recorded_in_receipt": recorded, "reported_by_kernel_in_container": kernel}
+                for key, (recorded, kernel) in recorded_vs_kernel.items()
+            },
             "result_directory_on_host_after_the_attempt": out_listing,
-            "planted_symlink_reached_host": (out_bytes.out / "gate-link").is_symlink(),
-            "planted_fifo_reached_host": os.path.lexists(out_bytes.out / "gate-fifo"),
+            "result_symlink_reached_host": (out_bytes.out / "gate-link").is_symlink(),
+            "result_fifo_reached_host": os.path.lexists(out_bytes.out / "gate-fifo"),
+            "workspace_readback": workspace_readback,
         },
         expected=(
             "each receipt records kernel-capped-volume with exactly the profile's byte and inode "
-            "numbers and no poll interval; a symlink and a FIFO planted in the result volume "
-            "never reach the host, which holds only the regular result file"
+            "numbers, and those equal the totals the kernel reports inside the container; a "
+            "symlink and a FIFO planted in the result volume never reach the host, which holds "
+            "only the regular result file; a symlink planted in the workspace comes back as the "
+            "same link (target unchanged, never followed) and a FIFO planted there is skipped"
         ),
         observer={
-            "source": "host: the runner receipt and the result directory listing; the receipt's "
-            "bounds are what the launcher read back from the engine's created volumes"
+            "source": "host: the runner receipt, the result directory listing and the workspace "
+            "read back; container: the statvfs totals of the capped volumes. The receipt's bounds "
+            "are profile values (the launcher records them from the profile after checking the "
+            "options of the volumes the engine created); the independent check of the caps is "
+            "the statvfs totals read inside the container"
         },
-        attempts=(ws_bytes, out_bytes, burst),
+        attempts=small,
     )
 
     # --- filling a tmpfs volume with memory ends in an ordinary exit 137 -----------------------

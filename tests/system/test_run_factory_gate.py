@@ -1086,9 +1086,9 @@ def test_every_required_assertion_has_one_observation_site() -> None:
     assert set().union(*sites) == set(everything)
     base = {**boundary.REQUIRED, **review.REQUIRED}
     assert len(base) == 64
-    assert len(boundary.OBSERVED_ON_HOST) == 28
+    assert len(boundary.OBSERVED_ON_HOST) == 27
     assert len(boundary.OBSERVED_IN_CONTAINER) == 19
-    assert len(boundary.OBSERVED_ON_BOTH - set(boundary.REAL_GATEWAY)) == 17
+    assert len(boundary.OBSERVED_ON_BOTH - set(boundary.REAL_GATEWAY)) == 18
 
 
 def _burst(*exits: tuple[int, str]) -> list[dict[str, Any]]:
@@ -1096,6 +1096,71 @@ def _burst(*exits: tuple[int, str]) -> list[dict[str, Any]]:
 
 
 ENOSPC_MESSAGE = "fallocate: fallocate failed: No space left on device"
+
+
+def test_the_receipt_numbers_must_equal_what_the_kernel_reported() -> None:
+    import factory_gate_review as review
+
+    kernel = {"workspace_bytes": (16 << 20, 16 << 20), "out_inodes": (64, 64)}
+    assert review._receipt_equals_kernel(kernel) is True
+    # A receipt that records the profile's number while the mounted volume has another one, or
+    # records nothing, or whose volume was never measured, is not independently confirmed.
+    assert review._receipt_equals_kernel({**kernel, "out_bytes": (8 << 20, 512 << 20)}) is False
+    assert review._receipt_equals_kernel({**kernel, "out_bytes": (None, 8 << 20)}) is False
+    assert review._receipt_equals_kernel({**kernel, "out_bytes": (8 << 20, None)}) is False
+    assert review._receipt_equals_kernel({}) is False
+
+
+def _workspace_after_readback(root: Path, *, link: bool = True, fifo: bool = False) -> Path:
+    workspace = root / "ws"
+    workspace.mkdir()
+    (workspace / "gate-fill").mkdir()
+    (workspace / "gate-fill" / "f0").write_bytes(b"\x5a" * 16)
+    if link:
+        (workspace / "gate-link").symlink_to("/etc/passwd")
+    if fifo:
+        os.mkfifo(workspace / "gate-fifo")
+    return workspace
+
+
+def test_the_workspace_readback_keeps_a_planted_link_as_a_link_and_skips_a_fifo(
+    tmp_path: Path,
+) -> None:
+    import factory_gate_review as review
+
+    good = review._workspace_readback(_workspace_after_readback(tmp_path))
+    assert good["as_documented"] is True
+    assert good["symlink_target"] == "/etc/passwd"
+
+
+def test_a_workspace_readback_that_proves_nothing_or_misbehaves_is_not_documented(
+    tmp_path: Path,
+) -> None:
+    import factory_gate_review as review
+
+    # The old check passed on this: nothing hostile was ever planted, so none came back.
+    no_link = tmp_path / "none"
+    no_link.mkdir()
+    assert (
+        review._workspace_readback(_workspace_after_readback(no_link, link=False))["as_documented"]
+        is False
+    )
+    # A FIFO that reached the host.
+    with_fifo = tmp_path / "fifo"
+    with_fifo.mkdir()
+    readback = review._workspace_readback(_workspace_after_readback(with_fifo, fifo=True))
+    assert readback["as_documented"] is False and readback["fifo_reached_host"] is True
+    # A link that was followed (its target's content copied as a regular file) or retargeted.
+    followed = tmp_path / "followed"
+    followed.mkdir()
+    workspace = _workspace_after_readback(followed, link=False)
+    (workspace / "gate-link").write_text("root:x:0:0:root:/root:/bin/sh\n", encoding="utf-8")
+    assert review._workspace_readback(workspace)["as_documented"] is False
+    retargeted = tmp_path / "retargeted"
+    retargeted.mkdir()
+    moved = _workspace_after_readback(retargeted, link=False)
+    (moved / "gate-link").symlink_to("/tmp/elsewhere")
+    assert review._workspace_readback(moved)["as_documented"] is False
 
 
 def test_the_parallel_burst_asks_for_more_than_the_volume_but_less_than_the_file_limit() -> None:
