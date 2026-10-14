@@ -304,13 +304,13 @@ def test_the_store_container_creates_the_two_capped_tmpfs_volumes_and_runs_nothi
             f"type=volume,src={names.workspace_volume},dst=/workspace,volume-nocopy,"
             "volume-driver=local,volume-label=dev.enginery.runner=1,volume-opt=type=tmpfs,"
             'volume-opt=device=tmpfs,"volume-opt=o=size=4096m,nr_inodes=500000,'
-            'uid=65532,gid=65532,mode=0700"'
+            'uid=65532,gid=65532,mode=0700,nosuid,nodev"'
         ),
         (
             f"type=volume,src={names.out_volume},dst=/out,volume-nocopy,"
             "volume-driver=local,volume-label=dev.enginery.runner=1,volume-opt=type=tmpfs,"
             'volume-opt=device=tmpfs,"volume-opt=o=size=1024m,nr_inodes=100000,'
-            'uid=65532,gid=65532,mode=0700"'
+            'uid=65532,gid=65532,mode=0700,nosuid,nodev,noexec"'
         ),
     ]
     assert _values_of(arguments, "--name") == [names.holder]
@@ -330,11 +330,21 @@ def test_volume_options_follow_the_profiles_caps_and_the_workers_owner(tmp_path:
     assert volume_options(profile, "workspace") == {
         "type": "tmpfs",
         "device": "tmpfs",
-        "o": "size=8m,nr_inodes=64,uid=70000,gid=70001,mode=0700",
+        "o": "size=8m,nr_inodes=64,uid=70000,gid=70001,mode=0700,nosuid,nodev",
     }
-    assert (
-        volume_options(profile, "out")["o"] == "size=2m,nr_inodes=16,uid=70000,gid=70001,mode=0700"
+    assert volume_options(profile, "out")["o"] == (
+        "size=2m,nr_inodes=16,uid=70000,gid=70001,mode=0700,nosuid,nodev,noexec"
     )
+
+
+def test_the_workspace_is_executable_and_the_result_volume_is_not() -> None:
+    # The workspace runs the project's own commands, so it cannot be noexec; the result volume
+    # holds only data the host reads back.
+    workspace = volume_options(RunnerProfile(), "workspace")["o"].split(",")
+    out = volume_options(RunnerProfile(), "out")["o"].split(",")
+
+    assert {"nosuid", "nodev"} <= set(workspace) and "noexec" not in workspace
+    assert {"nosuid", "nodev", "noexec"} <= set(out)
 
 
 def _store_documents(fake: FakeDocker, spec: LaunchSpec) -> dict[str, dict[str, Any]]:
@@ -362,7 +372,7 @@ def test_a_volume_that_is_not_the_capped_tmpfs_is_a_store_violation(
     documents = _store_documents(fake_docker, spec)
     documents[names.workspace_volume]["Options"] = {
         **documents[names.workspace_volume]["Options"],
-        "o": "size=999999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700",
+        "o": "size=999999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700,nosuid,nodev",
     }
     documents[names.out_volume]["Driver"] = "nfs"
     documents[names.out_volume]["Labels"] = {}
@@ -372,6 +382,61 @@ def test_a_volume_that_is_not_the_capped_tmpfs_is_a_store_violation(
         "the result volume does not use the local driver",
         "the result volume does not carry the runner label",
     )
+
+
+@pytest.mark.parametrize(
+    ("volume", "options", "flags"),
+    [
+        ("workspace", "size=4096m,nr_inodes=500000,uid=65532,gid=65532,mode=0700", "nosuid,nodev"),
+        (
+            "workspace",
+            "size=4096m,nr_inodes=500000,uid=65532,gid=65532,mode=0700,nodev",
+            "nosuid,nodev",
+        ),
+        (
+            "workspace",
+            "size=4096m,nr_inodes=500000,uid=65532,gid=65532,mode=0700,nosuid,nodev,suid",
+            "nosuid,nodev",
+        ),
+        (
+            "out",
+            "size=1024m,nr_inodes=100000,uid=65532,gid=65532,mode=0700,nosuid,nodev",
+            "nosuid,nodev,noexec",
+        ),
+        (
+            "out",
+            "size=1024m,nr_inodes=100000,uid=65532,gid=65532,mode=0700,nosuid,nodev,noexec,exec",
+            "nosuid,nodev,noexec",
+        ),
+    ],
+)
+def test_a_volume_missing_or_overriding_a_mount_flag_is_a_store_violation(
+    fake_docker: FakeDocker, tmp_path: Path, volume: str, options: str, flags: str
+) -> None:
+    spec, container = _created(fake_docker, tmp_path)
+    names = store_names_for(spec.container_name)
+    documents = _store_documents(fake_docker, spec)
+    name = names.workspace_volume if volume == "workspace" else names.out_volume
+    documents[name]["Options"] = {**documents[name]["Options"], "o": options}
+
+    assert store_violations(spec, container, documents) == (
+        f"the {'workspace' if volume == 'workspace' else 'result'} volume is not mounted with "
+        f"exactly the flags {flags}",
+    )
+
+
+def test_the_order_of_the_volume_option_tokens_is_not_significant(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, container = _created(fake_docker, tmp_path)
+    names = store_names_for(spec.container_name)
+    documents = _store_documents(fake_docker, spec)
+    documents[names.out_volume]["Options"] = {
+        **documents[names.out_volume]["Options"],
+        "o": "noexec,nodev,nosuid,mode=0700,gid=65532,uid=65532,nr_inodes=100000,size=1024m",
+    }
+
+    assert store_violations(spec, container, documents) == ()
 
 
 def test_a_worker_mount_that_is_not_the_attempts_volume_is_a_store_violation(
@@ -816,6 +881,7 @@ def test_real_engine_reports_the_capped_tmpfs_volumes_it_created(
     tampered = {**volumes, names.out_volume: {**volumes[names.out_volume], "Options": {}}}
     assert store_violations(spec, container, tampered) == (
         "the result volume is not a tmpfs capped at the profile's size and inode count",
+        "the result volume is not mounted with exactly the flags nosuid,nodev,noexec",
     )
 
 

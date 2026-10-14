@@ -495,10 +495,10 @@ def test_the_workspace_and_result_trees_are_volumes_capped_at_the_profiles_numbe
     assert held[names.workspace_volume]["Options"] == {
         "type": "tmpfs",
         "device": "tmpfs",
-        "o": "size=8m,nr_inodes=64,uid=65532,gid=65532,mode=0700",
+        "o": "size=8m,nr_inodes=64,uid=65532,gid=65532,mode=0700,nosuid,nodev",
     }
     assert held[names.out_volume]["Options"]["o"] == (
-        "size=2m,nr_inodes=16,uid=65532,gid=65532,mode=0700"
+        "size=2m,nr_inodes=16,uid=65532,gid=65532,mode=0700,nosuid,nodev,noexec"
     )
     bounds = RunnerReceipt.from_state(json.loads(Path(spec.receipt_path).read_text())).bounds
     assert bounds is not None
@@ -510,9 +510,12 @@ def test_the_workspace_and_result_trees_are_volumes_capped_at_the_profiles_numbe
 @pytest.mark.parametrize(
     ("volume", "change"),
     [
-        ("workspace", {"o": "size=99999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700"}),
+        (
+            "workspace",
+            {"o": "size=99999m,nr_inodes=500000,uid=65532,gid=65532,mode=0700,nosuid,nodev"},
+        ),
         ("workspace", {"type": "none", "device": "/host"}),
-        ("out", {"o": "size=1024m,uid=65532,gid=65532,mode=0700"}),
+        ("out", {"o": "size=1024m,uid=65532,gid=65532,mode=0700,nosuid,nodev,noexec"}),
     ],
 )
 def test_a_volume_that_does_not_carry_the_profiles_cap_is_refused_before_anything_starts(
@@ -534,6 +537,33 @@ def test_a_volume_that_does_not_carry_the_profiles_cap_is_refused_before_anythin
     assert "start" not in fake_docker.verbs
     assert _outcome(spec).state is OutcomeState.REFUSED
     assert fake_docker.containers == {} and fake_docker.volumes == {}
+
+
+@pytest.mark.parametrize(
+    ("volume", "tampered"),
+    [
+        ("workspace", "size=4096m,nr_inodes=500000,uid=65532,gid=65532,mode=0700"),
+        ("out", "size=1024m,nr_inodes=100000,uid=65532,gid=65532,mode=0700,nosuid,nodev"),
+    ],
+)
+def test_a_volume_without_its_mount_flags_is_refused_before_anything_starts(
+    fake_docker: FakeDocker, tmp_path: Path, volume: str, tampered: str
+) -> None:
+    spec = make_spec(tmp_path)
+    names = store_names_for(spec.container_name)
+    name = names.workspace_volume if volume == "workspace" else names.out_volume
+
+    def tamper(_args: tuple[str, ...]) -> None:
+        fake_docker.volumes[name]["Options"]["o"] = tampered
+
+    fake_docker.hooks["volume inspect"] = tamper
+
+    code, stderr = _run(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "volume is not mounted with exactly the flags" in stderr
+    assert "start" not in fake_docker.verbs
+    assert _outcome(spec).state is OutcomeState.REFUSED
 
 
 def test_a_worker_the_kernel_kills_for_memory_is_an_ordinary_failed_exit(
@@ -987,6 +1017,48 @@ def test_real_the_inode_cap_stops_a_worker_creating_too_many_entries(
     output = _output(real_root, spec)
     assert "files-result ENOSPC" in output
     assert int(output.split("files-result ENOSPC")[1].split()[0]) <= 200
+
+
+_MOUNT_FLAGS = """
+import os, subprocess
+flags = {}
+for line in open('/proc/self/mountinfo'):
+    fields = line.split()
+    if fields[4] in ('/workspace', '/out'):
+        flags[fields[4]] = sorted(fields[5].split(','))
+for path in ('/workspace', '/out'):
+    script = path + '/probe.sh'
+    try:
+        with open(script, 'w') as handle:
+            handle.write('#!/bin/sh\\nexit 0\\n')
+        os.chmod(script, 0o4755)
+        code = subprocess.run([script]).returncode
+    except OSError as error:
+        code = 'E' + str(error.errno)
+    print('flags', path, ','.join(flags[path]), 'exec', code)
+"""
+
+
+def test_real_the_workspace_is_nosuid_and_nodev_and_the_result_volume_is_also_noexec(
+    real_engine: OciEngine,
+    real_profile: RunnerProfile,
+    real_operation: Callable[[], str],
+    standin_image: str,
+    real_root: Path,
+) -> None:
+    """The kernel mounts report the flags; a setuid script can run from the workspace (which
+    the project's own commands need) but never from the noexec result volume."""
+    spec = _real_spec(real_root, real_operation(), standin_image, real_profile)
+
+    code, _ = _real_run(spec, real_engine, ("python3", "-c", _MOUNT_FLAGS))
+
+    assert code == 0
+    lines = {line.split()[1]: line for line in _output(real_root, spec).splitlines()}
+    workspace, out = lines["/workspace"].split(), lines["/out"].split()
+    assert {"nosuid", "nodev"} <= set(workspace[2].split(",")) and "noexec" not in workspace[2]
+    assert workspace[-1] == "0"
+    assert {"nosuid", "nodev", "noexec"} <= set(out[2].split(","))
+    assert out[-1] == "E13"  # EACCES: execution from the result volume is refused
 
 
 def test_real_the_workspace_comes_back_replaced_and_deletable_by_the_host(

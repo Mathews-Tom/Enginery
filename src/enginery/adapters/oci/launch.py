@@ -119,11 +119,23 @@ def store_names_for(container_name: str) -> StoreNames:
     )
 
 
+VOLUME_MOUNT_FLAGS: dict[str, tuple[str, ...]] = {
+    # The workspace is nosuid,nodev but NOT noexec: the worker runs the project's own
+    # validation commands, test runners, scripts and compiled extensions from it, and a noexec
+    # mount also refuses the executable mappings of shared libraries, so noexec would break the
+    # workflow. A worker-written setuid file or device node there is inert (nosuid, nodev).
+    "workspace": ("nosuid", "nodev"),
+    # The result volume only ever holds the result file and the branch bundle, which the host
+    # reads back as data; nothing in it is executed, so it is noexec as well.
+    "out": ("nosuid", "nodev", "noexec"),
+}
+
+
 def volume_options(profile: RunnerProfile, role: str) -> dict[str, str]:
     """The local-driver options that make a volume a tmpfs capped in size and inodes.
 
     ``role`` is ``"workspace"`` or ``"out"``. The tmpfs root is owned by the worker and closed
-    to everyone else.
+    to everyone else, and the mount carries the flags of ``VOLUME_MOUNT_FLAGS[role]``.
     """
     limits = profile.resources
     size, inodes = (
@@ -131,10 +143,13 @@ def volume_options(profile: RunnerProfile, role: str) -> dict[str, str]:
         if role == "workspace"
         else (limits.out_mib, limits.out_inodes)
     )
+    flags = ",".join(VOLUME_MOUNT_FLAGS[role])
     return {
         "type": "tmpfs",
         "device": "tmpfs",
-        "o": f"size={size}m,nr_inodes={inodes},uid={profile.uid},gid={profile.gid},mode=0700",
+        "o": (
+            f"size={size}m,nr_inodes={inodes},uid={profile.uid},gid={profile.gid},mode=0700,{flags}"
+        ),
     }
 
 
@@ -656,6 +671,21 @@ def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tupl
     return tuple(problems)
 
 
+def _split_volume_options(
+    options: Mapping[str, object],
+) -> tuple[dict[str, object], list[str], list[str]]:
+    """``options`` as the keys other than ``o``, its ``key=value`` settings and its mount flags.
+
+    Settings and flags are sorted, so the comparison ignores order but sees an added or repeated
+    token (``suid`` or ``exec`` after ``nosuid``, which would weaken the mount).
+    """
+    others = {key: value for key, value in options.items() if key != "o"}
+    tokens = [token for token in str(options.get("o", "")).split(",") if token]
+    settings = sorted(token for token in tokens if "=" in token)
+    flags = sorted(token for token in tokens if "=" not in token)
+    return others, settings, flags
+
+
 def store_violations(
     spec: LaunchSpec,
     container: Mapping[str, object],
@@ -665,7 +695,9 @@ def store_violations(
 
     ``volumes`` maps a volume name to the engine's inspect document of it. The caps are checked
     from what the engine holds: the local driver, a tmpfs of exactly the profile's size and
-    inode count owned by the worker, and the runner label.
+    inode count owned by the worker, the mount flags of ``VOLUME_MOUNT_FLAGS`` (nosuid and nodev
+    on both, noexec as well on the result volume, with no flag added or repeated), and the
+    runner label.
     """
     names = store_names_for(spec.container_name)
     mounts = {
@@ -683,10 +715,17 @@ def store_violations(
         document = volumes.get(volume, {})
         if document.get("Driver") != "local":
             problems.append(f"the {role} volume does not use the local driver")
-        expected = volume_options(spec.profile, "out" if role == "result" else "workspace")
-        if dict(_map(document.get("Options"))) != expected:
+        volume_role = "out" if role == "result" else "workspace"
+        actual = _split_volume_options(_map(document.get("Options")))
+        expected = _split_volume_options(volume_options(spec.profile, volume_role))
+        if actual[:2] != expected[:2]:
             problems.append(
                 f"the {role} volume is not a tmpfs capped at the profile's size and inode count"
+            )
+        if actual[2] != expected[2]:
+            problems.append(
+                f"the {role} volume is not mounted with exactly the flags "
+                f"{','.join(VOLUME_MOUNT_FLAGS[volume_role])}"
             )
         if _map(document.get("Labels")).get(RUNNER_LABEL) != "1":
             problems.append(f"the {role} volume does not carry the runner label")
