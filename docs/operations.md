@@ -863,9 +863,12 @@ build-request and at `stage1 start`). A command whose executable the image lacks
 not reported as a failed validation: when a command ends the way a missing executable
 does (exit 127, or the wrapper's `No such file or directory` / `Permission denied`),
 the same container restrictions are asked whether the executable exists
-(`command -v`), and a confirmed absence puts the `validate` node into a durable human
-wait whose reason names the missing tool. The request is immutable, so the way out is
-a new run whose validation commands only use what the image has.
+(`command -v`), and a confirmed absence records the `validate` node as `blocked`
+with the missing tool named in `blocked_reason`. It is not a human wait: `stage1
+approve` cannot turn it into a passed validation, and review and publication also
+refuse a passed `validate` node that has no `validation_artifact_digest`. The request
+is immutable, so the way out is a new run whose validation commands only use what the
+image has.
 
 Each validation container runs with `--network none` and has its own runner receipt,
 which the validation runner reads back and verifies before it accepts the result: the
@@ -936,27 +939,42 @@ run resumes unchanged.
   own worktree, whose repository configuration the worker can write, and reads
   `origin` from that shared configuration. Every publisher git command therefore
   overrides hooks, fsmonitor, askpass, the `ext`/`fd` transports, the credential
-  helper list and `core.sshCommand` on the command line, restoring only what your own
-  user and system git configuration say; per-URL credential helpers and URL rewrites
-  in repository configuration cannot be neutralised that way. Use `isolated-oci` when
-  that matters.
+  helper list and `core.sshCommand` on the command line, then restores only what your
+  own user and system git configuration say: the generic `credential.helper` entries
+  and the URL-scoped `credential.<url>.helper` entries (the form `gh auth setup-git`
+  writes, so an https origin keeps working), in configuration order, from the
+  system and user files only, never from a repository. A helper written into
+  repository configuration, scoped or not, never runs; URL rewrites
+  (`url.<base>.insteadOf`) in repository configuration cannot be neutralised that
+  way. Use `isolated-oci` when that matters.
 - **Protected paths are held for an operator decision.** Before pushing, the host
   reads `git diff --name-only -z --no-ext-diff --no-textconv --no-renames
-  <base>..<head>` from its verified repository (renames list both paths) and matches
+  --ignore-submodules=none <base>..<head>` from its verified repository (renames list
+  both paths; a submodule pin change is a changed path whatever the repository
+  configuration says to ignore) and matches
   it, ignoring case and Unicode normalization form, against a protected set: by
   default `.github/**`, other CI configuration (`.gitlab-ci.yml`, `.gitlab/**`,
   `.circleci/**`, `.buildkite/**`, `azure-pipelines.yml`, `Jenkinsfile`, ...),
-  `CODEOWNERS` at any depth, `.enginery/**` and `holdouts/**`. `stage1 build-request
+  `CODEOWNERS` and `.gitmodules` at any depth, `.enginery/**` and `holdouts/**`.
+  `stage1 build-request
   --protected-path GLOB` (repeatable) adds patterns bound into the request; the
   defaults cannot be narrowed. A match puts the `open_pr` node into a human wait
   (`awaiting_human`) with the set, the matched paths and a digest recorded, raises a
   human-action-required error, and pushes nothing. The reason names the commands:
   `enginery stage1 approve --database <ledger> --owner <operator> --run-id <id>
   --node-id open_pr --reason "<why>"` publishes it on the next `stage1 watch
-  --advance` (the node is re-registered as `open-pr-approved-<n>` and records
+  --advance` (the node is re-registered as `open-pr-approved-<n>` and carries the
+  approved digest and the reason, which the final node keeps as
   `publication_approval`); `stage1 reject` with the same arguments ends it. An
-  approval applies only to the exact matched set it was recorded for. An ordinary
-  change records the empty match and publishes unheld.
+  approval applies only to the exact matched set it was recorded for, and the digest
+  is compared on every attempt, including a retry or a restart after a failed
+  publication: when it no longer matches, the node returns to `awaiting_human` with
+  the new set and nothing is pushed until it is approved again. An ordinary
+  change records the empty match and publishes unheld. The hold covers changed CI
+  definitions only: a workflow, pipeline or build script the branch leaves
+  unchanged still runs the candidate's code on the pushed branch with whatever access
+  that CI has, so a branch with no protected change is not thereby safe to push to a
+  repository whose CI runs on branch pushes with secrets.
 - **Validation sees the verified head.** An isolated run's validation commands run
   in the isolated runner against `<workspace>.validate`, a fresh self-contained
   checkout of the verified head made from the intake repository and removed
@@ -1119,7 +1137,9 @@ killed outright leaves its network behind; the next launch (or `python -m
 enginery.adapters.oci.launcher --reconcile`) removes every attempt network whose
 launcher process is gone, disconnecting the relay first. Replacing the relay
 (`relay up --recreate`, `relay down`) while attempts are running cuts their model
-access.
+access. `relay down` removes the relay container and then the egress network
+(`relay up` creates it again), unless the network was not created by Enginery or
+another container is still attached to it; running it again changes nothing.
 
 ```bash
 uv run enginery runner build-relay-image [--docker-context NAME]    # prints the exact relay image id
@@ -1176,7 +1196,7 @@ cookie header and injects the gateway bearer; server-sent events are streamed
 through without buffering. It logs only method, path (without the query),
 decision and status.
 
-Load is bounded so one worker cannot starve the others. The 8 MiB request cap
+Load is bounded, and one attempt's share of it is bounded. The 8 MiB request cap
 keeps every real long-context request (a full 1M-token text context is about
 4 MiB of JSON, with room for large tool results and a few screenshots) while
 bounding the memory of a buffered body; the relay buffers each POST body, so its
@@ -1186,12 +1206,28 @@ limit is 4 forwarded requests at once (about 30-40 MiB each, inside the relay's
 and never reaches the gateway; both harnesses retry with backoff. Connections
 beyond 32 (half the relay's 64-process limit) are answered `503` on the accept
 thread without starting a handler. `GET /healthz` is never counted against the
-in-flight limit. The relay container runs with `--restart unless-stopped`: after a
-crash or an out-of-memory kill it comes back by itself (and after the engine
-restarts), and `relay status` reports `restarting` as unhealthy so admission holds
-until it answers its health check again. Both limits can be changed with
-`RELAY_MAX_IN_FLIGHT` and `RELAY_MAX_CONNECTIONS` in the relay's environment (the
-packaged defaults above are what `relay up` runs).
+in-flight limit.
+
+Every attempt reaches the relay from its own network, so the relay counts the
+client address as the source and applies per-source limits as well: one source
+holds at most 2 of the 4 forwarded requests and 8 of the 32 connections at once;
+its next request or connection gets the same `503` while other attempts are still
+served. A request body must be fully received within 60 seconds in total (a
+client that trickles bytes is cut with `408` and frees its slot and
+connection); the body deadline is `RELAY_BODY_DEADLINE`. What this does not do:
+with more than two attempts flooding at once, the 4 global slots are still
+shared first come, first served; a response that the gateway keeps streaming
+holds its slot until it ends (the gateway may be silent for up to 15 minutes
+between chunks); and a connection that sends request headers slowly is bounded
+only by the per-source connection limit and a 2-minute idle timeout between
+reads, not by a total deadline. The relay container runs with
+`--restart unless-stopped`: after a crash or an out-of-memory kill it comes back
+by itself (and after the engine restarts), and `relay status` reports
+`restarting` as unhealthy so admission holds until it answers its health check
+again. The limits can be changed with `RELAY_MAX_IN_FLIGHT`,
+`RELAY_MAX_CONNECTIONS`, `RELAY_MAX_IN_FLIGHT_PER_SOURCE`,
+`RELAY_MAX_CONNECTIONS_PER_SOURCE` and `RELAY_BODY_DEADLINE` in the relay's
+environment (the packaged defaults above are what `relay up` runs).
 
 For a run bound to `relay`, Claude Code is started with `ANTHROPIC_BASE_URL`
 set to the relay, `ANTHROPIC_AUTH_TOKEN` set to the placeholder,
@@ -1213,12 +1249,13 @@ with `--model-access none` is not held by the relay's state at all.
 Limits: the relay narrows *which* models and routes a worker can use; it does
 not read prompts, cap spend, or stop a worker from using the permitted accounts'
 quota. A worker with model access can use the relay for as long as its attempt
-runs (its network is the only one the relay shares with it), and a worker that
-floods it can still exhaust the relay's concurrency limit (and, with a
-structurally pathological body, its memory limit), cutting model access for other
-concurrent runs until the relay recovers; the restart policy and the admission
-hold bound that outage to the relay's restart time. Anyone who compromises the
-relay process or can inspect its container's mounts as you can read the bearer.
+runs (its network is the only one the relay shares with it). A worker that floods
+it is held to its per-source share, so other concurrent runs keep being served
+unless several attempts flood together; a structurally pathological body can still
+exhaust the relay's memory limit and cut model access for every run until the
+relay recovers; the restart policy and the admission hold bound that outage to
+the relay's restart time. Anyone who compromises the relay process or can inspect
+its container's mounts as you can read the bearer.
 
 ## Operator recovery entry point
 
