@@ -26,7 +26,12 @@ from enginery.application.adapter_types import (
     ProviderKind,
 )
 from enginery.application.execution_catalog import load_execution_catalog
-from enginery.application.execution_controls import build_receipt, prepare_native_controls
+from enginery.application.execution_controls import (
+    OBSERVED_HOST_FLAG,
+    build_receipt,
+    launch_observation,
+    prepare_native_controls,
+)
 from enginery.application.work_ports import (
     HarnessOutput,
     HarnessResult,
@@ -112,6 +117,7 @@ class ClaudeCodeHarness:
     catalog: ExecutionCatalog = field(default_factory=load_execution_catalog)
     _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _commands: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
+    _launch_versions: dict[str, str | None] = field(default_factory=dict, init=False)
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _processes: dict[str, _ClaudeCodeProcess] = field(default_factory=dict, init=False)
     _collected: dict[str, tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]] = field(
@@ -167,12 +173,13 @@ class ClaudeCodeHarness:
         )
         if session.session_id in self._sessions:
             raise WorkerFailureError("Claude Code harness session already exists")
-        command = self.command_for(task)
+        command, observed = self._host_command(task)
         process = self.process_factory(command, task.workspace_path)
         self._sessions[session.session_id] = session
         self._processes[session.session_id] = process
         self._tasks[session.session_id] = task
         self._commands[session.session_id] = command
+        self._launch_versions[session.session_id] = observed
         self._outcomes[str(task.operation_id)] = ReconciliationResult.FOUND_MATCHING
         return session
 
@@ -212,7 +219,10 @@ class ClaudeCodeHarness:
             terminal_status=status,
             outputs=(HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),),
             execution_receipt=self._receipt(
-                self._tasks[session.session_id], events, self._commands[session.session_id]
+                self._tasks[session.session_id],
+                events,
+                self._commands[session.session_id],
+                observed_at_launch=self._launch_versions.get(session.session_id),
             ),
         )
         collected = (events, result)
@@ -220,6 +230,10 @@ class ClaudeCodeHarness:
         return collected
 
     def command_for(self, task: HarnessTask) -> tuple[str, ...]:
+        return self._host_command(task)[0]
+
+    def _host_command(self, task: HarnessTask) -> tuple[tuple[str, ...], str | None]:
+        """Return the host command and the version observed while preparing its controls."""
         arguments: list[str] = [
             self.config.executable,
             "-p",
@@ -236,19 +250,22 @@ class ClaudeCodeHarness:
             "--permission-mode",
             "bypassPermissions",
         ]
-        arguments += prepare_native_controls(
+        launch = prepare_native_controls(
             task.selection,
             harness=_HARNESS_ID,
             catalog=self.catalog,
             probe_installed_host=self.installed_host,
         )
-        return tuple(arguments)
+        arguments += launch.arguments
+        return tuple(arguments), launch.observed_executable_version
 
     def _receipt(
         self,
         task: HarnessTask,
         events: tuple[NormalizedAdapterEvent, ...],
         launched_command: tuple[str, ...] | None,
+        *,
+        observed_at_launch: str | None,
     ) -> ExecutionReceipt:
         return build_receipt(
             task.selection,
@@ -256,7 +273,7 @@ class ClaudeCodeHarness:
             catalog=self.catalog,
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
-            probe_installed_host=self.installed_host,
+            observed_at_launch=observed_at_launch,
         )
 
     def _require_session(self, session: HarnessSession) -> None:
@@ -272,6 +289,7 @@ class ClaudeCodeHarness:
         """
         if not result_path.is_absolute():
             raise InvalidInputError("Claude Code worker result path must be absolute")
+        command, observed = self._host_command(task)
         return (
             sys.executable,
             "-m",
@@ -280,8 +298,9 @@ class ClaudeCodeHarness:
             str(task.operation_id),
             "--output",
             str(result_path),
+            *(() if observed is None else (OBSERVED_HOST_FLAG, observed)),
             "--",
-            *self.command_for(task),
+            *command,
         )
 
     def collect_supervised(
@@ -340,7 +359,12 @@ class ClaudeCodeHarness:
                 outputs=(
                     HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),
                 ),
-                execution_receipt=self._receipt(task, events, launched_command),
+                execution_receipt=self._receipt(
+                    task,
+                    events,
+                    launched_command,
+                    observed_at_launch=launch_observation(launched_command),
+                ),
             ),
         )
 

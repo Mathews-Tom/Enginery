@@ -11,9 +11,13 @@ from tests.support.execution import selection_for
 from enginery.adapters import claude_code, omp
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.execution_controls import (
+    OBSERVED_HOST_FLAG,
+    NativeLaunch,
     build_receipt,
     expected_native_arguments,
     extract_native_arguments,
+    launch_observation,
+    prepare_native_controls,
 )
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
@@ -69,10 +73,6 @@ def test_expected_arguments_follow_the_selection_and_are_empty_for_a_host_defaul
     assert expected_native_arguments(selection_for("omp"), catalog=CATALOG) == ()
 
 
-def _in_range_host() -> InstalledHost:
-    return InstalledHost("18.11.0", "json-protocol=3")
-
-
 def test_a_receipt_with_no_launched_command_records_no_submitted_arguments() -> None:
     receipt = build_receipt(
         selection_for("omp", model="openai/gpt-5.2"),
@@ -80,7 +80,7 @@ def test_a_receipt_with_no_launched_command_records_no_submitted_arguments() -> 
         catalog=CATALOG,
         launched_command=None,
         models=(),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.submitted_arguments == ()
@@ -256,7 +256,7 @@ def test_the_receipt_source_is_exactly_the_catalogs_effective_model_evidence(
         catalog=CATALOG,
         launched_command=None,
         models=(pin,),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.effective_model.state is EffectiveState.OBSERVED
@@ -269,7 +269,7 @@ def test_the_receipt_source_is_exactly_the_catalogs_effective_model_evidence(
             catalog=custom,
             launched_command=None,
             models=(pin,),
-            probe_installed_host=_in_range_host,
+            observed_at_launch="18.11.0",
         ).effective_model.source
         == "a custom evidence description"
     )
@@ -287,7 +287,7 @@ def test_a_catalog_without_effective_model_evidence_leaves_the_effective_model_u
         catalog=_catalog_with_model_evidence(""),
         launched_command=None,
         models=(pin,),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.effective_model.state is EffectiveState.UNKNOWN
@@ -302,13 +302,13 @@ def test_a_range_bound_receipt_records_the_range_the_tested_and_the_observed_ver
         catalog=CATALOG,
         launched_command=None,
         models=(),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.host == HostObservation(
         accepted_executable_versions=">=18.10.3,<19.0.0",
         tested_executable_version="18.10.3",
-        observed_executable_version="18.11.0",
+        observed_executable_version_at_launch="18.11.0",
     )
     assert ExecutionReceipt.from_state(receipt.to_state()) == receipt
 
@@ -320,13 +320,13 @@ def test_an_exact_bound_receipt_records_no_range_and_still_the_observed_version(
         catalog=load_execution_catalog("2"),
         launched_command=None,
         models=(),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.host == HostObservation(
         accepted_executable_versions=None,
         tested_executable_version="18.10.3",
-        observed_executable_version="18.11.0",
+        observed_executable_version_at_launch="18.11.0",
     )
 
 
@@ -337,25 +337,22 @@ def test_an_unobservable_host_is_recorded_as_no_observation_not_as_the_tested_ve
         catalog=CATALOG,
         launched_command=None,
         models=(),
-        probe_installed_host=lambda: None,
+        observed_at_launch=None,
     )
 
     assert receipt.host is not None
-    assert receipt.host.observed_executable_version is None
+    assert receipt.host.observed_executable_version_at_launch is None
     assert receipt.host.tested_executable_version == "18.10.3"
 
 
-def test_a_selection_without_native_controls_never_probes_for_the_receipt() -> None:
-    def forbidden() -> InstalledHost | None:
-        raise AssertionError("a host-default run must not probe the host")
-
+def test_a_selection_without_native_controls_records_no_host_observation() -> None:
     receipt = build_receipt(
         selection_for("omp"),
         harness="omp",
         catalog=CATALOG,
         launched_command=None,
         models=(),
-        probe_installed_host=forbidden,
+        observed_at_launch="18.11.0",
     )
 
     assert receipt.host is None
@@ -368,9 +365,47 @@ def test_a_receipt_recorded_before_host_versions_decodes_without_a_host() -> Non
         catalog=CATALOG,
         launched_command=None,
         models=(),
-        probe_installed_host=_in_range_host,
+        observed_at_launch="18.11.0",
     )
     state = receipt.to_state()
     del state["host"]
 
     assert ExecutionReceipt.from_state(state).host is None
+
+
+def test_prepare_native_controls_returns_the_host_version_it_probed_for_the_launch() -> None:
+    selection = selection_for("omp", model="openai/gpt-5.2")
+
+    launch = prepare_native_controls(
+        selection,
+        harness="omp",
+        catalog=CATALOG,
+        probe_installed_host=lambda: InstalledHost("18.11.0", "json-protocol=3"),
+    )
+
+    assert launch.arguments == ("--model", "openai/gpt-5.2")
+    assert launch.observed_executable_version == "18.11.0"
+
+
+def test_prepare_native_controls_for_a_host_default_selection_never_probes() -> None:
+    def forbidden() -> InstalledHost | None:
+        raise AssertionError("a host-default run must not probe the host")
+
+    launch = prepare_native_controls(
+        selection_for("omp"), harness="omp", catalog=CATALOG, probe_installed_host=forbidden
+    )
+
+    assert launch == NativeLaunch((), None)
+
+
+def test_launch_observation_reads_only_the_worker_wrappers_own_arguments() -> None:
+    wrapper = ("python", "-m", "worker", "--output", "/r.json", OBSERVED_HOST_FLAG, "18.11.0")
+
+    assert launch_observation((*wrapper, "--", "omp", "-p", "x")) == "18.11.0"
+    # The same tokens inside the host command are prompt text, not an observation.
+    assert launch_observation(("python", "--", "omp", OBSERVED_HOST_FLAG, "9.9.9")) is None
+    assert launch_observation((*wrapper[:-2], "--", "omp")) is None
+    assert launch_observation((*wrapper[:-1], "--", "omp")) is None
+    assert launch_observation((*wrapper[:-1], " ", "--", "omp")) is None
+    assert launch_observation(("omp", "-p", "x")) is None
+    assert launch_observation(None) is None

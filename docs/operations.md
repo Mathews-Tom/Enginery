@@ -428,11 +428,14 @@ launched, once the implementation has run) and `effective` (the model the host
 reported, or `unknown` with the reason; the effective effort is always `unknown`
 today). It also carries the support tier (both hosts are `experimental`), the
 catalog version and digest, the `host` block (the binding, the accepted version range,
-the tested version, the version observed when the request was built, the version
-observed when the implementation was collected, whether those two differ, and the
-protocol fingerprint; an observed version inside the range is never reported as
-tested), and any `holds`. A version change inside the bound range between the two
-observations runs normally and is visible there; it never raises a hold. The same hold is also printed as the
+the tested version, the version observed when the request was built
+(`observed_executable_version_at_bind`), the version observed when the host was launched
+(`observed_executable_version_at_launch`, read back from the launch record rather than
+probed again at collection), whether those two differ
+(`observed_version_changed_since_bind`), and the protocol fingerprint; an observed
+version inside the range is never reported as tested), and any `holds`. A version change
+inside the bound range between the two observations runs normally and is visible there;
+it never raises a hold. The same hold is also printed as the
 top-level `hold`. Only the host's executable version is probed (a read-only
 diagnostic creates no files); its protocol is the one the adapter declares. A
 matching fingerprint or a captured launch request does not raise a host above

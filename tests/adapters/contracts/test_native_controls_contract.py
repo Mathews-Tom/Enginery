@@ -240,6 +240,29 @@ def test_a_pre_release_or_below_range_banner_rejects_a_pinned_control_before_any
     assert rig.launches == []
 
 
+@pytest.mark.parametrize(
+    ("host", "banner", "version"),
+    [("omp", "omp v18.11.0\n", "18.11.0"), ("claude-code", "2.1.300 (Claude Code)\n", "2.1.300")],
+)
+def test_the_supervised_command_records_the_launch_version_ahead_of_the_host_command(
+    tmp_path: Path, host: str, banner: str, version: str
+) -> None:
+    model, *_ = _HOSTS[host]
+    rig = _rig(tmp_path, host, installed=banner)
+
+    pinned = rig.harness.supervised_command(
+        _task(tmp_path, selection_for(host, model=model)), result_path=tmp_path / "r.json"
+    )
+    default = rig.harness.supervised_command(
+        _task(tmp_path, selection_for(host)), result_path=tmp_path / "r.json"
+    )
+
+    separator = pinned.index("--")
+    assert pinned[separator - 2 : separator] == ("--observed-host-version", version)
+    assert "--observed-host-version" not in default
+    assert len(rig.probes) == 1
+
+
 @pytest.mark.parametrize("host", ["omp", "claude-code"])
 def test_an_unobservable_host_rejects_a_pinned_control_instead_of_guessing(
     tmp_path: Path, host: str

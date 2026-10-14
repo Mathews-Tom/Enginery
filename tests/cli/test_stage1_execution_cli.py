@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -563,8 +564,12 @@ class _Run:
             request,
         )
 
-    def execute(self) -> None:
-        """Qualify, dispatch the real supervised worker, and collect its result."""
+    def execute(self, *, after_launch: Callable[[], None] | None = None) -> None:
+        """Qualify, dispatch the real supervised worker, and collect its result.
+
+        ``after_launch`` runs once the worker is dispatched (its command is built and its
+        host version observed) and before the result is collected.
+        """
         ledger = LedgerService.open(self.database)
         try:
             service, request = self.service(ledger)
@@ -578,6 +583,8 @@ class _Run:
             dispatch = service.dispatch_implementation(
                 request, now=_NOW, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
             )
+            if after_launch is not None:
+                after_launch()
             deadline = time.monotonic() + 30
             while not dispatch.result_path.is_file():
                 assert time.monotonic() < deadline, "supervised worker retained no result"
@@ -834,8 +841,8 @@ def test_watch_proceeds_when_the_installed_version_changed_inside_the_bound_rang
         "accepted_executable_versions": ">=18.10.3,<19.0.0",
         "tested_executable_version": "18.10.3",
         "observed_executable_version_at_bind": "18.10.3",
-        "observed_executable_version_at_execution": None,
-        "observed_version_changed": None,
+        "observed_executable_version_at_launch": None,
+        "observed_version_changed_since_bind": None,
         "protocol_fingerprint": "json-protocol=3",
     }
 
@@ -871,7 +878,7 @@ def test_watch_holds_when_the_installed_version_leaves_the_bound_range(
         ("claude-code", "2.1.296", "2.1.300"),
     ],
 )
-def test_an_in_range_upgrade_between_bind_and_execution_runs_and_is_recorded_not_held(
+def test_an_in_range_upgrade_between_bind_and_launch_runs_and_is_recorded_not_held(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str, bound: str, upgraded: str
 ) -> None:
     pin = _PINS[host]
@@ -889,8 +896,8 @@ def test_an_in_range_upgrade_between_bind_and_execution_runs_and_is_recorded_not
     assert execution["holds"] == []
     assert execution["submitted"] == ["--model", pin]
     assert execution["host"]["observed_executable_version_at_bind"] == bound  # type: ignore[index]
-    assert execution["host"]["observed_executable_version_at_execution"] == upgraded  # type: ignore[index]
-    assert execution["host"]["observed_version_changed"] is True  # type: ignore[index]
+    assert execution["host"]["observed_executable_version_at_launch"] == upgraded  # type: ignore[index]
+    assert execution["host"]["observed_version_changed_since_bind"] is True  # type: ignore[index]
     assert execution["host"]["tested_executable_version"] == bound  # type: ignore[index]
 
 
@@ -905,4 +912,34 @@ def test_an_unchanged_host_reports_no_observed_version_change(
     execution = _json_of(capsys, run, "evidence")["execution"]
 
     assert isinstance(execution, dict)
-    assert execution["host"]["observed_version_changed"] is False  # type: ignore[index]
+    assert execution["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("host", "bound", "upgraded"),
+    [
+        ("omp", "18.10.3", "18.11.0"),
+        ("claude-code", "2.1.296", "2.1.300"),
+    ],
+)
+def test_the_receipt_reports_the_launch_version_not_one_probed_after_the_worker_ran(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str, bound: str, upgraded: str
+) -> None:
+    pin = _PINS[host]
+    run = _Run(tmp_path, host, "--model", pin, reported=(pin,))
+    stand_in = tmp_path / "stand-in"
+
+    def upgrade_the_host() -> None:
+        stand_in.write_text(
+            stand_in.read_text(encoding="utf-8").replace(bound, upgraded), encoding="utf-8"
+        )
+
+    run.execute(after_launch=upgrade_the_host)
+
+    report = _json_of(capsys, run, "evidence")["execution"]
+
+    assert isinstance(report, dict)
+    assert report["holds"] == []
+    assert report["host"]["observed_executable_version_at_bind"] == bound  # type: ignore[index]
+    assert report["host"]["observed_executable_version_at_launch"] == bound  # type: ignore[index]
+    assert report["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]

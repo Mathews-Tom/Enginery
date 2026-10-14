@@ -8,6 +8,7 @@ as selected is an error, never a different model or effort.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import (
@@ -41,26 +42,64 @@ def native_control_arguments(
     return tuple(arguments)
 
 
+OBSERVED_HOST_FLAG = "--observed-host-version"
+"""Worker-wrapper flag that carries the version observed at launch in the persisted command.
+
+The supervised worker ignores it. It exists so the launch-time observation survives in the
+durable dispatch record, from which a later collection reads it back instead of probing a
+host that may have changed since.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class NativeLaunch:
+    """The native control flags of one launch and the host version seen while preparing it."""
+
+    arguments: tuple[str, ...]
+    observed_executable_version: str | None
+
+
 def prepare_native_controls(
     selection: ExecutionSelection,
     *,
     harness: str,
     catalog: ExecutionCatalog,
     probe_installed_host: Callable[[], InstalledHost | None],
-) -> tuple[str, ...]:
+) -> NativeLaunch:
     """Validate a selection against the catalog and the installed host, then emit its flags.
 
     A selection that asks for no native control launches the host exactly as before and is
     never probed. A selection that asks for any control must name the catalog in use,
-    carry exact pins in the host's own vocabulary, and run against the host version and
-    protocol the flags were tested with; otherwise it is rejected before launch.
+    carry exact pins in the host's own vocabulary, and run against a host version the catalog
+    accepts and the protocol the flags were tested with; otherwise it is rejected before
+    launch. The probe that proved the host acceptable is the launch-time observation, and is
+    returned with the flags.
     """
     require_selection_harness(selection, harness=harness)
     if selection.legacy or not selection.requires_native_controls:
-        return ()
+        return NativeLaunch((), None)
     host = validate_against_catalog(selection, catalog=catalog)
-    host.require_installed(probe_installed_host())
-    return native_control_arguments(selection, host=host)
+    installed = probe_installed_host()
+    host.require_installed(installed)
+    return NativeLaunch(
+        native_control_arguments(selection, host=host),
+        None if installed is None else installed.executable_version,
+    )
+
+
+def launch_observation(command: tuple[str, ...] | None) -> str | None:
+    """Return the launch-time host version recorded in a persisted supervised command.
+
+    Only the worker wrapper's own arguments, before the first ``--``, are read; the host
+    command that follows is never searched.
+    """
+    if command is None:
+        return None
+    wrapper = command[: command.index("--")] if "--" in command else ()
+    for index, token in enumerate(wrapper[:-1]):
+        if token == OBSERVED_HOST_FLAG and wrapper[index + 1].strip():
+            return wrapper[index + 1]
+    return None
 
 
 def expected_native_arguments(
@@ -114,7 +153,7 @@ def build_receipt(
     catalog: ExecutionCatalog,
     launched_command: tuple[str, ...] | None,
     models: Iterable[str],
-    probe_installed_host: Callable[[], InstalledHost | None],
+    observed_at_launch: str | None,
 ) -> ExecutionReceipt:
     """Build a receipt from the launched command and the host's own reported models.
 
@@ -122,7 +161,8 @@ def build_receipt(
     evidence description comes from the catalog; effective effort has no extractor, so it is
     unknown and says whether the catalog records any evidence for it. A selection that asks
     for a native control also records the host versions it answers: the bound range, the
-    tested version and the version observed now, which is never reported as tested.
+    tested version and the version observed when the host was launched, never one probed
+    later and never reported as tested.
     """
     require_selection_harness(selection, harness=harness)
     host = catalog.host(harness)
@@ -150,28 +190,26 @@ def build_receipt(
         submitted_arguments=submitted,
         effective_model=model,
         effective_effort=EffectiveControl.unknown(reason=effort_reason),
-        host=_host_observation(selection, probe_installed_host),
+        host=_host_observation(selection, observed_at_launch),
     )
 
 
 def _host_observation(
-    selection: ExecutionSelection, probe_installed_host: Callable[[], InstalledHost | None]
+    selection: ExecutionSelection, observed_at_launch: str | None
 ) -> HostObservation | None:
     version = selection.host_version
     if selection.legacy or version is None or not selection.requires_native_controls:
         return None
-    installed = probe_installed_host()
-    observed = None if installed is None else installed.executable_version
     if isinstance(version, RangedHostVersion):
         return HostObservation(
             accepted_executable_versions=str(version.accepted),
             tested_executable_version=str(version.tested),
-            observed_executable_version=observed,
+            observed_executable_version_at_launch=observed_at_launch,
         )
     return HostObservation(
         accepted_executable_versions=None,
         tested_executable_version=version.version,
-        observed_executable_version=observed,
+        observed_executable_version_at_launch=observed_at_launch,
     )
 
 
@@ -189,10 +227,13 @@ def distinct_model(models: Iterable[str], *, source: str, reason: str) -> Effect
 
 
 __all__ = [
+    "OBSERVED_HOST_FLAG",
+    "NativeLaunch",
     "build_receipt",
     "distinct_model",
     "expected_native_arguments",
     "extract_native_arguments",
+    "launch_observation",
     "native_control_arguments",
     "prepare_native_controls",
     "require_selection_harness",

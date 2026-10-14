@@ -65,8 +65,8 @@ def _host(selection: ExecutionSelection, receipt: ExecutionReceipt | None) -> di
     The observed version is never presented as tested: an in-range version the catalog
     accepts is reported as accepted and observed, and only the catalog's own tested
     version is reported as tested. The version observed at bind time and the one observed
-    when the implementation was collected are reported apart, with whether they differ;
-    a change inside the accepted range is a difference to see, not a hold.
+    when the host was launched are reported apart, with whether they differ; a change inside
+    the accepted range is a difference to see, not a hold.
     """
     version = selection.host_version
     if version is None:
@@ -76,20 +76,20 @@ def _host(selection: ExecutionSelection, receipt: ExecutionReceipt | None) -> di
     else:
         binding, accepted, tested = "exact", None, version.version
     at_bind = selection.observed_host_version
-    at_execution = (
+    at_launch = (
         None
         if receipt is None or receipt.host is None
-        else receipt.host.observed_executable_version
+        else receipt.host.observed_executable_version_at_launch
     )
     return {
         "binding": binding,
         "accepted_executable_versions": accepted,
         "tested_executable_version": tested,
         "observed_executable_version_at_bind": at_bind,
-        "observed_executable_version_at_execution": at_execution,
-        "observed_version_changed": None
-        if at_bind is None or at_execution is None
-        else at_bind != at_execution,
+        "observed_executable_version_at_launch": at_launch,
+        "observed_version_changed_since_bind": None
+        if at_bind is None or at_launch is None
+        else at_bind != at_launch,
         "protocol_fingerprint": selection.host_protocol_fingerprint,
     }
 

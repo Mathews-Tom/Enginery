@@ -7,8 +7,8 @@ explicit UNKNOWN. An effective value is never copied from, defaulted to, or infe
 the request: a host that does not report a control leaves it unknown.
 
 A receipt also records the host versions it answers: the range the catalog accepted, the
-one version the catalog tested, and the version actually observed. The observed version is
-never presented as tested.
+one version the catalog tested, and the version observed when the host was launched. The
+observed version is never presented as tested.
 """
 
 from __future__ import annotations
@@ -93,13 +93,13 @@ class HostObservation:
 
     ``accepted_executable_versions`` is the bound range (absent for an exact-bound
     selection), ``tested_executable_version`` the version the catalog tested, and
-    ``observed_executable_version`` the installed version seen when the receipt was
-    recorded, or None when the host could not be probed.
+    ``observed_executable_version_at_launch`` the installed version seen when the host was
+    launched, never one probed later, or None when no launch observation was recorded.
     """
 
     accepted_executable_versions: str | None
     tested_executable_version: str
-    observed_executable_version: str | None
+    observed_executable_version_at_launch: str | None
 
     def __post_init__(self) -> None:
         if not self.tested_executable_version.strip():
@@ -109,7 +109,7 @@ class HostObservation:
         return {
             "accepted_executable_versions": self.accepted_executable_versions,
             "tested_executable_version": self.tested_executable_version,
-            "observed_executable_version": self.observed_executable_version,
+            "observed_executable_version_at_launch": self.observed_executable_version_at_launch,
         }
 
     @classmethod
@@ -120,7 +120,7 @@ class HostObservation:
             raise InvalidInputError("execution receipt host must be a mapping")
         accepted = state.get("accepted_executable_versions")
         tested = state.get("tested_executable_version")
-        observed = state.get("observed_executable_version")
+        observed = state.get("observed_executable_version_at_launch")
         if (
             (accepted is not None and not isinstance(accepted, str))
             or not isinstance(tested, str)
@@ -130,7 +130,7 @@ class HostObservation:
         return cls(
             accepted_executable_versions=accepted,
             tested_executable_version=tested,
-            observed_executable_version=observed,
+            observed_executable_version_at_launch=observed,
         )
 
 
