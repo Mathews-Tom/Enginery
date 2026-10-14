@@ -262,6 +262,91 @@ REAL_GATEWAY: dict[str, str] = {
 }
 
 
+# Where each required assertion's verdict is observed. ``host``: only from outside the container
+# (the engine, the receipts, host files and logs, the stubs' request logs). ``container``: from
+# the in-container probe's own refusals, which the host cannot reproduce independently (it only
+# cross-checks that nothing changed on the host). ``both``: the verdict needs a probe observation
+# and an independent host observation. The documentation quotes the counts of this table.
+OBSERVED_ON_HOST: frozenset[str] = frozenset(
+    {
+        "c-container-profile",
+        "d-network-host-listeners-zero-connections",
+        "e-bare-origin-unchanged",
+        "e-operator-publication",
+        "f-relay-bare-claude-rewrite",
+        "g-limits-memory",
+        "g-limits-wall-time",
+        "g-limits-launcher-deadline",
+        "h-hooks-not-executed-on-host",
+        "h-engine-install-unchanged",
+        "h-validation-in-runner",
+        "i-profile-violations-flagged",
+        "i-admission-missing-image",
+        "i-admission-wrong-recipe",
+        "i-admission-unreachable-engine",
+        "i-admission-profile-drift",
+        "i-launcher-no-fallback",
+        "z-profile-violations-all-receipts",
+        "z-canary-integrity",
+        "z-cleanup-no-stray-containers",
+        "z-no-hosted-inference",
+        "r-m2-exit-125-spoof-classified",
+        "r-m3-container-log-bounded",
+        "r-m3-disk-receipt-and-readback",
+        "r-m3-memory-fill-exit-137",
+        "r-m4-protected-path-held-then-published",
+        "r-b1-fsmonitor-not-run-on-host",
+        "r-m7-weaker-container-flagged",
+    }
+)
+
+OBSERVED_IN_CONTAINER: frozenset[str] = frozenset(
+    {
+        "a-read-protected-paths",
+        "a-read-filesystem-search",
+        "a-read-environment",
+        "a-read-proc-environ",
+        "b-write-image-paths",
+        "b-write-root-and-host-paths",
+        "b-write-workspace-plants",
+        "c-escape-docker-socket",
+        "c-escape-devices",
+        "c-escape-host-mounts",
+        "c-escape-mountinfo",
+        "c-escape-syscalls",
+        "d-network-direct-refused",
+        "d-network-internet-and-dns-refused",
+        "e-git-push-refused",
+        "e-scm-and-broker-network-refused",
+        "e-credentials-unreadable",
+        "h-image-paths-read-only",
+        "f-relay-models-filtered",
+    }
+)
+
+OBSERVED_ON_BOTH: frozenset[str] = frozenset(
+    {
+        "f-relay-hardened-and-reachable",
+        "f-relay-allowed-routes-forwarded",
+        "f-relay-denied-zero-upstream",
+        "g-limits-pids",
+        "g-limits-cpu",
+        "r-m1-no-host-objects-in-workspace",
+        "r-m2-symlink-result-refused",
+        "r-m2-fifo-result-refused",
+        "r-m2-stale-result-replay-refused",
+        "r-m3-disk-enospc-bytes",
+        "r-m3-disk-enospc-inodes",
+        "r-m3-disk-parallel-fallocate-capped",
+        "r-m3-git-bomb-refused-at-intake",
+        "r-m5-validation-and-none-mode-cannot-reach-relay",
+        "r-m5-concurrent-workers-isolated-networks",
+        "r-m4-hooks-disabled-in-image",
+        "f-relay-real-gateway-models-and-denials",
+    }
+)
+
+
 def required_assertions(options: Any) -> dict[str, str]:
     import factory_gate_review as review
 

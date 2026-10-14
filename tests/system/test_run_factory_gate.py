@@ -1022,3 +1022,22 @@ def test_disk_assertions_are_the_kernel_cap_scenario() -> None:
         "r-m3-memory-fill-exit-137",
     ):
         assert key in review.REQUIRED
+
+
+def test_every_required_assertion_has_one_observation_site() -> None:
+    import factory_gate_boundary as boundary
+    import factory_gate_review as review
+
+    everything = {**boundary.REQUIRED, **boundary.REAL_GATEWAY, **review.REQUIRED}
+    sites = (
+        boundary.OBSERVED_ON_HOST,
+        boundary.OBSERVED_IN_CONTAINER,
+        boundary.OBSERVED_ON_BOTH,
+    )
+    assert sum(len(site) for site in sites) == len(everything)
+    assert set().union(*sites) == set(everything)
+    base = {**boundary.REQUIRED, **review.REQUIRED}
+    assert len(base) == 63
+    assert len(boundary.OBSERVED_ON_HOST) == 28
+    assert len(boundary.OBSERVED_IN_CONTAINER) == 19
+    assert len(boundary.OBSERVED_ON_BOTH - set(boundary.REAL_GATEWAY)) == 16
