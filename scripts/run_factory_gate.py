@@ -15,8 +15,12 @@ Scenarios:
     Exactly one non-mutating authentication session (a prompt asking for the word OK, no tools)
     through the relay inside the runner. Without ``--live`` it uses a loopback stub upstream (mode
     ``local``). ``--live`` uses the operator's real gateway and token file and is an owner-
-    authorized action: it needs ``--gateway-url``, ``--gateway-token-file`` and
-    ``--confirm-single-session``.
+    authorized action: it needs ``--gateway-url``, ``--gateway-token-file``,
+    ``--custody-receipt`` (made on this host with ``enginery runner custody-receipt``; a receipt
+    for the other host, a malformed one, or one that does not conform is a HOLD) and
+    ``--confirm-single-session``. ``--live`` without ``--custody-receipt`` is a usage error
+    (status 2) before anything runs. No usage figures in the harness output, a gateway
+    401/403/429 or a deadline in a live run are also a HOLD, never a product failure.
 
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;
 raw artifacts go to ``<evidence stem>.raw/`` beside it. Exit status: 0 only if every required
@@ -115,7 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="runner-auth only: use the real gateway (owner-authorized, exactly one session)",
+        help="runner-auth only: use the real gateway (owner-authorized, exactly one session; "
+        "needs --custody-receipt)",
     )
     parser.add_argument(
         "--confirm-single-session",
@@ -137,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"runner-auth process-group deadline (1..{MAX_SESSION_DEADLINE_SECONDS})",
     )
     parser.add_argument(
-        "--custody-receipt", type=Path, help="runner-auth only: the host's auth-custody receipt"
+        "--custody-receipt",
+        type=Path,
+        help="runner-auth: this host's auth-custody receipt (required with --live)",
     )
     parser.add_argument(
         "--subject-commit",
@@ -167,6 +174,8 @@ def parse_options(
     if args.live:
         if args.gateway_url is None or args.gateway_token_file is None:
             parser.error("--live requires --gateway-url and --gateway-token-file")
+        if args.custody_receipt is None:
+            parser.error("--live requires --custody-receipt (`enginery runner custody-receipt`)")
         if not confirmed:
             parser.error(
                 "--live runs one real subscription session; confirm it with "

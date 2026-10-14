@@ -73,6 +73,7 @@ from enginery.engine.task_repository import (
     verify_intake_branch,
 )
 from enginery.engine.workspace import WORKSPACE_MODE_TASK_LOCAL_CLONE
+from enginery.ledger.artifact_store import ArtifactStore
 from factory_gate_context import Gate, receipt_summary
 from factory_gate_support import (
     GATE_LABEL,
@@ -119,7 +120,8 @@ REQUIRED: dict[str, str] = {
     ),
     "r-m3-git-bomb-refused-at-intake": (
         "A bundle whose tree holds more entries than the intake cap is refused by host "
-        "verification before any host checkout; a small bundle from the same path is accepted"
+        "verification for exactly that reason (the tree-cap refusal) before any host checkout; "
+        "a small bundle from the same path is accepted"
     ),
     "r-m4-protected-path-held-then-published": (
         "A candidate editing .github/workflows/x.yml is held (changed paths read by the host from "
@@ -822,6 +824,11 @@ def _intake(gate: Gate, attempt: AttemptResult, branch: str) -> dict[str, Any]:
     return result
 
 
+_TREE_CAP_REFUSAL = "worker branch tree exceeds the entry-count or size limit"
+"""The product's own refusal text for a tree past the intake cap (``_bound_tree``): the bomb must
+be refused for that reason, not merely refused."""
+
+
 def step_m3_bomb(gate: Gate) -> None:
     fixture = gate.fixture
     assert fixture is not None
@@ -859,6 +866,7 @@ def step_m3_bomb(gate: Gate) -> None:
         and small_result.get("accepted") is True
         and bomb_bundle.is_file()
         and bomb_result.get("accepted") is False
+        and _TREE_CAP_REFUSAL in str(bomb_result.get("message", ""))
         and bomb_result.get("seconds", 999) < 120
         and no_checkout
         and (bomb.obs or {}).get("fast_import_exit") == 0,
@@ -875,8 +883,8 @@ def step_m3_bomb(gate: Gate) -> None:
             "host_directory_entries": leftovers,
         },
         expected=(
-            "the bomb is refused during host verification, in seconds, with no host checkout; the "
-            "small bundle from the same path is accepted"
+            "the bomb is refused during host verification with the tree-cap reason, in seconds, "
+            "with no host checkout; the small bundle from the same path is accepted"
         ),
         observer={"source": "host: the product's intake and verify result and the directory list"},
         attempts=(small, bomb),
@@ -1151,11 +1159,24 @@ def step_m5_relay(gate: Gate) -> None:
         control_forwarded = len(stub.snapshot()) - before_control
         control_results = {r["id"]: r for r in (control.obs or {}).get("results", [])}
         status = manager.status()
-    validation_receipt = (
-        None
-        if validation.runner_receipt is None
-        else {"networks_expected": NO_NETWORK, "linked": True}
-    )
+    # The network the validation container really had is read from its published receipt (the
+    # product's own record of the engine's inspect), never assumed.
+    validation_receipt: dict[str, Any] | None = None
+    if validation.runner_receipt is not None:
+        published = json.loads(
+            ArtifactStore(fixture.work / "m5-validation-artifacts").read_bytes(
+                validation.runner_receipt.receipt_digest
+            )
+        )
+        effective = published.get("effective", {})
+        validation_receipt = {
+            "networks": effective.get("networks"),
+            "network_mode": effective.get("network_mode"),
+        }
+    validation_network_none = validation_receipt is not None and validation_receipt == {
+        "networks": [NO_NETWORK],
+        "network_mode": NO_NETWORK,
+    }
     names = [n for n, _h, _p in targets]
     passed = (
         _launched_clean(none_worker)
@@ -1168,7 +1189,7 @@ def step_m5_relay(gate: Gate) -> None:
         )
         and all(validation_results.get(n, "").startswith("refused") for n in names)
         and validation.returncode == 0
-        and validation_receipt is not None
+        and validation_network_none
         and upstream_after_denied == 0
         and log_after_denied == 0
         and control_results.get("C1-healthz", {}).get("status") == 200
@@ -1195,6 +1216,7 @@ def step_m5_relay(gate: Gate) -> None:
             if none_worker.receipt is None
             else list(none_worker.receipt.effective.networks),
             "validation_container_connections": validation_results,
+            "validation_container_recorded_network": validation_receipt,
             "stub_upstream_requests_from_denied_containers": upstream_after_denied,
             "relay_log_entries_from_denied_containers": log_after_denied,
             "control_model_access_worker": {

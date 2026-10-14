@@ -188,8 +188,9 @@ REQUIRED: dict[str, str] = {
         "expected-head constrained)"
     ),
     "f-relay-hardened-and-reachable": (
-        "The real relay runs hardened, dual-homed, and a worker on the internal network reaches "
-        "only it"
+        "The real relay runs hardened and egress-only, and is attached to each model-access "
+        "attempt's own internal network for that attempt's lifetime only; the worker on that "
+        "network reaches only it"
     ),
     "f-relay-allowed-routes-forwarded": (
         "Allowed routes are forwarded exactly once with the injected bearer and the inbound "

@@ -154,9 +154,14 @@ def subject_identity(subject_commit: str | None = None) -> dict[str, Any]:
         }
     except metadata.PackageNotFoundError:
         subject["source"] = {"kind": "unknown"}
-    # An installed wheel carries no git metadata: the commit it was built from is declared by
-    # the operator (--subject-commit) and recorded next to the wheel digest.
-    subject["commit_sha"] = subject_commit
+    # An installed wheel carries no git metadata, so nothing here can verify which commit it was
+    # built from: ``commit_sha`` stays null (unverified) and the operator's claim
+    # (--subject-commit) is recorded, as a claim, under ``declared_commit_sha`` beside the wheel
+    # digest.
+    subject["commit_sha"] = None
+    if subject_commit is not None:
+        subject["declared_commit_sha"] = subject_commit
+        subject["declared_commit_verified"] = False
     return subject
 
 

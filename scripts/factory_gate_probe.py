@@ -63,27 +63,6 @@ _CREDENTIAL_KEY = re.compile(
     r"OPENAI|XAI|PYPI|AUTH)(_|$)|TOKEN|SECRET|PASSWORD|PASSPHRASE|API_KEY|APIKEY|CREDENTIAL|COOKIE",
     re.IGNORECASE,
 )
-_REFUSAL_ERRNOS = {
-    errno.EROFS,
-    errno.EACCES,
-    errno.EPERM,
-    errno.ENOENT,
-    errno.ENOTDIR,
-    errno.EXDEV,
-    errno.ENOSYS,
-    errno.EINVAL,
-    errno.ENODEV,
-    errno.ENXIO,
-    errno.EBUSY,
-    errno.ECONNREFUSED,
-    errno.ENETUNREACH,
-    errno.EHOSTUNREACH,
-    errno.ENETDOWN,
-    errno.ETIMEDOUT,
-    errno.EAFNOSUPPORT,
-    errno.EADDRNOTAVAIL,
-}
-
 
 REFUSAL_ERRNOS = frozenset(
     {
@@ -881,6 +860,48 @@ def _command_text(arguments: list[str]) -> str:
     return "git " + " ".join(arguments)
 
 
+GIT_REFUSAL_SIGNATURES = (
+    "could not resolve host",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "connection refused",
+    "failed to connect",
+    "no route to host",
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "permission denied",
+    "authentication failed",
+    "host key verification failed",
+    "does not appear to be a git repository",
+    "no such file or directory",
+    "read-only file system",
+    "not permitted",
+    "protocol not supported",
+    "transport 'ssh' not allowed",
+    "transport 'git' not allowed",
+    "transport 'file' not allowed",
+)
+"""Messages git prints when the sandbox, not git itself, refused the operation."""
+
+
+def git_failure_outcome(returncode: int, stderr: str) -> tuple[str, str]:
+    """``(outcome, error)`` for a finished git command.
+
+    Success is ``performed``. A failure is ``refused`` only when its stderr carries a specific
+    refusal signature; any other non-zero exit is ``inconclusive`` (git may have failed for a
+    reason that says nothing about the boundary), so it can never satisfy ``refused``.
+    """
+    if returncode == 0:
+        return "performed", ""
+    text = stderr.lower()
+    for signature in GIT_REFUSAL_SIGNATURES:
+        if signature in text:
+            return "refused", f"exit {returncode}: {signature}"
+    return "inconclusive", f"exit {returncode}: no refusal signature"
+
+
 def _git_attempt(
     rec: Recorder, op_id: str, arguments: list[str], *, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str] | None:
@@ -892,13 +913,13 @@ def _git_attempt(
             outcome, name = "inconclusive", "timeout"
         rec.add(op_id, _command_text(arguments), "refused", outcome, error=name)
         return None
-    outcome = "performed" if completed.returncode == 0 else "refused"
+    outcome, error_text = git_failure_outcome(completed.returncode, completed.stderr)
     rec.add(
         op_id,
         _command_text(arguments),
         "refused",
         outcome,
-        error=None if outcome == "performed" else f"exit {completed.returncode}",
+        error=None if outcome == "performed" else error_text,
         detail=(completed.stderr.strip().splitlines() or [""])[-1][:160],
     )
     return completed

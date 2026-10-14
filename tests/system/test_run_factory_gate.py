@@ -108,11 +108,31 @@ def test_unsafe_or_incomplete_arguments_are_usage_errors(tmp_path: Path, extra: 
     assert refused.value.code == 2
 
 
+def test_live_without_a_custody_receipt_is_a_usage_error(tmp_path: Path) -> None:
+    argv = _argv(
+        tmp_path,
+        "--harness",
+        "omp",
+        "--live",
+        "--confirm-single-session",
+        "--gateway-url",
+        "http://host.docker.internal:4000",
+        "--gateway-token-file",
+        str(tmp_path / "gateway.token"),
+        scenario="runner-auth",
+    )
+    with pytest.raises(SystemExit) as refused:
+        parse_options(argv, {})
+    assert refused.value.code == 2
+
+
 def test_live_needs_gateway_arguments_and_an_explicit_confirmation(tmp_path: Path) -> None:
     live = [
         "--harness",
         "omp",
         "--live",
+        "--custody-receipt",
+        str(tmp_path / "custody.json"),
         "--gateway-url",
         "http://host.docker.internal:4000",
         "--gateway-token-file",
@@ -146,6 +166,8 @@ def test_a_live_run_never_starts_without_the_confirmation(tmp_path: Path) -> Non
                 "--harness",
                 "omp",
                 "--live",
+                "--custody-receipt",
+                str(tmp_path / "custody.json"),
                 "--gateway-url",
                 "http://127.0.0.1:4000",
                 "--gateway-token-file",
@@ -567,7 +589,7 @@ def test_scenario_requirements_follow_the_arguments(tmp_path: Path) -> None:
     )
     assert "f-relay-real-gateway-models-and-denials" in required_assertions(with_gateway)
     auth_required = scenarios["runner-auth"].required(auth)
-    assert {"auth-session-count", "auth-no-token-in-artifacts", "a-read-protected-paths"} <= set(
+    assert {"auth-custody-receipt", "auth-no-token-in-artifacts", "a-read-protected-paths"} <= set(
         auth_required
     )
     assert all(not key.startswith(("b-", "g-", "i-")) for key in auth_required)
@@ -776,6 +798,7 @@ def test_the_driver_documents_its_exit_codes_and_modes() -> None:
         "--gateway-url",
         "--gateway-token-file",
         "--confirm-single-session",
+        "--custody-receipt",
     ):
         assert flag in completed.stdout, flag
 
@@ -838,6 +861,26 @@ def test_probe_counts_only_explicit_refusals_as_refused() -> None:
         assert entry["ok"] is (outcome == "refused"), name
 
 
+def test_git_failure_is_refused_only_with_a_specific_signature() -> None:
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        import factory_gate_probe as probe
+    finally:
+        sys.path.remove(str(SCRIPTS))
+    refused = probe.git_failure_outcome(
+        128, "fatal: unable to access 'https://x/': Could not resolve host: x\n"
+    )
+    assert refused[0] == "refused"
+    assert (
+        probe.git_failure_outcome(128, "fatal: 'x' does not appear to be a git repository")[0]
+        == "refused"
+    )
+    # A failure that says nothing about the boundary is inconclusive, never a refusal.
+    assert probe.git_failure_outcome(1, "error: pathspec 'x' did not match")[0] == "inconclusive"
+    assert probe.git_failure_outcome(128, "")[0] == "inconclusive"
+    assert probe.git_failure_outcome(0, "") == ("performed", "")
+
+
 def test_subject_commit_is_validated_and_recorded(tmp_path: Path) -> None:
     sha = "a" * 40
     options = parse_options(_argv(tmp_path, "--subject-commit", sha))
@@ -850,8 +893,30 @@ def test_subject_commit_is_validated_and_recorded(tmp_path: Path) -> None:
     from factory_gate_context import subject_identity
 
     subject = subject_identity(sha)
-    assert subject["commit_sha"] is not None
     assert subject["source"]["kind"] in ("git", "installed-wheel", "unknown")
+    if subject["source"]["kind"] == "git":
+        assert subject["commit_sha"] == subject["source"]["git_sha"]
+    assert subject["declared_commit_sha"] == sha
+
+
+def test_wheel_subject_declares_but_does_not_verify_its_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import enginery
+    from factory_gate_context import subject_identity
+
+    installed = tmp_path / "site" / "enginery"
+    installed.mkdir(parents=True)
+    monkeypatch.setattr(enginery, "__file__", str(installed / "__init__.py"))
+    sha = "b" * 40
+
+    subject = subject_identity(sha)
+
+    assert subject["source"]["kind"] != "git"
+    assert subject["commit_sha"] is None
+    assert subject["declared_commit_sha"] == sha
+    assert subject["declared_commit_verified"] is False
+    assert subject_identity(None).get("declared_commit_sha") is None
 
 
 def test_custody_receipt_is_for_runner_auth_only(tmp_path: Path) -> None:
@@ -897,3 +962,24 @@ def test_hosted_inference_is_derived_from_observed_connections() -> None:
     assert leaked["hosted_inference_calls"] == 1
     assert not leaked["relay_forward_log_matches_stub"]
     assert leaked["gateway_and_broker_listener_connections"] == 2
+
+
+def test_git_bomb_must_be_refused_for_the_tree_cap_reason() -> None:
+    import inspect
+
+    import factory_gate_review as review
+    from enginery.engine import task_repository
+
+    # The gate keys the verdict on the product's own refusal text, so a rewording of it must
+    # break this test rather than silently turn the assertion into "refused for any reason".
+    assert review._TREE_CAP_REFUSAL in inspect.getsource(task_repository)
+    step = inspect.getsource(review.step_m3_bomb)
+    assert "_TREE_CAP_REFUSAL" in step
+
+
+def test_relay_description_is_egress_only_not_dual_homed() -> None:
+    import factory_gate_boundary as boundary
+
+    text = boundary.REQUIRED["f-relay-hardened-and-reachable"]
+    assert "dual-homed" not in text
+    assert "egress-only" in text
