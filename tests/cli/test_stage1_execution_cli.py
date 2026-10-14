@@ -842,6 +842,7 @@ def test_watch_proceeds_when_the_installed_version_changed_inside_the_bound_rang
         "tested_executable_version": "18.10.3",
         "observed_executable_version_at_bind": "18.10.3",
         "observed_executable_version_at_launch": None,
+        "observed_executable_version_at_resume": "18.11.0",
         "observed_version_changed_since_bind": None,
         "protocol_fingerprint": "json-protocol=3",
     }
@@ -913,6 +914,12 @@ def test_an_unchanged_host_reports_no_observed_version_change(
 
     assert isinstance(execution, dict)
     assert execution["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]
+    assert (
+        execution["host"]["observed_executable_version_at_resume"]
+        == (  # type: ignore[index]
+            execution["host"]["observed_executable_version_at_bind"]  # type: ignore[index]
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -942,4 +949,5 @@ def test_the_receipt_reports_the_launch_version_not_one_probed_after_the_worker_
     assert report["holds"] == []
     assert report["host"]["observed_executable_version_at_bind"] == bound  # type: ignore[index]
     assert report["host"]["observed_executable_version_at_launch"] == bound  # type: ignore[index]
+    assert report["host"]["observed_executable_version_at_resume"] == upgraded  # type: ignore[index]
     assert report["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]

@@ -432,7 +432,10 @@ the tested version, the version observed when the request was built
 (`observed_executable_version_at_bind`), the version observed when the host was launched
 (`observed_executable_version_at_launch`, read back from the launch record rather than
 probed again at collection), whether those two differ
-(`observed_version_changed_since_bind`), and the protocol fingerprint; an observed
+(`observed_version_changed_since_bind`), the version the binding check observed while
+producing this report (`observed_executable_version_at_resume`, the same check every
+dispatch and resume makes before it decides whether to hold), and the protocol
+fingerprint; an observed
 version inside the range is never reported as tested), and any `holds`. A version change
 inside the bound range between the two observations runs normally and is visible there;
 it never raises a hold. The same hold is also printed as the

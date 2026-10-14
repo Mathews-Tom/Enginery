@@ -522,7 +522,36 @@ def test_a_host_default_run_never_depends_on_the_installed_host_version(
     service.start(request, now=now, heartbeat_window=_WINDOW)
     other = replace(service, harness=_StubHarness(InstalledHost("0.0.1", "other")))  # type: ignore[arg-type]
 
-    assert other.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+    progression = other.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.QUALIFY
+    assert progression.observed_host_version is None
+
+
+def test_the_binding_check_reports_the_version_it_observed_even_when_it_holds_nothing(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    upgraded = replace(
+        service,
+        harness=_StubHarness(InstalledHost("18.11.0", "json-protocol=3")),  # type: ignore[arg-type]
+    )
+    outside = replace(
+        service,
+        harness=_StubHarness(InstalledHost("19.0.0", "json-protocol=3")),  # type: ignore[arg-type]
+    )
+    unobservable = replace(service, harness=_StubHarness(None))  # type: ignore[arg-type]
+
+    in_range = upgraded.next_action(request.run.id)
+    held = outside.next_action(request.run.id)
+    unseen = unobservable.next_action(request.run.id)
+
+    assert in_range.hold is None and in_range.observed_host_version == "18.11.0"
+    assert held.hold is not None and held.observed_host_version == "19.0.0"
+    assert unseen.hold is not None and unseen.observed_host_version is None
 
 
 def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(

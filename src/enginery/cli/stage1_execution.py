@@ -20,7 +20,11 @@ _HOST_DEFAULT = "host default"
 
 
 def execution_report(
-    ledger: LedgerService, run: Stage1Run, *, hold: ExecutionHold | None
+    ledger: LedgerService,
+    run: Stage1Run,
+    *,
+    hold: ExecutionHold | None,
+    observed_at_resume: str | None,
 ) -> dict[str, object]:
     """Return requested, selected, submitted, and effective controls with tier and holds."""
     selection = run.request.execution_selection
@@ -43,7 +47,7 @@ def execution_report(
             "version": selection.catalog_version,
             "digest": None if selection.catalog_digest is None else str(selection.catalog_digest),
         },
-        "host": _host(selection, receipt),
+        "host": _host(selection, receipt, observed_at_resume=observed_at_resume),
         "strict_effective": selection.strict_effective,
         "requested": {
             "model": _requested(selection.model),
@@ -59,14 +63,21 @@ def execution_report(
     }
 
 
-def _host(selection: ExecutionSelection, receipt: ExecutionReceipt | None) -> dict[str, object]:
+def _host(
+    selection: ExecutionSelection,
+    receipt: ExecutionReceipt | None,
+    *,
+    observed_at_resume: str | None,
+) -> dict[str, object]:
     """Report what the catalog accepts, what it tested, and what was observed, and when.
 
     The observed version is never presented as tested: an in-range version the catalog
     accepts is reported as accepted and observed, and only the catalog's own tested
     version is reported as tested. The version observed at bind time and the one observed
     when the host was launched are reported apart, with whether they differ; a change inside
-    the accepted range is a difference to see, not a hold.
+    the accepted range is a difference to see, not a hold. The version observed by the
+    binding check this report was produced under (the check every dispatch, resume and
+    diagnostic runs) is reported as a third, separate observation.
     """
     version = selection.host_version
     if version is None:
@@ -87,6 +98,7 @@ def _host(selection: ExecutionSelection, receipt: ExecutionReceipt | None) -> di
         "tested_executable_version": tested,
         "observed_executable_version_at_bind": at_bind,
         "observed_executable_version_at_launch": at_launch,
+        "observed_executable_version_at_resume": observed_at_resume,
         "observed_version_changed_since_bind": None
         if at_bind is None or at_launch is None
         else at_bind != at_launch,
