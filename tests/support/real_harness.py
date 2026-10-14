@@ -278,10 +278,10 @@ class RealHarness:
         for tree in (proof.workspace, proof.remote):
             if tree.exists():
                 subprocess.run(["chmod", "-R", "a+rwX", str(tree)], check=True)
-        configured = int(environment.get("GIT_CONFIG_COUNT", "0"))
-        environment["GIT_CONFIG_COUNT"] = str(configured + 1)
-        environment[f"GIT_CONFIG_KEY_{configured}"] = "safe.directory"
-        environment[f"GIT_CONFIG_VALUE_{configured}"] = "*"
+        # A global (not command-line) setting: the harness's own subprocesses and git's
+        # receive-pack on the remote honour it, where an environment-supplied one did not
+        # reach them.
+        home_files = {".gitconfig": "[safe]\n\tdirectory = *\n", **home_files}
         home = environment["HOME"]
         seeds: list[str] = []
         seed_arguments: list[str] = []
