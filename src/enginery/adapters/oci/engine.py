@@ -17,7 +17,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from enginery.domain.errors import MissingPrerequisiteError, OperationTimeoutError
+from enginery.domain.errors import (
+    InvalidInputError,
+    MissingPrerequisiteError,
+    OperationTimeoutError,
+)
 from enginery.domain.runner import EngineIdentity
 
 RUNNER_LABEL = "dev.enginery.runner"
@@ -142,6 +146,14 @@ def _texts(value: object) -> tuple[str, ...]:
     return tuple(item for item in value if isinstance(item, str))
 
 
+def _cannot_enforce(missing: Sequence[str], engine: str) -> MissingPrerequisiteError:
+    return MissingPrerequisiteError(
+        "container engine cannot enforce the isolated runner profile; missing: "
+        + "; ".join(missing),
+        details={"missing": "; ".join(missing), "engine": engine},
+    )
+
+
 def _option_name(option: str) -> str:
     """``name=seccomp,profile=builtin`` -> ``seccomp``."""
     first = option.split(",", 1)[0]
@@ -252,16 +264,21 @@ class OciEngine:
             kind = KIND_ROOTLESS_DOCKER
         else:
             kind = KIND_DOCKER
-        return EngineIdentity(
-            kind=kind,
-            server_version=str(info["ServerVersion"]),
-            operating_system=operating_system,
-            kernel_version=str(info.get("KernelVersion", "")),
-            cgroup_version=str(info.get("CgroupVersion", "")),
-            security_options=options,
-            rootless=rootless,
-            context=self.context,
-        )
+        try:
+            return EngineIdentity(
+                kind=kind,
+                server_version=str(info["ServerVersion"]),
+                operating_system=operating_system,
+                kernel_version=str(info.get("KernelVersion", "")),
+                cgroup_version=str(info.get("CgroupVersion", "")),
+                security_options=options,
+                rootless=rootless,
+                context=self.context,
+            )
+        except InvalidInputError as error:
+            raise MissingPrerequisiteError(
+                f"container engine did not report a usable identity: {error}"
+            ) from error
 
     def identity(self) -> EngineIdentity:
         """Describe the reachable engine; raises ``MissingPrerequisiteError`` if it is not."""
@@ -274,13 +291,12 @@ class OciEngine:
         limits. Anything less is refused with every missing requirement named.
         """
         info = self._info()
-        identity = self._identity(info)
+        options = _texts(info.get("SecurityOptions"))
+        cgroup = str(info.get("CgroupVersion", ""))
         missing: list[str] = []
-        if identity.cgroup_version != "2":
-            missing.append(f"cgroup v2 (engine reports {identity.cgroup_version or 'none'!r})")
-        seccomp = [
-            option for option in identity.security_options if _option_name(option) == "seccomp"
-        ]
+        if cgroup != "2":
+            missing.append(f"cgroup v2 (engine reports {cgroup or 'none'!r})")
+        seccomp = [option for option in options if _option_name(option) == "seccomp"]
         if not seccomp:
             missing.append("a seccomp profile")
         elif any("profile=unconfined" in option for option in seccomp):
@@ -291,12 +307,17 @@ class OciEngine:
         for warning in _texts(info.get("Warnings")):
             if _LIMIT_WARNING.search(warning):
                 missing.append(f"engine warning: {warning.strip()}")
+        # A well-formed identity is part of qualifying: an engine that omits a field fails
+        # here, before any receipt that could not be read back is written.
+        try:
+            identity = self._identity(info)
+        except MissingPrerequisiteError:
+            if not missing:
+                raise
+            # The named requirements are the more useful refusal than a malformed identity.
+            raise _cannot_enforce(missing, "unknown") from None
         if missing:
-            raise MissingPrerequisiteError(
-                "container engine cannot enforce the isolated runner profile; missing: "
-                + "; ".join(missing),
-                details={"missing": "; ".join(missing), "engine": identity.kind},
-            )
+            raise _cannot_enforce(missing, identity.kind)
         return identity
 
     # --- networks -------------------------------------------------------------------

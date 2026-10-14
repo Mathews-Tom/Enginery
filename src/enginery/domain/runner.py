@@ -417,6 +417,9 @@ class EngineIdentity:
     def __post_init__(self) -> None:
         _require_text(self.kind, "engine kind")
         _require_text(self.server_version, "engine server version")
+        _require_text(self.operating_system, "engine operating system")
+        _require_text(self.kernel_version, "engine kernel version")
+        _require_text(self.cgroup_version, "engine cgroup version")
 
     def to_state(self) -> dict[str, object]:
         return {

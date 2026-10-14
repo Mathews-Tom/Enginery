@@ -492,3 +492,15 @@ def test_real_engine_kill_and_remove_of_an_absent_container_are_not_errors(
     real_engine.kill("enginery-test-absent-container")
     real_engine.remove("enginery-test-absent-container")
     assert real_engine.container_exists("enginery-test-absent-container") is False
+
+
+@pytest.mark.parametrize("omitted", ["KernelVersion", "OperatingSystem"])
+def test_an_engine_that_omits_an_identity_field_is_refused_before_any_receipt_exists(
+    omitted: str,
+) -> None:
+    info = {key: value for key, value in DOCKER_DESKTOP_INFO.items() if key != omitted}
+
+    with pytest.raises(MissingPrerequisiteError, match="usable identity"):
+        FakeDocker(info=info).engine().qualify()
+    with pytest.raises(MissingPrerequisiteError, match="usable identity"):
+        FakeDocker(info=info).engine().identity()

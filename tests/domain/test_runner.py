@@ -580,3 +580,23 @@ def test_no_isolated_permission_entry_runs_code_from_the_workspace(harness: str)
     ]
     rationale = isolated_permission_mapping(harness).rationale
     assert "not the boundary" in rationale and "Containment is the container" in rationale
+
+
+@pytest.mark.parametrize("blank", ["operating_system", "kernel_version", "cgroup_version"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_engine_identity_cannot_be_constructed_with_a_value_it_could_not_decode(
+    blank: str, value: str
+) -> None:
+    fields: dict[str, object] = {
+        "kind": "docker",
+        "server_version": "29.8.2",
+        "operating_system": "linux",
+        "kernel_version": "6.1",
+        "cgroup_version": "2",
+        "security_options": (),
+        "rootless": False,
+    }
+    fields[blank] = value
+
+    with pytest.raises(InvalidInputError):
+        EngineIdentity(**fields)  # type: ignore[arg-type]
