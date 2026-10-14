@@ -650,11 +650,6 @@ count the kernel enforces, so a write beyond the cap fails with ``ENOSPC`` insid
 Their pages are charged to the container's memory cgroup, which is therefore the real ceiling on
 what a worker can keep in them."""
 
-DISK_BOUND_HOST_MONITOR = "host-monitor-kill-hold"
-"""Disk bound mechanism of an earlier launcher: a host process measured two bind-mounted trees
-and killed the container when either exceeded its cap. It is no longer used; receipts that
-name it still decode."""
-
 
 @dataclass(frozen=True, slots=True)
 class ResourceBounds:
@@ -814,7 +809,6 @@ class OutcomeState(enum.Enum):
     REFUSED = "refused"
     DEADLINE = "deadline"
     INTERRUPTED = "interrupted"
-    BOUND_EXCEEDED = "bound-exceeded"
     FAULTED = "faulted"
 
 

@@ -20,12 +20,7 @@ from pathlib import Path
 
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.digests import Digest
-from enginery.domain.errors import (
-    HumanActionRequiredError,
-    InvalidInputError,
-    MissingPrerequisiteError,
-    WorkerFailureError,
-)
+from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError, WorkerFailureError
 from enginery.domain.execution_catalog import HostCapability, InstalledHost
 from enginery.domain.execution_receipt import RunnerReceiptRef
 from enginery.domain.runner import (
@@ -236,18 +231,14 @@ def require_exited(outcome: LaunchOutcome, *, what: str) -> int:
 
     Classified from the launcher's own outcome and never from its process exit status, which a
     contained command can imitate. A refused, timed-out, interrupted, faulted or unfinished
-    launch is a worker failure; a worker that outgrew its disk bound is held for the operator.
+    launch is a worker failure. A write past a disk cap is not an outcome of its own: the kernel
+    refuses it inside the container, and what the worker then exits with is an exit like any other.
     """
     if outcome.state is OutcomeState.EXITED and outcome.exit_code is not None:
         return outcome.exit_code
     details = {"state": outcome.state.value, "detail": outcome.detail[-2000:]}
     if outcome.violations:
         details["violations"] = "; ".join(outcome.violations)[-2000:]
-    if outcome.state is OutcomeState.BOUND_EXCEEDED:
-        raise HumanActionRequiredError(
-            f"the {what} outgrew its disk bound and was killed; it is held for the operator",
-            details=details,
-        )
     raise WorkerFailureError(_OUTCOME_FAILURES[outcome.state].format(what=what), details=details)
 
 

@@ -604,7 +604,6 @@ def test_an_engine_identity_cannot_be_constructed_with_a_value_it_could_not_deco
 
 def test_resource_bounds_omit_the_poll_interval_for_a_kernel_enforced_cap() -> None:
     from enginery.domain.runner import (
-        DISK_BOUND_HOST_MONITOR,
         DISK_BOUND_KERNEL_VOLUME,
         ResourceBounds,
     )
@@ -620,7 +619,7 @@ def test_resource_bounds_omit_the_poll_interval_for_a_kernel_enforced_cap() -> N
         "log_max_file": 2,
     }
     kernel = ResourceBounds(disk_mechanism=DISK_BOUND_KERNEL_VOLUME, **fields)
-    monitored = ResourceBounds(disk_mechanism=DISK_BOUND_HOST_MONITOR, poll_seconds=2.0, **fields)
+    monitored = ResourceBounds(disk_mechanism="host-monitor-kill-hold", poll_seconds=2.0, **fields)
 
     assert "poll_seconds" not in kernel.to_state()
     assert monitored.to_state()["poll_seconds"] == 2.0

@@ -15,7 +15,7 @@ import pytest
 from enginery.adapters.oci.launcher import write_outcome
 from enginery.adapters.oci.validation import OciValidationRunner
 from enginery.adapters.runner_launch import LAUNCHER_MODULE, MAX_RESULT_BYTES
-from enginery.domain.errors import HumanActionRequiredError, WorkerFailureError
+from enginery.domain.errors import WorkerFailureError
 from enginery.domain.runner import (
     DEFAULT_ENV_ALLOWLIST,
     LaunchOutcome,
@@ -294,15 +294,6 @@ def test_a_launcher_that_recorded_no_outcome_is_a_worker_failure_with_its_stderr
         OciValidationRunner(_context(tmp_path), launcher=launcher)(("pytest",), workspace)
 
     assert "could not start" in str(caught.value.details["stderr"])
-
-
-def test_a_worker_that_outgrew_its_disk_bound_is_held_for_the_operator(
-    tmp_path: Path, workspace: Path
-) -> None:
-    launcher = FakeLauncher(state=OutcomeState.BOUND_EXCEEDED, process_returncode=125)
-
-    with pytest.raises(HumanActionRequiredError, match="disk bound"):
-        OciValidationRunner(_context(tmp_path), launcher=launcher)(("pytest",), workspace)
 
 
 def test_an_outcome_recorded_for_another_operation_is_refused(

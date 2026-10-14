@@ -16,7 +16,6 @@ from enginery.adapters.runner_launch import (
     require_exited,
 )
 from enginery.domain.errors import (
-    HumanActionRequiredError,
     InvalidInputError,
     WorkerFailureError,
 )
@@ -283,13 +282,6 @@ def test_every_outcome_that_is_not_an_exit_is_a_worker_failure(state: OutcomeSta
     assert caught.value.details["state"] == state.value
     assert caught.value.details["detail"] == "why"
     assert caught.value.details["violations"] == "a; b"
-
-
-def test_a_bound_exceeded_outcome_is_held_for_the_operator() -> None:
-    outcome = LaunchOutcome("op", _NONCE, OutcomeState.BOUND_EXCEEDED, detail="too big")
-
-    with pytest.raises(HumanActionRequiredError, match="outgrew its disk bound"):
-        require_exited(outcome, what="worker")
 
 
 @pytest.mark.parametrize("code", [0, 1, 124, 125, 137])
