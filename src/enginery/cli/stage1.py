@@ -20,8 +20,13 @@ from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
-from enginery.cli.stage1_runner import DriftedRunnerWiring, IsolatedWiring, isolated_wiring
-from enginery.domain.errors import InvalidInputError
+from enginery.cli.stage1_runner import (
+    DriftedRunnerWiring,
+    IsolatedWiring,
+    container_gone_for,
+    isolated_wiring,
+)
+from enginery.domain.errors import InternalInvariantViolationError, InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
 from enginery.engine.recovery import assess_worker
@@ -75,6 +80,24 @@ def run_stage1(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runtime_for_run(ledger: LedgerService, *, owner: str, run_id: str) -> CoordinatorRuntime:
+    """A runtime whose recovery can prove an isolated run's runner container is gone.
+
+    Recovery of a task-local worker must see that the launcher and its container are both
+    absent before it records the worker as exited. The container lookup needs the run's bound
+    engine, so the run is read first; a run that is not a Stage 1 run gets the plain runtime.
+    """
+    plain = CoordinatorRuntime(ledger, owner=owner)
+    try:
+        request = Stage1RunService(runtime=plain, ledger=ledger).read(RunId(run_id)).request
+    except InternalInvariantViolationError:
+        return plain
+    container_gone = container_gone_for(request.runner)
+    if container_gone is None:
+        return plain
+    return CoordinatorRuntime(ledger, owner=owner, container_gone=container_gone)
+
+
 def _start(args: argparse.Namespace) -> None:
     raw_request = _read_json(args.request)
     request = stage1_request_from_state(raw_request)
@@ -94,7 +117,7 @@ def _start(args: argparse.Namespace) -> None:
 def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
         service = (
             _advancing_service(runtime=runtime, ledger=ledger, request=request)
@@ -246,7 +269,7 @@ def _advancing_service(
 def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         selection = (
             Stage1RunService(runtime=runtime, ledger=ledger)
             .read(RunId(args.run_id))
@@ -344,7 +367,7 @@ def _required_string(state: dict[str, object], field_name: str) -> str:
 def _cancel(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=_HEARTBEAT_WINDOW)
         runtime.cancel_node(run_id=args.run_id, node_id=args.node_id, epoch=epoch.epoch, now=_now())
         _print({"run_id": args.run_id, "node_id": args.node_id, "status": "cancelled"})
@@ -355,7 +378,7 @@ def _cancel(args: argparse.Namespace) -> None:
 def _resume(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=_HEARTBEAT_WINDOW)
         request = runtime.read_node_request(run_id=args.run_id, node_id=args.node_id)
         runtime.resume_human_wait(

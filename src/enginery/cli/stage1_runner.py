@@ -17,8 +17,9 @@ from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.probe import OciProbeRunner
 from enginery.adapters.oci.validation import OciValidationRunner
+from enginery.adapters.runner_launch import runner_container_name
 from enginery.application.runner_ports import IsolatedCommandRunner, RunnerAdmissionPort
-from enginery.domain.runner import RunnerContext, RunnerProfile
+from enginery.domain.runner import RunnerContext, RunnerProfile, RunnerSelection
 from enginery.workflows.stage1 import Stage1RunRequest
 
 _RECEIPT_DIRECTORY = "runner-receipts"
@@ -75,4 +76,18 @@ def isolated_wiring(
     )
 
 
-__all__ = ["DriftedRunnerWiring", "IsolatedWiring", "isolated_wiring"]
+def container_gone_for(selection: RunnerSelection) -> Callable[[str], bool] | None:
+    """Return the engine lookup recovery uses to prove an isolated worker's container is gone.
+
+    ``None`` for a trusted-local run, whose worker is a host process recovery already checks.
+    For an isolated run the lookup asks the run's own engine (its bound docker context) whether
+    the deterministically named container of an operation still exists, running or not. A
+    lookup that cannot reach the engine raises, which recovery treats as unverifiable.
+    """
+    if not selection.isolated_mode:
+        return None
+    engine = OciEngine(context=selection.docker_context)
+    return lambda operation_id: not engine.container_exists(runner_container_name(operation_id))
+
+
+__all__ = ["DriftedRunnerWiring", "IsolatedWiring", "container_gone_for", "isolated_wiring"]
