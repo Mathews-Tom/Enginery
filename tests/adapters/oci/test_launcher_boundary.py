@@ -569,9 +569,9 @@ def test_a_volume_without_its_mount_flags_is_refused_before_anything_starts(
 def test_a_worker_the_kernel_kills_for_memory_is_an_ordinary_failed_exit(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
-    """tmpfs pages are charged to the container's memory, so filling a volume past the memory
-    limit ends in the kernel's OOM kill (137), not in a launcher decision: the outcome is an
-    exit like any other, with nothing held for the operator."""
+    """Pages a worker writes into a tmpfs volume are charged to its memory limit, so filling a
+    volume past that limit ends in the kernel's OOM kill (137), not in a launcher decision: the
+    outcome is an exit like any other, with nothing held for the operator."""
     spec = make_spec(tmp_path)
     fake_docker.exit_code = 137
 

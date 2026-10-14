@@ -49,8 +49,10 @@ from enginery.adapters.oci.launch import (
     StoreNames,
     create_arguments,
     effective_from_inspect,
+    engine_memory_shortfall,
     launch_violations,
     resource_bounds,
+    seed_byte_ceiling,
     store_arguments,
     store_names_for,
     store_violations,
@@ -435,9 +437,18 @@ def _remove_store(engine: OciEngine, names: StoreNames, log: _Log) -> None:
 
 
 def _seed_workspace(
-    engine: OciEngine, names: StoreNames, spec: LaunchSpec, bounds: ResourceBounds
+    engine: OciEngine,
+    names: StoreNames,
+    spec: LaunchSpec,
+    bounds: ResourceBounds,
+    *,
+    ceiling: int,
 ) -> None:
-    """Stream the host workspace into the workspace volume, owned by the worker's uid."""
+    """Stream the host workspace into the workspace volume, owned by the worker's uid.
+
+    The seeded pages are not charged to any container, so at most ``ceiling`` bytes go in: the
+    volume's cap, or less when the engine's memory leaves less room.
+    """
 
     def write(stream: IO[bytes]) -> None:
         write_tree_archive(
@@ -445,14 +456,20 @@ def _seed_workspace(
             stream,
             uid=spec.profile.uid,
             gid=spec.profile.gid,
-            max_bytes=bounds.workspace_bytes,
+            max_bytes=ceiling,
             max_entries=bounds.workspace_inodes - 1,
         )
 
     try:
         engine.copy_in(names.holder, WORKSPACE_MOUNT, write)
     except TreeTransferError as error:
-        raise _RefusedError(f"the workspace cannot be given to the worker: {error}") from error
+        reason = f"the workspace cannot be given to the worker: {error}"
+        if ceiling < bounds.workspace_bytes:
+            reason += (
+                f"; the engine's memory leaves room for {ceiling} bytes of seeded workspace "
+                "beside the worker's memory limit, so raise the engine virtual machine's memory"
+            )
+        raise _RefusedError(reason) from error
 
 
 def _copy_result_file(
@@ -559,6 +576,10 @@ def run_launcher(
         launcher = identify()
         arguments = create_arguments(spec, inner_command, nonce=nonce, launcher=launcher)
         identity = engine.qualify()
+        memory_total = engine.memory_total_bytes()
+        shortfall = engine_memory_shortfall(spec.profile, memory_total)
+        if shortfall is not None:
+            raise _RefusedError(shortfall)
         image = verify(engine, spec.image)
         if image.image_id != spec.image:
             raise _RefusedError("the verified image is not the pinned image")
@@ -601,7 +622,9 @@ def run_launcher(
             what="store container",
         )
         engine.start(names.holder)
-        _seed_workspace(engine, names, spec, bounds)
+        _seed_workspace(
+            engine, names, spec, bounds, ceiling=seed_byte_ceiling(spec.profile, memory_total)
+        )
         _checkpoint(stop)
 
         created = True

@@ -13,11 +13,15 @@ import pytest
 
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import (
+    ENGINE_MEMORY_HEADROOM_MIB,
     container_name_for,
     create_arguments,
     effective_from_inspect,
+    engine_memory_floor_mib,
+    engine_memory_shortfall,
     launch_violations,
     read_effective,
+    seed_byte_ceiling,
     store_arguments,
     store_names_for,
     store_violations,
@@ -345,6 +349,27 @@ def test_the_workspace_is_executable_and_the_result_volume_is_not() -> None:
 
     assert {"nosuid", "nodev"} <= set(workspace) and "noexec" not in workspace
     assert {"nosuid", "nodev", "noexec"} <= set(out)
+
+
+_MIB = 1 << 20
+
+
+def test_the_engine_memory_floor_is_the_worker_limit_plus_the_engine_headroom() -> None:
+    profile = RunnerProfile(resources=ResourceLimits(memory_mib=3000))
+
+    assert engine_memory_floor_mib(profile) == 3000 + ENGINE_MEMORY_HEADROOM_MIB
+    assert engine_memory_shortfall(profile, engine_memory_floor_mib(profile) * _MIB) is None
+    shortfall = engine_memory_shortfall(profile, engine_memory_floor_mib(profile) * _MIB - 1)
+    assert shortfall is not None and "4024 MiB" in shortfall
+
+
+def test_the_seeded_workspace_is_capped_by_the_volume_or_by_what_the_engine_memory_leaves() -> None:
+    profile = RunnerProfile(resources=ResourceLimits(memory_mib=1000, workspace_mib=500))
+    floor = engine_memory_floor_mib(profile)
+
+    assert seed_byte_ceiling(profile, (floor + 4000) * _MIB) == 500 * _MIB  # the volume cap
+    assert seed_byte_ceiling(profile, (floor + 200) * _MIB) == 200 * _MIB  # engine memory
+    assert seed_byte_ceiling(profile, (floor - 1) * _MIB) == 0  # never negative
 
 
 def _store_documents(fake: FakeDocker, spec: LaunchSpec) -> dict[str, dict[str, Any]]:

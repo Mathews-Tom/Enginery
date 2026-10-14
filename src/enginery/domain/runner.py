@@ -647,8 +647,9 @@ _IMAGE_ENV_KEYS = frozenset({"HOSTNAME", "NODE_VERSION", "YARN_VERSION", "BUN_IN
 DISK_BOUND_KERNEL_VOLUME = "kernel-capped-volume"
 """Disk bound mechanism: the workspace and result trees are tmpfs volumes whose size and inode
 count the kernel enforces, so a write beyond the cap fails with ``ENOSPC`` inside the container.
-Their pages are charged to the container's memory cgroup, which is therefore the real ceiling on
-what a worker can keep in them."""
+Pages a worker writes into them are charged to the container's memory cgroup, which is therefore
+the ceiling on what the worker can add; the content the host seeded is held by the engine and
+charged to no container."""
 
 
 @dataclass(frozen=True, slots=True)

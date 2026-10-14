@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.image import verify_image
+from enginery.adapters.oci.launch import engine_memory_shortfall
 from enginery.application.runner_ports import RunnerAdmissionDecision
 from enginery.domain.errors import (
     MissingPrerequisiteError,
@@ -53,6 +54,12 @@ class OciRunnerAdmission:
             identity = engine.qualify()
         except (MissingPrerequisiteError, OperationTimeoutError) as error:
             return _unqualified(f"no qualified container engine is available: {error}")
+        try:
+            shortfall = engine_memory_shortfall(self.profile, engine.memory_total_bytes())
+        except (MissingPrerequisiteError, OperationTimeoutError) as error:
+            return _unqualified(f"the container engine's memory cannot be checked: {error}")
+        if shortfall is not None:
+            return _unqualified(shortfall)
         try:
             image = self.verify(engine, image_id)
         except StaleEvidenceError as error:

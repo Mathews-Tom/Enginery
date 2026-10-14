@@ -26,7 +26,7 @@ from enginery.adapters.oci.image import (
     RUNNER_IMAGE_LABEL,
     recipe_digest,
 )
-from enginery.adapters.oci.launch import store_names_for
+from enginery.adapters.oci.launch import engine_memory_floor_mib, store_names_for
 from enginery.adapters.oci.launcher import (
     EXIT_DEADLINE,
     EXIT_FAULT,
@@ -106,6 +106,7 @@ def test_a_successful_run_qualifies_creates_checks_records_starts_waits_and_remo
     assert code == 0
     assert stderr == ""
     assert fake_docker.verbs == [
+        "info",
         "info",
         "network inspect",
         "network create",
@@ -422,6 +423,67 @@ def test_a_workspace_that_does_not_fit_its_volume_is_refused_before_the_worker_e
     assert state["state"] == "refused"
 
 
+def _state_of(spec: LaunchSpec) -> object:
+    return json.loads(Path(outcome_path_for(spec.receipt_path)).read_text("utf-8"))["state"]
+
+
+def test_an_engine_too_small_for_one_worker_is_refused_before_any_container_exists(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    floor = engine_memory_floor_mib(spec.profile)
+    fake_docker.info["MemTotal"] = (floor - 1) * (1 << 20)
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert f"one worker needs at least {floor} MiB" in stderr
+    assert fake_docker.calls_of("create") == []
+    assert _state_of(spec) == "refused"
+
+
+def test_an_engine_that_reports_no_memory_cannot_run_the_worker(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    del fake_docker.info["MemTotal"]
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "reported no usable total memory" in stderr
+    assert fake_docker.calls_of("create") == []
+
+
+def test_a_workspace_the_engine_memory_cannot_hold_beside_the_worker_is_refused(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    fake_docker.info["MemTotal"] = (engine_memory_floor_mib(spec.profile) + 1) * (1 << 20)
+    (tmp_path / "workspace" / "big.bin").write_bytes(b"\0" * (2 << 20))
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "cannot be given to the worker" in stderr
+    assert "raise the engine virtual machine's memory" in stderr
+    assert len(fake_docker.calls_of("create")) == 1  # only the store container was created
+    assert fake_docker.containers == {} and fake_docker.volumes == {}
+    assert _state_of(spec) == "refused"
+
+
+def test_a_workspace_that_fits_beside_the_worker_in_the_engine_memory_is_seeded(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec = make_spec(tmp_path)
+    fake_docker.info["MemTotal"] = (engine_memory_floor_mib(spec.profile) + 3) * (1 << 20)
+    (tmp_path / "workspace" / "fits.bin").write_bytes(b"\0" * (2 << 20))
+
+    code, _ = _launch(spec, fake_docker)
+
+    assert code == 0
+
+
 def test_a_returned_workspace_that_cannot_be_taken_back_is_a_fault_not_an_exited_worker(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
@@ -677,7 +739,7 @@ def test_an_image_that_fails_verification_is_refused_before_anything_is_created(
 
     assert code == EXIT_FAULT
     assert "another recipe" in stderr
-    assert fake_docker.verbs == ["info"]
+    assert fake_docker.verbs == ["info", "info"]  # the qualification, then the memory headroom
 
 
 def test_a_verifier_that_answers_for_another_image_is_refused(

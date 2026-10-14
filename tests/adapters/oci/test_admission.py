@@ -9,6 +9,7 @@ import pytest
 from enginery.adapters.oci import image
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
+from enginery.adapters.oci.launch import engine_memory_floor_mib
 from enginery.domain.execution_selection import HoldReason
 from enginery.domain.runner import ImageIdentity, RunnerProfile, RunnerSelection
 
@@ -92,6 +93,41 @@ def test_a_cgroup_v1_engine_is_unqualified_and_names_the_missing_requirement() -
     assert decision.engine is None
     # The image is never inspected on an engine that cannot enforce the profile.
     assert not any(call[:2] == ("image", "inspect") for call in fake.calls)
+
+
+def test_an_engine_with_too_little_memory_is_a_named_hold_before_the_image_is_inspected() -> None:
+    profile = RunnerProfile()
+    floor = engine_memory_floor_mib(profile)
+    fake = _fake_with_runner_image()
+    fake.info["MemTotal"] = (floor - 1) * (1 << 20)
+
+    decision = _admission(fake).admit(_selection())
+
+    assert decision.hold is not None
+    assert decision.hold.reason is HoldReason.RUNNER_UNQUALIFIED
+    assert f"one worker needs at least {floor} MiB" in decision.hold.message
+    assert "virtual machine" in decision.hold.message
+    assert "not run in trusted-local mode" in decision.hold.message
+    assert decision.engine is None
+    assert not any(call[:2] == ("image", "inspect") for call in fake.calls)
+
+
+def test_an_engine_with_exactly_the_floor_memory_is_admitted() -> None:
+    fake = _fake_with_runner_image()
+    fake.info["MemTotal"] = engine_memory_floor_mib(RunnerProfile()) * (1 << 20)
+
+    assert _admission(fake).admit(_selection()).hold is None
+
+
+def test_an_engine_that_reports_no_memory_is_a_named_hold() -> None:
+    fake = _fake_with_runner_image()
+    del fake.info["MemTotal"]
+
+    decision = _admission(fake).admit(_selection())
+
+    assert decision.hold is not None
+    assert decision.hold.reason is HoldReason.RUNNER_UNQUALIFIED
+    assert "memory cannot be checked" in decision.hold.message
 
 
 def test_an_unreachable_daemon_is_unqualified() -> None:

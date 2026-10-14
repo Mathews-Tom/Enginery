@@ -214,6 +214,19 @@ def test_identity_refuses_unusable_info_output(stdout: str) -> None:
         engine.identity()
 
 
+def test_memory_total_is_what_the_engine_reports() -> None:
+    assert FakeDocker().engine().memory_total_bytes() == 20_449_584 * 1024
+
+
+@pytest.mark.parametrize("value", [None, 0, -5, "8589934592", True, 1.5])
+def test_an_engine_without_a_usable_memory_total_is_a_missing_prerequisite(value: object) -> None:
+    fake = FakeDocker()
+    fake.info["MemTotal"] = value
+
+    with pytest.raises(MissingPrerequisiteError, match="no usable total memory"):
+        fake.engine().memory_total_bytes()
+
+
 def test_qualify_accepts_an_engine_that_can_enforce_the_profile(fake_docker: FakeDocker) -> None:
     assert fake_docker.engine().qualify().kind == KIND_DOCKER_DESKTOP
     assert FakeDocker(info=ROOTLESS_INFO).engine().qualify().rootless is True
@@ -463,6 +476,7 @@ def test_real_engine_identity_matches_what_docker_info_reports(real_engine: OciE
     assert identity.rootless is any("rootless" in option for option in info["SecurityOptions"])
     assert identity.kind in {KIND_DOCKER_DESKTOP, KIND_ROOTLESS_DOCKER, KIND_DOCKER}
     assert any(option.startswith("name=seccomp") for option in identity.security_options)
+    assert real_engine.memory_total_bytes() == info["MemTotal"] > 0
 
 
 def test_real_engine_internal_network_is_created_once_and_is_internal(

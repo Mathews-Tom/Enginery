@@ -101,6 +101,44 @@ def resource_bounds(profile: RunnerProfile) -> ResourceBounds:
     )
 
 
+ENGINE_MEMORY_HEADROOM_MIB = 1024
+"""Memory the engine's machine keeps for itself beyond one worker: the engine daemon, the store
+container, the relay and the operating system of a Docker Desktop or Lima virtual machine."""
+
+
+def engine_memory_floor_mib(profile: RunnerProfile) -> int:
+    """The least engine memory one attempt of ``profile`` needs besides its seeded workspace.
+
+    A worker may use its whole memory limit, and everything it writes into a volume, ``/tmp`` or
+    its home directory is charged to that limit. The pages the host seeds into the workspace
+    volume are not: the engine writes them and no container is charged for them (measured on
+    Docker Desktop: a worker limited to 64 MiB beside 200 MiB of seeded content was killed after
+    writing 58 MiB, and the virtual machine held both). One attempt therefore needs, in the
+    engine's memory, the seeded content plus this floor.
+    """
+    return profile.resources.memory_mib + ENGINE_MEMORY_HEADROOM_MIB
+
+
+def engine_memory_shortfall(profile: RunnerProfile, memory_total_bytes: int) -> str | None:
+    """Why an engine with ``memory_total_bytes`` cannot hold one attempt, or ``None`` if it can."""
+    floor = engine_memory_floor_mib(profile)
+    if memory_total_bytes >= floor * _MIB:
+        return None
+    return (
+        f"the engine has {memory_total_bytes // _MIB} MiB of memory and one worker needs at "
+        f"least {floor} MiB ({profile.resources.memory_mib} MiB worker limit plus "
+        f"{ENGINE_MEMORY_HEADROOM_MIB} MiB engine headroom) before any workspace is seeded; "
+        "raise the memory of the Docker Desktop or Lima virtual machine"
+    )
+
+
+def seed_byte_ceiling(profile: RunnerProfile, memory_total_bytes: int) -> int:
+    """The most workspace content one attempt may seed: the volume's cap, or what the engine's
+    memory leaves after the worker's floor if that is less (never negative)."""
+    room = memory_total_bytes - engine_memory_floor_mib(profile) * _MIB
+    return max(0, min(profile.resources.workspace_mib * _MIB, room))
+
+
 @dataclass(frozen=True, slots=True)
 class StoreNames:
     """The names of one attempt's store container and its two capped volumes."""

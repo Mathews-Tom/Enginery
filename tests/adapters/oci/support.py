@@ -50,6 +50,7 @@ DOCKER_DESKTOP_INFO: dict[str, Any] = {
     "CpuCfsPeriod": True,
     "CpuCfsQuota": True,
     "PidsLimit": True,
+    "MemTotal": 20_449_584 * 1024,
     "Warnings": None,
 }
 

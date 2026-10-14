@@ -391,6 +391,18 @@ class OciEngine:
         """Describe the reachable engine; raises ``MissingPrerequisiteError`` if it is not."""
         return self._identity(self._info())
 
+    def memory_total_bytes(self) -> int:
+        """The memory of the machine that runs the engine, in bytes (``docker info`` MemTotal).
+
+        Under Docker Desktop and Lima this is the memory of the engine's virtual machine, which
+        holds every container and every tmpfs volume. Raises ``MissingPrerequisiteError`` when
+        the engine does not report a usable value: the memory headroom cannot be checked then.
+        """
+        total = self._info().get("MemTotal")
+        if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+            raise MissingPrerequisiteError("container engine reported no usable total memory")
+        return total
+
     def qualify(self) -> EngineIdentity:
         """Return the engine identity only if the engine can enforce the isolated profile.
 
