@@ -1,4 +1,4 @@
-"""The real relay container and a hardened worker on the internal network, on a real engine.
+"""The real relay container and a hardened worker on its own attempt network, on a real engine.
 
 Skipped, by ``real_engine``, when no qualified container engine is reachable. Everything else
 that goes wrong on an engine that is reachable fails the test.
