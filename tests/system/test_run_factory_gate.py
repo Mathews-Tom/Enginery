@@ -11,9 +11,12 @@ from __future__ import annotations
 import ast
 import errno
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -42,6 +45,7 @@ from factory_gate_support import (
     Scrubber,
     UpstreamStub,
     diff_snapshots,
+    run_with_deadline,
     snapshot_tree,
 )
 from run_factory_gate import (
@@ -460,6 +464,49 @@ def test_execute_turns_a_scenario_crash_into_a_failure_after_cleaning_up(tmp_pat
     assert code == 1 and document["verdict"] == "fail"
     assert "RuntimeError" in document["reason"]
     assert holder[0].cleaned is True
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP])
+def test_a_termination_signal_still_runs_the_gate_cleanup(
+    tmp_path: Path, number: signal.Signals
+) -> None:
+    # Left at their default, SIGTERM and SIGHUP end the process with no evidence and no cleanup,
+    # which left a gate's scratch network on the engine.
+    def terminated(gate: Any) -> None:
+        os.kill(os.getpid(), number)
+        raise AssertionError("the signal must interrupt the scenario")  # pragma: no cover
+
+    holder: list[FakeGate] = []
+    before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
+
+    document, code = execute(
+        parse_options(_argv(tmp_path)), scenarios=_spec(terminated), prepare=_fake_prepare(holder)
+    )
+
+    assert holder[0].cleaned is True
+    assert (document["verdict"], code) == ("fail", 130)
+    assert f"interrupted by {number.name}" in document["reason"]
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
+
+
+def test_an_interrupted_launcher_group_is_stopped_before_the_gate_moves_on(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "launcher.pid"
+    timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_with_deadline(
+                ["/bin/sh", "-c", f"echo $$ > {pid_file}; exec sleep 60"],
+                env=dict(os.environ),
+                deadline_seconds=120,
+            )
+    finally:
+        timer.cancel()
+    launcher = int(pid_file.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(launcher, 0)  # waited for, not left running in its own session
 
 
 def test_a_hold_raised_by_the_scenario_is_a_hold(tmp_path: Path) -> None:

@@ -36,6 +36,7 @@ from enginery.adapters.oci.image import (
     verify_image,
     verify_relay_image,
 )
+from enginery.adapters.oci.launch import store_names_for
 from enginery.adapters.oci.launcher import run_launcher
 from enginery.domain.errors import (
     EngineryError,
@@ -68,6 +69,7 @@ from factory_gate_support import (
     iter_enginery_containers,
     launch_command,
     launcher_environment,
+    list_engine_names,
     make_spec,
     new_task_workspace,
     probe_seed_files,
@@ -238,6 +240,32 @@ def _resolve_image(
         raise GateHoldError(f"the {noun} image is not usable on this engine: {error}") from error
 
 
+@dataclass(frozen=True, slots=True)
+class StrayObjects:
+    """What this gate caused that the engine still holds, read from the engine's own listings.
+
+    ``listing_errors`` are listings the engine refused: a stray check that could not ask the engine
+    is not a clean one.
+    """
+
+    containers: tuple[str, ...] = ()
+    volumes: tuple[str, ...] = ()
+    networks: tuple[str, ...] = ()
+    listing_errors: tuple[str, ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return not (self.containers or self.volumes or self.networks or self.listing_errors)
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "stray_enginery_containers": list(self.containers),
+            "stray_volumes": list(self.volumes),
+            "leftover_gate_networks": list(self.networks),
+            "listing_errors": list(self.listing_errors),
+        }
+
+
 @dataclass(slots=True)
 class Gate:
     """One scenario run's shared state."""
@@ -263,6 +291,7 @@ class Gate:
     created_tags: list[str] = field(default_factory=list)
     _containers: list[str] = field(default_factory=list)
     _networks: list[str] = field(default_factory=list)
+    _attempt_networks: set[str] = field(default_factory=set)
     _cleanups: list[Callable[[], None]] = field(default_factory=list)
     _preexisting_containers: set[str] = field(default_factory=set)
     cleanup_report: dict[str, Any] = field(default_factory=dict)
@@ -305,9 +334,28 @@ class Gate:
     def track_container(self, name: str) -> None:
         self._containers.append(name)
 
-    def track_network(self, name: str) -> None:
-        if name != "none" and name not in self._networks:
+    def track_network(self, name: str, *, per_attempt: bool = False) -> None:
+        """Track a network for removal; ``per_attempt`` marks one the launcher removes itself."""
+        if name == "none":
+            return
+        if name not in self._networks:
             self._networks.append(name)
+        if per_attempt:
+            self._attempt_networks.add(name)
+
+    def store_objects(self) -> tuple[list[str], list[str]]:
+        """The store containers and volumes the launcher creates for every tracked container.
+
+        Their names derive from the worker's, so the gate need not see the launcher create them; a
+        tracked container that is no worker (the relay, a control) simply has none.
+        """
+        holders: list[str] = []
+        volumes: list[str] = []
+        for name in dict.fromkeys(self._containers):
+            names = store_names_for(name)
+            holders.append(names.holder)
+            volumes += [names.workspace_volume, names.out_volume]
+        return holders, volumes
 
     def on_cleanup(self, action: Callable[[], None]) -> None:
         self._cleanups.append(action)
@@ -410,7 +458,7 @@ class Gate:
         ]
         spec_ref = self.raw_write(f"{name}.launch-spec.json", spec_state)
         self.track_container(spec.container_name)
-        self.track_network(spec.attempt_network)
+        self.track_network(spec.attempt_network, per_attempt=True)
         observer = ContainerObserver(self.engine, spec.container_name) if observe else None
         if observer is not None:
             observer.start()
@@ -539,28 +587,55 @@ class Gate:
     # --- cleanup ---------------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        report: dict[str, Any] = {"containers_removed": [], "networks_removed": [], "errors": []}
+        report: dict[str, Any] = {
+            "containers_removed": [],
+            "volumes_removed": [],
+            "networks_removed": [],
+            "errors": [],
+        }
         for action in reversed(self._cleanups):
             try:
                 action()
             except Exception as error:
                 report["errors"].append(f"cleanup action failed: {type(error).__name__}: {error}")
-        for name in dict.fromkeys(self._containers):
-            try:
-                if self.engine.container_exists(name):
-                    self.engine.remove(name, force=True)
-                    report["containers_removed"].append(name)
-            except EngineryError as error:
-                report["errors"].append(f"container {name}: {error}")
-        for name in dict.fromkeys(self._networks):
-            completed = self.engine.run_cli(("network", "rm", name), timeout=60)
-            if completed.returncode == 0:
-                report["networks_removed"].append(name)
-            elif "No such network" not in completed.stderr and "not found" not in completed.stderr:
-                report["errors"].append(f"network {name}: {completed.stderr.strip()[-200:]}")
+        holders, volumes = self.store_objects()
+        # What the product launcher removes itself on every path; finding any of it here is a leak
+        # of the launcher's (or of a probe's own store), however quietly the gate removes it.
+        launcher_owned = {*holders, *volumes, *self._attempt_networks}
+        self._remove_present(
+            report,
+            "container",
+            [*self._containers, *holders],
+            launcher_owned,
+            list_arguments=("ps", "--all"),
+            template="{{.Names}}",
+            remove_arguments=("rm", "--volumes", "--force"),
+        )
+        self._remove_present(
+            report,
+            "volume",
+            volumes,
+            launcher_owned,
+            list_arguments=("volume", "ls"),
+            template="{{.Name}}",
+            remove_arguments=("volume", "rm"),
+        )
+        self._remove_present(
+            report,
+            "network",
+            self._networks,
+            launcher_owned,
+            list_arguments=("network", "ls"),
+            template="{{.Name}}",
+            remove_arguments=("network", "rm"),
+        )
         report["image_tags_removed"] = []
         for tag in self.created_tags:
-            completed = self.engine.run_cli(("image", "rm", tag), timeout=120)
+            try:
+                completed = self.engine.run_cli(("image", "rm", tag), timeout=120)
+            except EngineryError as error:
+                report["errors"].append(f"image tag {tag}: {error}")
+                continue
             if completed.returncode == 0:
                 report["image_tags_removed"].append(tag)
             else:
@@ -583,15 +658,91 @@ class Gate:
             report["fixture_retained"] = retained
         self.cleanup_report = report
 
-    def stray_containers(self) -> list[str]:
-        """``enginery-*`` containers present now that were not present before the run began."""
-        # Only containers this gate created (it tracks every one it starts, and names the rest
-        # with its run id): another operator's or concurrent run's containers are not strays.
-        ours = set(self._containers)
-        return sorted(
-            name
-            for name in set(iter_enginery_containers(self.engine)) - self._preexisting_containers
-            if name in ours or self.rid in name
+    def _remove_present(
+        self,
+        report: dict[str, Any],
+        kind: str,
+        names: Sequence[str],
+        launcher_owned: set[str],
+        *,
+        list_arguments: tuple[str, ...],
+        template: str,
+        remove_arguments: tuple[str, ...],
+    ) -> None:
+        """Remove each of ``names`` the engine lists; one the launcher owns is also reported.
+
+        The engine is listed once instead of asked about every name, so an object that is absent
+        costs nothing, and an engine that cannot be listed is an error rather than "nothing left".
+        One failing removal never stops the next one: a hung or refused command must not leave the
+        later networks behind.
+        """
+        try:
+            present = set(list_engine_names(self.engine, list_arguments, template))
+        except EngineryError as error:
+            report["errors"].append(f"{kind}s: {error}")
+            return
+        for name in dict.fromkeys(names):
+            if name not in present:
+                continue
+            try:
+                completed = self.engine.run_cli((*remove_arguments, name), timeout=120)
+            except EngineryError as error:
+                report["errors"].append(f"{kind} {name}: {error}")
+                continue
+            stderr = completed.stderr.lower()
+            if completed.returncode != 0:
+                if not any(
+                    text in stderr for text in ("no such", "not found", "already in progress")
+                ):
+                    report["errors"].append(f"{kind} {name}: {completed.stderr.strip()[-200:]}")
+                continue
+            report[f"{kind}s_removed"].append(name)
+            if name in launcher_owned:
+                report["errors"].append(
+                    f"{kind} {name} was left behind by the launcher; the gate removed it"
+                )
+
+    def stray_objects(self) -> StrayObjects:
+        """Containers, volumes and networks of this gate the engine still holds.
+
+        Only what this gate created counts: it tracks every container and network it starts and
+        names the rest with its run id, so another operator's or a concurrent run's objects are not
+        strays. A store container belongs to its worker and the two capped volumes to the store.
+        """
+        problems: list[str] = []
+
+        def listed(arguments: tuple[str, ...], template: str) -> set[str]:
+            try:
+                return set(list_engine_names(self.engine, arguments, template))
+            except EngineryError as error:
+                problems.append(str(error))
+                return set()
+
+        holders, volumes = self.store_objects()
+        containers = {*self._containers, *holders}
+        containers_now = listed(("ps", "--all"), "{{.Names}}") - self._preexisting_containers
+        gate_prefix = f"enginery-gate-{self.rid}"
+        return StrayObjects(
+            containers=tuple(
+                sorted(
+                    name
+                    for name in containers_now
+                    if name.startswith("enginery-") and (name in containers or self.rid in name)
+                )
+            ),
+            volumes=tuple(
+                sorted(
+                    name for name in listed(("volume", "ls"), "{{.Name}}") if name in set(volumes)
+                )
+            ),
+            networks=tuple(
+                sorted(
+                    name
+                    for name in listed(("network", "ls"), "{{.Name}}")
+                    if name in self._networks or name.startswith(gate_prefix)
+                )
+            ),
+            listing_errors=tuple(problems),
         )
 
 

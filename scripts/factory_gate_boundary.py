@@ -250,7 +250,9 @@ REQUIRED: dict[str, str] = {
         "during any attempt"
     ),
     "z-cleanup-no-stray-containers": (
-        "No enginery-* container, gate network or created image tag remains"
+        "No enginery-* container (store containers included), capped volume, gate network or "
+        "created image tag remains, and the launcher left no store, volume or attempt network "
+        "for the gate's own cleanup to remove"
     ),
     "z-no-hosted-inference": "No hosted inference was performed",
 }
@@ -2994,12 +2996,7 @@ def finalize(gate: Gate) -> None:
             },
         },
     )
-    stray = gate.stray_containers()
-    leftover_networks = [
-        name
-        for name in gate.engine_cli("network", "ls", "--format", "{{.Name}}").stdout.split()
-        if name.startswith(f"enginery-gate-{gate.rid}")
-    ]
+    strays = gate.stray_objects()
     leftover_tags = [
         tag
         for tag in gate.created_tags
@@ -3007,24 +3004,33 @@ def finalize(gate: Gate) -> None:
     ]
     gate.evidence.assertion(
         "z-cleanup-no-stray-containers",
-        passed=not stray
-        and not leftover_networks
+        passed=strays.clean
         and not leftover_tags
         and not gate.cleanup_report.get("errors")
         and not gate.cleanup_report.get("fixture_retained"),
         commands=[
             gate.docker_command("ps", "--all", "--format", "{{.Names}}"),
-            gate.docker_command("network", "ls"),
+            gate.docker_command("volume", "ls", "--format", "{{.Name}}"),
+            gate.docker_command("network", "ls", "--format", "{{.Name}}"),
             gate.docker_command("image", "rm", "<tags created by the gate>"),
         ],
         observed={
-            "stray_enginery_containers": stray,
-            "leftover_gate_networks": leftover_networks,
+            **strays.to_state(),
             "leftover_created_image_tags": leftover_tags,
             "cleanup": gate.cleanup_report,
         },
-        expected="nothing left behind; pre-existing containers and images untouched",
-        observer={"enginery_containers_now": sorted(set(iter_enginery_containers(gate.engine)))},
+        expected=(
+            "nothing left behind: no container (store containers included), capped volume or "
+            "network of this gate, and nothing the launcher should have removed; pre-existing "
+            "containers and images untouched"
+        ),
+        observer={
+            "enginery_containers_now": (
+                None
+                if strays.listing_errors
+                else sorted(set(iter_enginery_containers(gate.engine)))
+            )
+        },
     )
     stub_counts = gate.stubs.counts()
     markers = _executed_markers(fixture) if fixture.markers.exists() else []

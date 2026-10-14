@@ -25,7 +25,9 @@ Scenarios:
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;
 raw artifacts go to ``<evidence stem>.raw/`` beside it. Exit status: 0 only if every required
 assertion ran and passed; 1 if any assertion failed or did not run; 2 for a usage error; 3 when the
-engine, an image or a permission is missing (verdict ``hold``). No assertion is ever skipped.
+engine, an image or a permission is missing (verdict ``hold``); 130 when it was interrupted (Ctrl-C,
+SIGTERM or SIGHUP; what the gate created is still removed before it exits). No assertion is ever
+skipped.
 
 The script and its ``factory_gate_*`` siblings are self-contained: copy the ``scripts/`` directory
 next to an installed ``enginery`` wheel and run it there.
@@ -38,8 +40,9 @@ import contextlib
 import json
 import os
 import re
+import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -252,6 +255,41 @@ def _gateway_prerequisites(options: GateOptions) -> None:
         raise GateHoldError(f"the gateway token file is not usable: {error}") from error
 
 
+_TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+def _interrupt(number: int, _frame: Any) -> None:
+    # The first signal unwinds the run through its cleanup; a second one must not cut that short.
+    for other in _TERMINATION_SIGNALS:
+        signal.signal(other, signal.SIG_IGN)
+    raise KeyboardInterrupt(signal.Signals(number).name)
+
+
+@contextlib.contextmanager
+def _termination_as_interrupt() -> Iterator[None]:
+    """SIGTERM and SIGHUP interrupt the run like Ctrl-C, so the gate's cleanup still runs.
+
+    Left at their default they end the process at once: no evidence is written and every
+    container, volume and network the gate had created stays on the engine.
+    """
+    previous: dict[signal.Signals, Any] = {}
+    try:
+        for number in _TERMINATION_SIGNALS:
+            previous[number] = signal.signal(number, _interrupt)
+    except ValueError:  # handlers can only be installed from the main thread
+        pass
+    try:
+        yield
+    finally:
+        for restored, handler in previous.items():
+            signal.signal(restored, handler)
+
+
+def _interrupted_reason(stop: KeyboardInterrupt) -> str:
+    by = f" by {stop}" if str(stop) else ""
+    return f"interrupted{by} before every assertion ran"
+
+
 def execute(
     options: GateOptions,
     *,
@@ -260,6 +298,19 @@ def execute(
     prepare: PrepareGate = prepare_gate,
 ) -> tuple[dict[str, Any], int]:
     """Run one scenario; return the evidence document and the process exit status."""
+    with _termination_as_interrupt():
+        return _execute(
+            options, engine_factory=engine_factory, scenarios=scenarios, prepare=prepare
+        )
+
+
+def _execute(
+    options: GateOptions,
+    *,
+    engine_factory: EngineFactory,
+    scenarios: Mapping[str, ScenarioSpec] | None,
+    prepare: PrepareGate,
+) -> tuple[dict[str, Any], int]:
     registry = dict(default_scenarios() if scenarios is None else scenarios)
     spec = registry[options.scenario]
     required = spec.required(options)
@@ -289,9 +340,9 @@ def execute(
             spec.run(gate)
         except GateHoldError as hold:
             evidence.hold(str(hold))
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as stop:
             interrupted = True
-            evidence.abort("interrupted before every assertion ran")
+            evidence.abort(_interrupted_reason(stop))
         except Exception as error:
             evidence.abort(f"the scenario stopped on {type(error).__name__}: {error}")
         finally:
@@ -302,6 +353,9 @@ def execute(
             evidence.abort(f"final checks stopped on {type(error).__name__}: {error}")
     except GateHoldError as hold:
         evidence.hold(str(hold))
+    except KeyboardInterrupt as stop:  # before the scenario started, or while it was finalized
+        interrupted = True
+        evidence.abort(_interrupted_reason(stop))
     identities = (
         gate.identities(required) if gate is not None else _minimal_identities(options, required)
     )

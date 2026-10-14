@@ -23,12 +23,12 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from enginery.adapters.oci.engine import OciEngine, engine_environment
+from enginery.adapters.oci.engine import EngineCommandError, OciEngine, engine_environment
 from enginery.adapters.oci.launch import container_name_for, store_arguments, store_names_for
 from enginery.adapters.runner_launch import LAUNCHER_MODULE, worker_environment
 from enginery.application.worker_environment import LAUNCHER_KEYS, build_worker_environment
@@ -1013,11 +1013,36 @@ def container_exists(engine: OciEngine, name: str) -> bool:
     return engine.container_exists(name)
 
 
-def iter_enginery_containers(engine: OciEngine) -> Iterator[str]:
-    completed = engine.run_cli(("ps", "--all", "--format", "{{.Names}}"), timeout=60)
-    for line in completed.stdout.splitlines():
-        if line.strip().startswith("enginery-"):
-            yield line.strip()
+def list_engine_names(engine: OciEngine, arguments: Sequence[str], template: str) -> list[str]:
+    """The names one engine listing prints; a failed listing raises, it never reads as 'none'.
+
+    A stray check that treated a failed ``docker ps`` or ``network ls`` as an empty list would
+    pass exactly when the engine could not be asked.
+    """
+    completed = engine.run_cli((*arguments, "--format", template), timeout=60)
+    if completed.returncode != 0:
+        raise EngineCommandError(
+            f"the engine cannot list {' '.join(arguments)}: {completed.stderr.strip()[-200:]}"
+        )
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def iter_enginery_containers(engine: OciEngine) -> list[str]:
+    """Every ``enginery-*`` container, running or not."""
+    names = list_engine_names(engine, ("ps", "--all"), "{{.Names}}")
+    return [name for name in names if name.startswith("enginery-")]
+
+
+def _stop_group(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Ask ``process``'s group to terminate, kill it if it ignores that; return what it wrote."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, 15)
+    try:
+        return process.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, 9)
+        return process.communicate()
 
 
 def run_with_deadline(
@@ -1046,14 +1071,12 @@ def run_with_deadline(
         timed_out = True
         if stop is not None:
             stop()
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, 15)
-        try:
-            stdout, stderr = process.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, 9)
-            stdout, stderr = process.communicate()
+        stdout, stderr = _stop_group(process)
+    except BaseException:
+        # An interrupted gate must not orphan the launcher it started in its own session: stop
+        # the group and wait, so the launcher removes its own worker, store and network first.
+        _stop_group(process)
+        raise
     return (
         subprocess.CompletedProcess(list(argv), process.returncode, stdout or "", stderr or ""),
         timed_out,
