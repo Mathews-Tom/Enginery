@@ -30,11 +30,14 @@ import shlex
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from enginery.adapters.claude_code import probe_installed_host as probe_installed_claude
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.capabilities.serialization import read_lock
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import (
     LayerControls,
     SelectionLayer,
@@ -220,6 +223,18 @@ def _harness_executable(args: argparse.Namespace, harness: str) -> str:
     return "claude" if harness == "claude-code" else "omp"
 
 
+def _probe_host(args: argparse.Namespace, harness: str) -> InstalledHost | None:
+    """Observe the installed host the run will use, only when its controls are pinned."""
+    executable = _harness_executable(args, harness)
+    if harness == "claude-code":
+        return probe_installed_claude(executable)
+    if harness == "omp":
+        return probe_installed_omp(executable)
+    raise InvalidInputError(
+        "Stage 1 harness_provider is not a configured harness", details={"harness": harness}
+    )
+
+
 def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     """Construct one durable Stage 1 request for the GitHub issue named by
     ``--external-reference``.
@@ -260,6 +275,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             ),
         ),
         catalog=load_execution_catalog(),
+        probe_host=lambda harness: _probe_host(args, harness),
     )
 
     # Everything the source decides is read once the operator's own flags are valid, and is

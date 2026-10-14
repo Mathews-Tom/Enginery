@@ -1,0 +1,54 @@
+# Versioned native execution-control catalog for the supported agent harnesses.
+#
+# Each host entry records the range of executable versions it accepts, the one
+# version it was actually tested against, the protocol fingerprint, its support
+# tier, and the native flag every supported control maps to. A range is accepted
+# trust, not tested fact: an installed version inside it is accepted and is never
+# reported as tested. A range is exactly ">=LOWER,<UPPER" over plain numeric
+# MAJOR.MINOR.PATCH versions; a pre-release or otherwise non-numeric version is
+# never inside it. Controls are host-specific: effort vocabularies are never mapped
+# across hosts. Both hosts are `experimental` until a live qualification
+# proves otherwise; a local capture of the launch request never raises a tier.
+# A public model listing is not proof that the operator can use a model, so the
+# catalog names no model identifiers, only the exact form a pin must take.
+
+catalog_version = "3"
+scope = "native_execution_controls"
+
+[[hosts]]
+harness = "omp"
+executable_versions = ">=18.10.3,<19.0.0"
+tested_executable_version = "18.10.3"
+protocol_fingerprint = "json-protocol=3"
+support_tier = "experimental"
+
+[hosts.model]
+flag = "--model"
+pin_form = "provider-qualified provider/id"
+pin_pattern = '^[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:@+/-]*$'
+effective_evidence = "message_end.message.provider and message_end.message.model"
+
+[hosts.effort]
+flag = "--thinking"
+levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+unpinnable = ["auto"]
+effective_evidence = ""
+
+[[hosts]]
+harness = "claude-code"
+executable_versions = ">=2.1.296,<3.0.0"
+tested_executable_version = "2.1.296"
+protocol_fingerprint = "stream-json-schema=1"
+support_tier = "experimental"
+
+[hosts.model]
+flag = "--model"
+pin_form = "full model name such as claude-<family>-<version>, not an alias"
+pin_pattern = '^claude-(?=[a-z0-9-]*[0-9])[a-z0-9]+(?:-[a-z0-9]+)*$'
+effective_evidence = "assistant.message.model"
+
+[hosts.effort]
+flag = "--effort"
+levels = ["low", "medium", "high", "xhigh", "max"]
+unpinnable = []
+effective_evidence = ""

@@ -92,6 +92,9 @@ def _parse_arguments(arguments: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    # Launch-time provenance recorded in the persisted command for later receipts; the
+    # worker itself never reads it.
+    parser.add_argument("--observed-host-version", default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     parsed = parser.parse_args(arguments)
     if parsed.command[:1] == ["--"]:

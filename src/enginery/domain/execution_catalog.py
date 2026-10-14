@@ -2,7 +2,9 @@
 
 The catalog is data, not behavior: it names which flags a host accepts, which
 level vocabulary its effort control uses, the exact form a model pin must take,
-and the executable and protocol fingerprint those facts were tested against. It
+and the executable versions and protocol fingerprint those facts were tested against.
+A host entry names either one exact executable version or an accepted version range
+together with the version actually tested; the two are never conflated. It
 never lists model identifiers; a public listing is not proof of authenticated
 access, so the only model check is the exact-identifier form.
 """
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
+from enginery.domain.version_range import Version, VersionRange
 
 
 class SupportTier(enum.Enum):
@@ -80,36 +83,100 @@ class InstalledHost:
 
 
 @dataclass(frozen=True, slots=True)
+class ExactHostVersion:
+    """A host accepted only at the one executable version it was tested against."""
+
+    version: str
+
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise InvalidInputError("host executable version must be non-blank")
+
+    @property
+    def expectation(self) -> str:
+        return f"the tested {self.version}"
+
+    def accepts(self, observed: str) -> bool:
+        return observed == self.version
+
+    def details(self) -> dict[str, str]:
+        return {"tested_executable_version": self.version}
+
+    def bound_details(self) -> dict[str, str]:
+        return {"bound_executable_version": self.version}
+
+
+@dataclass(frozen=True, slots=True)
+class RangedHostVersion:
+    """A host accepted across a version range, with the one version its flags were tested on.
+
+    Acceptance is a statement about versions the controls are expected to keep working
+    on; only ``tested`` was actually exercised. An observed version inside the range is
+    accepted, never reported as tested.
+    """
+
+    accepted: VersionRange
+    tested: Version
+
+    def __post_init__(self) -> None:
+        if not self.accepted.contains(self.tested):
+            raise InvalidInputError(
+                "the tested executable version must be inside the accepted range",
+                details={"accepted": str(self.accepted), "tested": str(self.tested)},
+            )
+
+    @property
+    def expectation(self) -> str:
+        return f"the accepted range {self.accepted} (tested {self.tested})"
+
+    def accepts(self, observed: str) -> bool:
+        return self.accepted.accepts(observed)
+
+    def details(self) -> dict[str, str]:
+        return {
+            "accepted_executable_versions": str(self.accepted),
+            "tested_executable_version": str(self.tested),
+        }
+
+    def bound_details(self) -> dict[str, str]:
+        return {
+            "bound_executable_versions": str(self.accepted),
+            "bound_tested_executable_version": str(self.tested),
+        }
+
+
+HostVersion = ExactHostVersion | RangedHostVersion
+"""A host's version policy: frozen exact history, or an accepted range with a tested version."""
+
+
+@dataclass(frozen=True, slots=True)
 class HostCapability:
-    """One host's tested fingerprint, support tier, and native controls."""
+    """One host's accepted and tested versions, protocol fingerprint, tier, and native controls."""
 
     harness: str
-    executable_version: str
+    version: HostVersion
     protocol_fingerprint: str
     support_tier: SupportTier
     model: ModelControl
     effort: EffortControl
 
     def __post_init__(self) -> None:
-        if not all(
-            value.strip()
-            for value in (self.harness, self.executable_version, self.protocol_fingerprint)
-        ):
+        if not all(value.strip() for value in (self.harness, self.protocol_fingerprint)):
             raise InvalidInputError("host capability identity must be non-blank")
 
     def matches(self, installed: InstalledHost) -> bool:
-        """Return whether an observed host is exactly the tested executable and protocol."""
-        return (
-            installed.executable_version == self.executable_version
-            and installed.protocol_fingerprint == self.protocol_fingerprint
+        """Return whether an observed host has the protocol and an accepted executable version."""
+        return installed.protocol_fingerprint == self.protocol_fingerprint and self.version.accepts(
+            installed.executable_version
         )
 
     def require_installed(self, installed: InstalledHost | None) -> None:
-        """Reject native controls against a host that is not the tested executable.
+        """Reject native controls against a host the catalog does not accept.
 
-        An unobservable or different host makes every mandatory control unsupported: the
-        flags and level vocabularies were only tested against the recorded fingerprint,
-        so nothing is guessed.
+        An unobservable host, a different protocol, or an executable version the catalog
+        does not accept (outside the range, or not a plain numeric version) makes every
+        mandatory control unsupported: the flags and level vocabularies were only tested
+        against the recorded fingerprint, so nothing is guessed.
         """
         if installed is None:
             raise MissingPrerequisiteError(
@@ -120,14 +187,13 @@ class HostCapability:
         if not self.matches(installed):
             raise MissingPrerequisiteError(
                 f"the installed {self.harness} ({installed.executable_version}, "
-                f"{installed.protocol_fingerprint}) differs from the tested "
-                f"{self.executable_version} ({self.protocol_fingerprint}), so its native "
-                "controls are unsupported",
+                f"{installed.protocol_fingerprint}) differs from {self.version.expectation} "
+                f"({self.protocol_fingerprint}), so its native controls are unsupported",
                 details={
                     "harness": self.harness,
                     "installed_executable_version": installed.executable_version,
                     "installed_protocol_fingerprint": installed.protocol_fingerprint,
-                    "tested_executable_version": self.executable_version,
+                    **self.version.details(),
                     "tested_protocol_fingerprint": self.protocol_fingerprint,
                 },
             )
@@ -220,7 +286,7 @@ def _host_from_mapping(entry: object) -> HostCapability:
     effort = _table(entry, "effort")
     return HostCapability(
         harness=_text(entry, "harness"),
-        executable_version=_text(entry, "executable_version"),
+        version=_host_version_from_mapping(entry),
         protocol_fingerprint=_text(entry, "protocol_fingerprint"),
         support_tier=tier,
         model=ModelControl(
@@ -235,6 +301,27 @@ def _host_from_mapping(entry: object) -> HostCapability:
             unpinnable=_texts(effort, "unpinnable"),
             effective_evidence=_text(effort, "effective_evidence", allow_blank=True),
         ),
+    )
+
+
+def _host_version_from_mapping(entry: Mapping[str, object]) -> HostVersion:
+    """Decode a host's version policy: one exact version, or a range plus its tested version.
+
+    The two forms are mutually exclusive and never coerced into each other, so a frozen
+    exact entry keeps its exact semantics and a range entry cannot lose its tested version.
+    """
+    exact = "executable_version" in entry
+    ranged = "executable_versions" in entry or "tested_executable_version" in entry
+    if exact == ranged:
+        raise InvalidInputError(
+            "an execution catalog host needs either executable_version or both "
+            "executable_versions and tested_executable_version, not both or neither"
+        )
+    if exact:
+        return ExactHostVersion(_text(entry, "executable_version"))
+    return RangedHostVersion(
+        accepted=VersionRange.parse(_text(entry, "executable_versions")),
+        tested=Version.parse(_text(entry, "tested_executable_version")),
     )
 
 
@@ -261,10 +348,13 @@ def _texts(entry: Mapping[str, object], key: str) -> tuple[str, ...]:
 
 __all__ = [
     "EffortControl",
+    "ExactHostVersion",
     "ExecutionCatalog",
     "HostCapability",
+    "HostVersion",
     "InstalledHost",
     "ModelControl",
+    "RangedHostVersion",
     "SupportTier",
     "catalog_from_mapping",
 ]

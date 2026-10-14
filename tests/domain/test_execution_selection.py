@@ -7,7 +7,7 @@ import pytest
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
-from enginery.domain.execution_catalog import SupportTier
+from enginery.domain.execution_catalog import ExactHostVersion, SupportTier
 from enginery.domain.execution_selection import (
     ExecutionSelection,
     HoldReason,
@@ -225,7 +225,7 @@ def test_a_tampered_selection_is_rejected_by_catalog_validation() -> None:
         (alias, "not an exact omp model pin"),
         (auto, "cannot be pinned"),
         (replace(good, support_tier=SupportTier.QUALIFIED), "tested host entry"),
-        (replace(good, host_executable_version="9.9.9"), "tested host entry"),
+        (replace(good, host_version=ExactHostVersion("9.9.9")), "tested host entry"),
         (replace(good, host_protocol_fingerprint="json-protocol=9"), "tested host entry"),
         (replace(good, catalog_version="9"), "different catalog"),
         (replace(good, catalog_digest=Digest.of_bytes(b"x")), "different catalog"),
@@ -465,7 +465,7 @@ def test_the_selection_round_trips_and_rejects_an_unknown_schema_version() -> No
     assert ExecutionSelection.from_state(selection.to_state()) == selection
 
     state = selection.to_state()
-    state["schema_version"] = 2
+    state["schema_version"] = 3
     with pytest.raises(InvalidInputError, match="schema version is unsupported"):
         ExecutionSelection.from_state(state)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -24,7 +25,12 @@ from enginery.application.adapter_types import (
     ProviderKind,
 )
 from enginery.application.execution_catalog import load_execution_catalog
-from enginery.application.execution_controls import build_receipt, prepare_native_controls
+from enginery.application.execution_controls import (
+    OBSERVED_HOST_FLAG,
+    build_receipt,
+    launch_observation,
+    prepare_native_controls,
+)
 from enginery.application.work_ports import (
     HarnessOutput,
     HarnessResult,
@@ -113,6 +119,7 @@ class OmpHarness:
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _commands: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
+    _launch_versions: dict[str, str | None] = field(default_factory=dict, init=False)
     _processes: dict[str, _OmpProcess] = field(default_factory=dict, init=False)
     _collected: dict[str, tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]] = field(
         default_factory=dict, init=False
@@ -164,11 +171,12 @@ class OmpHarness:
         )
         if session.session_id in self._sessions:
             raise WorkerFailureError("OMP harness session already exists")
-        command = self.command_for(task)
+        command, observed = self._host_command(task)
         process = self.process_factory(command, task.workspace_path)
         self._sessions[session.session_id] = session
         self._tasks[session.session_id] = task
         self._commands[session.session_id] = command
+        self._launch_versions[session.session_id] = observed
         self._processes[session.session_id] = process
         self._outcomes[str(task.operation_id)] = ReconciliationResult.FOUND_MATCHING
         return session
@@ -214,7 +222,10 @@ class OmpHarness:
             terminal_status=status,
             outputs=(HarnessOutput(digest=digest, redaction=RedactionClassification.SENSITIVE),),
             execution_receipt=self._receipt(
-                self._tasks[session.session_id], events, self._commands[session.session_id]
+                self._tasks[session.session_id],
+                events,
+                self._commands[session.session_id],
+                observed_at_launch=self._launch_versions.get(session.session_id),
             ),
         )
         collected = (events, result)
@@ -222,13 +233,17 @@ class OmpHarness:
         return collected
 
     def command_for(self, task: HarnessTask) -> tuple[str, ...]:
-        controls = prepare_native_controls(
+        return self._host_command(task)[0]
+
+    def _host_command(self, task: HarnessTask) -> tuple[tuple[str, ...], str | None]:
+        """Return the host command and the version observed while preparing its controls."""
+        launch = prepare_native_controls(
             task.selection,
             harness=_HARNESS_ID,
             catalog=self.catalog,
             probe_installed_host=self.installed_host,
         )
-        return (
+        command = (
             self.config.executable,
             "--mode=json",
             "--no-session",
@@ -236,16 +251,19 @@ class OmpHarness:
             str(task.workspace_path),
             "--max-time",
             str(task.time_budget_seconds),
-            *controls,
+            *launch.arguments,
             "-p",
             _render_task(task),
         )
+        return command, launch.observed_executable_version
 
     def _receipt(
         self,
         task: HarnessTask,
         events: tuple[NormalizedAdapterEvent, ...],
         launched_command: tuple[str, ...] | None,
+        *,
+        observed_at_launch: str | None,
     ) -> ExecutionReceipt:
         return build_receipt(
             task.selection,
@@ -253,12 +271,14 @@ class OmpHarness:
             catalog=self.catalog,
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
+            observed_at_launch=observed_at_launch,
         )
 
     def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
         """Return a worker command whose parent is the coordinator supervisor."""
         if not result_path.is_absolute():
             raise InvalidInputError("OMP worker result path must be absolute")
+        command, observed = self._host_command(task)
         return (
             sys.executable,
             "-m",
@@ -267,8 +287,9 @@ class OmpHarness:
             str(task.operation_id),
             "--output",
             str(result_path),
+            *(() if observed is None else (OBSERVED_HOST_FLAG, observed)),
             "--",
-            *self.command_for(task),
+            *command,
         )
 
     def collect_supervised(
@@ -333,13 +354,22 @@ class OmpHarness:
                         redaction=RedactionClassification.SENSITIVE,
                     ),
                 ),
-                execution_receipt=self._receipt(task, events, launched_command),
+                execution_receipt=self._receipt(
+                    task,
+                    events,
+                    launched_command,
+                    observed_at_launch=launch_observation(launched_command),
+                ),
             ),
         )
 
     def _require_session(self, session: HarnessSession) -> None:
         if self._sessions.get(session.session_id) != session:
             raise CancellationError("unknown OMP harness session")
+
+
+_OMP_BANNER = re.compile(r"omp v(\S+)")
+"""The exact first line: no whitespace is skipped, so a malformed banner yields no version."""
 
 
 def probe_installed_host(
@@ -357,13 +387,13 @@ def probe_installed_host(
         completed = runner((executable, "--help"))
     except OSError:
         return None
-    if completed.returncode != 0 or not completed.stdout.startswith("omp v"):
-        return None
-    version = completed.stdout.splitlines()[0].removeprefix("omp v").strip()
-    if not version:
+    lines = completed.stdout.splitlines()
+    banner = _OMP_BANNER.fullmatch(lines[0]) if lines else None
+    if completed.returncode != 0 or banner is None:
         return None
     return InstalledHost(
-        executable_version=version, protocol_fingerprint=f"json-protocol={_OMP_PROTOCOL_VERSION}"
+        executable_version=banner.group(1),
+        protocol_fingerprint=f"json-protocol={_OMP_PROTOCOL_VERSION}",
     )
 
 

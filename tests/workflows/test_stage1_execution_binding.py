@@ -17,7 +17,12 @@ from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.execution_controls import build_receipt
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
-from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost, SupportTier
+from enginery.domain.execution_catalog import (
+    ExactHostVersion,
+    ExecutionCatalog,
+    InstalledHost,
+    SupportTier,
+)
 from enginery.domain.execution_receipt import evaluate_effective_requirement
 from enginery.domain.execution_selection import (
     ExecutionSelection,
@@ -417,7 +422,7 @@ def _tampered(selection: ExecutionSelection) -> list[tuple[ExecutionSelection, s
             "cannot be pinned",
         ),
         (replace(selection, support_tier=SupportTier.QUALIFIED), "tested host entry"),
-        (replace(selection, host_executable_version="9.9.9"), "tested host entry"),
+        (replace(selection, host_version=ExactHostVersion("9.9.9")), "tested host entry"),
     ]
 
 
@@ -503,7 +508,7 @@ def test_a_changed_or_unobservable_host_holds_a_run_with_native_controls(
     assert progression.action is Stage1ProgressionAction.HOLD
     assert progression.hold is not None
     assert progression.hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
-    with pytest.raises(HumanActionRequiredError, match="not the executable"):
+    with pytest.raises(HumanActionRequiredError, match="not a host this run"):
         drifted.dispatch_implementation(
             request, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
         )
@@ -517,7 +522,36 @@ def test_a_host_default_run_never_depends_on_the_installed_host_version(
     service.start(request, now=now, heartbeat_window=_WINDOW)
     other = replace(service, harness=_StubHarness(InstalledHost("0.0.1", "other")))  # type: ignore[arg-type]
 
-    assert other.next_action(request.run.id).action is Stage1ProgressionAction.QUALIFY
+    progression = other.next_action(request.run.id)
+
+    assert progression.action is Stage1ProgressionAction.QUALIFY
+    assert progression.observed_host_version is None
+
+
+def test_the_binding_check_reports_the_version_it_observed_even_when_it_holds_nothing(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, execution_selection=_PIN
+    )
+    service.start(request, now=now, heartbeat_window=_WINDOW)
+    upgraded = replace(
+        service,
+        harness=_StubHarness(InstalledHost("18.11.0", "json-protocol=3")),  # type: ignore[arg-type]
+    )
+    outside = replace(
+        service,
+        harness=_StubHarness(InstalledHost("19.0.0", "json-protocol=3")),  # type: ignore[arg-type]
+    )
+    unobservable = replace(service, harness=_StubHarness(None))  # type: ignore[arg-type]
+
+    in_range = upgraded.next_action(request.run.id)
+    held = outside.next_action(request.run.id)
+    unseen = unobservable.next_action(request.run.id)
+
+    assert in_range.hold is None and in_range.observed_host_version == "18.11.0"
+    assert held.hold is not None and held.observed_host_version == "19.0.0"
+    assert unseen.hold is not None and unseen.observed_host_version is None
 
 
 def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
@@ -528,7 +562,7 @@ def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
     )
     forged = replace(
         request,
-        execution_selection=replace(_PIN, host_executable_version="0.0.1"),
+        execution_selection=replace(_PIN, host_version=ExactHostVersion("0.0.1")),
     )
 
     with pytest.raises(InvalidInputError, match="tested host entry"):
@@ -556,6 +590,7 @@ def test_a_recorded_execution_hold_makes_the_next_action_hold_with_that_hold(
             catalog=load_execution_catalog(),
             launched_command=("omp", "--model", "openai/gpt-5.2"),
             models=(),
+            observed_at_launch="18.10.3",
         ),
     )
     assert unverified is not None

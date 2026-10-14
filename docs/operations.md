@@ -407,6 +407,14 @@ controls at the run layer:
   (exit code 2, no file written, and the same check applies when a run starts) rather
   than spend a worker session on a run that cannot pass.
 
+When a pin is requested, `build-request` also runs the host's own version command
+once and records the observed version in the selection, next to the catalog's
+accepted range and tested version. An installed host that is outside the accepted
+range, is a pre-release or otherwise non-numeric version, or speaks a different
+protocol is rejected there too (exit code 3, no file written); a host that cannot be
+run records no observation and is rejected again before launch. A run that pins
+nothing never probes the host.
+
 Unsupported pins are rejected by `build-request` itself, with exit code 2 and
 before any file is written. Omitted flags leave the host's own default, which is
 shown as `host default`, never as a level. Pins are exact: there is no fuzzy
@@ -419,8 +427,19 @@ things apart: `requested` (the value and the layer that supplied it), `selected`
 launched, once the implementation has run) and `effective` (the model the host
 reported, or `unknown` with the reason; the effective effort is always `unknown`
 today). It also carries the support tier (both hosts are `experimental`), the
-catalog version and digest, the host version and protocol fingerprint the controls
-were tested against, and any `holds`. The same hold is also printed as the
+catalog version and digest, the `host` block (the binding, the accepted version range,
+the tested version, the version observed when the request was built
+(`observed_executable_version_at_bind`), the version observed when the dispatch command was built
+(`observed_executable_version_at_launch`; for queued work this is when the work was queued,
+not when its process later started, and it is read back from the persisted command rather
+than probed again at collection), whether those two differ
+(`observed_version_changed_since_bind`), the version the binding check observed while
+producing this report (`observed_executable_version_at_resume`, the same check every
+dispatch and resume makes before it decides whether to hold), and the protocol
+fingerprint; an observed
+version inside the range is never reported as tested), and any `holds`. A version change
+inside the bound range between the two observations runs normally and is visible there;
+it never raises a hold. The same hold is also printed as the
 top-level `hold`. Only the host's executable version is probed (a read-only
 diagnostic creates no files); its protocol is the one the adapter declares. A
 matching fingerprint or a captured launch request does not raise a host above
@@ -432,7 +451,7 @@ depends on the reason, and `stage1 resume` does not clear a hold:
 | Hold reason | Cause | Recovery |
 |---|---|---|
 | `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and re-run `stage1 watch`, or start a new run from a rebuilt request. |
-| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is not the tested version, or cannot be probed. | Restore the tested host version and re-run `watch`, or rebuild the request. |
+| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is outside the version range the run was bound to (or is a pre-release or otherwise non-numeric version), has a different protocol, or cannot be probed. A version change that stays inside the bound range is not a hold. A run bound to a frozen exact-version catalog (1 or 2) holds on any version difference. | Restore a host version inside the bound range and re-run `watch`, or rebuild the request. |
 | `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
 | `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
 | `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine, or its identity is unreadable. (A reused pid or a reboot proves the worker gone and is reconciled instead.) | There is no supported release for it in this release: the node keeps its slot. Deal with the worker where it was launched; `stage1 cancel` refuses without signalling (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |

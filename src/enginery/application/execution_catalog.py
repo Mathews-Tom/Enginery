@@ -19,11 +19,12 @@ from enginery.domain.execution_catalog import ExecutionCatalog, catalog_from_map
 
 _CONFIG_DIRECTORY = Path(__file__).parent.parent / "config"
 
-CURRENT_CATALOG_VERSION = "2"
+CURRENT_CATALOG_VERSION = "3"
 
 REGISTERED_CATALOG_DIGESTS: Mapping[str, str] = {
     "1": "23598e0c044269fddefc073583fddf2432d940626fad6130d2b9e64d805196a3",
     "2": "de74499de75b1bcf9e06ebce0932d3944c5dda9e5bee7c3eaa8dfd2769eb3653",
+    "3": "7e8b15191bf283cf5721d8d5384a8391191874a4bdc6754fec73b8f1ddc6c105",
 }
 """SHA-256 of each frozen catalog file's bytes, keyed by ``catalog_version``."""
 

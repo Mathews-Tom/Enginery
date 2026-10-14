@@ -164,6 +164,8 @@ def valid_request(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]
     output = root / "request.json"
     command = [
         *release_consumer_smoke._build_request_command(_EXECUTABLE, root=root, output=output),
+        "--harness-executable",
+        str(release_consumer_smoke._stand_in_host(root, "claude-code", "2.1.300")),
         "--harness-provider",
         "claude-code",
         "--model",
@@ -186,6 +188,9 @@ def _check(document: dict[str, object]) -> None:
         effort="high",
         catalog_version=str(packaged["catalog_version"]),
         catalog_digest=str(packaged["catalog_digest"]),
+        accepted_versions=">=2.1.296,<3.0.0",
+        tested_version="2.1.296",
+        observed_version="2.1.300",
     )
 
 
@@ -215,6 +220,10 @@ def _tamper(document: dict[str, object], path: tuple[str, ...], value: object) -
         (("execution_selection", "strict_effective"), True),
         (("execution_selection", "catalog", "digest"), "sha256:" + "0" * 64),
         (("execution_selection", "host", "support_tier"), "supported"),
+        (("execution_selection", "host", "executable_versions"), ">=2.1.296,<4.0.0"),
+        (("execution_selection", "host", "tested_executable_version"), "2.1.300"),
+        (("execution_selection", "host", "observed_executable_version"), "2.1.296"),
+        (("execution_selection", "host", "observed_executable_version"), None),
         (("execution_configuration", "harness_provider"), "omp"),
     ],
 )
@@ -285,3 +294,29 @@ def test_a_printed_digest_that_differs_from_the_request_fails_the_pin_check(
     packaged = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)
     with pytest.raises(ConsumerSmokeError, match="differs from its printed report"):
         release_consumer_smoke._check_valid_pins(launcher, root=tmp_path, packaged=packaged)
+
+
+def test_the_packaged_stand_in_versions_are_in_range_and_never_the_tested_version(
+    tmp_path: Path,
+) -> None:
+    versions = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)["versions"]
+
+    assert isinstance(versions, dict)
+    assert set(versions) == {"omp", "claude-code"}
+    for host in versions.values():
+        assert host["stand_in"] != host["tested"]
+
+
+def test_a_stand_in_that_equals_the_tested_version_fails_the_pin_check(
+    tmp_path: Path,
+) -> None:
+    real = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)
+    versions = {
+        harness: {**host, "stand_in": host["tested"]}  # type: ignore[dict-item]
+        for harness, host in real["versions"].items()  # type: ignore[attr-defined]
+    }
+
+    with pytest.raises(ConsumerSmokeError, match="other than the tested"):
+        release_consumer_smoke._check_valid_pins(
+            _EXECUTABLE, root=tmp_path, packaged={**real, "versions": versions}
+        )

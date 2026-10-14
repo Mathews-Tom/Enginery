@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from enginery.engine.omp_worker import run_omp_worker
+from enginery.engine.omp_worker import main, run_omp_worker
 
 
 def _result(output_path: Path) -> dict[str, object]:
@@ -79,3 +79,27 @@ def test_run_omp_worker_records_unavailable_command(tmp_path: Path) -> None:
 
     assert exit_code == 1
     assert _result(output_path)["terminal_status"] == "failed"
+
+
+def test_the_worker_accepts_and_ignores_the_recorded_launch_host_version(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "result.json"
+
+    exit_code = main(
+        [
+            "--operation-id",
+            "operation-1",
+            "--output",
+            str(output_path),
+            "--observed-host-version",
+            "18.11.0",
+            "--",
+            sys.executable,
+            "-c",
+            "print('agent_end')",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _result(output_path)["output"] == "agent_end\n"

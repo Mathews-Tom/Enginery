@@ -96,8 +96,8 @@ class _Rig:
 _OMP_INSTALLED = "omp v18.10.3\n\nUSAGE\n"
 _CLAUDE_INSTALLED = "2.1.296 (Claude Code)\n"
 _HOSTS = {
-    "omp": ("openai/gpt-5.2", "--thinking", _OMP_INSTALLED, "omp v18.10.4\n"),
-    "claude-code": ("claude-opus-4-8", "--effort", _CLAUDE_INSTALLED, "2.1.297 (Claude Code)\n"),
+    "omp": ("openai/gpt-5.2", "--thinking", _OMP_INSTALLED, "omp v19.0.0\n"),
+    "claude-code": ("claude-opus-4-8", "--effort", _CLAUDE_INSTALLED, "3.0.0 (Claude Code)\n"),
 }
 
 
@@ -191,6 +191,76 @@ def test_a_fingerprint_mismatch_rejects_a_pinned_control_before_any_launch(
 
     assert rig.launches == []
     assert len(rig.probes) == 2
+
+
+@pytest.mark.parametrize(
+    ("host", "banner"),
+    [
+        ("omp", "omp v18.11.0\n\nUSAGE\n"),
+        ("omp", "omp v18.99.99\n"),
+        ("claude-code", "2.1.300 (Claude Code)\n"),
+        ("claude-code", "2.9.0 (Claude Code)\n"),
+    ],
+)
+def test_an_installed_version_inside_the_accepted_range_launches_the_pinned_control(
+    tmp_path: Path, host: str, banner: str
+) -> None:
+    model, *_ = _HOSTS[host]
+    rig = _rig(tmp_path, host, installed=banner)
+
+    rig.harness.start(_task(tmp_path, selection_for(host, model=model)))
+
+    assert _contains(rig.launches[0], ("--model", model))
+    assert len(rig.probes) == 1
+
+
+@pytest.mark.parametrize(
+    ("host", "banner"),
+    [
+        ("omp", "omp v18.11.0-beta.1\n"),
+        ("omp", "omp v18.11.0+build.7\n"),
+        ("omp", "omp v18.10.2\n"),
+        ("omp", "omp v 18.11.0\n"),
+        ("claude-code", " 2.1.300 (Claude Code)\n"),
+        ("claude-code", "2.1.300-beta.1 (Claude Code)\n"),
+        ("claude-code", "2.1.295 (Claude Code)\n"),
+    ],
+)
+def test_a_pre_release_or_below_range_banner_rejects_a_pinned_control_before_any_launch(
+    tmp_path: Path, host: str, banner: str
+) -> None:
+    model, *_ = _HOSTS[host]
+    rig = _rig(tmp_path, host, installed=banner)
+
+    with pytest.raises(MissingPrerequisiteError, match="native controls are unsupported"):
+        rig.harness.supervised_command(
+            _task(tmp_path, selection_for(host, model=model)), result_path=tmp_path / "r.json"
+        )
+
+    assert rig.launches == []
+
+
+@pytest.mark.parametrize(
+    ("host", "banner", "version"),
+    [("omp", "omp v18.11.0\n", "18.11.0"), ("claude-code", "2.1.300 (Claude Code)\n", "2.1.300")],
+)
+def test_the_supervised_command_records_the_launch_version_ahead_of_the_host_command(
+    tmp_path: Path, host: str, banner: str, version: str
+) -> None:
+    model, *_ = _HOSTS[host]
+    rig = _rig(tmp_path, host, installed=banner)
+
+    pinned = rig.harness.supervised_command(
+        _task(tmp_path, selection_for(host, model=model)), result_path=tmp_path / "r.json"
+    )
+    default = rig.harness.supervised_command(
+        _task(tmp_path, selection_for(host)), result_path=tmp_path / "r.json"
+    )
+
+    separator = pinned.index("--")
+    assert pinned[separator - 2 : separator] == ("--observed-host-version", version)
+    assert "--observed-host-version" not in default
+    assert len(rig.probes) == 1
 
 
 @pytest.mark.parametrize("host", ["omp", "claude-code"])

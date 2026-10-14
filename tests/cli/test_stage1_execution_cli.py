@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -332,15 +333,16 @@ def test_watch_holds_a_pinned_run_whose_installed_host_is_not_the_bound_fingerpr
 ) -> None:
     output = tmp_path / "request.json"
     database = tmp_path / "ledger.db"
-    drifted = _fake_host(tmp_path, "omp v0.0.1")
+    host = _fake_host(tmp_path, "omp v18.10.3")
     assert (
         main(
             _build_argv(
-                tmp_path, "--model", OMP_MODEL, "--harness-executable", str(drifted), output=output
+                tmp_path, "--model", OMP_MODEL, "--harness-executable", str(host), output=output
             )
         )
         == 0
     )
+    _fake_host(tmp_path, "omp v0.0.1")
     assert (
         main(
             [
@@ -367,7 +369,8 @@ def test_watch_holds_a_pinned_run_whose_installed_host_is_not_the_bound_fingerpr
     assert isinstance(hold, dict)
     assert hold["reason"] == "host_fingerprint_drift"
     assert hold["details"]["installed_executable_version"] == "0.0.1"  # type: ignore[index]
-    assert hold["details"]["bound_executable_version"] == "18.10.3"  # type: ignore[index]
+    assert hold["details"]["bound_executable_versions"] == ">=18.10.3,<19.0.0"  # type: ignore[index]
+    assert hold["details"]["bound_tested_executable_version"] == "18.10.3"  # type: ignore[index]
     execution = watch["execution"]
     assert isinstance(execution, dict)
     assert execution["holds"] == [hold]
@@ -561,8 +564,12 @@ class _Run:
             request,
         )
 
-    def execute(self) -> None:
-        """Qualify, dispatch the real supervised worker, and collect its result."""
+    def execute(self, *, after_launch: Callable[[], None] | None = None) -> None:
+        """Qualify, dispatch the real supervised worker, and collect its result.
+
+        ``after_launch`` runs once the worker is dispatched (its command is built and its
+        host version observed) and before the result is collected.
+        """
         ledger = LedgerService.open(self.database)
         try:
             service, request = self.service(ledger)
@@ -576,6 +583,8 @@ class _Run:
             dispatch = service.dispatch_implementation(
                 request, now=_NOW, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
             )
+            if after_launch is not None:
+                after_launch()
             deadline = time.monotonic() + 30
             while not dispatch.result_path.is_file():
                 assert time.monotonic() < deadline, "supervised worker retained no result"
@@ -691,3 +700,254 @@ def test_a_failed_pinned_run_keeps_its_original_pins_and_is_never_retried_differ
     finally:
         ledger.close()
     assert len(run.launches()) == 1
+
+
+def _build_and_start(tmp_path: Path, banner: str, *flags: str) -> tuple[Path, Path, Path]:
+    output = tmp_path / "request.json"
+    database = tmp_path / "ledger.db"
+    host = _fake_host(tmp_path, banner)
+    assert (
+        main(
+            _build_argv(
+                tmp_path,
+                "--model",
+                OMP_MODEL,
+                "--harness-executable",
+                str(host),
+                *flags,
+                output=output,
+            )
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "stage1",
+                "start",
+                "--database",
+                str(database),
+                "--owner",
+                "op",
+                "--request",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    return output, database, host
+
+
+def test_build_request_binds_the_range_the_tested_version_and_the_observed_version(
+    tmp_path: Path,
+) -> None:
+    output, _, _ = _build_and_start(tmp_path, "omp v18.11.0")
+
+    host = json.loads(output.read_text(encoding="utf-8"))["execution_selection"]["host"]
+    assert host == {
+        "executable_versions": ">=18.10.3,<19.0.0",
+        "tested_executable_version": "18.10.3",
+        "observed_executable_version": "18.11.0",
+        "protocol_fingerprint": "json-protocol=3",
+        "support_tier": "experimental",
+    }
+
+
+def test_build_request_binds_a_claude_banner_inside_its_range(tmp_path: Path) -> None:
+    output = tmp_path / "request.json"
+
+    assert (
+        main(
+            _build_argv(
+                tmp_path,
+                "--harness-provider",
+                "claude-code",
+                "--model",
+                CLAUDE_MODEL,
+                "--harness-executable",
+                str(_fake_host(tmp_path, "2.1.300 (Claude Code)")),
+                output=output,
+            )
+        )
+        == 0
+    )
+
+    host = json.loads(output.read_text(encoding="utf-8"))["execution_selection"]["host"]
+    assert host["executable_versions"] == ">=2.1.296,<3.0.0"
+    assert host["tested_executable_version"] == "2.1.296"
+    assert host["observed_executable_version"] == "2.1.300"
+
+
+@pytest.mark.parametrize(
+    "banner", ["omp v19.0.0", "omp v18.10.2", "omp v18.11.0-beta.1", "omp v18.11.0+build.4"]
+)
+def test_build_request_refuses_an_installed_host_outside_the_range_before_writing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], banner: str
+) -> None:
+    output = tmp_path / "request.json"
+
+    exit_code = main(
+        _build_argv(
+            tmp_path,
+            "--model",
+            OMP_MODEL,
+            "--harness-executable",
+            str(_fake_host(tmp_path, banner)),
+            output=output,
+        )
+    )
+
+    assert exit_code == 3
+    assert "native controls are unsupported" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_build_request_does_not_probe_a_host_default_run(tmp_path: Path) -> None:
+    output = tmp_path / "request.json"
+
+    assert (
+        main(
+            _build_argv(
+                tmp_path,
+                "--harness-executable",
+                str(_fake_host(tmp_path, "omp v19.0.0")),
+                output=output,
+            )
+        )
+        == 0
+    )
+
+    host = json.loads(output.read_text(encoding="utf-8"))["execution_selection"]["host"]
+    assert host["observed_executable_version"] is None
+
+
+def test_watch_proceeds_when_the_installed_version_changed_inside_the_bound_range(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, database, _ = _build_and_start(tmp_path, "omp v18.10.3")
+    _fake_host(tmp_path, "omp v18.11.0")
+
+    watch = _run_json(
+        capsys,
+        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+    )
+
+    assert watch["next_action"] == "qualify"
+    assert watch["hold"] is None
+    execution = watch["execution"]
+    assert isinstance(execution, dict)
+    assert execution["host"] == {
+        "binding": "range",
+        "accepted_executable_versions": ">=18.10.3,<19.0.0",
+        "tested_executable_version": "18.10.3",
+        "observed_executable_version_at_bind": "18.10.3",
+        "observed_executable_version_at_launch": None,
+        "observed_executable_version_at_resume": "18.11.0",
+        "observed_version_changed_since_bind": None,
+        "protocol_fingerprint": "json-protocol=3",
+    }
+
+
+@pytest.mark.parametrize("banner", ["omp v19.0.0", "omp v18.11.0-beta.1"])
+def test_watch_holds_when_the_installed_version_leaves_the_bound_range(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], banner: str
+) -> None:
+    _, database, _ = _build_and_start(tmp_path, "omp v18.11.0")
+    _fake_host(tmp_path, banner)
+
+    watch = _run_json(
+        capsys,
+        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+    )
+
+    assert watch["next_action"] == "hold"
+    hold = watch["hold"]
+    assert isinstance(hold, dict)
+    assert hold["reason"] == "host_fingerprint_drift"
+    assert hold["details"]["bound_executable_versions"] == ">=18.10.3,<19.0.0"  # type: ignore[index]
+    assert hold["details"]["bound_tested_executable_version"] == "18.10.3"  # type: ignore[index]
+    assert hold["details"]["installed_executable_version"] == banner.removeprefix("omp v")  # type: ignore[index]
+    execution = watch["execution"]
+    assert isinstance(execution, dict)
+    assert execution["host"]["observed_executable_version_at_bind"] == "18.11.0"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("host", "bound", "upgraded"),
+    [
+        ("omp", "18.10.3", "18.11.0"),
+        ("claude-code", "2.1.296", "2.1.300"),
+    ],
+)
+def test_an_in_range_upgrade_between_bind_and_launch_runs_and_is_recorded_not_held(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str, bound: str, upgraded: str
+) -> None:
+    pin = _PINS[host]
+    run = _Run(tmp_path, host, "--model", pin, reported=(pin,))
+    stand_in = tmp_path / "stand-in"
+    stand_in.write_text(
+        stand_in.read_text(encoding="utf-8").replace(bound, upgraded), encoding="utf-8"
+    )
+    run.execute()
+
+    report = _json_of(capsys, run, "evidence")
+    execution = report["execution"]
+
+    assert isinstance(execution, dict)
+    assert execution["holds"] == []
+    assert execution["submitted"] == ["--model", pin]
+    assert execution["host"]["observed_executable_version_at_bind"] == bound  # type: ignore[index]
+    assert execution["host"]["observed_executable_version_at_launch"] == upgraded  # type: ignore[index]
+    assert execution["host"]["observed_version_changed_since_bind"] is True  # type: ignore[index]
+    assert execution["host"]["tested_executable_version"] == bound  # type: ignore[index]
+
+
+@pytest.mark.parametrize("host", ["omp", "claude-code"])
+def test_an_unchanged_host_reports_no_observed_version_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str
+) -> None:
+    pin = _PINS[host]
+    run = _Run(tmp_path, host, "--model", pin, reported=(pin,))
+    run.execute()
+
+    execution = _json_of(capsys, run, "evidence")["execution"]
+
+    assert isinstance(execution, dict)
+    assert execution["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]
+    assert (
+        execution["host"]["observed_executable_version_at_resume"]
+        == (  # type: ignore[index]
+            execution["host"]["observed_executable_version_at_bind"]  # type: ignore[index]
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("host", "bound", "upgraded"),
+    [
+        ("omp", "18.10.3", "18.11.0"),
+        ("claude-code", "2.1.296", "2.1.300"),
+    ],
+)
+def test_the_receipt_reports_the_launch_version_not_one_probed_after_the_worker_ran(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str, bound: str, upgraded: str
+) -> None:
+    pin = _PINS[host]
+    run = _Run(tmp_path, host, "--model", pin, reported=(pin,))
+    stand_in = tmp_path / "stand-in"
+
+    def upgrade_the_host() -> None:
+        stand_in.write_text(
+            stand_in.read_text(encoding="utf-8").replace(bound, upgraded), encoding="utf-8"
+        )
+
+    run.execute(after_launch=upgrade_the_host)
+
+    report = _json_of(capsys, run, "evidence")["execution"]
+
+    assert isinstance(report, dict)
+    assert report["holds"] == []
+    assert report["host"]["observed_executable_version_at_bind"] == bound  # type: ignore[index]
+    assert report["host"]["observed_executable_version_at_launch"] == bound  # type: ignore[index]
+    assert report["host"]["observed_executable_version_at_resume"] == upgraded  # type: ignore[index]
+    assert report["host"]["observed_version_changed_since_bind"] is False  # type: ignore[index]

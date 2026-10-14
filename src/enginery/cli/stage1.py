@@ -121,7 +121,12 @@ def _watch(args: argparse.Namespace) -> None:
                 "next_action": progression.action.value,
                 "nodes": _nodes(ledger, runtime, run_id=str(run.request.run.id)),
                 "hold": None if progression.hold is None else progression.hold.to_state(),
-                "execution": execution_report(ledger, run, hold=progression.hold),
+                "execution": execution_report(
+                    ledger,
+                    run,
+                    hold=progression.hold,
+                    observed_at_resume=progression.observed_host_version,
+                ),
             }
         )
     finally:
@@ -344,7 +349,12 @@ def _evidence(args: argparse.Namespace) -> None:
                 "base_revision": run.request.run.base_revision,
                 "nodes": _nodes(ledger, runtime, run_id=str(run.request.run.id)),
                 "hold": None if progression.hold is None else progression.hold.to_state(),
-                "execution": execution_report(ledger, run, hold=progression.hold),
+                "execution": execution_report(
+                    ledger,
+                    run,
+                    hold=progression.hold,
+                    observed_at_resume=progression.observed_host_version,
+                ),
             }
         )
     finally:

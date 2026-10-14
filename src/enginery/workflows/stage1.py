@@ -307,6 +307,19 @@ class Stage1Progression:
     action: Stage1ProgressionAction
     run: Stage1Run
     hold: ExecutionHold | None = None
+    observed_host_version: str | None = None
+    """The host version the binding check observed while deriving this action.
+
+    None when the run needs no native control or the host could not be probed.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class _BindingCheck:
+    """A binding hold verdict and the host version observed while reaching it."""
+
+    hold: ExecutionHold | None
+    observed_host_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,7 +402,9 @@ class Stage1RunService:
         observation keeps its action but still carries the hold diagnostic so it is shown.
         """
         progression = self._derive_progression(run_id)
-        hold = self._binding_hold(progression.run.request)
+        check = self._binding_check(progression.run.request)
+        progression = replace(progression, observed_host_version=check.observed_host_version)
+        hold = check.hold
         if hold is None:
             return progression
         if progression.action in {
@@ -397,7 +412,7 @@ class Stage1RunService:
             Stage1ProgressionAction.AWAIT_HUMAN_REVIEW,
         }:
             return replace(progression, hold=hold)
-        return Stage1Progression(Stage1ProgressionAction.HOLD, progression.run, hold)
+        return replace(progression, action=Stage1ProgressionAction.HOLD, hold=hold)
 
     def _current_catalog(self) -> ExecutionCatalog:
         return self.execution_catalog or load_execution_catalog()
@@ -427,24 +442,29 @@ class Stage1RunService:
                 held[projection.aggregate_id] = hold.message
         return held
 
-    def _binding_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
-        """Return a catalog drift hold, else a host fingerprint drift hold, else None.
+    def _binding_check(self, request: Stage1RunRequest) -> _BindingCheck:
+        """Return a catalog drift hold, else a host fingerprint drift hold, else no hold.
 
         The host is only probed when the run selected a native control, so a host-default
-        run never depends on the installed version.
+        run never depends on the installed version. The version that probe observed is
+        returned with the verdict instead of being discarded, so a diagnostic can show it.
         """
         hold = self._catalog_hold(request)
         if hold is not None:
-            return hold
+            return _BindingCheck(hold)
         selection = request.execution_selection
         if selection.legacy or not selection.requires_native_controls:
-            return None
+            return _BindingCheck(None)
         probe = self.host_probe
         if probe is None and self.harness is not None:
             probe = self.harness.installed_host
         if probe is None:
-            return None
-        return detect_host_drift(selection, installed=probe())
+            return _BindingCheck(None)
+        installed = probe()
+        return _BindingCheck(
+            detect_host_drift(selection, installed=installed),
+            None if installed is None else installed.executable_version,
+        )
 
     def _recorded_execution_hold(
         self, implement_state: Mapping[str, object]
@@ -470,7 +490,7 @@ class Stage1RunService:
                     "supplied_request_digest": str(request.digest),
                 },
             )
-        hold = self._binding_hold(durable)
+        hold = self._binding_check(durable).hold
         if hold is not None:
             raise HumanActionRequiredError(hold.message, details=dict(hold.details))
         if not durable.execution_selection.legacy:
