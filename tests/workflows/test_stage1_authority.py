@@ -1617,7 +1617,7 @@ def test_a_validation_tool_missing_from_the_image_is_a_hold_naming_it_not_a_fail
     assert "validation_artifact_digest" not in node
     assert not validation_path_for(built.request.workspace_path).exists()
     action = built.service.next_action(built.request.run.id).action
-    assert action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    assert action is Stage1ProgressionAction.BLOCKED
 
 
 def test_a_missing_tool_validation_hold_cannot_be_approved_into_a_publication(
@@ -1649,7 +1649,7 @@ def test_a_missing_tool_validation_hold_cannot_be_approved_into_a_publication(
     node = _node(ledger_service, "validate")
     assert node is not None and node["status"] == "blocked"
     assert built.service.next_action(built.request.run.id).action is (
-        Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+        Stage1ProgressionAction.BLOCKED
     )
     with pytest.raises(MissingPrerequisiteError):
         service.review_implementation(

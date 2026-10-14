@@ -324,6 +324,7 @@ class Stage1ProgressionAction(StrEnum):
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
+    BLOCKED = "blocked"
     OPEN_PR = "open_pr"
     WAIT_FOR_CI = "wait_for_ci"
     VERIFY = "verify"
@@ -462,6 +463,7 @@ class Stage1RunService:
         if progression.action in {
             Stage1ProgressionAction.WAIT,
             Stage1ProgressionAction.AWAIT_HUMAN_REVIEW,
+            Stage1ProgressionAction.BLOCKED,
         }:
             return replace(progression, hold=hold)
         return replace(progression, action=Stage1ProgressionAction.HOLD, hold=hold)
@@ -692,6 +694,9 @@ class Stage1RunService:
             or _generation(_string(validate_state, "attempt_id")) != generation
         ):
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
+        if validate_state.get("status") == "blocked":
+            # A hold such as a missing validation tool is not a verdict a human can approve.
+            return Stage1Progression(Stage1ProgressionAction.BLOCKED, run)
         if validate_state.get("status") != "passed" or (
             not run.request.runner.legacy and "validation_artifact_digest" not in validate_state
         ):
