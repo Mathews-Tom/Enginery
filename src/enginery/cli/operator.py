@@ -20,7 +20,7 @@ from pathlib import Path
 
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
-from enginery.adapters.oci.launch import container_name_for
+from enginery.adapters.oci.launch import container_name_for, worker_container_gone
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.ledger import run_backup, run_restore, run_verify
 from enginery.domain.errors import (
@@ -234,8 +234,13 @@ def _stop_workers(
     def remove_containers(worker: WorkerView) -> tuple[str, ...]:
         engine = engine_factory(context)
         name = container_name_for(worker.operation_id)
-        existed = engine.container_exists(name)
+        existed = not worker_container_gone(engine, worker.operation_id)
         engine.remove(name, force=True)
+        if not worker_container_gone(engine, worker.operation_id):
+            raise HumanActionRequiredError(
+                f"worker container {name} still exists after removal",
+                details={"container": name, "operation_id": worker.operation_id},
+            )
         return (name,) if existed else ()
 
     report = drain_stop(

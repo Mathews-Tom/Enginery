@@ -15,6 +15,7 @@ import pytest
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import container_name_for
+from enginery.cli import stage1_runner
 from enginery.cli.operator import main
 from enginery.domain.errors import HumanActionRequiredError
 from enginery.domain.runner import EngineIdentity, ImageIdentity
@@ -23,6 +24,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
+from tests.workflows.test_stage1_isolated import _isolated
 
 _IMAGE = "sha256:" + "ab" * 32
 _LIMITS = SchedulingLimits(global_concurrency=2, per_repository_concurrency=2)
@@ -361,12 +363,25 @@ def test_drain_stop_stops_every_running_worker(
 
 
 class _FakeEngine:
-    def __init__(self, *, exists: bool, fail: bool = False) -> None:
+    """Knows containers by name only; ``survives`` keeps a removed container present."""
+
+    def __init__(
+        self,
+        *,
+        exists: bool,
+        fail: bool = False,
+        names: set[str] | None = None,
+        survives: bool = False,
+    ) -> None:
         self.exists = exists
         self.fail = fail
+        self.names = names
+        self.survives = survives
         self.removed: list[str] = []
 
     def container_exists(self, name: str) -> bool:
+        if self.names is not None:
+            return name in self.names
         return self.exists
 
     def remove(self, name: str, *, force: bool = True) -> None:
@@ -375,6 +390,10 @@ class _FakeEngine:
 
             raise MissingPrerequisiteError("engine unreachable")
         self.removed.append(name)
+        if not self.survives:
+            self.exists = False
+            if self.names is not None:
+                self.names.discard(name)
 
 
 def _fake_admission() -> OciRunnerAdmission:
@@ -444,6 +463,65 @@ def test_drain_stop_removes_the_isolated_worker_container_of_each_stopped_worker
     stopped = report["stopped"]
     assert isinstance(stopped, list)
     assert stopped[0]["containers_removed"] == [container_name_for("operation-1")]
+
+
+def test_drain_stop_looks_up_the_container_stage1_recovery_looks_up(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    tmp_path: Path,
+    worker_groups: list[int],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _dispatch(ledger_service, tmp_path, worker_groups, seconds=60)
+    engine = _FakeEngine(exists=False, names={container_name_for("operation-1")})
+    monkeypatch.setattr(stage1_runner, "OciEngine", lambda *, context=None: engine)
+    gone = stage1_runner.container_gone_for(_isolated())
+    assert gone is not None and gone("operation-1") is False
+
+    code, report, _ = _run(
+        capsys,
+        "drain",
+        "--database",
+        str(ledger_path),
+        "--stop",
+        "--owner",
+        "coordinator",
+        "--docker-context",
+        "ctx",
+        engine_factory=lambda context: engine,  # type: ignore[arg-type, return-value]
+    )
+
+    assert code == 0
+    assert report["stopped"][0]["containers_removed"] == [container_name_for("operation-1")]  # type: ignore[index]
+    assert gone("operation-1") is True, "the Stage 1 lookup agrees the container is gone"
+
+
+def test_drain_stop_fails_when_the_container_survives_its_removal(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    tmp_path: Path,
+    worker_groups: list[int],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _dispatch(ledger_service, tmp_path, worker_groups, seconds=60)
+    engine = _FakeEngine(exists=True, survives=True)
+
+    code, report, _ = _run(
+        capsys,
+        "drain",
+        "--database",
+        str(ledger_path),
+        "--stop",
+        "--owner",
+        "coordinator",
+        "--docker-context",
+        "ctx",
+        engine_factory=lambda context: engine,  # type: ignore[arg-type, return-value]
+    )
+
+    assert code == 5
+    assert "still exists after removal" in report["stopped"][0]["container_error"]  # type: ignore[index]
 
 
 def test_drain_stop_fails_loudly_when_a_container_cannot_be_removed(

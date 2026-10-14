@@ -15,9 +15,9 @@ from subprocess import CompletedProcess
 
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
+from enginery.adapters.oci.launch import worker_container_gone
 from enginery.adapters.oci.probe import OciProbeRunner
 from enginery.adapters.oci.validation import OciValidationRunner
-from enginery.adapters.runner_launch import runner_container_name
 from enginery.application.runner_ports import IsolatedCommandRunner, RunnerAdmissionPort
 from enginery.domain.runner import (
     MODEL_ACCESS_RELAY,
@@ -100,7 +100,7 @@ def container_gone_for(selection: RunnerSelection) -> Callable[[str], bool] | No
     if not selection.isolated_mode:
         return None
     engine = OciEngine(context=selection.docker_context)
-    return lambda operation_id: not engine.container_exists(runner_container_name(operation_id))
+    return lambda operation_id: worker_container_gone(engine, operation_id)
 
 
 __all__ = ["DriftedRunnerWiring", "IsolatedWiring", "container_gone_for", "isolated_wiring"]

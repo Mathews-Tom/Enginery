@@ -10,7 +10,6 @@ before an adapter uses it.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
@@ -18,6 +17,7 @@ import stat
 import sys
 from pathlib import Path
 
+from enginery.adapters.oci.launch import container_name_for
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError, WorkerFailureError
@@ -54,11 +54,6 @@ _READ_CHUNK = 1024 * 1024
 
 _WORKER_IDENTITY = ("Enginery Worker", "worker@enginery.invalid")
 _WORKER_PATH = "/usr/local/bin:/usr/bin:/bin"
-
-
-def runner_container_name(operation_id: str) -> str:
-    """The deterministic container name for one operation (stable across resumes)."""
-    return "enginery-" + hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:24]
 
 
 def worker_environment(
@@ -170,7 +165,7 @@ def isolated_command(
     bundle = task.head_branch is not None and task.base_revision is not None
     spec = LaunchSpec(
         operation_id=operation_id,
-        container_name=runner_container_name(operation_id),
+        container_name=container_name_for(operation_id),
         image=image,
         profile=runner.profile,
         harness=harness,
@@ -443,7 +438,7 @@ def _receipt_mismatches(
         ("trust_mode", receipt.trust_mode is TrustMode.ISOLATED_OCI),
         ("profile", receipt.profile_digest == expected_profile),
         ("image", receipt.image.image_id == runner.selection.image),
-        ("container", receipt.container_name == runner_container_name(operation_id)),
+        ("container", receipt.container_name == container_name_for(operation_id)),
         ("harness_version", receipt.harness_version == expected_host.executable_version),
         ("harness_protocol", receipt.harness_protocol == expected_host.protocol_fingerprint),
     )

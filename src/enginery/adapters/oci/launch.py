@@ -68,6 +68,16 @@ def container_name_for(operation_id: str) -> str:
     return f"{_CONTAINER_NAME_PREFIX}{digest[:_NAME_DIGEST_CHARS]}"
 
 
+def worker_container_gone(engine: OciEngine, operation_id: str) -> bool:
+    """Whether an operation's worker container no longer exists, running or not.
+
+    The one container lookup shared by recovery's proof that a worker is gone and by the
+    operator's drain, so both ask the engine about exactly the same name. An engine that
+    cannot be reached raises rather than answering.
+    """
+    return not engine.container_exists(container_name_for(operation_id))
+
+
 def _cpus(nano_cpus: int) -> str:
     """Exact decimal text of a cpu count, which the engine converts back to ``nano_cpus``."""
     whole, fraction = divmod(nano_cpus, _NANOS)

@@ -6,8 +6,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from enginery.adapters.oci.launch import container_name_for
 from enginery.adapters.oci.launcher import write_outcome
-from enginery.adapters.runner_launch import runner_container_name, runner_receipt_path
+from enginery.adapters.runner_launch import runner_receipt_path
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
@@ -136,7 +137,7 @@ def runner_receipt(
             rootless=True,
         ),
         image=ImageIdentity(image_id=context.selection.image, recipe_digest="sha256:" + "b" * 64),
-        container_name=runner_container_name(operation_id),
+        container_name=container_name_for(operation_id),
         host={"os": "linux"},
         effective=clean_effective_container(
             context.profile,
