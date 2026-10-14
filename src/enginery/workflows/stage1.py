@@ -69,7 +69,7 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.task_repository import out_path_for
+from enginery.engine.task_repository import out_path_for, resolve_commit
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
@@ -867,16 +867,19 @@ class Stage1RunService:
                 ordinal=generation,
             )
             repair_context = _repair_context(wait_state)
+        base_revision = self._implementation_base(request)
         task = _implementation_task(
             request,
             attempt_id=attempt_id,
             operation_id=operation_id,
             repair_context=repair_context,
+            base_revision=base_revision,
         )
         result_path = _implementation_result_path(request, operation_id=operation_id)
         dispatch = WorkflowDispatch(
             _fixture_dispatch(
                 request,
+                base_revision=base_revision,
                 node_id="implement",
                 attempt_id=attempt_id,
                 operation_id=str(operation_id),
@@ -1069,7 +1072,11 @@ class Stage1RunService:
         attempt_id = _string(implement_state, "attempt_id")
         operation_id = OperationId(_string(implement_state, "operation_id"))
         task = _implementation_task(
-            request, attempt_id=attempt_id, operation_id=operation_id, repair_context=None
+            request,
+            attempt_id=attempt_id,
+            operation_id=operation_id,
+            repair_context=None,
+            base_revision=self._implementation_base(request),
         )
         result_path = _implementation_result_path(request, operation_id=operation_id)
         return Stage1ImplementationExecutor(
@@ -1485,6 +1492,25 @@ class Stage1RunService:
                 details={"run_id": str(run_id), "node_id": node_id},
             )
 
+    def _implementation_base(self, request: Stage1RunRequest) -> str:
+        """Return the base the implementation worker and its verification must share.
+
+        An isolated worker clones only what the base reaches, so a branch or tag name does not
+        resolve inside its clone. The base is therefore a full object id: the one an existing
+        reservation already holds, else the one the repository resolves now, which the new
+        reservation then records verbatim. A trusted-local run keeps the requested revision.
+        """
+        if not request.runner.isolated_mode:
+            return request.run.base_revision
+        reservation = self.runtime.read_workspace_reservation(request.repository_id)
+        if (
+            reservation is not None
+            and reservation.run_id == str(request.run.id)
+            and reservation.status in {"reserved", "materialized", "retained"}
+        ):
+            return reservation.resolved_base_revision
+        return resolve_commit(request.repository_path, request.run.base_revision)
+
     def _require_work_ledger(self) -> WorkLedgerPort:
         if self.work_ledger is None:
             raise MissingPrerequisiteError("Stage 1 source-work ledger is not configured")
@@ -1507,13 +1533,14 @@ def _implementation_task(
     attempt_id: str,
     operation_id: OperationId,
     repair_context: str | None,
+    base_revision: str,
 ) -> HarnessTask:
     execution = request.implementation
     isolated = request.runner.isolated_mode
     if repair_context is None:
         branch_constraint = (
             f"Create and work only on branch {request.head_branch!r} from "
-            f"{request.run.base_revision!r}; "
+            f"{base_revision!r}; "
             + (
                 "commit the completed change locally. You hold no remote and no credentials: "
                 "do not push; the operator publishes the verified branch."
@@ -1546,7 +1573,7 @@ def _implementation_task(
         cost_budget=execution.cost_budget,
         selection=request.execution_selection,
         head_branch=request.head_branch if isolated else None,
-        base_revision=request.run.base_revision if isolated else None,
+        base_revision=base_revision if isolated else None,
     )
 
 
@@ -1649,6 +1676,7 @@ def _fixture_dispatch(
     operation_id: str,
     command: tuple[str, ...],
     dependencies: tuple[tuple[str, str], ...] = (),
+    base_revision: str | None = None,
 ) -> FixtureDispatch:
     return FixtureDispatch(
         run_id=str(request.run.id),
@@ -1657,7 +1685,7 @@ def _fixture_dispatch(
         repository_id=request.repository_id,
         repository_path=request.repository_path,
         workspace_path=request.workspace_path,
-        base_revision=request.run.base_revision,
+        base_revision=request.run.base_revision if base_revision is None else base_revision,
         command=command,
         expected_attempt_version=0,
         operation_id=operation_id,

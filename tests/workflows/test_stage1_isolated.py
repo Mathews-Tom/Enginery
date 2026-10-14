@@ -20,6 +20,7 @@ from typing import cast
 import pytest
 from tests.adapters.oci.support import IMAGE_ID as FAKE_IMAGE_ID
 from tests.adapters.oci.support import FakeDocker
+from tests.engine.test_isolated_workspace import _WORKER as WORKER_SCRIPT
 from tests.support.execution import selection_for
 
 from enginery.adapters.oci import image as oci_image
@@ -45,7 +46,7 @@ from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.task_repository import out_path_for
+from enginery.engine.task_repository import intake_path_for, out_path_for
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
@@ -165,6 +166,23 @@ class RecordingHarness:
         raise AssertionError("collection is not exercised here")
 
 
+class BundlingHarness(RecordingHarness):
+    """Plays the in-container worker: bundles its branch on the base the task carries."""
+
+    def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
+        super().supervised_command(task, result_path=result_path)
+        assert task.base_revision is not None and task.head_branch is not None
+        return (
+            sys.executable,
+            "-c",
+            WORKER_SCRIPT,
+            task.base_revision,
+            task.head_branch,
+            str(result_path.parent / "marker"),
+            "implement",
+        )
+
+
 class RecordingIsolatedRunner:
     """The isolated validation runner: records every call and reports a fixed exit code."""
 
@@ -274,8 +292,13 @@ def _build(
     isolated_runner: RecordingIsolatedRunner | None = None,
     validation_commands: tuple[tuple[str, ...], ...] = (("uv", "run", "pytest", "-q"),),
     deterministic_implement: bool = False,
+    symbolic_base: str | None = None,
+    harness: RecordingHarness | None = None,
 ) -> Harnessed:
     repository, base = _repository(tmp_path)
+    if symbolic_base is not None:
+        _git("branch", "-M", symbolic_base, cwd=repository)
+        base = symbolic_base
     request = _request(
         tmp_path,
         runner=runner,
@@ -285,7 +308,7 @@ def _build(
         deterministic_implement=deterministic_implement,
     )
     runtime = CoordinatorRuntime(ledger, owner="coordinator")
-    harness = RecordingHarness(ArtifactStore(tmp_path / "artifacts"))
+    harness = harness or RecordingHarness(ArtifactStore(tmp_path / "artifacts"))
     service = Stage1RunService(
         runtime=runtime,
         ledger=ledger,
@@ -682,7 +705,37 @@ def test_an_isolated_worker_is_told_to_commit_locally_and_never_to_push(
     assert "do not push" in constraint
     assert "push the completed change to origin" not in constraint
     assert task.head_branch == "enginery/run-isolated"
-    assert task.base_revision == built.request.run.base_revision
+    assert task.base_revision == _git("rev-parse", "HEAD", cwd=built.repository)
+    assert task.base_revision in constraint
+
+
+def test_a_symbolic_base_reaches_the_worker_as_a_full_object_id_and_the_bundle_verifies(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    harness = BundlingHarness(ArtifactStore(tmp_path / "artifacts"))
+    built = _build(
+        ledger_service,
+        tmp_path,
+        runner=_isolated(),
+        admission=ScriptedAdmission(),
+        symbolic_base="main",
+        harness=harness,
+    )
+    assert built.request.run.base_revision == "main"
+    oid = _git("rev-parse", "main", cwd=built.repository)
+    _qualify(built)
+
+    dispatch = _dispatch(built)
+    _reap(dispatch)
+
+    assert dispatch.task.base_revision == oid
+    assert "'main'" not in dispatch.task.constraints[-1]
+    assert oid in dispatch.task.constraints[-1]
+    head = built.runtime.verify_implementation_branch(
+        run_id=RUN_ID, head_branch=built.request.head_branch
+    )
+    intake = intake_path_for(built.request.workspace_path)
+    assert _git("--git-dir", str(intake), "rev-parse", f"{head}^", cwd=tmp_path) == oid
 
 
 def test_a_trusted_local_worker_still_pushes_and_carries_no_bundle_binding(
