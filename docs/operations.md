@@ -1574,15 +1574,23 @@ attempt really ran.
   positive control). Objects planted in the host repository as an unreachable
   blob, a stash, an unrelated branch and a tag are absent from the workspace
   clone (the base-only clone, scanned on the host and inside the container). A
-  result file replaced by a symlink to a host canary, by a FIFO, or replayed from an
-  earlier attempt is refused by the product's own collection (no-follow,
-  non-blocking, bounded read, per-launch nonce); a worker exiting 125 or 124 is
+  result file the worker replaced by a symlink or a FIFO in its own result volume never
+  reaches the host (the launcher copies regular files only, and logs the refusal), and
+  the product's own collection also refuses a symlink or FIFO on the host path
+  (no-follow, non-blocking, bounded read); a result replayed from an earlier attempt is
+  refused for lack of the per-launch nonce; a worker exiting 125 or 124 is
   classified from the launcher's own outcome file as an exited container while a
   genuine launcher refusal is classified as a refusal. The engine-side container log
   stays under its cap while a worker spams it. The disk bound of the workspace and
-  result volumes (kernel-enforced `ENOSPC` inside the worker, nothing killed) is not
-  qualified by this scenario yet: `r-m3-disk-bound-kill-hold` fails closed until it
-  is rewritten for kernel-capped volumes. A bundle whose tree exceeds
+  result volumes is the kernel's: on small capped volumes (16 MiB workspace, 8 MiB
+  result, 4000 and 64 inodes) a write past a cap, an entry burst past an inode cap and
+  a burst of 8 parallel `fallocate` processes all fail with `ENOSPC` inside the worker,
+  no more than the cap is allocated (`statvfs` and allocated blocks inside the
+  container, and the bytes read back on the host), the launcher kills nothing (outcome
+  `exited`), the receipt records `kernel-capped-volume` with the profile's byte and
+  inode numbers, a symlink or FIFO planted in the result volume never reaches the
+  host, and a worker filling a tmpfs volume past its memory limit ends in an ordinary
+  exit 137 (`r-m3-disk-*`, `r-m3-memory-fill-exit-137`). A bundle whose tree exceeds
   the intake entry cap is refused during host verification before any host checkout.
   A candidate editing `.github/workflows/x.yml` is held with nothing pushed to the
   bare origin and is published only after the explicit approval. In the real image
@@ -1611,26 +1619,51 @@ attempt really ran.
 
 ### Which assertions are observed where
 
-Every verdict is decided from a host-side observation; what a worker reports is
-recorded beside it. *Outside the container* (host processes, the engine, host
-files): the host marker directory and host file hashes (`h-*`, `z-canary-integrity`),
-the stub gateway and broker listener logs (`d-network-host-listeners-zero-connections`,
-`z-no-hosted-inference`), the bare origin's refs (`e-bare-origin-unchanged`,
-`e-operator-publication`, `r-m4-protected-path-held-then-published`), the engine's
-event stream and inspect output (`g-limits-*`, `c-container-profile`, `i-*`,
-`z-cleanup-no-stray-containers`, `r-m7-*`), the relay log and stub upstream request
-log (`f-relay-*`, `r-m5-*`), the launcher outcome file and the product's collection
-(`r-m2-*`), the host clone's object store (`r-m1-*`, host half), `docker logs`
-(`r-m3-container-log-bounded`), the host intake and verification
-(`r-m3-git-bomb-refused-at-intake`), the host hook log file (`r-m4-hooks-disabled-in-image`)
-and the host marker for the planted fsmonitor (`r-b1-fsmonitor-not-run-on-host`).
-*Inside the container* (the in-container probe's own observations, which the host
-cross-checks but cannot independently reproduce): the read, write and escape
-refusals (`a-*`, `b-*`, `c-escape-*`), the in-container half of the network
-refusals (`d-network-direct-refused`, `d-network-internet-and-dns-refused`) and
-`r-m1-*` (the container's object scan). The probe counts only an explicit refusal
-(`EROFS`, `EACCES`, `EPERM`, `ENOENT`, `ECONNREFUSED`, `ENETUNREACH`, a failed name
-lookup and similar) as refused; a timeout or an unexpected exception is
+The `runner-boundary` scenario records **63 required assertions** (64 with
+`--gateway-url`, which adds `f-relay-real-gateway-models-and-denials`) and **5
+controls** (the positive controls that prove the observers can see what they claim
+to refuse: an unhardened container reaches a host listener, the worker's network code
+executes, the host marker observer detects execution, the product-created container
+has no violation, and admission admits the qualified selection). The table
+`OBSERVED_ON_HOST` / `OBSERVED_IN_CONTAINER` / `OBSERVED_ON_BOTH` in
+`scripts/factory_gate_boundary.py` assigns every assertion to exactly one site and a
+test keeps the counts below true.
+
+- **28 are decided from the host alone** (outside the container: the engine's
+  inspect output and event stream, the receipts, host files and hashes, the stub
+  listeners' and upstream's logs, `docker logs`): `c-container-profile`,
+  `d-network-host-listeners-zero-connections`, `e-bare-origin-unchanged`,
+  `e-operator-publication`, `f-relay-bare-claude-rewrite`, `g-limits-memory`,
+  `g-limits-wall-time`, `g-limits-launcher-deadline`, `h-hooks-not-executed-on-host`,
+  `h-engine-install-unchanged`, `h-validation-in-runner`, the six `i-*`, the four
+  `z-*`, `r-m2-exit-125-spoof-classified`, `r-m3-container-log-bounded`,
+  `r-m3-disk-receipt-and-readback`, `r-m3-memory-fill-exit-137`,
+  `r-m4-protected-path-held-then-published`, `r-b1-fsmonitor-not-run-on-host` and
+  `r-m7-weaker-container-flagged`.
+- **19 are decided from what the in-container probe itself reports**, which the host
+  cannot reproduce independently (the host only confirms that nothing changed on the
+  host): the four `a-read-*`, the three `b-write-*`, the five `c-escape-*`,
+  `d-network-direct-refused`, `d-network-internet-and-dns-refused`,
+  `e-git-push-refused`, `e-scm-and-broker-network-refused`,
+  `e-credentials-unreadable`, `h-image-paths-read-only` and
+  `f-relay-models-filtered`.
+- **16 need both**, a probe observation and an independent host observation:
+  `f-relay-hardened-and-reachable`, `f-relay-allowed-routes-forwarded`,
+  `f-relay-denied-zero-upstream`, `g-limits-pids`, `g-limits-cpu`,
+  `r-m1-no-host-objects-in-workspace` (the container's object scan and the host
+  clone's), the three `r-m2-*` result-forgery assertions, `r-m3-disk-enospc-bytes`,
+  `r-m3-disk-enospc-inodes`, `r-m3-disk-parallel-fallocate-capped` (`statvfs` inside
+  the container and the bytes read back on the host), `r-m3-git-bomb-refused-at-intake`,
+  `r-m4-hooks-disabled-in-image` (the hook log is written in the workspace and read
+  by the host), `r-m5-validation-and-none-mode-cannot-reach-relay` and
+  `r-m5-concurrent-workers-isolated-networks`.
+
+The probe is delivered through the launch spec and reports through its collected
+result (and a copy in the workspace, which the launcher reads back), because the
+worker's workspace and result trees are volumes no host path reaches. The probe counts
+only an explicit refusal (`EROFS`, `EACCES`, `EPERM`, `ENOENT`, `ECONNREFUSED`,
+`ENETUNREACH`, a failed name lookup and similar; for a `git` command only a specific
+sandbox refusal message) as refused; a timeout or an unexpected exception is
 `inconclusive` and fails the assertion. `z-no-hosted-inference` is computed from
 observed connection counts (internet connects completed by workers, relay forwards
 against the stub's request log, gateway and broker listener connections and, with
@@ -1660,12 +1693,13 @@ scenario's record of that address, not this page, to know whether it answered.
   prompts, redact content or ration usage. A worker may also freeze its own
   container (for example by tracing its init process); that is bounded by the
   launcher's hard deadline, not prevented.
-- **The disk bound is not yet qualified by the gate.** The workspace and result trees
-  are tmpfs volumes whose size and inode caps the kernel enforces, so a write past a
-  cap fails inside the worker; their pages are charged to the worker's memory limit,
-  which is the real ceiling. `r-m3-disk-bound-kill-hold` records a failure until its
-  scenario (ENOSPC, inode cap, parallel `fallocate` burst, receipt mechanism) is
-  written for that mechanism.
+- **The workspace and result volumes live in memory.** They are tmpfs volumes whose
+  size and inode caps the kernel enforces, so a write past a cap fails inside the
+  worker; their pages are charged to the worker's memory limit, which is the real
+  ceiling (a worker that fills a volume past it is killed by the kernel and ends in
+  exit 137). The gate qualifies this on each engine (`r-m3-disk-*`,
+  `r-m3-memory-fill-exit-137`) with small caps; the product's default caps are not
+  filled to the byte.
 - **A worker can forge its own result.** The per-launch nonce stops a stale or
   replayed result from an earlier attempt; the worker can read the nonce of its own
   launch from its supervisor's command line, so a result is the worker's claim, never
@@ -1732,10 +1766,17 @@ relay inside the runner, after repeating the credential-read refusals in the
 same image. Without `--live` it runs the same path against a loopback stub
 upstream and records mode `local`. With `--live` it uses your real gateway and
 token file, so it is an **operator-run, owner-authorized action**: it needs
-`--gateway-url`, `--gateway-token-file` and `--confirm-single-session`, runs one
-session, enforces a process-group deadline of at most 900 seconds, and records
-the relay's request counts, the usage the harness reports and that the token
-value appears in no artifact. Nothing in Enginery starts it for you.
+`--gateway-url`, `--gateway-token-file`, `--custody-receipt` and
+`--confirm-single-session` (`--live` without `--custody-receipt` is a usage
+error, exit 2, before anything runs). The receipt is the one made on this host
+with `enginery runner custody-receipt`; a receipt for the other host (macOS
+versus the Lima VM), a malformed or tampered one, one that does not conform, or
+one naming a different gateway or token file is a HOLD with a stated reason,
+as are a gateway 401/403/429, a deadline, and a harness output that reported no
+usage figures. The run starts one session, enforces a process-group deadline of
+at most 900 seconds, and records the relay's request counts, the usage the
+harness reports and that the token value appears in no artifact. Nothing in
+Enginery starts it for you.
 
 ## Release scope and gate-deferred work
 
