@@ -755,10 +755,16 @@ def test_real_a_worker_that_swaps_its_result_for_a_link_or_fifo_cannot_make_the_
     # The planted link or FIFO stays in the volume: the host never receives it, so there is
     # nothing for it to follow, and no host file was read or replaced.
     result = real_root / "out" / "result.json"
-    assert not os.path.lexists(result)
     assert json.loads(secret.read_text("utf-8"))["output"] == "HOST SECRET"
-    with pytest.raises(WorkerFailureError, match="missing or unreadable"):
-        read_bounded_text(result, limit=1 << 20, what="worker result")
+    if os.path.lexists(result):
+        # The copy-out raced ahead of the planting loop and found the wrapper's own regular
+        # result. That is the legitimate outcome of the same race: what the host holds is a
+        # plain file, never the planted link or FIFO, and never the host secret.
+        assert stat.S_ISREG(result.lstat().st_mode)
+        assert "HOST SECRET" not in read_bounded_text(result, limit=1 << 20, what="result")
+    else:
+        with pytest.raises(WorkerFailureError, match="missing or unreadable"):
+            read_bounded_text(result, limit=1 << 20, what="worker result")
     # The launcher's own outcome is still trustworthy: the container exited zero.
     outcome = read_launch_outcome(spec.receipt_path, operation_id=spec.operation_id, what="worker")
     assert require_exited(outcome, what="worker") == 0
