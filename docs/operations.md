@@ -1517,11 +1517,14 @@ says what that scenario covers and, as precisely, what it does not.
 
 ### What the isolated runner enforces, and what was observed to refuse
 
-Each line below is an assertion of the scenario. For every one it attempted the
-action inside the container and checked the outcome from outside (file hashes,
-listener connection logs, the bare origin's refs, marker files, the engine's
-own event stream and the runner receipt), with a positive control showing the
-attempt really ran.
+Each line below summarises assertions of the scenario: the action was attempted
+inside the container and the outcome was read at the site recorded for each
+assertion (the engine's own inspect output and event stream, the runner receipt,
+file hashes, listener connection logs, the bare origin's refs, marker files, and
+what the in-container probe itself reported). Which assertions are decided on the
+host, inside the container or on both, and which have a positive control, is
+listed under [Which assertions are observed where](#which-assertions-are-observed-where);
+a positive control is not claimed for every assertion.
 
 - **Reads.** The ledger, artifact store, configuration, broker and gateway
   token files, the installed engine, holdouts, `~/.ssh` and `gh` credentials are
@@ -1570,8 +1573,8 @@ attempt really ran.
   its process group killed and its container removed, a worker that ignores
   termination is killed by the launcher's own hard deadline (exit 124), and CPU
   use is throttled to the limit.
-- **Object store, result collection and bounds** (`r-` assertions, each with a
-  positive control). Objects planted in the host repository as an unreachable
+- **Object store, result collection and bounds** (`r-` assertions). Objects
+  planted in the host repository as an unreachable
   blob, a stash, an unrelated branch and a tag are absent from the workspace
   clone (the base-only clone, scanned on the host and inside the container). A
   result file the worker replaced by a symlink or a FIFO in its own result volume never
@@ -1657,6 +1660,25 @@ test keeps the counts below true.
   `r-m4-hooks-disabled-in-image` (the hook log is written in the workspace and read
   by the host), `r-m5-validation-and-none-mode-cannot-reach-relay` and
   `r-m5-concurrent-workers-isolated-networks`.
+
+Positive controls cover a stated subset of the assertions, not every one; an
+assertion not named here is not claimed to have one. The five recorded controls
+back the claims they name: the unhardened container's connection to a host listener
+and the hardened worker's own loopback connection (the `d-network-*` refusals), the
+host marker observer seeing a deliberate execution (`h-hooks-not-executed-on-host`),
+a container created from the product's own arguments having no violation
+(`i-profile-violations-flagged`) and admission admitting the qualified selection
+(the `i-admission-*` assertions). Controls built into an assertion are:
+`a-read-protected-paths` and `a-read-filesystem-search` (a planted control file is
+read and found), `b-write-workspace-plants` (the planted writes succeed),
+`r-m1-no-host-objects-in-workspace` (the planted objects exist in the host
+repository and a base object is found by both scans), `r-m2-symlink-result-refused`
+and `r-m2-fifo-result-refused` (the same link or FIFO on the host path is real and a
+legitimate result is collected), `r-m3-container-log-bounded` (a container created
+without the log cap keeps every byte),
+`r-m5-validation-and-none-mode-cannot-reach-relay` (a model-access worker reaches
+the relay) and `r-m7-weaker-container-flagged` (the product's own container has no
+violation).
 
 The probe is delivered through the launch spec and reports through its collected
 result (and a copy in the workspace, which the launcher reads back), because the

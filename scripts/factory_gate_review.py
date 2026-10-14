@@ -1,11 +1,12 @@
 """Boundary assertions that answer the review of the isolated runner (ids prefixed ``r-``).
 
-Each assertion pairs a hostile attempt with a positive control (the same measurement on a case
-where the unsafe thing is meant to happen, so a pass cannot be an artefact of a broken probe) and
-an observation made on the *host*, outside the container: the host clone's object store, the
-launcher's own outcome file, the engine's network and container lists, the bare origin's refs, a
-stub upstream's request log, the host marker directory. What the worker itself reported is
-recorded alongside but never decides a verdict on its own.
+Each assertion pairs a hostile attempt with the observation that decides it, at the site
+``factory_gate_boundary.OBSERVED_*`` records for it: on the *host*, outside the container (the host
+clone's object store, the launcher's own outcome file, the engine's network and container lists,
+the bare origin's refs, a stub upstream's request log, the host marker directory), from what the
+in-container probe reported, or from both. Only some assertions carry a positive control (the same
+measurement on a case where the unsafe thing is meant to happen, so a pass cannot be an artefact of
+a broken probe); ``docs/operations.md`` names which.
 """
 
 from __future__ import annotations
