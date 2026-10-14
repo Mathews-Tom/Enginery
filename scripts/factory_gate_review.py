@@ -2058,7 +2058,10 @@ def _runtime_recovery(gate: Gate, trap: Path, marker: Path) -> dict[str, Any]:
     ledger = LedgerService.open(ledger_path)
     try:
         for label, sleep_seconds in (
-            ("failure", "0"),
+            # The failing worker lingers a few seconds so the observer can see its marker in the
+            # container log before the launcher removes the container (a slower engine, such as
+            # a VM, would otherwise lose the race and report a plant that did happen as missing).
+            ("failure", "6"),
             ("cancel", "120"),
         ):
             run_id = f"b1-{label}"
