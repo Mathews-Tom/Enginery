@@ -14,9 +14,9 @@ import yaml
 from tests.support.loopback_model import STUB_TOKEN, LoopbackModelServer, ToolRequest
 from tests.support.real_harness import (
     ProofWorkspace,
+    RealHarness,
     make_proof_workspace,
-    require_real_harness,
-    scrubbed_environment,
+    require_real_target,
 )
 from tests.support.runner_context import harness_task, isolated_context
 
@@ -148,62 +148,48 @@ def _tool_outcomes(json_events: str) -> dict[str, _Outcome]:
     return outcomes
 
 
-def _host_command(harness: OmpHarness, proof: ProofWorkspace, binary: Path) -> tuple[str, ...]:
-    """The adapter's isolated argv with its two container-only paths pointed at the host."""
-    command = harness.command_for(harness_task(proof.workspace, "omp"))
-    translated = [
-        str(proof.workspace)
-        if argument == WORKSPACE_MOUNT
-        else str(POLICY_ASSET)
-        if argument == "/opt/enginery/omp-isolated-policy.yml"
-        else argument
-        for argument in command
-    ]
-    prompt_flag = translated.index("-p")
-    translated[prompt_flag:prompt_flag] = ["--model", "anthropic/claude-sonnet-5-5"]
-    return (str(binary), *translated[1:])
-
-
 def _run_omp(
-    harness: OmpHarness, proof: ProofWorkspace, binary: Path, server: LoopbackModelServer
+    harness: OmpHarness, proof: ProofWorkspace, real: RealHarness, server: LoopbackModelServer
 ) -> str:
+    """Run the adapter's isolated argv on the real omp the catalog tests, against the stub."""
     task = harness_task(proof.workspace, "omp")
-    environment = scrubbed_environment(binary, proof, dict(harness.container_environment(task)))
-    (proof.home / ".omp" / "agent" / "models.yml").write_text(
-        textwrap.dedent(
-            f"""\
-            providers:
-              anthropic:
-                baseUrl: {server.base_url}
-                apiKey: {STUB_TOKEN}
-                transport: pi-native
-            """
-        ),
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        _host_command(harness, proof, binary),
-        cwd=proof.workspace,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        stdin=subprocess.DEVNULL,
-        check=False,
+    command = list(harness.command_for(task))
+    prompt_flag = command.index("-p")
+    command[prompt_flag:prompt_flag] = ["--model", "anthropic/claude-sonnet-5-5"]
+    completed = real.run(
+        command,
+        proof,
+        dict(harness.container_environment(task)),
+        home_files={".omp/agent/models.yml": _models_yaml(real.stub_url(server))},
+        # In the image the overlay is the image's own copy; on the host it is the packaged asset.
+        host_paths={"/opt/enginery/omp-isolated-policy.yml": str(POLICY_ASSET)},
     )
     assert completed.returncode == 0, completed.stderr[-500:]
     return completed.stdout
 
 
+def _models_yaml(base_url: str) -> str:
+    return textwrap.dedent(
+        f"""\
+        providers:
+          anthropic:
+            baseUrl: {base_url}
+            apiKey: {STUB_TOKEN}
+            transport: pi-native
+        """
+    )
+
+
 def test_real_omp_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_path: Path) -> None:
-    binary = require_real_harness("omp")
+    real = require_real_target("omp")
     proof = make_proof_workspace(tmp_path)
-    allowed_file = proof.workspace / "allowed.txt"
+    allowed_file = real.view(proof, proof.workspace / "allowed.txt")
+    seen_workspace = real.view(proof, proof.workspace)
     turns = [
         [
             ToolRequest("write", {"path": str(allowed_file), "content": "allowed\n"}),
             ToolRequest("bash", {"command": "git push origin HEAD"}),
-            ToolRequest("bash", {"command": f"touch {proof.workspace / 'shell-marker'}"}),
+            ToolRequest("bash", {"command": f"touch {seen_workspace / 'shell-marker'}"}),
             ToolRequest("bash", {"command": "git status && git push origin HEAD"}),
             ToolRequest("bash", {"command": "curl http://127.0.0.1:9/"}),
             ToolRequest("eval", {"language": "py", "code": "print(1)"}),
@@ -213,13 +199,13 @@ def test_real_omp_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_path: 
     ]
     harness = _isolated_harness(tmp_path)
 
-    with LoopbackModelServer("pi-native", turns) as server:
-        output = _run_omp(harness, proof, binary, server)
+    with real.stub("pi-native", turns) as server:
+        output = _run_omp(harness, proof, real, server)
 
     outcomes = _tool_outcomes(output)
     # Allowed: a write in the workspace and the two local git steps.
     assert not outcomes["call_0_0"].is_error
-    assert allowed_file.read_text(encoding="utf-8") == "allowed\n"
+    assert (proof.workspace / "allowed.txt").read_text(encoding="utf-8") == "allowed\n"
     assert not outcomes["call_1_0"].is_error
     assert not outcomes["call_2_0"].is_error
     assert proof.git("log", "-1", "--format=%s") == "add allowed file\n"
@@ -242,42 +228,33 @@ def test_real_omp_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_path: 
 
 def test_real_omp_with_default_approval_would_have_run_the_refused_calls(tmp_path: Path) -> None:
     """The control: the trusted-local default (no approval flag) lets the same calls take effect."""
-    binary = require_real_harness("omp")
+    real = require_real_target("omp")
     proof = make_proof_workspace(tmp_path)
+    seen_workspace = real.view(proof, proof.workspace)
     turns = [
         [
             ToolRequest("bash", {"command": "git push origin HEAD"}),
-            ToolRequest("bash", {"command": f"touch {proof.workspace / 'shell-marker'}"}),
+            ToolRequest("bash", {"command": f"touch {seen_workspace / 'shell-marker'}"}),
         ]
     ]
     harness = OmpHarness(
         OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
         ArtifactStore(tmp_path / "artifacts"),
     )
-    task = harness_task(proof.workspace, "omp")
-    environment = scrubbed_environment(
-        binary,
-        proof,
-        {"HOME": "/unused", "PI_CODING_AGENT_DIR": "/unused", "GIT_TERMINAL_PROMPT": "0"},
-    )
-    command = list(harness.command_for(task))
+    command = list(harness.command_for(harness_task(seen_workspace, "omp")))
     command.insert(command.index("-p"), "--model")
     command.insert(command.index("-p"), "anthropic/claude-sonnet-5-5")
-    with LoopbackModelServer("pi-native", turns) as server:
-        (proof.home / ".omp" / "agent" / "models.yml").write_text(
-            f"providers:\n  anthropic:\n    baseUrl: {server.base_url}\n"
-            f"    apiKey: {STUB_TOKEN}\n    transport: pi-native\n",
-            encoding="utf-8",
-        )
-        completed = subprocess.run(
-            (str(binary), *command[1:]),
-            cwd=proof.workspace,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            stdin=subprocess.DEVNULL,
-            check=False,
+    with real.stub("pi-native", turns) as server:
+        completed = real.run(
+            command,
+            proof,
+            {
+                "HOME": "/home/worker",
+                "PI_CODING_AGENT_DIR": "/home/worker/.omp/agent",
+                "GIT_TERMINAL_PROMPT": "0",
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+            },
+            home_files={".omp/agent/models.yml": _models_yaml(real.stub_url(server))},
         )
 
     assert completed.returncode == 0, completed.stderr[-500:]

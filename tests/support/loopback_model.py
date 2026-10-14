@@ -4,7 +4,9 @@ The server speaks just enough of the two wire formats the harness adapters can b
 (the Anthropic Messages API for Claude Code and the pi-native stream protocol for omp) to make
 the harness run its own permission machinery: the first model turn requests the scripted tool
 calls, the next turn (which carries the tool results) ends the conversation. It never reaches
-any other host, holds no credential, and answers only on 127.0.0.1.
+any other host and holds no credential. It answers on 127.0.0.1 unless a test that runs the
+harness inside a throw-away container asks it to bind every interface (``bind_host``), so the
+container can reach it through the engine's host gateway.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ class LoopbackModelServer:
     """One entry per scripted model turn; the turn after the last one answers ``final_text``."""
     final_text: str = "done"
     model: str = "claude-opus-5-5"
+    bind_host: str = "127.0.0.1"
     requests: list[RecordedRequest] = field(default_factory=list, init=False)
     _server: ThreadingHTTPServer | None = field(default=None, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
@@ -56,7 +59,12 @@ class LoopbackModelServer:
     @property
     def base_url(self) -> str:
         assert self._server is not None, "server is not started"
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return self.url_for("127.0.0.1")
+
+    def url_for(self, host: str) -> str:
+        """The base URL a client that reaches this server as ``host`` should use."""
+        assert self._server is not None, "server is not started"
+        return f"http://{host}:{self._server.server_address[1]}"
 
     def __enter__(self) -> Self:
         outer = self
@@ -84,7 +92,7 @@ class LoopbackModelServer:
                 outer._record(self, body)
                 outer._answer(self, body)
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = ThreadingHTTPServer((self.bind_host, 0), Handler)
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
