@@ -561,6 +561,7 @@ def test_a_recorded_execution_hold_makes_the_next_action_hold_with_that_hold(
             catalog=load_execution_catalog(),
             launched_command=("omp", "--model", "openai/gpt-5.2"),
             models=(),
+            probe_installed_host=lambda: InstalledHost("18.10.3", "json-protocol=3"),
         ),
     )
     assert unverified is not None

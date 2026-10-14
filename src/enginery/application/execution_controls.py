@@ -10,8 +10,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.execution_catalog import ExecutionCatalog, HostCapability, InstalledHost
-from enginery.domain.execution_receipt import EffectiveControl, ExecutionReceipt
+from enginery.domain.execution_catalog import (
+    ExecutionCatalog,
+    HostCapability,
+    InstalledHost,
+    RangedHostVersion,
+)
+from enginery.domain.execution_receipt import EffectiveControl, ExecutionReceipt, HostObservation
 from enginery.domain.execution_selection import ExecutionSelection, validate_against_catalog
 
 
@@ -109,12 +114,15 @@ def build_receipt(
     catalog: ExecutionCatalog,
     launched_command: tuple[str, ...] | None,
     models: Iterable[str],
+    probe_installed_host: Callable[[], InstalledHost | None],
 ) -> ExecutionReceipt:
     """Build a receipt from the launched command and the host's own reported models.
 
     Submitted tokens are extracted from the command that was launched. The effective model's
     evidence description comes from the catalog; effective effort has no extractor, so it is
-    unknown and says whether the catalog records any evidence for it.
+    unknown and says whether the catalog records any evidence for it. A selection that asks
+    for a native control also records the host versions it answers: the bound range, the
+    tested version and the version observed now, which is never reported as tested.
     """
     require_selection_harness(selection, harness=harness)
     host = catalog.host(harness)
@@ -142,6 +150,28 @@ def build_receipt(
         submitted_arguments=submitted,
         effective_model=model,
         effective_effort=EffectiveControl.unknown(reason=effort_reason),
+        host=_host_observation(selection, probe_installed_host),
+    )
+
+
+def _host_observation(
+    selection: ExecutionSelection, probe_installed_host: Callable[[], InstalledHost | None]
+) -> HostObservation | None:
+    version = selection.host_version
+    if selection.legacy or version is None or not selection.requires_native_controls:
+        return None
+    installed = probe_installed_host()
+    observed = None if installed is None else installed.executable_version
+    if isinstance(version, RangedHostVersion):
+        return HostObservation(
+            accepted_executable_versions=str(version.accepted),
+            tested_executable_version=str(version.tested),
+            observed_executable_version=observed,
+        )
+    return HostObservation(
+        accepted_executable_versions=None,
+        tested_executable_version=version.version,
+        observed_executable_version=observed,
     )
 
 

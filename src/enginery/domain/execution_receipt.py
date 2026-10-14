@@ -5,6 +5,10 @@ submitted arguments are the native control tokens the adapter emitted; its effec
 controls are what the host's own output reported, with the evidence it came from, or an
 explicit UNKNOWN. An effective value is never copied from, defaulted to, or inferred from
 the request: a host that does not report a control leaves it unknown.
+
+A receipt also records the host versions it answers: the range the catalog accepted, the
+one version the catalog tested, and the version actually observed. The observed version is
+never presented as tested.
 """
 
 from __future__ import annotations
@@ -84,6 +88,53 @@ class EffectiveControl:
 
 
 @dataclass(frozen=True, slots=True)
+class HostObservation:
+    """The host versions an execution answers, kept apart so none is mistaken for another.
+
+    ``accepted_executable_versions`` is the bound range (absent for an exact-bound
+    selection), ``tested_executable_version`` the version the catalog tested, and
+    ``observed_executable_version`` the installed version seen when the receipt was
+    recorded, or None when the host could not be probed.
+    """
+
+    accepted_executable_versions: str | None
+    tested_executable_version: str
+    observed_executable_version: str | None
+
+    def __post_init__(self) -> None:
+        if not self.tested_executable_version.strip():
+            raise InvalidInputError("execution receipt tested executable version must be non-blank")
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "accepted_executable_versions": self.accepted_executable_versions,
+            "tested_executable_version": self.tested_executable_version,
+            "observed_executable_version": self.observed_executable_version,
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> HostObservation | None:
+        if state is None:
+            return None
+        if not isinstance(state, Mapping):
+            raise InvalidInputError("execution receipt host must be a mapping")
+        accepted = state.get("accepted_executable_versions")
+        tested = state.get("tested_executable_version")
+        observed = state.get("observed_executable_version")
+        if (
+            (accepted is not None and not isinstance(accepted, str))
+            or not isinstance(tested, str)
+            or (observed is not None and not isinstance(observed, str))
+        ):
+            raise InvalidInputError("execution receipt host is malformed")
+        return cls(
+            accepted_executable_versions=accepted,
+            tested_executable_version=tested,
+            observed_executable_version=observed,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionReceipt:
     """The submitted and effective controls of one harness execution."""
 
@@ -92,6 +143,7 @@ class ExecutionReceipt:
     submitted_arguments: tuple[str, ...]
     effective_model: EffectiveControl
     effective_effort: EffectiveControl
+    host: HostObservation | None = None
 
     def __post_init__(self) -> None:
         if not self.harness.strip():
@@ -109,6 +161,7 @@ class ExecutionReceipt:
             "submitted_arguments": list(self.submitted_arguments),
             "effective_model": self.effective_model.to_state(),
             "effective_effort": self.effective_effort.to_state(),
+            "host": None if self.host is None else self.host.to_state(),
         }
 
     @classmethod
@@ -141,6 +194,7 @@ class ExecutionReceipt:
             effective_effort=EffectiveControl.from_state(
                 state.get("effective_effort"), name="effective_effort"
             ),
+            host=HostObservation.from_state(state.get("host")),
         )
 
 
@@ -208,5 +262,6 @@ __all__ = [
     "EffectiveControl",
     "EffectiveState",
     "ExecutionReceipt",
+    "HostObservation",
     "evaluate_effective_requirement",
 ]

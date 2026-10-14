@@ -253,6 +253,7 @@ class OmpHarness:
             catalog=self.catalog,
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
+            probe_installed_host=self.installed_host,
         )
 
     def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:

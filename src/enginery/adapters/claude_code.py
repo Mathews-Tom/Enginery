@@ -255,6 +255,7 @@ class ClaudeCodeHarness:
             catalog=self.catalog,
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
+            probe_installed_host=self.installed_host,
         )
 
     def _require_session(self, session: HarnessSession) -> None:

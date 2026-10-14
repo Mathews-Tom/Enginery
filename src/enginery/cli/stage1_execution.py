@@ -43,7 +43,7 @@ def execution_report(
             "version": selection.catalog_version,
             "digest": None if selection.catalog_digest is None else str(selection.catalog_digest),
         },
-        "host": _host(selection),
+        "host": _host(selection, receipt),
         "strict_effective": selection.strict_effective,
         "requested": {
             "model": _requested(selection.model),
@@ -59,12 +59,14 @@ def execution_report(
     }
 
 
-def _host(selection: ExecutionSelection) -> dict[str, object]:
-    """Report what the catalog accepts, what it tested, and what was observed at bind time.
+def _host(selection: ExecutionSelection, receipt: ExecutionReceipt | None) -> dict[str, object]:
+    """Report what the catalog accepts, what it tested, and what was observed, and when.
 
     The observed version is never presented as tested: an in-range version the catalog
     accepts is reported as accepted and observed, and only the catalog's own tested
-    version is reported as tested.
+    version is reported as tested. The version observed at bind time and the one observed
+    when the implementation was collected are reported apart, with whether they differ;
+    a change inside the accepted range is a difference to see, not a hold.
     """
     version = selection.host_version
     if version is None:
@@ -73,11 +75,21 @@ def _host(selection: ExecutionSelection) -> dict[str, object]:
         binding, accepted, tested = "range", str(version.accepted), str(version.tested)
     else:
         binding, accepted, tested = "exact", None, version.version
+    at_bind = selection.observed_host_version
+    at_execution = (
+        None
+        if receipt is None or receipt.host is None
+        else receipt.host.observed_executable_version
+    )
     return {
         "binding": binding,
         "accepted_executable_versions": accepted,
         "tested_executable_version": tested,
-        "observed_executable_version_at_bind": selection.observed_host_version,
+        "observed_executable_version_at_bind": at_bind,
+        "observed_executable_version_at_execution": at_execution,
+        "observed_version_changed": None
+        if at_bind is None or at_execution is None
+        else at_bind != at_execution,
         "protocol_fingerprint": selection.host_protocol_fingerprint,
     }
 
