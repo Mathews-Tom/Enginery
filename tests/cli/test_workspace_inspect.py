@@ -12,7 +12,7 @@ from enginery.cli.main import main
 from enginery.domain.errors import ExternalConflictError
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.workspace import GitWorktreeBackend
+from enginery.engine.workspace import WORKSPACE_MODE_TASK_LOCAL_CLONE, GitWorktreeBackend
 from enginery.ledger.service import LedgerService
 
 
@@ -35,12 +35,22 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _dispatch_materialized_workspace(
-    ledger: LedgerService, *, tmp_path: Path, run_id: str, repository_id: str, now: datetime
-) -> None:
+    ledger: LedgerService,
+    *,
+    tmp_path: Path,
+    run_id: str,
+    repository_id: str,
+    now: datetime,
+    mode: str | None = None,
+    symbolic_base: str | None = None,
+) -> str:
     """Drive a real node through CoordinatorRuntime.tick so its workspace reservation
     reaches "materialized" -- the live-leased state a release must refuse."""
     repository, base_revision = _repository(tmp_path)
+    if symbolic_base is not None:
+        _git("branch", "-M", symbolic_base, cwd=repository)
     runtime = CoordinatorRuntime(ledger, owner="operator")
+    extra = {} if mode is None else {"workspace_mode": mode}
     request = FixtureDispatch(
         run_id=run_id,
         node_id="node-1",
@@ -48,10 +58,11 @@ def _dispatch_materialized_workspace(
         repository_id=repository_id,
         repository_path=repository,
         workspace_path=tmp_path / f"workspace-{repository_id}",
-        base_revision=base_revision,
+        base_revision=base_revision if symbolic_base is None else symbolic_base,
         command=(sys.executable, "-c", "import time; time.sleep(60)"),
         expected_attempt_version=0,
         operation_id=f"operation-{run_id}",
+        **extra,  # type: ignore[arg-type]
     )
     tick = runtime.tick(
         now=now,
@@ -61,6 +72,7 @@ def _dispatch_materialized_workspace(
         requests=(request,),
     )
     assert len(tick.dispatched) == 1
+    return base_revision
 
 
 def test_workspace_inspect_reports_no_reservations_on_empty_ledger(
@@ -406,3 +418,36 @@ def test_workspace_inspect_text_output_lists_status_and_run(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "[materialized] repository-1 run=run-1" in out
+
+
+def test_workspace_inspect_shows_the_mode_and_the_resolved_base_of_an_isolated_reservation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    ledger = LedgerService.open(database)
+    try:
+        oid = _dispatch_materialized_workspace(
+            ledger,
+            tmp_path=tmp_path,
+            run_id="run-1",
+            repository_id="repository-1",
+            now=datetime(2026, 7, 22, 12, 0, tzinfo=UTC),
+            mode=WORKSPACE_MODE_TASK_LOCAL_CLONE,
+            symbolic_base="main",
+        )
+    finally:
+        ledger.close()
+
+    assert (
+        main(["workspace", "inspect", "--database", str(database), "--owner", "operator", "--json"])
+        == 0
+    )
+    (entry,) = json.loads(capsys.readouterr().out)
+    assert entry["mode"] == WORKSPACE_MODE_TASK_LOCAL_CLONE
+    assert entry["base_revision"] == "main"
+    assert entry["base_oid"] == oid
+
+    assert main(["workspace", "inspect", "--database", str(database), "--owner", "operator"]) == 0
+    line = capsys.readouterr().out
+    assert f"mode={WORKSPACE_MODE_TASK_LOCAL_CLONE}" in line
+    assert f"base={oid}" in line
