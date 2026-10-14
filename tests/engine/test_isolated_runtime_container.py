@@ -122,14 +122,17 @@ def test_a_container_commits_on_a_branch_and_the_host_verifies_and_cleans_it(
         head_branch=_BRANCH,
         base_revision=base,
     )
+    permissions = isolated_permission_mapping("omp")
     command = isolated_command(
         runner=context,
         harness="omp",
         task=task,
         result_path=out_path_for(workspace) / "result.json",
-        permissions=isolated_permission_mapping("omp"),
+        permissions=permissions,
         environment=worker_environment(()),
-        inner_command=("sh", "-c", _WORKER_SCRIPT),
+        # The launcher refuses an inner command that does not carry the recorded permission
+        # arguments; the stand-in worker script receives them as ignored positional parameters.
+        inner_command=("sh", "-c", _WORKER_SCRIPT, "sh", *permissions.arguments),
     )
     logs = root / "logs"
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
