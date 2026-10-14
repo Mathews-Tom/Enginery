@@ -251,8 +251,7 @@ def test_the_receipt_records_the_bound_mechanism_and_the_harness_identity(
     assert receipt.harness_protocol == "a" * 64
     assert receipt.bounds is not None
     assert receipt.bounds.disk_mechanism == DISK_BOUND_KERNEL_VOLUME == "kernel-capped-volume"
-    assert receipt.bounds.poll_seconds is None  # nothing on the host measures a kernel cap
-    assert "poll_seconds" not in receipt.bounds.to_state()
+    assert not hasattr(receipt.bounds, "poll_seconds")  # nothing on the host measures a kernel cap
     assert receipt.bounds == resource_bounds(spec.profile)
     assert receipt.bounds.workspace_bytes == 4096 * 1024 * 1024
     assert receipt.bounds.out_bytes == 1024 * 1024 * 1024
@@ -959,7 +958,7 @@ def test_real_a_parallel_fallocate_burst_is_capped_by_the_kernel(
     real_root: Path,
 ) -> None:
     """Eight processes each ask for 64 MiB of a 16 MiB workspace at once: the kernel refuses
-    with ENOSPC; allocation never exceeds the cap (no host monitor is outrun, none exists)."""
+    with ENOSPC; allocation never exceeds the cap."""
     profile = _small_caps(real_profile, workspace_mib=16)
     spec = _real_spec(real_root, real_operation(), standin_image, profile)
 

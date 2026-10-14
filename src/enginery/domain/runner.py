@@ -653,12 +653,7 @@ what a worker can keep in them."""
 
 @dataclass(frozen=True, slots=True)
 class ResourceBounds:
-    """The disk and log bounds one attempt ran under, and the mechanism that enforces them.
-
-    ``poll_seconds`` is the measurement interval of a host-side monitor and is absent for a
-    mechanism the kernel enforces (it is left out of the recorded state, so receipts that
-    carry it keep their digest).
-    """
+    """The disk and log bounds one attempt ran under, and the mechanism that enforces them."""
 
     disk_mechanism: str
     workspace_bytes: int
@@ -669,7 +664,6 @@ class ResourceBounds:
     log_driver: str
     log_max_size: str
     log_max_file: int
-    poll_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.disk_mechanism, "resource bounds disk mechanism")
@@ -677,7 +671,7 @@ class ResourceBounds:
         _require_text(self.log_max_size, "resource bounds log size")
 
     def to_state(self) -> dict[str, object]:
-        state: dict[str, object] = {
+        return {
             "disk_mechanism": self.disk_mechanism,
             "workspace_bytes": self.workspace_bytes,
             "out_bytes": self.out_bytes,
@@ -688,16 +682,10 @@ class ResourceBounds:
             "log_max_size": self.log_max_size,
             "log_max_file": self.log_max_file,
         }
-        if self.poll_seconds is not None:
-            state["poll_seconds"] = self.poll_seconds
-        return state
 
     @classmethod
     def from_state(cls, state: object) -> ResourceBounds:
         data = _mapping(state, "resource bounds")
-        poll = data.get("poll_seconds")
-        if poll is not None and (not isinstance(poll, int | float) or isinstance(poll, bool)):
-            raise InvalidInputError("resource bounds poll_seconds must be a number")
         return cls(
             disk_mechanism=_text(data, "disk_mechanism", "resource bounds"),
             workspace_bytes=_integer(data, "workspace_bytes", "resource bounds"),
@@ -708,7 +696,6 @@ class ResourceBounds:
             log_driver=_text(data, "log_driver", "resource bounds"),
             log_max_size=_text(data, "log_max_size", "resource bounds"),
             log_max_file=_integer(data, "log_max_file", "resource bounds"),
-            poll_seconds=None if poll is None else float(poll),
         )
 
 

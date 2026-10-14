@@ -602,7 +602,7 @@ def test_an_engine_identity_cannot_be_constructed_with_a_value_it_could_not_deco
         EngineIdentity(**fields)  # type: ignore[arg-type]
 
 
-def test_resource_bounds_omit_the_poll_interval_for_a_kernel_enforced_cap() -> None:
+def test_resource_bounds_carry_only_the_kernel_enforced_fields() -> None:
     from enginery.domain.runner import (
         DISK_BOUND_KERNEL_VOLUME,
         ResourceBounds,
@@ -619,10 +619,10 @@ def test_resource_bounds_omit_the_poll_interval_for_a_kernel_enforced_cap() -> N
         "log_max_file": 2,
     }
     kernel = ResourceBounds(disk_mechanism=DISK_BOUND_KERNEL_VOLUME, **fields)
-    monitored = ResourceBounds(disk_mechanism="host-monitor-kill-hold", poll_seconds=2.0, **fields)
 
-    assert "poll_seconds" not in kernel.to_state()
-    assert monitored.to_state()["poll_seconds"] == 2.0
-    # A receipt recorded by the earlier monitor still decodes, with the same recorded state.
-    assert ResourceBounds.from_state(monitored.to_state()) == monitored
+    # Nothing on the host measures a kernel cap, so no measurement interval exists.
+    assert not hasattr(kernel, "poll_seconds")
+    assert set(kernel.to_state()) == {"disk_mechanism", *fields}
     assert ResourceBounds.from_state(kernel.to_state()) == kernel
+    with pytest.raises(TypeError):
+        ResourceBounds(disk_mechanism=DISK_BOUND_KERNEL_VOLUME, poll_seconds=2.0, **fields)
