@@ -44,7 +44,6 @@ _MAX_DECISION_CHARS = 200
 _MAX_TEXT_CHARS = 1024
 _MODE_PATTERN = re.compile(r"^[0-7]{4}$")
 _OWNER_ONLY_MODE = "0600"
-_LIMA_GATEWAY_HOST = "host.lima.internal"
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
@@ -336,7 +335,7 @@ def build_custody_receipt(
             "regenerate the gateway token: omp auth-gateway token --regenerate",
             f"delete the token file at {path} on the macOS host if it is no longer needed",
         )
-    elif gateway.host == _LIMA_GATEWAY_HOST or host is CustodyHost.UBUNTU_LIMA:
+    else:  # CustodyHost has exactly two members: the remaining host is the Lima VM
         location = "remote-through-macos-gateway"
         custody = (
             "custody stays on the macOS host: the VM reaches the macOS gateway at "
@@ -351,23 +350,6 @@ def build_custody_receipt(
             "stop the relay in the VM: enginery runner relay down",
             "regenerate the gateway token on the macOS host: omp auth-gateway token --regenerate",
             f"remove the VM token copy at {path}",
-        )
-    else:
-        location = f"gateway-{gateway.host}"
-        custody = (
-            f"the gateway at {gateway.url} (host {gateway.host}) holds the provider grants; "
-            f"this host holds only a token copy at {path} "
-            f"(observed mode {observed_mode}, required 0600)"
-        )
-        revocation = (
-            f"on the gateway host {gateway.host}: omp auth-gateway token --regenerate "
-            "(invalidates this host's copy)",
-            "restart that gateway so it only accepts the regenerated token",
-        )
-        cleanup = (
-            "stop the relay: enginery runner relay down",
-            f"regenerate the gateway token on {gateway.host}: omp auth-gateway token --regenerate",
-            f"remove the token copy at {path}",
         )
     return AuthCustodyReceipt(
         host=host,
