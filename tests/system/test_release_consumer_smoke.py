@@ -294,3 +294,29 @@ def test_a_printed_digest_that_differs_from_the_request_fails_the_pin_check(
     packaged = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)
     with pytest.raises(ConsumerSmokeError, match="differs from its printed report"):
         release_consumer_smoke._check_valid_pins(launcher, root=tmp_path, packaged=packaged)
+
+
+def test_the_packaged_stand_in_versions_are_in_range_and_never_the_tested_version(
+    tmp_path: Path,
+) -> None:
+    versions = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)["versions"]
+
+    assert isinstance(versions, dict)
+    assert set(versions) == {"omp", "claude-code"}
+    for host in versions.values():
+        assert host["stand_in"] != host["tested"]
+
+
+def test_a_stand_in_that_equals_the_tested_version_fails_the_pin_check(
+    tmp_path: Path,
+) -> None:
+    real = release_consumer_smoke._packaged_data(_PYTHON, root=tmp_path)
+    versions = {
+        harness: {**host, "stand_in": host["tested"]}  # type: ignore[dict-item]
+        for harness, host in real["versions"].items()  # type: ignore[attr-defined]
+    }
+
+    with pytest.raises(ConsumerSmokeError, match="other than the tested"):
+        release_consumer_smoke._check_valid_pins(
+            _EXECUTABLE, root=tmp_path, packaged={**real, "versions": versions}
+        )

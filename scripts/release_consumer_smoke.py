@@ -259,7 +259,8 @@ def check_bound_selection(
 
     The host section must name the catalog's accepted range and tested version and the
     version observed when the request was built, and the observed version must be the
-    stand-in host's own, never the tested one by default.
+    stand-in host's own, never the tested one by default; callers pass a version other than
+    the tested one so a copy of the tested version into the observed one is detected.
     """
     selection = document.get("execution_selection")
     if not isinstance(selection, dict):
@@ -311,12 +312,23 @@ def _packaged_data(python: Path, *, root: Path) -> Mapping[str, object]:
         "from enginery.evidence.acceptance_baseline import load_acceptance_baseline\n"
         "catalog = load_execution_catalog()\n"
         "baseline = load_acceptance_baseline()\n"
+        "def stand_in(host):\n"
+        "    tested = host.version.tested\n"
+        "    version = type(tested)(tested.major, tested.minor, tested.patch + 1)\n"
+        "    assert host.version.accepted.contains(version), host.harness\n"
+        "    return str(version)\n"
         "print(json.dumps({\n"
         "    'catalog_version': catalog.version,\n"
         "    'catalog_digest': str(catalog.digest),\n"
         "    'hosts': {host.harness: host.support_tier.value for host in catalog.hosts},\n"
-        "    'versions': {host.harness: [str(host.version.accepted), str(host.version.tested)]\n"
-        "                 for host in catalog.hosts},\n"
+        "    'versions': {\n"
+        "        host.harness: {\n"
+        "            'accepted': str(host.version.accepted),\n"
+        "            'tested': str(host.version.tested),\n"
+        "            'stand_in': stand_in(host),\n"
+        "        }\n"
+        "        for host in catalog.hosts\n"
+        "    },\n"
         "    'baseline_version': baseline.baseline_version,\n"
         "    'journeys': len(baseline.journeys),\n"
         "    'check_ids': sorted(baseline.check_ids),\n"
@@ -361,17 +373,24 @@ def _check_valid_pins(executable: Path, *, root: Path, packaged: Mapping[str, ob
     versions = packaged["versions"]
     if not isinstance(versions, dict):
         raise ConsumerSmokeError(f"packaged host versions are {versions!r}")
-    accepted = (
+    pins = (
         ("claude-code", _CLAUDE_MODEL, "high"),
         ("omp", _OMP_MODEL, "medium"),
     )
-    for harness, model, effort in accepted:
+    for harness, model, effort in pins:
         output = root / f"request-{harness}.json"
-        accepted, tested = versions[harness]
+        host_versions = versions[harness]
+        accepted_range = str(host_versions["accepted"])
+        tested = str(host_versions["tested"])
+        observed = str(host_versions["stand_in"])
+        if observed == tested:
+            raise ConsumerSmokeError(
+                f"the {harness} stand-in must run a version other than the tested {tested}"
+            )
         command = [
             *_build_request_command(executable, root=root, output=output),
             "--harness-executable",
-            str(_stand_in_host(root, harness, tested)),
+            str(_stand_in_host(root, harness, observed)),
             "--harness-provider",
             harness,
             "--model",
@@ -398,9 +417,9 @@ def _check_valid_pins(executable: Path, *, root: Path, packaged: Mapping[str, ob
             effort=effort,
             catalog_version=catalog_version,
             catalog_digest=catalog_digest,
-            accepted_versions=accepted,
+            accepted_versions=accepted_range,
             tested_version=tested,
-            observed_version=tested,
+            observed_version=observed,
         )
     _note("valid pins write requests whose selection is bound to the packaged catalog")
 
