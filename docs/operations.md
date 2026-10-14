@@ -481,7 +481,8 @@ A run's `implement` node reserves one workspace per repository for the
 run's lifetime. If a run is aborted outside the normal lifecycle (the
 process was killed, or a human decides not to continue), that
 reservation can outlive the run. `enginery workspace inspect` lists
-every repository's current reservation, from the same durable state
+every repository's current reservation (with its workspace `mode` and the resolved base
+object id `base_oid`), from the same durable state
 `stage1`'s coordinator already reads:
 
 ```bash
@@ -831,8 +832,9 @@ enforced while the tree is streamed so a tree that expands from a few objects is
 stopped early), and never runs git inside the worker's repository, whose
 configuration and hooks the worker controls. That includes recovery after a worker
 failure, cancel, human wait or retry: for a task-local clone the host proves the
-launcher is gone (and, where an engine probe is wired, that the runner container is
-gone) and checks `.git/index.lock` with a non-following `lstat`; it never runs
+launcher is gone and, for a run bound to the isolated profile, asks that run's own
+container engine whether the runner container is gone (an engine that cannot answer holds
+recovery) and checks `.git/index.lock` with a non-following `lstat`; it never runs
 `git status` there. Host git in linked worktrees (the `trusted-local` backend) runs with
 `core.fsmonitor=false`, `core.hooksPath=/dev/null` and an allowlisted environment. An
 isolated worker commits locally and holds no remote and no credentials; its branch
@@ -862,12 +864,12 @@ each mapping is recorded in the runner receipt:
 
 The host-side launcher records how every attempt ended in its own file beside the
 runner receipt (outside both worker mounts, mode `0600`): refused, hard deadline,
-stopped, faulted, killed for outgrowing a disk bound, or "the container exited
-with N". Collection and isolated validation classify an attempt from that record
-and never from the launcher's process exit status, because the contained command
-can exit with any status, including the launcher's own `124` and `125`. A refused,
-timed-out, stopped, faulted or unfinished launch is a worker failure; a worker that
-outgrew a disk bound is held for the operator.
+stopped, faulted, or "the container exited with N". Collection and isolated
+validation classify an attempt from that record and never from the launcher's process
+exit status, because the contained command can exit with any status, including the
+launcher's own `124` and `125`. A refused, timed-out, stopped, faulted or unfinished
+launch is a worker failure, and so is a nonce-bound `"succeeded"` result from a
+container that exited non-zero.
 
 Everything the worker wrote is untrusted input. The host opens the result file
 relative to its directory with `O_NOFOLLOW | O_NONBLOCK`, checks the open
@@ -880,25 +882,30 @@ is refused.
 
 The container's log is rotated (`json-file`, 2 files of at most 1 MiB), so a
 process that writes to the container's stdout cannot fill the engine's disk. The
-workspace and result directories are bounded by size and entry count (4 GiB and
-500,000 entries for the workspace, 1 GiB and 100,000 entries for the result
-directory by default; a profile can lower them). A capped store is not available
-for a bind mount of a host directory on Docker Desktop, so the launcher measures
-both trees every couple of seconds while the worker runs (symlinks never followed,
-hard links counted once, an unreadable directory counts as over the bound) and
-kills the container when either is exceeded; each file is additionally limited to
-the smaller of the two size bounds by the kernel's per-file size limit, so one
-write cannot run far ahead of the measurement. The receipt records the mechanism
-(`host-monitor-kill-hold`) and the numbers. The bound holds to within one polling
-interval of writes, not exactly.
+workspace and result trees are tmpfs volumes created per attempt with a size and an
+inode cap the kernel enforces (4 GiB and 500,000 entries for the workspace, 1 GiB and
+100,000 entries for the result directory by default; a profile can lower them): a
+write past a cap fails inside the worker with `ENOSPC`, however many processes write
+at once, and nothing on the host measures or races the worker. This works the same on
+Docker Desktop and on rootless Docker. The receipt records the mechanism
+(`kernel-capped-volume`) and the numbers. tmpfs pages are charged to the container's
+memory limit, so that limit (4 GiB by default) is the real ceiling on what a worker
+can keep in the two volumes together with `/tmp` and the home directory; a worker that
+fills them is ended by the kernel's out-of-memory kill, an ordinary non-zero exit.
+Each file is additionally limited by the kernel's per-file size limit. Orphaned
+volumes of a dead launcher are removed by reconcile.
 
 The workspace, result and intake directories must sit in one private parent
-(operator-owned, mode `0700`); the launcher refuses a launch otherwise. Where the
-engine presents a bind mount to the container user with the operator's own
-authority (Docker Desktop), no permission is opened; where the container's uid is
-a different host uid (rootless or rootful Docker on Linux), the trees are opened
-`a+rwX` inside that private parent, and the worker creates everything with umask 0
-so the host can always delete it again.
+(operator-owned, mode `0700`); the launcher refuses a launch otherwise. No host
+directory is ever mounted into a worker, so no permission on the host tree is opened
+for it: the launcher streams the workspace into the worker's volume as a tar archive
+owned by the worker's uid, and after the worker exits on its own it reads the result
+file, the bundle and the workspace back with an extraction that opens every
+directory with `O_NOFOLLOW` (a symlink the worker planted never redirects a write),
+skips FIFOs and devices, strips setuid and sticky bits, caps bytes and entries, keeps
+a 1 GiB free-space reserve on the host disk and replaces the host workspace only
+after a complete extraction. A killed, timed-out or faulted attempt copies nothing
+back, so a retry sees the workspace as it was before the attempt.
 
 The launcher labels each container with its own pid, start identity and host. A
 launcher that is killed outright (a SIGKILL after the stop grace, a crash) leaves
