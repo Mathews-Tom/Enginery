@@ -54,6 +54,7 @@ from enginery.domain.runner import (
 from factory_gate_evidence import EvidenceBuilder
 from factory_gate_support import (
     GATE_LABEL,
+    OBS_FILE_IN_WORKSPACE,
     PROBE_IN_CONTAINER,
     AttemptResult,
     ContainerObserver,
@@ -69,11 +70,12 @@ from factory_gate_support import (
     launcher_environment,
     make_spec,
     new_task_workspace,
+    probe_seed_files,
     read_json,
+    read_probe_observation,
     read_receipt,
     run_with_deadline,
     snapshot_tree,
-    stage_probe,
     violations_of,
 )
 
@@ -372,8 +374,9 @@ class Gate:
         profile = profile or self.profile
         workspace = workspace or new_task_workspace(fixture, name)
         out = Path(str(workspace) + ".out")
-        if stage:
-            stage_probe(out, params)
+        out.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):  # only this attempt's own copy may be read
+            (workspace / OBS_FILE_IN_WORKSPACE).unlink()
         operation_id = f"gate:{self.rid}:{name}"
         # ``product_receipt_path``: the receipt (and its launcher outcome) where the product's own
         # collection looks for them, ``<receipt root>/<operation id>.runner-receipt.json``.
@@ -392,6 +395,7 @@ class Gate:
             time_budget_seconds=time_budget,
             docker_context=self.docker_context,
             env=env,
+            seed_files=probe_seed_files(params) if stage else (),
             bundle_branch=bundle_branch,
             bundle_base=fixture.base_revision if bundle_branch else None,
         )
@@ -400,7 +404,11 @@ class Gate:
         if spec_overrides:
             spec = dataclasses.replace(spec, **spec_overrides)
         inner_command = list(inner) if inner is not None else ["python3", PROBE_IN_CONTAINER, mode]
-        spec_ref = self.raw_write(f"{name}.launch-spec.json", spec.to_state())
+        spec_state = spec.to_state()
+        spec_state["seed_files"] = [  # the probe source is not repeated in every raw record
+            [path, f"<{len(content)} characters>"] for path, content in spec.seed_files
+        ]
+        spec_ref = self.raw_write(f"{name}.launch-spec.json", spec_state)
         self.track_container(spec.container_name)
         self.track_network(spec.attempt_network)
         observer = ContainerObserver(self.engine, spec.container_name) if observe else None
@@ -442,7 +450,7 @@ class Gate:
         if outcome is not None:
             self.raw_write(f"{name}.launch-outcome.json", outcome)
         result = read_json(out / "result.json")
-        obs = read_json(out / "obs.json")
+        obs = read_probe_observation(result, workspace)
         if result is not None:
             self.raw_write(f"{name}.result.json", result)
         if obs is not None:

@@ -55,9 +55,11 @@ from enginery.domain.errors import (
 )
 from enginery.domain.ids import OperationId
 from enginery.domain.runner import (
+    DISK_BOUND_KERNEL_VOLUME,
     NO_NETWORK,
     RELAY_HOSTNAME,
     RELAY_PORT,
+    ResourceLimits,
     RunnerContext,
     RunnerProfile,
     RunnerSelection,
@@ -113,10 +115,26 @@ REQUIRED: dict[str, str] = {
         "A worker spamming stdout and stderr keeps the container log under the configured cap "
         "(an engine container without the cap keeps all of it)"
     ),
-    "r-m3-disk-bound-kill-hold": (
-        "NOT QUALIFIED (fails closed until rewritten for kernel-capped volumes): a worker "
-        "outgrowing the workspace or result volume (bytes, inodes, parallel fallocate burst) "
-        "fails with ENOSPC inside the worker and is not killed by the launcher"
+    "r-m3-disk-enospc-bytes": (
+        "A worker writing past the workspace cap or past the result cap fails with ENOSPC inside "
+        "the worker; no more than the cap is allocated and the launcher records an ordinary exit"
+    ),
+    "r-m3-disk-enospc-inodes": (
+        "A worker creating entries past an inode cap fails with ENOSPC inside the worker and the "
+        "entry count never exceeds the cap"
+    ),
+    "r-m3-disk-parallel-fallocate-capped": (
+        "A burst of 8 parallel fallocate processes into a small workspace is capped by the "
+        "kernel: the large allocations fail and at most the cap is allocated (statvfs inside the "
+        "container and the bytes read back on the host)"
+    ),
+    "r-m3-disk-receipt-and-readback": (
+        "The receipt records the kernel-capped-volume mechanism with the profile's byte and "
+        "inode numbers; a symlink or FIFO planted in the result volume never reaches the host"
+    ),
+    "r-m3-memory-fill-exit-137": (
+        "A worker filling a tmpfs volume past the memory limit ends in exit 137 recorded as an "
+        "ordinary exit, not a launcher kill"
     ),
     "r-m3-git-bomb-refused-at-intake": (
         "A bundle whose tree holds more entries than the intake cap is refused by host "
@@ -455,23 +473,56 @@ def step_m1(gate: Gate) -> None:
 # --- M2: result collection ---------------------------------------------------------------------
 
 
+_FORGE_CANARY_FILE = "/out/gate-forge-canary.txt"
+
+
 def _forged_attempt(gate: Gate, name: str, kind: str, legit: AttemptResult) -> AttemptResult:
+    """A worker that plants a hostile ``result.json`` in its own result volume and kills the
+    supervisor, so nothing overwrites it. Nothing is staged on the host: the result directory
+    on the host starts empty and only what the launcher chooses to copy out can appear in it."""
     assert gate.fixture is not None
     workspace = new_task_workspace(gate.fixture, name)
+    stale = (legit.out / "result.json").read_text(encoding="utf-8")
     out = Path(str(workspace) + ".out")
     out.mkdir(parents=True, exist_ok=True)
-    stale = (legit.out / "result.json").read_bytes()
-    (out / "old-result.json").write_bytes(stale)
-    (out / "result.json").write_bytes(stale)  # a stale result present before the launch
-    canary = gate.fixture.canaries["artifact"]
+    (out / "result.json").write_text(stale, encoding="utf-8")  # present before the launch
     params: dict[str, Any] = {
         "kind": kind,
-        "target": str(canary.path),
-        "source": "/out/old-result.json",
+        "target": _FORGE_CANARY_FILE,
+        "canary": _forge_canary(gate),
+        "stale_result": stale,
     }
     return gate.attempt(
         name, "forge", params, workspace=workspace, product_receipt_path=True, time_budget=60
     )
+
+
+def _forge_canary(gate: Gate) -> str:
+    return f"gate-forge-canary-{gate.rid}"
+
+
+def _tree_contains(root: Path, needle: str) -> bool:
+    """Whether any regular file under ``root`` holds ``needle`` (never following a link)."""
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            if needle.encode() in path.read_bytes():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _host_plant(path: Path, kind: str, target: Path | None = None) -> None:
+    """The host-side control: the same hostile file the worker planted, on the host path."""
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    if kind == "symlink":
+        assert target is not None
+        os.symlink(target, path)
+    else:
+        os.mkfifo(path)
 
 
 def step_m2(gate: Gate) -> None:
@@ -487,7 +538,18 @@ def step_m2(gate: Gate) -> None:
 
     # symlink -------------------------------------------------------------------------------
     symlink = _forged_attempt(gate, "m2-symlink", "symlink", legit)
+    worker_canary = _forge_canary(gate)
+    # The host path held a stale result before the launch: nothing is left there afterwards, so
+    # the launcher removed it and the worker's link was not copied in its place.
+    reached_host = os.path.lexists(symlink.out / "result.json")
+    canary_on_host = _tree_contains(symlink.out, worker_canary) or _tree_contains(
+        symlink.workspace, worker_canary
+    )
+    launcher_refused_link = "is not a regular file" in symlink.launcher_stderr
+    # Control: the same link on the host path is real (a naive read follows it to the canary)
+    # and the product's own bounded read still refuses it.
     link_path = symlink.out / "result.json"
+    _host_plant(link_path, "symlink", canary.path)
     link_is_symlink = link_path.is_symlink()
     try:
         naive = link_path.read_text(encoding="utf-8")
@@ -496,59 +558,90 @@ def step_m2(gate: Gate) -> None:
     naive_follows = canary.value in naive
     collected = _collect(gate, symlink)
     leaked = canary.value in json.dumps(collected)
+    link_path.unlink()
     _assert(
         gate,
         "r-m2-symlink-result-refused",
         passed=legit_collect.get("accepted") is True
+        and (symlink.obs or {}).get("kind") == "symlink"
+        and not reached_host
+        and not canary_on_host
+        and launcher_refused_link
         and link_is_symlink
         and naive_follows
         and collected.get("accepted") is False
         and not leaked
-        and _outcome_state(symlink) == "exited"
-        and (symlink.obs or {}).get("kind") == "symlink",
+        and _outcome_state(symlink) == "exited",
         commands=[*_attempt_commands(gate, symlink), *commands_collect],
         observed={
-            "result_is_symlink_on_host": link_is_symlink,
-            "naive_open_follows_to_canary": naive_follows,
-            "collection": collected,
+            "worker_planted": (symlink.obs or {}).get("kind"),
+            "result_path_exists_on_host_after_the_attempt": reached_host,
+            "worker_canary_found_on_host": canary_on_host,
+            "launcher_logged_not_a_regular_file": launcher_refused_link,
+            "control_host_path_is_symlink": link_is_symlink,
+            "control_naive_open_follows_to_canary": naive_follows,
+            "control_collection_of_the_host_symlink": collected,
             "canary_in_collection_output": leaked,
             "control_legit_attempt_collection": legit_collect,
             "launcher_outcome": symlink.outcome,
         },
-        expected="the symlinked result is refused and no canary content is read",
+        expected=(
+            "a symlink the worker planted as its result never reaches the host (the launcher "
+            "copies regular files only) and no canary content is read; the product's bounded "
+            "read also refuses a symlink on the host path"
+        ),
         observer={
-            "source": "host: lstat of the result path, a naive read, and the product's "
-            "read_attempt_result on it"
+            "source": "host: lstat of the result path, a tree search, the launcher's own log, "
+            "and the product's read_attempt_result on a host symlink (control)"
         },
         attempts=(legit, symlink),
     )
 
     # FIFO ----------------------------------------------------------------------------------
     fifo = _forged_attempt(gate, "m2-fifo", "fifo", legit)
+    fifo_reached_host = os.path.lexists(fifo.out / "result.json")
+    fifo_launcher_refused = "is not a regular file" in fifo.launcher_stderr
+    fifo_path = fifo.out / "result.json"
+    _host_plant(fifo_path, "fifo")
     try:
-        is_fifo = stat.S_ISFIFO((fifo.out / "result.json").lstat().st_mode)
+        is_fifo = stat.S_ISFIFO(fifo_path.lstat().st_mode)
     except OSError:
         is_fifo = False
     started = time.monotonic()
     collected = _collect(gate, fifo)
     elapsed = time.monotonic() - started
+    fifo_path.unlink()
     _assert(
         gate,
         "r-m2-fifo-result-refused",
-        passed=is_fifo
+        passed=(fifo.obs or {}).get("kind") == "fifo"
+        and not fifo_reached_host
+        and fifo_launcher_refused
+        and not fifo.timed_out
+        and is_fifo
         and collected.get("accepted") is False
         and collected.get("error_type") != "collection-hang"
         and elapsed < 20
         and _outcome_state(fifo) == "exited",
         commands=[*_attempt_commands(gate, fifo), *commands_collect],
         observed={
-            "result_is_fifo_on_host": is_fifo,
-            "collection": collected,
+            "worker_planted": (fifo.obs or {}).get("kind"),
+            "result_path_exists_on_host_after_the_attempt": fifo_reached_host,
+            "launcher_logged_not_a_regular_file": fifo_launcher_refused,
+            "launcher_returned_without_blocking": not fifo.timed_out,
+            "control_host_path_is_fifo": is_fifo,
+            "control_collection_of_the_host_fifo": collected,
             "collection_seconds": round(elapsed, 2),
             "launcher_outcome": fifo.outcome,
         },
-        expected="the FIFO result is refused promptly (no blocking read)",
-        observer={"source": "host: lstat of the result path and the product's bounded read"},
+        expected=(
+            "a FIFO the worker planted as its result never reaches the host and does not block "
+            "the launcher; the product's bounded read also refuses a FIFO promptly"
+        ),
+        observer={
+            "source": "host: lstat of the result path, the launcher's own log and the product's "
+            "bounded read of a host FIFO (control)"
+        },
         attempts=(fifo,),
     )
 
@@ -757,35 +850,417 @@ def step_m3_log(gate: Gate) -> None:
     )
 
 
-def step_m3_disk(gate: Gate) -> None:
-    """NOT QUALIFIED: the disk-bound assertion still has to be rewritten for capped volumes.
+_MIB = 1024 * 1024
+_SMALL_WORKSPACE_MIB = 16
+_SMALL_OUT_MIB = 8
+_SMALL_WORKSPACE_INODES = 4000
+_SMALL_OUT_INODES = 64
+_BURST_PROCESSES = 8
+_BURST_BIG_MIB = 64
+_BURST_CHUNK_MIB = 2
 
-    The launcher no longer measures the worker's trees from the host and kills or holds the
-    worker (the host-monitor mechanism is gone, and with it the ``bound-exceeded`` outcome).
-    The workspace and result trees are tmpfs volumes whose size and inode count the kernel
-    enforces, so the qualification is different: a write past a cap fails inside the worker with
-    ``ENOSPC``, a parallel ``fallocate`` burst is capped by the kernel, nothing is killed and the
-    receipt records ``kernel-capped-volume``. Until that scenario is written this assertion is
-    recorded as FAILED, so a gate run can never pass on a disk bound it did not exercise.
+
+def _small_profile(gate: Gate) -> RunnerProfile:
+    """The gate profile with small capped volumes, so the caps are reached in seconds."""
+    return RunnerProfile(
+        network=gate.internal_network,
+        resources=ResourceLimits(
+            memory_mib=256,
+            cpus=1.0,
+            pids=64,
+            tmp_mib=32,
+            home_mib=16,
+            stop_grace_seconds=2,
+            workspace_mib=_SMALL_WORKSPACE_MIB,
+            out_mib=_SMALL_OUT_MIB,
+            workspace_inodes=_SMALL_WORKSPACE_INODES,
+            out_inodes=_SMALL_OUT_INODES,
+        ),
+    )
+
+
+def _host_tree(root: Path) -> dict[str, int]:
+    """Regular-file bytes and entries of a tree the launcher read back to the host."""
+    total = entries = 0
+    if not root.exists():
+        return {"bytes": 0, "entries": 0}
+    for path in root.rglob("*"):
+        entries += 1
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
+    return {"bytes": total, "entries": entries}
+
+
+def _ran_to_completion(attempt: AttemptResult, *, exit_code: int = 0) -> bool:
+    """The worker exited on its own (the launcher's outcome says ``exited``) and nothing killed
+    it: no deadline, no launcher signal."""
+    return (
+        _outcome_state(attempt) == "exited"
+        and (attempt.outcome or {}).get("exit_code") == exit_code
+        and attempt.exit_code == exit_code
+        and not attempt.timed_out
+        and attempt.container_gone
+    )
+
+
+def _kernel_cap_bounds(attempt: AttemptResult, profile: RunnerProfile) -> dict[str, Any]:
+    """What the receipt's resource bounds record, beside the numbers the profile asked for."""
+    limits = profile.resources
+    bounds = None if attempt.receipt is None else attempt.receipt.bounds
+    recorded = None if bounds is None else bounds.to_state()
+    return {
+        "recorded": recorded,
+        "expected": {
+            "disk_mechanism": DISK_BOUND_KERNEL_VOLUME,
+            "workspace_bytes": limits.workspace_mib * _MIB,
+            "out_bytes": limits.out_mib * _MIB,
+            "workspace_inodes": limits.workspace_inodes,
+            "out_inodes": limits.out_inodes,
+        },
+        "matches": bounds is not None
+        and bounds.disk_mechanism == DISK_BOUND_KERNEL_VOLUME
+        and bounds.workspace_bytes == limits.workspace_mib * _MIB
+        and bounds.out_bytes == limits.out_mib * _MIB
+        and bounds.workspace_inodes == limits.workspace_inodes
+        and bounds.out_inodes == limits.out_inodes
+        and bounds.poll_seconds is None,
+    }
+
+
+def step_m3_disk(gate: Gate) -> None:
+    """The disk bounds are the kernel's: a worker that outgrows a capped volume gets ``ENOSPC``.
+
+    Small capped volumes (16 MiB workspace, 8 MiB result, 4000 / 64 inodes) are exercised on
+    whichever engine the gate runs on. A worker writes past each cap, creates entries past each
+    inode cap and runs a parallel ``fallocate`` burst; in every case the worker itself sees the
+    refusal, the launcher kills nothing (outcome ``exited``), the volume statistics read inside
+    the container stay within the cap, and the tree the launcher reads back to the host does too.
     """
+    profile = _small_profile(gate)
+    cap_bytes = _SMALL_WORKSPACE_MIB * _MIB
+    out_cap_bytes = _SMALL_OUT_MIB * _MIB
+
+    ws_bytes = gate.attempt(
+        "m3-disk-ws-bytes",
+        "disk",
+        {"kind": "bytes", "where": "/workspace", "max_mib": 4 * _SMALL_WORKSPACE_MIB},
+        profile=profile,
+        time_budget=120,
+    )
+    out_bytes = gate.attempt(
+        "m3-disk-out-bytes",
+        "disk",
+        {
+            "kind": "bytes",
+            "where": "/out",
+            "max_mib": 4 * _SMALL_OUT_MIB,
+            "chunk_kib": 256,
+            "plant_links": True,
+            "cleanup": True,
+        },
+        profile=profile,
+        product_receipt_path=True,
+        time_budget=120,
+    )
+    out_bytes_collect = _collect(gate, out_bytes, profile=profile)
+    ws_entries = gate.attempt(
+        "m3-disk-ws-entries",
+        "disk",
+        {"kind": "entries", "where": "/workspace", "max_entries": 5 * _SMALL_WORKSPACE_INODES},
+        profile=profile,
+        time_budget=120,
+    )
+    out_entries = gate.attempt(
+        "m3-disk-out-entries",
+        "disk",
+        {
+            "kind": "entries",
+            "where": "/out",
+            "max_entries": 5 * _SMALL_OUT_INODES,
+            "cleanup": True,
+        },
+        profile=profile,
+        time_budget=120,
+    )
+    burst = gate.attempt(
+        "m3-disk-burst",
+        "disk",
+        {
+            "kind": "burst",
+            "where": "/workspace",
+            "procs": _BURST_PROCESSES,
+            "big_mib": _BURST_BIG_MIB,
+            "chunk_mib": _BURST_CHUNK_MIB,
+            "max_chunks": 4 * _SMALL_WORKSPACE_MIB // _BURST_CHUNK_MIB,
+        },
+        profile=profile,
+        time_budget=180,
+    )
+    memory_profile = RunnerProfile(
+        network=gate.internal_network,
+        resources=ResourceLimits(
+            memory_mib=128,
+            cpus=1.0,
+            pids=64,
+            tmp_mib=32,
+            home_mib=16,
+            stop_grace_seconds=2,
+            workspace_mib=512,
+            out_mib=16,
+        ),
+    )
+    memory = gate.attempt(
+        "m3-disk-memory-fill",
+        "disk",
+        {"kind": "bytes", "where": "/workspace", "max_mib": 400, "chunk_kib": 1024},
+        profile=memory_profile,
+        time_budget=120,
+    )
+
+    def seen(attempt: AttemptResult, key: str) -> dict[str, Any]:
+        value = (attempt.obs or {}).get(key)
+        return value if isinstance(value, dict) else {}
+
+    # --- bytes: ENOSPC inside the worker, within both caps, nothing killed -------------------
+    ws_fill, ws_after = seen(ws_bytes, "fill"), seen(ws_bytes, "volume_after")
+    out_fill, out_after = seen(out_bytes, "fill"), seen(out_bytes, "volume_after")
+    ws_host = _host_tree(ws_bytes.workspace / "gate-fill")
+    out_listing = sorted(path.name for path in out_bytes.out.iterdir())
     _assert(
         gate,
-        "r-m3-disk-bound-kill-hold",
-        passed=False,
-        commands=[],
+        "r-m3-disk-enospc-bytes",
+        passed=_launched_clean(ws_bytes)
+        and _launched_clean(out_bytes)
+        and _ran_to_completion(ws_bytes)
+        and _ran_to_completion(out_bytes)
+        and ws_fill.get("failure") == "ENOSPC"
+        and out_fill.get("failure") == "ENOSPC"
+        and ws_after.get("total_bytes") == cap_bytes
+        and out_after.get("total_bytes") == out_cap_bytes
+        and 0 < ws_fill.get("bytes_written", 0) <= cap_bytes
+        and 0 < out_fill.get("bytes_written", 0) <= out_cap_bytes
+        and ws_after.get("used_bytes", cap_bytes + 1) <= cap_bytes
+        and out_after.get("used_bytes", out_cap_bytes + 1) <= out_cap_bytes
+        and ws_host["bytes"] == seen(ws_bytes, "fill_tree").get("apparent_bytes")
+        and ws_host["bytes"] <= cap_bytes
+        and out_bytes_collect.get("accepted") is True,
+        commands=[
+            *_attempt_commands(gate, ws_bytes, out_bytes),
+            "[in container] write 512 KiB files into /workspace/gate-fill until the first error",
+            "[in container] write 256 KiB files into /out/gate-fill until the first error",
+            "[in container] os.statvfs(/workspace) ; os.statvfs(/out)",
+            "read_attempt_result(...)  # the result is still written after the worker freed /out",
+        ],
         observed={
-            "status": "not-qualified",
-            "reason": (
-                "the host-monitor disk-bound scenario was removed with its mechanism; the "
-                "kernel-capped-volume scenario (ENOSPC inside the worker, fallocate burst, "
-                "inode cap, receipt mechanism) has not been written yet"
-            ),
+            "workspace": {
+                "cap_bytes": cap_bytes,
+                "worker_error": ws_fill.get("failure"),
+                "bytes_written_by_worker": ws_fill.get("bytes_written"),
+                "volume_after_in_container": ws_after,
+                "bytes_read_back_on_host": ws_host,
+                "launcher_outcome": ws_bytes.outcome,
+            },
+            "result_volume": {
+                "cap_bytes": out_cap_bytes,
+                "worker_error": out_fill.get("failure"),
+                "bytes_written_by_worker": out_fill.get("bytes_written"),
+                "volume_after_in_container": out_after,
+                "result_collected_by_the_product": out_bytes_collect,
+                "launcher_outcome": out_bytes.outcome,
+            },
+            "launcher_killed_nothing": _ran_to_completion(ws_bytes)
+            and _ran_to_completion(out_bytes),
         },
         expected=(
-            "a worker outgrowing a capped volume (bytes, inodes, or a parallel fallocate burst) "
-            "fails with ENOSPC inside the worker and is not killed by the launcher"
+            "a write past the workspace cap and past the result cap fails with ENOSPC inside the "
+            "worker, no more than the cap is allocated (volume statistics in the container and "
+            "the bytes read back on the host), and the launcher records an ordinary exit"
         ),
-        observer={"source": "none: failing closed until the capped-volume scenario exists"},
+        observer={
+            "source": "container: statvfs of the capped volumes and the worker's own errno; "
+            "host: the launcher outcome file and the workspace read back"
+        },
+        attempts=(ws_bytes, out_bytes),
+    )
+
+    # --- inodes: ENOSPC for an entry burst, entries within the inode cap ----------------------
+    ws_entry_fill, ws_entry_after = seen(ws_entries, "fill"), seen(ws_entries, "volume_after")
+    out_entry_fill, out_entry_after = seen(out_entries, "fill"), seen(out_entries, "volume_after")
+    ws_entry_host = _host_tree(ws_entries.workspace)
+    _assert(
+        gate,
+        "r-m3-disk-enospc-inodes",
+        passed=_launched_clean(ws_entries)
+        and _launched_clean(out_entries)
+        and _ran_to_completion(ws_entries)
+        and _ran_to_completion(out_entries)
+        and ws_entry_fill.get("failure") == "ENOSPC"
+        and out_entry_fill.get("failure") == "ENOSPC"
+        and ws_entry_after.get("inodes_total") == _SMALL_WORKSPACE_INODES
+        and out_entry_after.get("inodes_total") == _SMALL_OUT_INODES
+        and 0 < ws_entry_fill.get("entries_created", 0) <= _SMALL_WORKSPACE_INODES
+        and 0 < out_entry_fill.get("entries_created", 0) <= _SMALL_OUT_INODES
+        and ws_entry_after.get("inodes_used", _SMALL_WORKSPACE_INODES + 1)
+        <= _SMALL_WORKSPACE_INODES
+        and out_entry_after.get("inodes_used", _SMALL_OUT_INODES + 1) <= _SMALL_OUT_INODES
+        and ws_entry_host["entries"] <= _SMALL_WORKSPACE_INODES,
+        commands=[
+            *_attempt_commands(gate, ws_entries, out_entries),
+            "[in container] create empty files in /workspace/gate-fill until the first error",
+            "[in container] create empty files in /out/gate-fill until the first error",
+            "[in container] os.statvfs(...).f_files / f_ffree",
+        ],
+        observed={
+            "workspace": {
+                "inode_cap": _SMALL_WORKSPACE_INODES,
+                "worker_error": ws_entry_fill.get("failure"),
+                "entries_created_by_worker": ws_entry_fill.get("entries_created"),
+                "volume_after_in_container": ws_entry_after,
+                "entries_read_back_on_host": ws_entry_host["entries"],
+            },
+            "result_volume": {
+                "inode_cap": _SMALL_OUT_INODES,
+                "worker_error": out_entry_fill.get("failure"),
+                "entries_created_by_worker": out_entry_fill.get("entries_created"),
+                "volume_after_in_container": out_entry_after,
+            },
+            "launcher_outcomes": [ws_entries.outcome, out_entries.outcome],
+        },
+        expected=(
+            "an entry burst past each inode cap fails with ENOSPC inside the worker, the entry "
+            "count never exceeds the cap, and the launcher records an ordinary exit"
+        ),
+        observer={
+            "source": "container: statvfs inode counts and the worker's own errno; host: the "
+            "launcher outcome file and the workspace read back"
+        },
+        attempts=(ws_entries, out_entries),
+    )
+
+    # --- a parallel fallocate burst is capped ---------------------------------------------------
+    reports = list((burst.obs or {}).get("fill", {}).get("reports", []))
+    burst_after = seen(burst, "volume_after")
+    burst_tree = seen(burst, "fill_tree")
+    burst_host = _host_tree(burst.workspace / "gate-fill")
+    big_all_failed = len(reports) == _BURST_PROCESSES and all(
+        (report.get("big_fallocate") or {}).get("exit") not in (0, None) for report in reports
+    )
+    chunked_total = sum(report.get("chunks_allocated", 0) for report in reports) * _BURST_CHUNK_MIB
+    all_refused = all(report.get("failure") == "ENOSPC" for report in reports)
+    _assert(
+        gate,
+        "r-m3-disk-parallel-fallocate-capped",
+        passed=_launched_clean(burst)
+        and _ran_to_completion(burst)
+        and big_all_failed
+        and all_refused
+        and chunked_total * _MIB <= cap_bytes
+        and burst_after.get("total_bytes") == cap_bytes
+        and burst_after.get("used_bytes", cap_bytes + 1) <= cap_bytes
+        and burst_tree.get("allocated_bytes", cap_bytes + 1) <= cap_bytes
+        and 0 < burst_host["bytes"] <= cap_bytes
+        and burst_host["bytes"] == burst_tree.get("apparent_bytes"),
+        commands=[
+            *_attempt_commands(gate, burst),
+            f"[in container] {_BURST_PROCESSES} processes, each: fallocate -l {_BURST_BIG_MIB}M "
+            f"<file> ; then posix_fallocate {_BURST_CHUNK_MIB} MiB files until the first error",
+            "[in container] os.statvfs(/workspace) after the burst",
+        ],
+        observed={
+            "workspace_cap_bytes": cap_bytes,
+            "processes": len(reports),
+            "large_fallocate_exits": [
+                (report.get("big_fallocate") or {}).get("exit") for report in reports
+            ],
+            "large_fallocate_messages": sorted(
+                {(report.get("big_fallocate") or {}).get("stderr", "") for report in reports}
+            ),
+            "chunked_allocations_mib_total": chunked_total,
+            "worker_errors": sorted({str(report.get("failure")) for report in reports}),
+            "volume_after_in_container": burst_after,
+            "allocated_bytes_in_container": burst_tree.get("allocated_bytes"),
+            "bytes_read_back_on_host": burst_host,
+            "launcher_outcome": burst.outcome,
+        },
+        expected=(
+            "every large fallocate of a parallel burst is refused, the chunked allocations end "
+            "with ENOSPC, and no more than the workspace cap is allocated (statvfs and the "
+            "allocated blocks inside the container, and the bytes read back on the host)"
+        ),
+        observer={
+            "source": "container: statvfs and allocated blocks and each process's own errno; "
+            "host: the workspace read back"
+        },
+        attempts=(burst,),
+    )
+
+    # --- receipt bounds and what may come back to the host ------------------------------------
+    bounds = {a.name: _kernel_cap_bounds(a, profile) for a in (ws_bytes, out_bytes, burst)}
+    out_listing_ok = out_listing == ["result.json"]
+    _assert(
+        gate,
+        "r-m3-disk-receipt-and-readback",
+        passed=all(entry["matches"] for entry in bounds.values())
+        and out_listing_ok
+        and not (out_bytes.out / "gate-link").is_symlink()
+        and not os.path.lexists(out_bytes.out / "gate-fifo")
+        and not (ws_bytes.workspace / "gate-fill").is_symlink()
+        and all(
+            not path.is_symlink() and not stat.S_ISFIFO(path.lstat().st_mode)
+            for path in ws_bytes.workspace.rglob("*")
+        ),
+        commands=[
+            *_attempt_commands(gate, ws_bytes, out_bytes, burst),
+            "[in container] ln -s /etc/passwd /out/gate-link ; mkfifo /out/gate-fifo",
+            "RunnerReceipt.bounds  # disk mechanism and the byte and inode caps, as read back",
+        ],
+        observed={
+            "receipt_bounds": bounds,
+            "result_directory_on_host_after_the_attempt": out_listing,
+            "planted_symlink_reached_host": (out_bytes.out / "gate-link").is_symlink(),
+            "planted_fifo_reached_host": os.path.lexists(out_bytes.out / "gate-fifo"),
+        },
+        expected=(
+            "each receipt records kernel-capped-volume with exactly the profile's byte and inode "
+            "numbers and no poll interval; a symlink and a FIFO planted in the result volume "
+            "never reach the host, which holds only the regular result file"
+        ),
+        observer={
+            "source": "host: the runner receipt and the result directory listing; the receipt's "
+            "bounds are what the launcher read back from the engine's created volumes"
+        },
+        attempts=(ws_bytes, out_bytes, burst),
+    )
+
+    # --- filling a tmpfs volume with memory ends in an ordinary exit 137 -----------------------
+    memory_obs = memory.obs
+    _assert(
+        gate,
+        "r-m3-memory-fill-exit-137",
+        passed=_launched_clean(memory)
+        and _ran_to_completion(memory, exit_code=137)
+        and memory_obs is None,
+        commands=[
+            *_attempt_commands(gate, memory),
+            "[in container] write 1 MiB files into /workspace/gate-fill (512 MiB volume) "
+            "under a 128 MiB memory limit",
+        ],
+        observed={
+            "memory_limit_mib": 128,
+            "workspace_cap_mib": 512,
+            "launcher_outcome": memory.outcome,
+            "launcher_exit_code": memory.exit_code,
+            "worker_reported_completion": memory_obs is not None,
+            "container_removed": memory.container_gone,
+        },
+        expected=(
+            "a worker that fills its tmpfs volume until the memory limit is reached is killed by "
+            "the kernel and the launcher records an ordinary exit (137), not a launcher kill; it "
+            "never completes"
+        ),
+        observer={"source": "host: the launcher outcome file (state exited, exit code 137)"},
+        attempts=(memory,),
     )
 
 
@@ -1284,9 +1759,11 @@ def step_m5_peers(gate: Gate) -> None:
         sampler.start()
         thread_a = threading.Thread(target=run_a)
         thread_a.start()
-        ready = Path(str(workspace_a) + ".out") / "ready"
         deadline = time.monotonic() + 90
-        while time.monotonic() < deadline and not ready.exists():
+        while time.monotonic() < deadline:
+            logs = gate.engine_cli("logs", container_a, timeout=30)
+            if "GATE_READY" in logs.stdout + logs.stderr:
+                break
             time.sleep(0.3)
         ip_a = peers_ip.get(container_a) or _container_ip(gate, container_a, network_a)
         control_connect = None
@@ -1322,7 +1799,21 @@ def step_m5_peers(gate: Gate) -> None:
             workspace=workspace_b,
             relay=True,
         )
-        Path(str(workspace_a) + ".out", "stop").write_text("1", encoding="utf-8")
+        if ip_a:  # ends A's listen early: a peer on A's own network sends ``stop``
+            gate.engine_cli(
+                "run",
+                "--rm",
+                "--network",
+                network_a,
+                "--label",
+                f"{GATE_LABEL}={gate.rid}",
+                gate.runner_image.image_id,
+                "python3",
+                "-c",
+                f"import socket; s = socket.create_connection(({ip_a!r}, {port}), timeout=5); "
+                "s.sendall(b'stop'); s.close()",
+                timeout=90,
+            )
         thread_a.join(120)
         stop.set()
         sampler.join(30)
@@ -1414,7 +1905,7 @@ def step_m5_peers(gate: Gate) -> None:
 
 def step_hooks(gate: Gate) -> None:
     attempt = gate.attempt("m4-hooks", "hookcommit", {}, time_budget=120)
-    log = attempt.out / "hook-ran.log"
+    log = attempt.workspace / ".git" / "gate-hook-ran.log"
     lines = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
     obs = attempt.obs or {}
     keys = obs.get("git_config_env_keys", [])
@@ -1447,9 +1938,10 @@ def step_hooks(gate: Gate) -> None:
         },
         expected=(
             "the planted pre-commit hook does not run for the first commit and runs once for "
-            "the control commit; the host-visible log has exactly the one control line"
+            "the control commit; the log the hook wrote in the workspace, read by the host, has "
+            "exactly the one control line"
         ),
-        observer={"source": "host: /out/hook-ran.log written by the hook itself"},
+        observer={"source": "host: <workspace>/.git/gate-hook-ran.log written by the hook itself"},
         attempts=(attempt,),
     )
 
@@ -1552,7 +2044,7 @@ def _runtime_recovery(gate: Gate, trap: Path, marker: Path) -> dict[str, Any]:
     plant = (
         "import subprocess,sys,time\n"
         f"subprocess.run(['git','config','core.fsmonitor',{str(trap)!r}],cwd='/workspace',check=True)\n"
-        "open('/out/planted','w').write('1')\n"
+        "open('/proc/1/fd/1','w').write('GATE_PLANTED\\n')\n"
         "time.sleep(float(sys.argv[1]))\n"
     )
     wrapper = (
@@ -1624,11 +2116,13 @@ def _runtime_recovery(gate: Gate, trap: Path, marker: Path) -> dict[str, Any]:
             if len(dispatched) != 1:
                 report[label] = "the runtime did not dispatch the worker"
                 return report
-            planted = Path(str(workspace_path) + ".out") / "planted"
             deadline = time.monotonic() + 120
-            while time.monotonic() < deadline and not planted.exists():
-                time.sleep(0.3)
-            was_planted = planted.exists()
+            was_planted = False
+            while time.monotonic() < deadline and not was_planted:
+                logs = gate.engine_cli("logs", spec.container_name, timeout=30)
+                was_planted = "GATE_PLANTED" in logs.stdout + logs.stderr
+                if not was_planted:
+                    time.sleep(0.3)
             if label == "failure":
                 while time.monotonic() < deadline and gate.engine.container_exists(
                     spec.container_name
@@ -1782,7 +2276,17 @@ def run(gate: Gate) -> None:
             step_m2,
         ),
         ("m3-log", ["r-m3-container-log-bounded"], step_m3_log),
-        ("m3-disk", ["r-m3-disk-bound-kill-hold"], step_m3_disk),
+        (
+            "m3-disk",
+            [
+                "r-m3-disk-enospc-bytes",
+                "r-m3-disk-enospc-inodes",
+                "r-m3-disk-parallel-fallocate-capped",
+                "r-m3-disk-receipt-and-readback",
+                "r-m3-memory-fill-exit-137",
+            ],
+            step_m3_disk,
+        ),
         ("m3-bomb", ["r-m3-git-bomb-refused-at-intake"], step_m3_bomb),
         ("m4", ["r-m4-protected-path-held-then-published"], step_m4),
         ("m5-relay", ["r-m5-validation-and-none-mode-cannot-reach-relay"], step_m5_relay),

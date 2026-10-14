@@ -6,14 +6,16 @@ worker command inside the real isolated runner:
 
     python3 /out/factory_gate_probe.py <mode>
 
-The attempt list of each mode is read from ``/out/params.json``, written by the host. Every
+The attempt list of each mode is read from ``/out/params.json``, which the host puts in the
+launch spec (the in-container supervisor writes it; no host path reaches ``/out``). Every
 attempt is data (an identifier, the exact call made and the expectation), so the evidence that
 the host records names precisely what was tried. This program only *attempts* and reports what it
-observed; it never decides whether the platform passed. It writes ``/out/obs.json`` and prints one
-``GATE_OBS <json>`` line.
+observed; it never decides whether the platform passed. It prints one ``GATE_OBS <json>`` line
+(the supervisor captures it into the result the host collects) and leaves a second copy in the
+workspace, which the host reads back, so a killed supervisor cannot lose the observation.
 
 Modes: read, write, escape, network, git, plant, relay, memory, pids, cpu, sleep, session,
-objects, forge, spam, fill, bomb, hookcommit, listen.
+objects, forge, spam, disk, bomb, hookcommit, listen.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import json
 import os
 import re
 import resource
+import shutil
 import signal
 import socket
 import stat
@@ -37,8 +40,8 @@ from collections.abc import Callable
 from typing import Any
 
 PARAMS_PATH = "/out/params.json"
-OBS_PATH = "/out/obs.json"
-SELF_PATHS = frozenset({PARAMS_PATH, OBS_PATH, "/out/factory_gate_probe.py"})
+OBS_PATH = "/workspace/.git/gate-obs.json"
+SELF_PATHS = frozenset({PARAMS_PATH, OBS_PATH, f"{OBS_PATH}.tmp", "/out/factory_gate_probe.py"})
 WORKSPACE = "/workspace"
 
 _SKIPPED_TREES = ("/proc", "/sys", "/dev")
@@ -191,9 +194,11 @@ def _load_params() -> dict[str, Any]:
 def _emit(observation: dict[str, Any]) -> None:
     payload = json.dumps(observation, sort_keys=True, separators=(",", ":"))
     temporary = f"{OBS_PATH}.tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(payload)
-    os.replace(temporary, OBS_PATH)
+    # A full or read-only workspace must not hide the copy on stdout.
+    with contextlib.suppress(OSError):
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(temporary, OBS_PATH)
     print("GATE_OBS " + payload, flush=True)
 
 
@@ -1296,12 +1301,15 @@ def mode_forge(params: dict[str, Any]) -> dict[str, Any]:
     with contextlib.suppress(FileNotFoundError):
         os.unlink(result)
     if kind == "symlink":
+        # The link points at a file inside the result volume that holds a recognisable canary.
+        with open(params["target"], "w", encoding="utf-8") as canary:
+            canary.write(params["canary"])
         os.symlink(params["target"], result)
     elif kind == "fifo":
         os.mkfifo(result)
     elif kind == "replay":
-        with open(params["source"], "rb") as source, open(result, "wb") as target:
-            target.write(source.read())
+        with open(result, "w", encoding="utf-8") as target:
+            target.write(params["stale_result"])
     else:
         raise SystemExit(f"unknown forgery {kind!r}")
     try:
@@ -1350,29 +1358,164 @@ def mode_spam(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def mode_fill(params: dict[str, Any]) -> dict[str, Any]:
-    """Grow a directory in bytes or in files until ``max`` is reached (the host monitor kills)."""
-    root = os.path.join(params["where"], "gate-fill")
+def _volume_stats(path: str) -> dict[str, int]:
+    """What the kernel reports for the filesystem holding ``path`` (the capped volume's own
+    numbers: size, free space, inode total and free)."""
+    stat_result = os.statvfs(path)
+    return {
+        "total_bytes": stat_result.f_blocks * stat_result.f_frsize,
+        "used_bytes": (stat_result.f_blocks - stat_result.f_bfree) * stat_result.f_frsize,
+        "free_bytes": stat_result.f_bavail * stat_result.f_frsize,
+        "inodes_total": stat_result.f_files,
+        "inodes_used": stat_result.f_files - stat_result.f_ffree,
+    }
+
+
+def _tree_usage(root: str) -> dict[str, int]:
+    """Allocated bytes (blocks actually held, not apparent size) and entries under ``root``."""
+    allocated = apparent = entries = 0
+    for directory, directories, files in os.walk(root):
+        for name in (*directories, *files):
+            entries += 1
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                allocated += info.st_blocks * 512
+                apparent += info.st_size
+    return {"allocated_bytes": allocated, "apparent_bytes": apparent, "entries": entries}
+
+
+def _fill_bytes(root: str, params: dict[str, Any]) -> dict[str, Any]:
+    chunk = b"\x5a" * (int(params.get("chunk_kib", 512)) * 1024)
+    limit = int(params["max_mib"]) * 1024 * 1024
+    written = files = 0
+    failure: str | None = None
+    try:
+        while written < limit:
+            with open(os.path.join(root, f"f{files}"), "wb") as handle:
+                handle.write(chunk)
+            written += len(chunk)
+            files += 1
+    except OSError as error:
+        failure = errno.errorcode.get(error.errno or 0, type(error).__name__)
+    return {"files_written": files, "bytes_written": written, "failure": failure}
+
+
+def _fill_entries(root: str, params: dict[str, Any]) -> dict[str, Any]:
+    created = 0
+    failure: str | None = None
+    try:
+        for index in range(int(params["max_entries"])):
+            os.close(os.open(os.path.join(root, f"i{index}"), os.O_WRONLY | os.O_CREAT, 0o600))
+            created += 1
+    except OSError as error:
+        failure = errno.errorcode.get(error.errno or 0, type(error).__name__)
+    return {"entries_created": created, "failure": failure}
+
+
+def _fallocate_child(root: str, index: int, params: dict[str, Any], write_end: int) -> None:
+    """One burst process: a large ``fallocate`` (command line), then chunked ``posix_fallocate``
+    calls into new files until the first refusal. Reports one JSON object and exits."""
+    report: dict[str, Any] = {"index": index}
+    big = f"{int(params['big_mib'])}M"
+    try:
+        cli = subprocess.run(
+            ["fallocate", "-l", big, os.path.join(root, f"big{index}")],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        report["big_fallocate"] = {
+            "exit": cli.returncode,
+            "stderr": cli.stderr.strip()[-160:],
+        }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        report["big_fallocate"] = {"error": type(error).__name__}
+    chunk = int(params["chunk_mib"]) * 1024 * 1024
+    chunks = 0
+    failure: str | None = None
+    try:
+        for number in range(int(params["max_chunks"])):
+            descriptor = os.open(
+                os.path.join(root, f"c{index}-{number}"), os.O_WRONLY | os.O_CREAT, 0o600
+            )
+            try:
+                os.posix_fallocate(descriptor, 0, chunk)
+                chunks += 1
+            finally:
+                os.close(descriptor)
+    except OSError as error:
+        failure = errno.errorcode.get(error.errno or 0, type(error).__name__)
+    report.update(chunks_allocated=chunks, failure=failure)
+    os.write(write_end, (json.dumps(report) + "\n").encode())
+
+
+def _fallocate_burst(root: str, params: dict[str, Any]) -> dict[str, Any]:
+    pipes: list[tuple[int, int]] = []
+    pids: list[int] = []
+    for index in range(int(params["procs"])):
+        read_end, write_end = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_end)
+            try:
+                _fallocate_child(root, index, params, write_end)
+            finally:
+                os._exit(0)
+        os.close(write_end)
+        pipes.append((read_end, write_end))
+        pids.append(pid)
+    reports: list[dict[str, Any]] = []
+    for (read_end, _), pid in zip(pipes, pids, strict=True):
+        with os.fdopen(read_end, encoding="utf-8") as handle:
+            for line in handle:
+                with contextlib.suppress(ValueError):
+                    reports.append(json.loads(line))
+        os.waitpid(pid, 0)
+    return {"processes": int(params["procs"]), "reports": reports}
+
+
+def mode_disk(params: dict[str, Any]) -> dict[str, Any]:
+    """Outgrow a capped volume in bytes, in entries or with a parallel ``fallocate`` burst.
+
+    Reports what the process saw (errno names) and what the kernel reports for the volume
+    (``statvfs``), before and after. ``cleanup`` removes the fill afterwards so a full result
+    volume cannot stop the supervisor from writing the result.
+    """
+    where = params["where"]
+    root = os.path.join(where, "gate-fill")
     os.makedirs(root, exist_ok=True)
-    written = 0
-    if params["kind"] == "bytes":
-        block = b"\x5a" * (1 << 20)
-        index = 0
-        while written < int(params["max"]):
-            with open(os.path.join(root, f"f{index}"), "wb") as handle:
-                handle.write(block)
-                handle.flush()
-                os.fsync(handle.fileno())
-            written += 1
-            index += 1
-            time.sleep(float(params.get("delay", 0)))
+    if params.get("plant_links"):
+        # A symlink and a FIFO in the volume: neither may ever be copied out to the host.
+        os.symlink("/etc/passwd", os.path.join(where, "gate-link"))
+        os.mkfifo(os.path.join(where, "gate-fifo"))
+    before = _volume_stats(where)
+    kind = params["kind"]
+    if kind == "bytes":
+        outcome = _fill_bytes(root, params)
+    elif kind == "entries":
+        outcome = _fill_entries(root, params)
+    elif kind == "burst":
+        outcome = _fallocate_burst(root, params)
     else:
-        for index in range(int(params["max"])):
-            with open(os.path.join(root, f"i{index}"), "wb"):
-                pass
-            written += 1
-            time.sleep(float(params.get("delay", 0)))
-    return {"identity": _identity(), "operations": [], "units_written": written}
+        raise SystemExit(f"unknown disk kind {kind!r}")
+    after = _volume_stats(where)
+    usage = _tree_usage(root)
+    if params.get("cleanup"):
+        shutil.rmtree(root, ignore_errors=True)
+    return {
+        "identity": _identity(),
+        "operations": [],
+        "kind": kind,
+        "where": where,
+        "volume_before": before,
+        "volume_after": after,
+        "fill_tree": usage,
+        "fill": outcome,
+    }
 
 
 def mode_bomb(params: dict[str, Any]) -> dict[str, Any]:
@@ -1408,9 +1551,10 @@ def mode_hookcommit(params: dict[str, Any]) -> dict[str, Any]:
     """Commit twice with a planted ``pre-commit`` hook: with the worker environment, then without
     its command-scoped git configuration (the control: the hook can run).
 
-    The hook appends a line to ``/out/hook-ran.log`` (a host-visible file) each time it runs.
+    The hook appends a line to ``/workspace/.git/gate-hook-ran.log`` each time it runs; the
+    workspace comes back to the host when the worker exits, so the host reads the log itself.
     """
-    log = "/out/hook-ran.log"
+    log = "/workspace/.git/gate-hook-ran.log"
     hook = os.path.join(WORKSPACE, ".git/hooks/pre-commit")
     os.makedirs(os.path.dirname(hook), exist_ok=True)
     with open(hook, "w", encoding="utf-8") as handle:
@@ -1475,15 +1619,24 @@ def mode_listen(params: dict[str, Any]) -> dict[str, Any]:
     server.listen(8)
     server.settimeout(1.0)
     accepted: list[str] = []
-    with open("/out/ready", "w", encoding="utf-8") as handle:
-        handle.write("1")
+    # The host watches the container's own log for this line (pid 1's stdout), then connects.
+    with contextlib.suppress(OSError), open("/proc/1/fd/1", "w", encoding="utf-8") as stream:
+        stream.write("GATE_READY\n")
     deadline = time.monotonic() + float(params["seconds"])
-    while time.monotonic() < deadline and not os.path.exists("/out/stop"):
+    stopped = False
+    while time.monotonic() < deadline and not stopped:
         try:
             connection, peer = server.accept()
         except TimeoutError:
             continue
-        accepted.append(peer[0])
+        # A peer that sends ``stop`` ends the listen early; any other connection is recorded.
+        connection.settimeout(0.5)
+        try:
+            stopped = connection.recv(16).startswith(b"stop")
+        except OSError:
+            stopped = False
+        if not stopped:
+            accepted.append(peer[0])
         connection.close()
     server.close()
     return {"identity": _identity(), "operations": [], "accepted_peers": accepted}
@@ -1505,7 +1658,7 @@ MODES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "objects": mode_objects,
     "forge": mode_forge,
     "spam": mode_spam,
-    "fill": mode_fill,
+    "disk": mode_disk,
     "bomb": mode_bomb,
     "hookcommit": mode_hookcommit,
     "listen": mode_listen,

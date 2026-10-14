@@ -16,7 +16,6 @@ import http.server
 import json
 import os
 import secrets
-import shutil
 import socket
 import sqlite3
 import stat
@@ -952,11 +951,48 @@ def read_receipt(path: Path) -> tuple[RunnerReceipt | None, dict[str, Any] | Non
         return None, document
 
 
-def stage_probe(out: Path, params: Mapping[str, Any]) -> None:
-    """Put the attempt program and its attempt list into the worker's result directory."""
-    out.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(PROBE_SOURCE, out / PROBE_IN_CONTAINER.rsplit("/", 1)[1])
-    (out / "params.json").write_text(json.dumps(params, sort_keys=True), encoding="utf-8")
+PARAMS_IN_CONTAINER = "/out/params.json"
+OBS_LINE_PREFIX = "GATE_OBS "
+OBS_FILE_IN_WORKSPACE = ".git/gate-obs.json"
+"""Where the probe leaves a second copy of its observation: inside the workspace, which the
+launcher reads back to the host, so the observation survives a supervisor that was killed."""
+
+
+def probe_seed_files(params: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The attempt program and its attempt list, as files the in-container supervisor writes.
+
+    ``/out`` is a kernel-capped volume the host never mounts, so nothing can be staged into it
+    from the host: the launch spec carries the two files and the supervisor writes them before
+    it runs the command.
+    """
+    return (
+        (PROBE_IN_CONTAINER, PROBE_SOURCE.read_text(encoding="utf-8")),
+        (PARAMS_IN_CONTAINER, json.dumps(params, sort_keys=True)),
+    )
+
+
+def read_probe_observation(
+    result: Mapping[str, Any] | None, workspace: Path
+) -> dict[str, Any] | None:
+    """What the probe reported: the copy it left in the workspace the launcher read back, else
+    its last ``GATE_OBS`` line in the collected result.
+
+    The workspace copy comes first because the result file is replaceable by the worker (a
+    forged or replayed result carries another attempt's output); the workspace copy is removed
+    before each launch, so it can only be this attempt's.
+    """
+    document = read_json(workspace / OBS_FILE_IN_WORKSPACE)
+    if document is not None:
+        return document
+    output = str(result.get("output", "")) if result else ""
+    for line in reversed(output.splitlines()):
+        if line.startswith(OBS_LINE_PREFIX):
+            try:
+                parsed = json.loads(line[len(OBS_LINE_PREFIX) :])
+            except ValueError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def violations_of(

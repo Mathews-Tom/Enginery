@@ -983,3 +983,42 @@ def test_relay_description_is_egress_only_not_dual_homed() -> None:
     text = boundary.REQUIRED["f-relay-hardened-and-reachable"]
     assert "dual-homed" not in text
     assert "egress-only" in text
+
+
+def test_probe_observation_prefers_the_workspace_copy_over_a_forgeable_result(
+    tmp_path: Path,
+) -> None:
+    from factory_gate_support import (
+        OBS_FILE_IN_WORKSPACE,
+        PARAMS_IN_CONTAINER,
+        PROBE_IN_CONTAINER,
+        probe_seed_files,
+        read_probe_observation,
+    )
+
+    forged = {"output": 'noise\nGATE_OBS {"kind": "replayed-from-another-attempt"}\n'}
+    assert read_probe_observation(forged, tmp_path) == {"kind": "replayed-from-another-attempt"}
+    assert read_probe_observation({"output": "no observation here"}, tmp_path) is None
+    copy = tmp_path / OBS_FILE_IN_WORKSPACE
+    copy.parent.mkdir(parents=True)
+    copy.write_text('{"kind": "own"}', encoding="utf-8")
+    assert read_probe_observation(forged, tmp_path) == {"kind": "own"}
+
+    seeds = dict(probe_seed_files({"mode": "x"}))
+    assert set(seeds) == {PROBE_IN_CONTAINER, PARAMS_IN_CONTAINER}
+    assert json.loads(seeds[PARAMS_IN_CONTAINER]) == {"mode": "x"}
+    assert "def mode_disk" in seeds[PROBE_IN_CONTAINER]
+
+
+def test_disk_assertions_are_the_kernel_cap_scenario() -> None:
+    import factory_gate_review as review
+
+    assert "r-m3-disk-bound-kill-hold" not in review.REQUIRED
+    for key in (
+        "r-m3-disk-enospc-bytes",
+        "r-m3-disk-enospc-inodes",
+        "r-m3-disk-parallel-fallocate-capped",
+        "r-m3-disk-receipt-and-readback",
+        "r-m3-memory-fill-exit-137",
+    ):
+        assert key in review.REQUIRED
