@@ -21,13 +21,22 @@ Configuration (environment): ``RELAY_UPSTREAM`` (``http://host:port``, required)
 ``RELAY_TOKEN_FILE`` (default ``/run/relay/gateway-token``), ``RELAY_LISTEN_HOST`` (default
 ``0.0.0.0``), ``RELAY_LISTEN_PORT`` (default ``8080``; ``0`` picks a free port and is announced
 on stdout), ``RELAY_CONNECT_TIMEOUT`` (seconds, default 10), ``RELAY_READ_TIMEOUT`` (seconds,
-default 900), ``RELAY_MAX_IN_FLIGHT`` (forwarded requests at once, default 4) and
-``RELAY_MAX_CONNECTIONS`` (open connections at once, default 32).
+default 900), ``RELAY_MAX_IN_FLIGHT`` (forwarded requests at once, default 4),
+``RELAY_MAX_CONNECTIONS`` (open connections at once, default 32),
+``RELAY_MAX_IN_FLIGHT_PER_SOURCE`` (default 2), ``RELAY_MAX_CONNECTIONS_PER_SOURCE`` (default 8)
+and ``RELAY_BODY_DEADLINE`` (seconds allowed to receive one request body, default 60).
 
-Requests are bounded: a body over 8 MiB is refused with 413, a forwarded request beyond the
-in-flight limit is refused with 503 and ``Retry-After`` before its body is read, and connections
-beyond the connection limit are answered 503 and closed. The container restarts the relay after
-a crash (or an out-of-memory kill); until it answers ``/healthz`` again, admission holds.
+Requests are bounded: a body over 8 MiB is refused with 413, a body that is not fully received
+within the body deadline is refused with 408 (a client that trickles bytes cannot keep a slot),
+a forwarded request beyond the in-flight limit is refused with 503 and ``Retry-After`` before
+its body is read, and connections beyond the connection limit are answered 503 and closed.
+Every limit also applies per source: each attempt reaches the relay from its own network, so the
+client address identifies the attempt, and one source can hold at most its per-source share of
+the in-flight slots and of the connections. Fairness is only that: with more sources than
+``RELAY_MAX_IN_FLIGHT / RELAY_MAX_IN_FLIGHT_PER_SOURCE`` the global limit is still shared first
+come, first served, and a source's response stream holds its slot for as long as the upstream
+keeps it open (at most ``RELAY_READ_TIMEOUT`` between chunks). The container restarts the relay
+after a crash (or an out-of-memory kill); until it answers ``/healthz`` again, admission holds.
 """
 
 from __future__ import annotations
@@ -38,7 +47,9 @@ import os
 import socket
 import sys
 import threading
+import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, NoReturn
@@ -63,6 +74,15 @@ DEFAULT_MAX_IN_FLIGHT = 4
 # limit, so a flood of slow connections cannot exhaust it; beyond that a connection is answered
 # 503 and closed without a thread. ``/healthz`` is never counted against the in-flight limit.
 DEFAULT_MAX_CONNECTIONS = 32
+# Per-source shares (a source is the client address; every attempt has its own network and so its
+# own address): one source may hold at most half of the in-flight slots and a quarter of the
+# connections, so one worker's parallel or stalled requests never take everything.
+DEFAULT_MAX_IN_FLIGHT_PER_SOURCE = 2
+DEFAULT_MAX_CONNECTIONS_PER_SOURCE = 8
+# DEFAULT_BODY_DEADLINE = 60 seconds in total to receive a request body (at most 8 MiB from a
+# peer on a local bridge network), however slowly it arrives; the per-read socket timeout alone
+# lets a client trickle one byte every 119 seconds and hold its slot for days.
+DEFAULT_BODY_DEADLINE = 60.0
 RETRY_AFTER_SECONDS = 2
 SHED_SEND_TIMEOUT_SECONDS = 1.0
 MAX_MODELS_BYTES = 16 * 1024 * 1024
@@ -136,6 +156,9 @@ class RelayConfig:
     read_timeout: float
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT
     max_connections: int = DEFAULT_MAX_CONNECTIONS
+    max_in_flight_per_source: int = DEFAULT_MAX_IN_FLIGHT_PER_SOURCE
+    max_connections_per_source: int = DEFAULT_MAX_CONNECTIONS_PER_SOURCE
+    body_deadline: float = DEFAULT_BODY_DEADLINE
 
     @property
     def upstream_netloc(self) -> str:
@@ -158,10 +181,24 @@ def parse_config(environ: dict[str, str]) -> RelayConfig:
         read_timeout = float(environ.get("RELAY_READ_TIMEOUT", DEFAULT_READ_TIMEOUT))
     except ValueError as error:
         raise RelayConfigError(f"relay configuration is malformed: {error}") from error
+    try:
+        body_deadline = float(environ.get("RELAY_BODY_DEADLINE", DEFAULT_BODY_DEADLINE))
+    except ValueError as error:
+        raise RelayConfigError(
+            "RELAY_BODY_DEADLINE must be a positive number of seconds"
+        ) from error
     if not 0 <= listen_port <= 65535 or connect_timeout <= 0 or read_timeout <= 0:
         raise RelayConfigError("relay port or timeouts are out of range")
+    if not 0 < body_deadline < float("inf"):
+        raise RelayConfigError("RELAY_BODY_DEADLINE must be a positive number of seconds")
     max_in_flight = _positive_int(environ, "RELAY_MAX_IN_FLIGHT", DEFAULT_MAX_IN_FLIGHT)
     max_connections = _positive_int(environ, "RELAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS)
+    max_in_flight_per_source = _positive_int(
+        environ, "RELAY_MAX_IN_FLIGHT_PER_SOURCE", DEFAULT_MAX_IN_FLIGHT_PER_SOURCE
+    )
+    max_connections_per_source = _positive_int(
+        environ, "RELAY_MAX_CONNECTIONS_PER_SOURCE", DEFAULT_MAX_CONNECTIONS_PER_SOURCE
+    )
     return RelayConfig(
         upstream_scheme=parts.scheme,
         upstream_host=parts.hostname,
@@ -173,6 +210,9 @@ def parse_config(environ: dict[str, str]) -> RelayConfig:
         read_timeout=read_timeout,
         max_in_flight=max_in_flight,
         max_connections=max_connections,
+        max_in_flight_per_source=max_in_flight_per_source,
+        max_connections_per_source=max_connections_per_source,
+        body_deadline=body_deadline,
     )
 
 
@@ -326,50 +366,94 @@ class RefusalError(Exception):
         self.headers = headers
 
 
+def client_source(client_address: Any) -> str:
+    """The source a client is counted under: its IP address (one per attempt network)."""
+    return str(client_address[0])
+
+
+class SourceLimiter:
+    """Counts held slots per source and refuses a source its ``limit + 1``-th at once."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._held: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def acquire(self, source: str) -> bool:
+        with self._lock:
+            held = self._held.get(source, 0)
+            if held >= self._limit:
+                return False
+            self._held[source] = held + 1
+            return True
+
+    def release(self, source: str) -> None:
+        with self._lock:
+            held = self._held.get(source, 0) - 1
+            if held > 0:
+                self._held[source] = held
+            else:
+                self._held.pop(source, None)
+
+
 class RelayServer(ThreadingHTTPServer):
     """The relay's HTTP server, with a bound on connections and on forwarded requests.
 
     ``in_flight`` admits at most ``max_in_flight`` forwarded requests at once (the rest get 503
-    and ``Retry-After``). Connections beyond ``max_connections`` are answered 503 and closed on
-    the accept thread, without spawning a handler thread, so slow or numerous clients cannot
-    exhaust the container's process limit.
+    and ``Retry-After``), and ``source_in_flight`` at most ``max_in_flight_per_source`` of them
+    per source. Connections beyond ``max_connections`` (or ``max_connections_per_source`` from one
+    source) are answered 503 and closed on the accept thread, without spawning a handler thread,
+    so slow or numerous clients cannot exhaust the container's process limit.
+
+    ``source_key`` maps a client address to the source it is counted under (default: its IP
+    address, which is one per attempt network). It must be a pure function of the address.
     """
 
     daemon_threads = True
     request_queue_size = 64
 
-    def __init__(self, config: RelayConfig) -> None:
+    def __init__(
+        self, config: RelayConfig, source_key: Callable[[Any], str] = client_source
+    ) -> None:
         self.config = config
+        self.source_key = source_key
         self.in_flight = threading.BoundedSemaphore(config.max_in_flight)
+        self.source_in_flight = SourceLimiter(config.max_in_flight_per_source)
         self._connections = threading.BoundedSemaphore(config.max_connections)
+        self._source_connections = SourceLimiter(config.max_connections_per_source)
         super().__init__((config.listen_host, config.listen_port), RelayHandler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
+        source = self.source_key(client_address)
+        if not self._source_connections.acquire(source):
+            self._shed(request, "this source is at its connection limit; retry shortly")
+            self.shutdown_request(request)
+            return
         if not self._connections.acquire(blocking=False):
-            self._shed(request)
+            self._source_connections.release(source)
+            self._shed(request, "the relay is at its connection limit; retry shortly")
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self._connections.release()
+            self._release_connection(source)
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._connections.release()
+            self._release_connection(self.source_key(client_address))
+
+    def _release_connection(self, source: str) -> None:
+        self._connections.release()
+        self._source_connections.release(source)
 
     @staticmethod
-    def _shed(request: socket.socket) -> None:
+    def _shed(request: socket.socket, message: str) -> None:
         payload = json.dumps(
-            {
-                "error": {
-                    "type": "overloaded_error",
-                    "message": "the relay is at its connection limit; retry shortly",
-                }
-            },
+            {"error": {"type": "overloaded_error", "message": message}},
             separators=(",", ":"),
         ).encode("utf-8")
         head = (
@@ -518,18 +602,32 @@ class RelayHandler(BaseHTTPRequestHandler):
             raise RefusalError(411, "invalid_request_error", "content-length is required", "length")
         # Admission comes before the body is read: a request beyond the limit is refused without
         # buffering anything, so the bound on memory is (body cap x in-flight limit).
-        if not self.server.in_flight.acquire(blocking=False):
+        # A source is held to its own share first, so one attempt's parallel or stalled requests
+        # leave the rest of the global limit to the other attempts.
+        source = self.server.source_key(self.client_address)
+        if not self.server.source_in_flight.acquire(source):
             raise RefusalError(
                 503,
                 "overloaded_error",
-                "the relay is at its concurrency limit; retry shortly",
-                "busy",
+                "this source is at its concurrency limit; retry shortly",
+                "busy-source",
                 headers=(("Retry-After", str(RETRY_AFTER_SECONDS)),),
             )
         try:
-            self._forward_admitted(route, query)
+            if not self.server.in_flight.acquire(blocking=False):
+                raise RefusalError(
+                    503,
+                    "overloaded_error",
+                    "the relay is at its concurrency limit; retry shortly",
+                    "busy",
+                    headers=(("Retry-After", str(RETRY_AFTER_SECONDS)),),
+                )
+            try:
+                self._forward_admitted(route, query)
+            finally:
+                self.server.in_flight.release()
         finally:
-            self.server.in_flight.release()
+            self.server.source_in_flight.release(source)
 
     def _forward_admitted(self, route: str, query: str) -> None:
         body = self._read_body(route)
@@ -574,12 +672,41 @@ class RelayHandler(BaseHTTPRequestHandler):
             raise RefusalError(
                 413, "invalid_request_error", "request body is too large", "too-large"
             )
-        body = self.rfile.read(length)
+        body = self._receive(length)
         if len(body) != length:
             raise RefusalError(
                 400, "invalid_request_error", "request body is truncated", "truncated"
             )
         return body
+
+    def _receive(self, length: int) -> bytes:
+        """Read up to ``length`` body bytes within the total body deadline.
+
+        Each read waits at most for what is left of the deadline, so a client that sends a byte
+        at a time still runs out of time; a body that is not complete in time is a 408. A short
+        result means the client closed early.
+        """
+        deadline = time.monotonic() + self.server.config.body_deadline
+        chunks: list[bytes] = []
+        remaining = length
+        try:
+            while remaining:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(min(left, CLIENT_SOCKET_TIMEOUT_SECONDS))
+                chunk = self.rfile.read1(min(remaining, STREAM_CHUNK_BYTES))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except TimeoutError as error:
+            raise RefusalError(
+                408, "invalid_request_error", "the request body was not received in time", "slow"
+            ) from error
+        finally:
+            self.connection.settimeout(CLIENT_SOCKET_TIMEOUT_SECONDS)
+        return b"".join(chunks)
 
     # -- forwarding ----------------------------------------------------------------------------
 

@@ -21,8 +21,10 @@ import pytest
 from .relay_support import (
     RELAY_SCRIPT,
     TOKEN,
+    InProcessRelay,
     RecordingUpstream,
     RelayProcess,
+    in_process_relay,
     running_relay,
     write_token,
 )
@@ -686,6 +688,9 @@ def test_the_request_cap_is_eight_mib_and_the_limits_are_the_documented_ones() -
     assert "MAX_REQUEST_BYTES = 8 * 1024 * 1024" in source
     assert "DEFAULT_MAX_IN_FLIGHT = 4" in source
     assert "DEFAULT_MAX_CONNECTIONS = 32" in source
+    assert "DEFAULT_MAX_IN_FLIGHT_PER_SOURCE = 2" in source
+    assert "DEFAULT_MAX_CONNECTIONS_PER_SOURCE = 8" in source
+    assert "DEFAULT_BODY_DEADLINE = 60.0" in source
 
 
 def test_requests_beyond_the_in_flight_limit_get_503_and_never_reach_the_gateway(
@@ -694,7 +699,8 @@ def test_requests_beyond_the_in_flight_limit_get_503_and_never_reach_the_gateway
     gate, entered = threading.Event(), threading.Semaphore(0)
     upstream.script.handler = _hold_upstream(gate, entered)
     held: list[int] = []
-    with running_relay(upstream.url, token_file, {"RELAY_MAX_IN_FLIGHT": "2"}) as relay:
+    env = {"RELAY_MAX_IN_FLIGHT": "2", "RELAY_MAX_IN_FLIGHT_PER_SOURCE": "2"}
+    with running_relay(upstream.url, token_file, env) as relay:
 
         def call() -> None:
             held.append(relay.post_json("/v1/messages", CLAUDE_BODY)[0])
@@ -770,7 +776,15 @@ def test_connections_beyond_the_connection_limit_are_answered_503_without_a_thre
         assert upstream.forwarded() == []
 
 
-@pytest.mark.parametrize("name", ["RELAY_MAX_IN_FLIGHT", "RELAY_MAX_CONNECTIONS"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "RELAY_MAX_IN_FLIGHT",
+        "RELAY_MAX_CONNECTIONS",
+        "RELAY_MAX_IN_FLIGHT_PER_SOURCE",
+        "RELAY_MAX_CONNECTIONS_PER_SOURCE",
+    ],
+)
 @pytest.mark.parametrize("value", ["0", "-1", "many"])
 def test_a_malformed_limit_stops_the_relay_at_startup(name: str, value: str) -> None:
     completed = subprocess.run(
@@ -783,3 +797,137 @@ def test_a_malformed_limit_stops_the_relay_at_startup(name: str, value: str) -> 
     )
     assert completed.returncode == 2
     assert name in completed.stderr
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon", "inf", "nan"])
+def test_a_malformed_body_deadline_stops_the_relay_at_startup(value: str) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(RELAY_SCRIPT)],
+        env={
+            "RELAY_UPSTREAM": "http://127.0.0.1:9",
+            "PATH": "/usr/bin:/bin",
+            "RELAY_BODY_DEADLINE": value,
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "RELAY_BODY_DEADLINE" in completed.stderr
+
+
+# --- fairness between sources: per-source limits and the body deadline ------------------------
+
+
+def _hold_marked(
+    gate: threading.Event, entered: threading.Semaphore
+) -> Callable[[BaseHTTPRequestHandler], bool]:
+    """Hold only requests whose path carries ``hold=1``; answer every other one at once."""
+    held = _hold_upstream(gate, entered)
+
+    def handler(request: BaseHTTPRequestHandler) -> bool:
+        return held(request) if "hold=1" in request.path else False
+
+    return handler
+
+
+def _start_held(relay: InProcessRelay, label: str, count: int) -> list[threading.Thread]:
+    threads = [
+        threading.Thread(
+            target=lambda: relay.post(label, "/v1/messages?hold=1", CLAUDE_BODY), daemon=True
+        )
+        for _ in range(count)
+    ]
+    for thread in threads:
+        thread.start()
+    return threads
+
+
+def test_one_source_holding_its_slots_cannot_starve_another(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    gate, entered = threading.Event(), threading.Semaphore(0)
+    upstream.script.handler = _hold_marked(gate, entered)
+    env = {"RELAY_MAX_IN_FLIGHT": "4", "RELAY_MAX_IN_FLIGHT_PER_SOURCE": "2"}
+    with in_process_relay(upstream.url, token_file, env) as relay:
+        threads = _start_held(relay, "attempt-a", 2)
+        try:
+            assert entered.acquire(timeout=15) and entered.acquire(timeout=15)
+
+            # A is at its share: its next request is refused before it reaches the gateway.
+            status, headers, body = relay.post("attempt-a", "/v1/messages?hold=1", CLAUDE_BODY)
+            assert status == 503
+            assert headers.get("Retry-After") == "2"
+            assert b"this source is at its concurrency limit" in body
+            assert len(upstream.forwarded()) == 2
+
+            # B is served while A holds both of its slots, again and again.
+            for _ in range(3):
+                assert relay.post("attempt-b", "/v1/messages", CLAUDE_BODY)[0] == 200
+            assert len(upstream.forwarded()) == 5
+        finally:
+            gate.set()
+            for thread in threads:
+                thread.join(timeout=20)
+        # A's slots came back with its responses.
+        assert relay.post("attempt-a", "/v1/messages", CLAUDE_BODY)[0] == 200
+
+
+def test_a_source_holding_its_connections_cannot_take_another_sources(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    env = {"RELAY_MAX_CONNECTIONS": "32", "RELAY_MAX_CONNECTIONS_PER_SOURCE": "3"}
+    with in_process_relay(upstream.url, token_file, env) as relay:
+        idle = [relay.source_client("attempt-a") for _ in range(3)]
+        try:
+            # The accept thread knows all three before the fourth arrives.
+            time.sleep(0.3)
+            extra = relay.source_client("attempt-a")
+            extra.request("GET", "/healthz")
+            refused = extra.getresponse()
+            assert refused.status == 503
+            assert b"this source is at its connection limit" in refused.read()
+            extra.close()
+
+            other = relay.source_client("attempt-b")
+            other.request("GET", "/healthz")
+            assert other.getresponse().status == 200
+            other.close()
+        finally:
+            for connection in idle:
+                connection.close()
+        assert upstream.forwarded() == []
+
+
+def test_a_body_that_trickles_in_is_cut_by_the_total_deadline_and_frees_its_slot(
+    upstream: RecordingUpstream, token_file: Path
+) -> None:
+    env = {
+        "RELAY_BODY_DEADLINE": "1",
+        "RELAY_MAX_IN_FLIGHT": "1",
+        "RELAY_MAX_IN_FLIGHT_PER_SOURCE": "1",
+    }
+    with running_relay(upstream.url, token_file, env) as relay:
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", relay.port), timeout=10) as slow:
+            slow.sendall(
+                b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 4096\r\n\r\n{"
+            )
+            reply = b""
+            # One byte every 0.25 s never idles the socket for long, so only a total deadline
+            # ends this; without one the relay would wait for the whole 4096 bytes.
+            while time.monotonic() - started < 20 and not reply:
+                try:
+                    slow.sendall(b" ")
+                    slow.settimeout(0.25)
+                    reply = slow.recv(4096)
+                except (TimeoutError, BrokenPipeError, ConnectionResetError):
+                    continue
+        elapsed = time.monotonic() - started
+        assert reply.startswith(b"HTTP/1.1 408"), reply
+        assert elapsed < 10
+        assert upstream.forwarded() == []
+        # The single slot was released with the cut connection.
+        assert relay.post_json("/v1/messages", CLAUDE_BODY)[0] == 200

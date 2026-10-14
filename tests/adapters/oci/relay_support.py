@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -209,3 +211,87 @@ def write_token(path: Path, value: str = TOKEN) -> Path:
     path.write_text(value + "\n", encoding="utf-8")
     path.chmod(0o600)
     return path
+
+
+class InProcessRelay:
+    """The real ``relay.py`` loaded as a module and served from a thread.
+
+    It exists so a test can inject the per-source key function: a loopback test client always
+    arrives from 127.0.0.1, so the sources are told apart by client port instead (see
+    ``source_client``). Everything else is the packaged relay code, unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        upstream: str,
+        token_file: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        spec = importlib.util.spec_from_file_location("relay_under_test", RELAY_SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # dataclasses resolve string annotations through it
+        spec.loader.exec_module(module)
+        self._module_name = spec.name
+        self.sources: dict[int, str] = {}
+        config = module.parse_config(
+            {
+                "RELAY_UPSTREAM": upstream,
+                "RELAY_TOKEN_FILE": str(token_file),
+                "RELAY_LISTEN_HOST": "127.0.0.1",
+                "RELAY_LISTEN_PORT": "0",
+                **(extra_env or {}),
+            }
+        )
+        self.server = module.RelayServer(
+            config, source_key=lambda address: self.sources.get(address[1], "unregistered")
+        )
+        self.port = int(self.server.server_address[1])
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def source_client(self, label: str, timeout: float = 15.0) -> http.client.HTTPConnection:
+        """A connection to the relay that the relay counts under source ``label``.
+
+        The client socket is bound first and its port registered before it connects, so the
+        relay can name the source from the moment it accepts.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.bind(("127.0.0.1", 0))
+        self.sources[sock.getsockname()[1]] = label
+        sock.connect(("127.0.0.1", self.port))
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        connection.sock = sock
+        return connection
+
+    def post(self, label: str, path: str, document: object) -> tuple[int, dict[str, str], bytes]:
+        connection = self.source_client(label)
+        try:
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(document).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        sys.modules.pop(self._module_name, None)
+
+
+@contextlib.contextmanager
+def in_process_relay(
+    upstream: str, token_file: Path, extra_env: dict[str, str] | None = None
+) -> Iterator[InProcessRelay]:
+    relay = InProcessRelay(upstream=upstream, token_file=token_file, extra_env=extra_env)
+    try:
+        yield relay
+    finally:
+        relay.stop()

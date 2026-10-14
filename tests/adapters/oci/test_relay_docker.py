@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
@@ -88,6 +90,41 @@ result = {
 print(json.dumps(result))
 """
 
+# Two forwarded requests are held open by the upstream; a third from the same attempt network
+# must be refused by the relay's per-source limit, and a request after they finish is served.
+_FAIRNESS_SCRIPT = """
+import json, threading, time, urllib.error, urllib.request
+
+BASE = "http://enginery-relay:8080"
+
+
+def post(path):
+    request = urllib.request.Request(
+        BASE + path,
+        data=json.dumps({"model": "anthropic/claude-sonnet-4-5", "messages": []}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return [response.status, response.read().decode()]
+    except urllib.error.HTTPError as error:
+        return [error.code, error.read().decode()]
+
+
+held = []
+threads = [
+    threading.Thread(target=lambda: held.append(post("/v1/messages?hold=1"))) for _ in range(2)
+]
+for thread in threads:
+    thread.start()
+time.sleep(1.5)
+third = post("/v1/messages?hold=1")
+for thread in threads:
+    thread.join()
+print(json.dumps({"held": held, "third": third, "after": post("/v1/messages")}))
+"""
+
 
 @dataclass
 class Stack:
@@ -144,7 +181,7 @@ def stack(real_engine: OciEngine, relay_image: str, tmp_path: Path) -> Iterator[
                 real_engine.run_cli(("network", "rm", network))
 
 
-def _run_worker(stack: Stack) -> dict[str, object]:
+def _run_worker(stack: Stack, script: str = _WORKER_SCRIPT) -> dict[str, object]:
     name = f"enginery-test-worker-{uuid.uuid4().hex[:10]}"
     host, port = UNREACHABLE_PUBLIC_ADDRESS
     stack.engine.create_attempt_network(stack.internal, operation_id="relay-docker-test")
@@ -161,7 +198,7 @@ def _run_worker(stack: Stack) -> dict[str, object]:
                 "python3",
                 stack.relay_image,
                 "-c",
-                _WORKER_SCRIPT,
+                script,
                 TOKEN,
                 str(stack.upstream.port),
                 host,
@@ -275,3 +312,28 @@ def test_up_again_is_idempotent_and_down_removes_the_relay(stack: Stack) -> None
     assert stack.engine.network_info(stack.egress) is None
     assert stack.manager.down().present is False
     assert stack.engine.network_info(stack.egress) is None
+
+
+def test_one_attempt_cannot_hold_every_relay_slot(stack: Stack) -> None:
+    def hold(request: BaseHTTPRequestHandler) -> bool:
+        if "hold=1" in request.path:
+            time.sleep(4)
+        return False
+
+    stack.upstream.script.handler = hold
+    stack.manager.up(
+        relay_image=stack.relay_image,
+        upstream=f"http://host.docker.internal:{stack.upstream.port}",
+        token_file=stack.token_file,
+    )
+
+    result = _run_worker(stack, _FAIRNESS_SCRIPT)
+
+    # The relay counts the worker under its own address on its own network: the third parallel
+    # request is refused by the per-source limit although the global limit has room.
+    held, third, after = result["held"], result["third"], result["after"]
+    assert held == [[200, '{"ok":true}'], [200, '{"ok":true}']]
+    assert isinstance(third, list) and third[0] == 503
+    assert "this source is at its concurrency limit" in third[1]
+    assert isinstance(after, list) and after[0] == 200
+    assert len(stack.upstream.forwarded()) == 3  # the refused one never reached the gateway
