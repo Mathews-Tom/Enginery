@@ -22,14 +22,16 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import stat
 import tarfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import IO
 
 from enginery.domain.errors import EngineryError
+from enginery.engine.task_repository import remove_trees, staging_path_for
 
 HOST_RESERVE_BYTES = 1 << 30
 """Free host disk space that extraction must never eat into."""
@@ -281,20 +283,36 @@ def extract_tree_archive(
     return TreeStats(entries=entries, bytes_used=total, skipped=skipped)
 
 
+def _discard(path: Path, log: Callable[[str], None] | None) -> None:
+    """Remove a staging tree, reporting what could not be removed (it stays until cleanup)."""
+    for leftover in remove_trees((path,)):
+        if log is not None:
+            log(f"could not remove {leftover}; it is removed with the workspace's cleanup")
+
+
 def replace_tree(
-    stream: IO[bytes], destination: str, *, max_bytes: int, max_entries: int
+    stream: IO[bytes],
+    destination: str,
+    *,
+    max_bytes: int,
+    max_entries: int,
+    log: Callable[[str], None] | None = None,
 ) -> TreeStats:
     """Replace the directory ``destination`` with the tree in the archive on ``stream``.
 
     The archive is extracted beside ``destination`` first; only a complete extraction replaces
-    it, so a refused or failed archive leaves the old tree untouched.
+    it, so a refused or failed archive leaves the old tree untouched. The staging trees are
+    named after ``destination`` (see ``staging_path_for``), so the cleanup of the workspace
+    removes any that outlive this call; a removal that fails here is reported to ``log``.
     """
-    parent = os.path.dirname(destination)
-    staging = os.path.join(parent, f".incoming-{uuid.uuid4().hex}")
-    retired = os.path.join(parent, f".retired-{uuid.uuid4().hex}")
+    workspace = Path(destination)
+    staging = staging_path_for(workspace, "incoming", uuid.uuid4().hex)
+    retired = staging_path_for(workspace, "retired", uuid.uuid4().hex)
     os.mkdir(staging, 0o700)
     try:
-        stats = extract_tree_archive(stream, staging, max_bytes=max_bytes, max_entries=max_entries)
+        stats = extract_tree_archive(
+            stream, str(staging), max_bytes=max_bytes, max_entries=max_entries
+        )
         os.rename(destination, retired)
         try:
             os.rename(staging, destination)
@@ -304,9 +322,9 @@ def replace_tree(
             )  # keep the old tree if the new one cannot take its place
             raise
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        _discard(staging, log)
         raise
-    shutil.rmtree(retired, ignore_errors=True)
+    _discard(retired, log)
     return stats
 
 

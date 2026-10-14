@@ -490,6 +490,7 @@ def _collect(
             spec.workspace_path,
             max_bytes=bounds.workspace_bytes,
             max_entries=bounds.workspace_inodes,
+            log=log,
         )
 
     engine.copy_out(names.holder, f"{WORKSPACE_MOUNT}/.", take_workspace)

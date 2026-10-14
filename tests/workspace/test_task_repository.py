@@ -21,6 +21,8 @@ from enginery.engine.task_repository import (
     remove_stale_base_references,
     remove_task_local_workspace,
     resolve_commit,
+    staging_path_for,
+    staging_trees_for,
     verify_intake_branch,
 )
 
@@ -701,6 +703,48 @@ def test_cleanup_removes_workspace_out_and_intake(
 
 def test_cleanup_of_missing_paths_is_a_no_op(workspace: Path) -> None:
     assert remove_task_local_workspace(workspace_path=workspace) == ()
+
+
+def test_cleanup_removes_the_staging_trees_of_its_own_workspace_only(
+    materialized: Path,
+) -> None:
+    siblings = materialized.parent
+    own = [
+        staging_path_for(materialized, "incoming", "aa"),
+        staging_path_for(materialized, "retired", "bb"),
+    ]
+    other = materialized.with_name(materialized.name + "-other")
+    foreign = [
+        staging_path_for(other, "incoming", "cc"),
+        siblings / ".incoming-legacy",
+    ]
+    for path in (*own, *foreign):
+        (path / "nested").mkdir(parents=True)
+        (path / "nested" / "file").write_text("x", encoding="utf-8")
+    (own[1] / "nested").chmod(0o500)
+
+    assert set(staging_trees_for(materialized)) == set(own)
+    assert remove_task_local_workspace(workspace_path=materialized) == ()
+
+    assert not any(path.exists() for path in own)
+    assert all(path.exists() for path in foreign)
+
+
+def test_a_staging_tree_that_cannot_be_removed_is_reported_as_retained(
+    materialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = staging_path_for(materialized, "retired", "dd")
+    stuck.mkdir()
+    real_unlink = os.rmdir
+
+    def refuse(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        if Path(path) == stuck:
+            raise PermissionError("busy")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rmdir", refuse)
+
+    assert remove_task_local_workspace(workspace_path=materialized) == (stuck,)
 
 
 def test_cleanup_repairs_owner_permissions_before_removing(

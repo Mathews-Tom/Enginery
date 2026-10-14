@@ -44,6 +44,7 @@ WORKER_HOOKS_PATH = "/nonexistent-enginery-hooks"
 
 _INTAKE_SUFFIX = ".intake.git"
 _OUT_SUFFIX = ".out"
+_STAGING_KINDS = ("incoming", "retired")
 _MAX_BRANCH_LENGTH = 200
 _TREE_READ_CHUNK = 1 << 16
 _TREE_MAX_RECORD_BYTES = 1 << 20
@@ -61,6 +62,29 @@ def intake_path_for(workspace_path: Path) -> Path:
 def out_path_for(workspace_path: Path) -> Path:
     """Directory the worker writes its result artifacts into."""
     return workspace_path.with_name(workspace_path.name + _OUT_SUFFIX)
+
+
+def staging_path_for(workspace_path: Path, kind: str, token: str) -> Path:
+    """Where a readback stages a tree beside ``workspace_path`` (``kind`` is ``incoming`` or
+    ``retired``).
+
+    The name starts with the workspace's own name, so the staging trees of one workspace are
+    found, and removed with it, by :func:`staging_trees_for` and
+    :func:`remove_task_local_workspace`; no other workspace's cleanup sees them.
+    """
+    if kind not in _STAGING_KINDS or not token or "/" in token:
+        raise InvalidInputError("unusable staging tree name", details={"kind": kind})
+    return workspace_path.with_name(f"{workspace_path.name}.{kind}-{token}")
+
+
+def staging_trees_for(workspace_path: Path) -> tuple[Path, ...]:
+    """Every staging tree a readback left beside ``workspace_path``."""
+    prefixes = tuple(f"{workspace_path.name}.{kind}-" for kind in _STAGING_KINDS)
+    try:
+        with os.scandir(workspace_path.parent) as scan:
+            return tuple(Path(entry.path) for entry in scan if entry.name.startswith(prefixes))
+    except OSError:
+        return ()
 
 
 def resolve_commit(repository_path: Path, revision: str) -> str:
@@ -305,14 +329,26 @@ def verify_intake_branch(
 
 
 def remove_task_local_workspace(*, workspace_path: Path) -> tuple[Path, ...]:
-    """Remove the workspace, its out directory and its intake repository.
+    """Remove the workspace, its out directory, its intake repository and any staging tree.
 
     Permissions are repaired best-effort first (symbolic links are never followed).
     Entries that still cannot be removed are returned; this never raises for a
     partial failure so the caller can record what was retained.
     """
+    return remove_trees(
+        (
+            workspace_path,
+            out_path_for(workspace_path),
+            intake_path_for(workspace_path),
+            *staging_trees_for(workspace_path),
+        )
+    )
+
+
+def remove_trees(roots: Sequence[Path]) -> tuple[Path, ...]:
+    """Remove each of ``roots`` without following links; return what could not be removed."""
     retained: list[Path] = []
-    for root in (workspace_path, out_path_for(workspace_path), intake_path_for(workspace_path)):
+    for root in roots:
         _remove_root(root, retained)
     return tuple(retained)
 
@@ -895,6 +931,9 @@ __all__ = [
     "materialize_task_local_repository",
     "out_path_for",
     "remove_task_local_workspace",
+    "remove_trees",
     "resolve_commit",
+    "staging_path_for",
+    "staging_trees_for",
     "verify_intake_branch",
 ]

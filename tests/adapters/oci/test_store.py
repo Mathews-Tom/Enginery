@@ -298,6 +298,45 @@ def test_replace_tree_swaps_only_a_complete_extraction(tmp_path: Path) -> None:
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["workspace"]
 
 
+def test_staging_trees_are_named_after_the_workspace_and_logged_when_they_outlive_the_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from enginery.engine.task_repository import remove_task_local_workspace, staging_trees_for
+
+    destination = tmp_path / "task-7"
+    destination.mkdir()
+    (destination / "old").write_text("old")
+    monkeypatch.setattr(store, "remove_trees", lambda roots: tuple(roots))
+    messages: list[str] = []
+
+    replace_tree(
+        _archive(_file("new", b"new")),
+        str(destination),
+        max_bytes=_BIG,
+        max_entries=10,
+        log=messages.append,
+    )
+    with pytest.raises(TreeTransferError):
+        replace_tree(
+            _archive(_file("../bad")),
+            str(destination),
+            max_bytes=_BIG,
+            max_entries=10,
+            log=messages.append,
+        )
+
+    left = sorted(entry.name for entry in tmp_path.iterdir() if entry.name != "task-7")
+    assert len(left) == 2
+    assert left[0].startswith("task-7.incoming-") and left[1].startswith("task-7.retired-")
+    assert len(messages) == 2 and all("could not remove" in message for message in messages)
+    assert {path.name for path in staging_trees_for(destination)} == set(left)
+
+    # The workspace's ordinary cleanup takes the stragglers with it.
+    monkeypatch.undo()
+    assert remove_task_local_workspace(workspace_path=destination) == ()
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- named result files --------------------------------------------------------------
 
 
