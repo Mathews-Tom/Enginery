@@ -6,7 +6,7 @@ HOME and configuration directory and a scrubbed environment.
 
 The proofs must exercise the harness version the execution catalog tested (never merely a
 version inside its accepted range). When the binary on
-``PATH`` is another version (harnesses auto-upgrade), ``omp`` is run instead inside a throw-away
+``PATH`` is another version (harnesses auto-upgrade), the harness is run instead inside a throw-away
 container of the pinned worker image, which is the binary the isolated runner actually uses.
 The container carries the production hardening flags; only the test adds ``--add-host`` so the
 container reaches the stub, which then listens on every interface for the length of the test.
@@ -41,8 +41,8 @@ _PROBES: dict[str, tuple[str, _Probe]] = {
     "claude-code": ("claude", probe_claude),
     "omp": ("omp", probe_omp),
 }
-_IMAGE_CAPABLE = frozenset({"omp"})
-"""Harnesses whose proofs are wired to run in the worker image (claude runs on the host)."""
+_IMAGE_CAPABLE = frozenset({"omp", "claude-code"})
+"""Harnesses whose proofs are wired to run in the worker image."""
 
 CONTAINER_STUB_HOST = "host.docker.internal"
 """How a Docker Desktop container reaches the test's stub on the host."""
@@ -275,7 +275,7 @@ class RealHarness:
         # not the owner of the proof's temporary directories: open them for it, and let git
         # trust the bare remote that lives at its host path. Test-only; the workspace itself is
         # trusted through the image's own system configuration.
-        for tree in (proof.workspace, proof.remote):
+        for tree in (proof.workspace, proof.remote, proof.outside):
             if tree.exists():
                 subprocess.run(["chmod", "-R", "a+rwX", str(tree)], check=True)
         # A global (not command-line) setting: the harness's own subprocesses and git's
@@ -309,6 +309,10 @@ class RealHarness:
             # The bare "remote" keeps its host path so the workspace's origin URL resolves.
             "-v",
             f"{proof.remote}:{proof.remote}:rw",
+            # The directory outside the workspace is mounted too, so a refused access to it is a
+            # refusal of something that exists rather than of a path the container cannot see.
+            "-v",
+            f"{proof.outside}:{proof.outside}:rw",
             "-w",
             WORKSPACE_MOUNT,
             *(item for key, value in environment.items() for item in ("-e", f"{key}={value}")),
@@ -325,10 +329,10 @@ class RealHarness:
 
 
 def require_real_target(harness: str) -> RealHarness:
-    """The binary to prove against: the host's if it is the catalog version, else the image's.
+    """The binary to prove against: the host's if it is the tested version, else the image's.
 
     Skips, with a reason naming both the host binary and the worker image, only when neither
-    is usable. Never runs a harness version the catalog does not test.
+    is usable. Never runs a harness version the catalog did not test.
     """
     executable, probe = _PROBES[harness]
     catalog_host = load_execution_catalog().host(harness)
@@ -349,13 +353,6 @@ def require_real_target(harness: str) -> RealHarness:
         image=image_ref if selection.target == "image" else None,
         reason=selection.reason,
     )
-
-
-def require_real_harness(harness: str) -> Path:
-    """The host binary path for harnesses proven on the host (skips otherwise, naming why)."""
-    target = require_real_target(harness)
-    assert target.binary is not None
-    return target.binary
 
 
 @dataclass(frozen=True, slots=True)

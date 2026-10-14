@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,9 +10,9 @@ import pytest
 from tests.support.loopback_model import STUB_TOKEN, LoopbackModelServer, ToolRequest
 from tests.support.real_harness import (
     ProofWorkspace,
+    RealHarness,
     make_proof_workspace,
-    require_real_harness,
-    scrubbed_environment,
+    require_real_target,
 )
 from tests.support.runner_context import harness_task, isolated_context
 
@@ -135,30 +134,31 @@ def _tool_outcomes(stream_json: str) -> dict[str, _Outcome]:
 
 
 def _run_claude(
-    harness: ClaudeCodeHarness, proof: ProofWorkspace, binary: Path, server: LoopbackModelServer
+    harness: ClaudeCodeHarness,
+    proof: ProofWorkspace,
+    real: RealHarness,
+    server: LoopbackModelServer,
 ) -> str:
+    """Run the adapter's isolated argv on the real claude the catalog tests, against the stub."""
     task = harness_task(proof.workspace, "claude-code")
-    environment = scrubbed_environment(binary, proof, dict(harness.container_environment(task)))
-    environment["ANTHROPIC_BASE_URL"] = server.base_url
-    environment["ANTHROPIC_AUTH_TOKEN"] = STUB_TOKEN
-    completed = subprocess.run(
-        (str(binary), *harness.command_for(task)[1:]),
-        cwd=proof.workspace,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        stdin=subprocess.DEVNULL,
-        check=False,
+    completed = real.run(
+        harness.command_for(task),
+        proof,
+        dict(harness.container_environment(task)),
+        extra_environment={
+            "ANTHROPIC_BASE_URL": real.stub_url(server),
+            "ANTHROPIC_AUTH_TOKEN": STUB_TOKEN,
+        },
     )
     assert completed.returncode == 0, completed.stderr[-500:]
     return completed.stdout
 
 
 def test_real_claude_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_path: Path) -> None:
-    binary = require_real_harness("claude-code")
+    real = require_real_target("claude-code")
     proof = make_proof_workspace(tmp_path)
-    allowed_file = proof.workspace / "allowed.txt"
+    allowed_file = real.view(proof, proof.workspace / "allowed.txt")
+    seen_workspace = real.view(proof, proof.workspace)
     turns = [
         [
             ToolRequest("Write", {"file_path": str(allowed_file), "content": "allowed\n"}),
@@ -169,7 +169,7 @@ def test_real_claude_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_pat
             ),
             ToolRequest(
                 "Bash",
-                {"command": f"touch {proof.workspace / 'shell-marker'}", "description": "touch"},
+                {"command": f"touch {seen_workspace / 'shell-marker'}", "description": "touch"},
             ),
             ToolRequest("Read", {"file_path": str(proof.outside / "secret.txt")}),
             ToolRequest("WebFetch", {"url": "http://127.0.0.1:9/x", "prompt": "fetch"}),
@@ -179,13 +179,13 @@ def test_real_claude_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_pat
     ]
     harness = _isolated_harness(tmp_path)
 
-    with LoopbackModelServer("anthropic", turns) as server:
-        output = _run_claude(harness, proof, binary, server)
+    with real.stub("anthropic", turns) as server:
+        output = _run_claude(harness, proof, real, server)
 
     outcomes = _tool_outcomes(output)
     # Allowed: a write inside the workspace and the two local git steps.
     assert not outcomes["toolu_0_0"].is_error
-    assert allowed_file.read_text(encoding="utf-8") == "allowed\n"
+    assert (proof.workspace / "allowed.txt").read_text(encoding="utf-8") == "allowed\n"
     assert not outcomes["toolu_1_0"].is_error
     assert not outcomes["toolu_2_0"].is_error
     assert proof.git("log", "-1", "--format=%s") == "add allowed file\n"
@@ -208,7 +208,7 @@ def test_real_claude_refuses_disallowed_tool_calls_and_runs_allowed_ones(tmp_pat
 def test_real_claude_bypass_would_have_run_the_refused_calls(tmp_path: Path) -> None:
     """The control: with the trusted-local bypass the same calls take effect, so the refusals
     above come from the mapping and not from the stub, the workspace or the environment."""
-    binary = require_real_harness("claude-code")
+    real = require_real_target("claude-code")
     proof = make_proof_workspace(tmp_path)
     turns = [
         [
@@ -225,28 +225,23 @@ def test_real_claude_bypass_would_have_run_the_refused_calls(tmp_path: Path) -> 
         runner=None,
     )
     task = harness_task(proof.workspace, "claude-code")
-    environment = scrubbed_environment(binary, proof, {})
-    environment["CLAUDE_CONFIG_DIR"] = str(proof.home / ".claude")
-    (proof.home / ".claude").mkdir()
-    with LoopbackModelServer("anthropic", turns) as server:
-        environment["ANTHROPIC_BASE_URL"] = server.base_url
-        environment["ANTHROPIC_AUTH_TOKEN"] = STUB_TOKEN
-        environment.update(
+    with real.stub("anthropic", turns) as server:
+        completed = real.run(
+            harness.command_for(task),
+            proof,
             {
+                "HOME": "/home/worker",
+                "CLAUDE_CONFIG_DIR": "/home/worker/.claude",
+                "GIT_TERMINAL_PROMPT": "0",
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+            },
+            extra_environment={
+                "ANTHROPIC_BASE_URL": real.stub_url(server),
+                "ANTHROPIC_AUTH_TOKEN": STUB_TOKEN,
                 "DISABLE_TELEMETRY": "1",
                 "DISABLE_AUTOUPDATER": "1",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            }
-        )
-        completed = subprocess.run(
-            (str(binary), *harness.command_for(task)[1:]),
-            cwd=proof.workspace,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            stdin=subprocess.DEVNULL,
-            check=False,
+            },
         )
 
     assert completed.returncode == 0, completed.stderr[-500:]

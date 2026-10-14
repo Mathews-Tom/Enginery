@@ -81,15 +81,20 @@ def test_a_harness_not_wired_for_the_image_skips_instead_of_proving_another_vers
 
 
 def _stub_environment(
-    monkeypatch: pytest.MonkeyPatch, *, installed: str | None, image: ImageFacts
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    installed: str | None,
+    image: ImageFacts,
+    harness: str = "omp",
 ) -> None:
+    executable = real_harness._PROBES[harness][0]
     monkeypatch.setattr(shutil, "which", lambda name: f"/opt/bin/{name}")
     probe = (
         (lambda executable: InstalledHost(installed, "x"))
         if installed is not None
         else (lambda executable: None)
     )
-    monkeypatch.setitem(real_harness._PROBES, "omp", ("omp", probe))
+    monkeypatch.setitem(real_harness._PROBES, harness, (executable, probe))
     monkeypatch.setattr(
         real_harness,
         "_image_facts",
@@ -97,13 +102,16 @@ def _stub_environment(
     )
 
 
+@pytest.mark.parametrize("harness", ["omp", "claude-code"])
 def test_require_real_target_uses_the_image_when_the_host_differs_from_the_real_catalog(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, harness: str
 ) -> None:
-    catalog_version = load_execution_catalog().host("omp").tested_executable_version
-    _stub_environment(monkeypatch, installed="0.0.1-not-the-catalog", image=USABLE_IMAGE)
+    catalog_version = load_execution_catalog().host(harness).tested_executable_version
+    _stub_environment(
+        monkeypatch, installed="0.0.1-not-the-catalog", image=USABLE_IMAGE, harness=harness
+    )
 
-    target = require_real_target("omp")
+    target = require_real_target(harness)
 
     assert target.in_image
     assert target.image == "enginery-runner:abc"
@@ -111,40 +119,49 @@ def test_require_real_target_uses_the_image_when_the_host_differs_from_the_real_
     assert target.binary is None
 
 
+@pytest.mark.parametrize("harness", ["omp", "claude-code"])
 def test_a_host_binary_inside_the_accepted_range_but_not_tested_is_not_proven(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, harness: str
 ) -> None:
-    host = load_execution_catalog().host("omp")
+    host = load_execution_catalog().host(harness)
     tested = host.tested_executable_version
     major, minor, patch = (int(part) for part in tested.split("."))
     untested = f"{major}.{minor}.{patch + 1}"
     assert host.version.accepts(untested)  # accepted by the catalog, never the tested binary
+    executable = real_harness._PROBES[harness][0]
     monkeypatch.setattr(shutil, "which", lambda name: f"/opt/bin/{name}")
     monkeypatch.setitem(
         real_harness._PROBES,
-        "omp",
-        ("omp", lambda found: InstalledHost(untested, host.protocol_fingerprint)),
+        harness,
+        (executable, lambda found: InstalledHost(untested, host.protocol_fingerprint)),
     )
     monkeypatch.setattr(
         real_harness, "_image_facts", lambda harness: (USABLE_IMAGE, "enginery-runner:abc")
     )
 
-    target = require_real_target("omp")
+    target = require_real_target(harness)
 
     assert target.in_image
     assert target.version == tested
 
 
+@pytest.mark.parametrize("harness", ["omp", "claude-code"])
 def test_require_real_target_skips_with_a_reason_naming_host_and_engine(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, harness: str
 ) -> None:
-    _stub_environment(monkeypatch, installed="0.0.1-not-the-catalog", image=NO_ENGINE)
+    _stub_environment(
+        monkeypatch, installed="0.0.1-not-the-catalog", image=NO_ENGINE, harness=harness
+    )
 
     with pytest.raises(pytest.skip.Exception) as skipped:
-        require_real_target("omp")
+        require_real_target(harness)
 
     assert "0.0.1-not-the-catalog" in str(skipped.value)
     assert "no qualified container engine is reachable" in str(skipped.value)
+
+
+def test_claude_is_wired_for_the_worker_image() -> None:
+    assert "claude-code" in real_harness._IMAGE_CAPABLE
 
 
 def test_the_image_target_reaches_a_stub_bound_on_every_interface() -> None:
@@ -203,5 +220,6 @@ def test_the_image_run_is_a_throwaway_hardened_container(
     assert mounts == [
         f"{proof.workspace}:/workspace:rw",
         f"{proof.remote}:{proof.remote}:rw",
+        f"{proof.outside}:{proof.outside}:rw",
     ]
     assert arguments[-3:] == ("sh", "omp", "--version")
