@@ -191,10 +191,12 @@ class GitBranchPublisher:
         """List every path ``base_revision..head_revision`` changes, with renames split in two.
 
         Read by the host from the verified repository with external diff drivers and textconv
-        disabled and rename detection off, so a path moved out of a protected directory is
-        reported at its old location as well as its new one. NUL-separated output keeps paths
-        with newlines or quotes exact; bytes that are not UTF-8 are replaced, which can only
-        make a path look different, never hide it from a pattern.
+        disabled, rename detection off and submodule changes always reported (a worker-planted
+        ``diff.ignoreSubmodules`` or ``submodule.*.ignore`` never hides a gitlink change), so
+        a path moved out of a protected directory is reported at its old location as well as
+        its new one. NUL-separated output keeps paths with newlines or quotes exact; bytes
+        that are not UTF-8 are replaced, which can only make a path look different, never hide
+        it from a pattern.
         """
         if _OBJECT_ID.fullmatch(head_revision) is None:
             raise InvalidInputError(
@@ -223,6 +225,7 @@ class GitBranchPublisher:
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-renames",
+                "--ignore-submodules=none",
                 f"{base}..{head_revision}",
                 "--",
             ],

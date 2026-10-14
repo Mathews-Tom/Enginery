@@ -112,6 +112,8 @@ def test_a_blank_repository_identity_is_refused() -> None:
         "services/api/Jenkinsfile",
         "CODEOWNERS",
         "docs/CODEOWNERS",
+        ".gitmodules",
+        "vendor/lib/.gitmodules",
         ".enginery/capabilities.lock.json",
         ".enginery/evaluators/x.json",
         "holdouts/case-1/expected.json",

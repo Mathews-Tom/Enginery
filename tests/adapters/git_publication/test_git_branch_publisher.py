@@ -709,6 +709,23 @@ def test_a_planted_diff_driver_or_textconv_never_runs_while_paths_are_read(rig: 
     assert not marker.exists()
 
 
+def test_a_submodule_change_is_reported_whatever_the_repository_config_says_to_ignore(
+    rig: Rig,
+) -> None:
+    git("config", "diff.ignoreSubmodules", "all", cwd=rig.source)
+    git("config", "submodule.vendor/sub.ignore", "all", cwd=rig.source)
+    git("update-index", "--add", "--cacheinfo", f"160000,{_base(rig)},vendor/sub", cwd=rig.source)
+    git("commit", "-q", "-m", "add a submodule pin", cwd=rig.source)
+    pinned = git("rev-parse", "HEAD", cwd=rig.source)
+    git("update-index", "--cacheinfo", f"160000,{pinned},vendor/sub", cwd=rig.source)
+    git("commit", "-q", "-m", "move the submodule pin", cwd=rig.source)
+    head = git("rev-parse", "HEAD", cwd=rig.source)
+
+    changed = rig.publisher().changed_paths(base_revision=_base(rig), head_revision=head)
+
+    assert changed == ("vendor/sub",), "a hidden gitlink change would bypass a protected pattern"
+
+
 class _AuthenticatingServer(http.server.BaseHTTPRequestHandler):
     """Answers 401 to everything but one credential, which it answers 403 and records."""
 

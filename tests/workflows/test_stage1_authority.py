@@ -1387,6 +1387,8 @@ def test_an_ordinary_change_publishes_unheld_and_records_the_empty_match(
     [
         ".GitHub/Workflows/X.yml",
         "CODEOWNERS",
+        ".gitmodules",
+        "vendor/lib/.gitmodules",
         "docs/CODEOWNERS",
         ".circleci/config.yml",
         "holdouts/case-1.json",

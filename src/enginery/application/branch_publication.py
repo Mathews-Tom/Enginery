@@ -47,6 +47,9 @@ DEFAULT_PROTECTED_PATH_PATTERNS: tuple[str, ...] = (
     "cloudbuild.yml",
     # Who must review what: a change can remove the required reviewer of itself.
     "CODEOWNERS",
+    # Submodule definitions: a change re-points a pinned dependency to a URL that CI and every
+    # fresh recursive clone then fetch.
+    ".gitmodules",
     # Evaluator, holdout and factory configuration: material a candidate must not rewrite to
     # change how it is judged.
     ".enginery/**",
