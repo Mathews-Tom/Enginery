@@ -271,6 +271,17 @@ class RealHarness:
         for name in ("NO_PROXY", "no_proxy"):
             environment[name] = f"127.0.0.1,localhost,{CONTAINER_STUB_HOST}"
         environment.update(extra_environment)
+        # On an engine that keeps real host uids (plain Docker on Linux) the container's uid is
+        # not the owner of the proof's temporary directories: open them for it, and let git
+        # trust the bare remote that lives at its host path. Test-only; the workspace itself is
+        # trusted through the image's own system configuration.
+        for tree in (proof.workspace, proof.remote):
+            if tree.exists():
+                subprocess.run(["chmod", "-R", "a+rwX", str(tree)], check=True)
+        configured = int(environment.get("GIT_CONFIG_COUNT", "0"))
+        environment["GIT_CONFIG_COUNT"] = str(configured + 1)
+        environment[f"GIT_CONFIG_KEY_{configured}"] = "safe.directory"
+        environment[f"GIT_CONFIG_VALUE_{configured}"] = "*"
         home = environment["HOME"]
         seeds: list[str] = []
         seed_arguments: list[str] = []
