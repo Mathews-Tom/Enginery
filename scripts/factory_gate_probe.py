@@ -1415,25 +1415,40 @@ def _fill_entries(root: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"entries_created": created, "failure": failure}
 
 
-def _fallocate_child(root: str, index: int, params: dict[str, Any], write_end: int) -> None:
-    """One burst process: a large ``fallocate`` (command line), then chunked ``posix_fallocate``
-    calls into new files until the first refusal. Reports one JSON object and exits."""
-    report: dict[str, Any] = {"index": index}
-    big = f"{int(params['big_mib'])}M"
+def _exit_report(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    """How a command the probe ran ended: its code, the signal that ended it, its stderr tail."""
+    code = completed.returncode
+    ended_by: str | None = None
+    if code < 0:
+        try:
+            ended_by = signal.Signals(-code).name
+        except ValueError:
+            ended_by = f"signal {-code}"
+    return {"exit": code, "signal": ended_by, "stderr": completed.stderr.strip()[-160:]}
+
+
+def _fallocate_cli(path: str, mib: int) -> dict[str, Any]:
+    """``fallocate -l <mib>M <path>`` as a separate process, so a signal ends it, not the probe."""
     try:
-        cli = subprocess.run(
-            ["fallocate", "-l", big, os.path.join(root, f"big{index}")],
+        completed = subprocess.run(
+            ["fallocate", "-l", f"{mib}M", path],
             check=False,
             capture_output=True,
             text=True,
             timeout=60,
         )
-        report["big_fallocate"] = {
-            "exit": cli.returncode,
-            "stderr": cli.stderr.strip()[-160:],
-        }
     except (OSError, subprocess.TimeoutExpired) as error:
-        report["big_fallocate"] = {"error": type(error).__name__}
+        return {"error": type(error).__name__}
+    return _exit_report(completed)
+
+
+def _fallocate_child(root: str, index: int, params: dict[str, Any], write_end: int) -> None:
+    """One burst process: a ``fallocate`` (command line) below the per-file limit, then chunked
+    ``posix_fallocate`` calls into new files until the first refusal. Reports one JSON object and
+    exits."""
+    report: dict[str, Any] = {"index": index}
+    big_path = os.path.join(root, f"big{index}")
+    report["big_fallocate"] = _fallocate_cli(big_path, int(params["big_mib"]))
     chunk = int(params["chunk_mib"]) * 1024 * 1024
     chunks = 0
     failure: str | None = None
@@ -1478,8 +1493,27 @@ def _fallocate_burst(root: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"processes": int(params["procs"]), "reports": reports}
 
 
+def _file_size_limit(root: str, params: dict[str, Any]) -> dict[str, Any]:
+    """One allocation below the per-file limit (``RLIMIT_FSIZE``) and one above it that still fits
+    the volume, so that only the per-file limit can be what stops the second."""
+    report: dict[str, Any] = {"rlimit_fsize": list(resource.getrlimit(resource.RLIMIT_FSIZE))}
+    for label in ("under", "over"):
+        path = os.path.join(root, f"{label}_limit")
+        mib = int(params[f"{label}_mib"])
+        outcome: dict[str, Any] = {"requested_mib": mib, **_fallocate_cli(path, mib)}
+        try:
+            info = os.lstat(path)
+            outcome["allocated_bytes"] = info.st_blocks * 512
+            outcome["apparent_bytes"] = info.st_size
+        except OSError:
+            outcome["allocated_bytes"] = None
+        report[f"{label}_limit"] = outcome
+    return report
+
+
 def mode_disk(params: dict[str, Any]) -> dict[str, Any]:
-    """Outgrow a capped volume in bytes, in entries or with a parallel ``fallocate`` burst.
+    """Outgrow a capped volume in bytes, in entries or with a parallel ``fallocate`` burst, or
+    outgrow the per-file size limit alone (``filesize``).
 
     Reports what the process saw (errno names) and what the kernel reports for the volume
     (``statvfs``), before and after. ``cleanup`` removes the fill afterwards so a full result
@@ -1500,6 +1534,8 @@ def mode_disk(params: dict[str, Any]) -> dict[str, Any]:
         outcome = _fill_entries(root, params)
     elif kind == "burst":
         outcome = _fallocate_burst(root, params)
+    elif kind == "filesize":
+        outcome = _file_size_limit(root, params)
     else:
         raise SystemExit(f"unknown disk kind {kind!r}")
     after = _volume_stats(where)

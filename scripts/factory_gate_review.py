@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -125,9 +125,16 @@ REQUIRED: dict[str, str] = {
         "entry count never exceeds the cap"
     ),
     "r-m3-disk-parallel-fallocate-capped": (
-        "A burst of 8 parallel fallocate processes into a small workspace is capped by the "
-        "kernel: the large allocations fail and at most the cap is allocated (statvfs inside the "
-        "container and the bytes read back on the host)"
+        "A burst of 8 parallel fallocate processes, each asking for less than the per-file limit "
+        "but together for more than the workspace holds, is capped by the volume's kernel size "
+        "cap: the allocations beyond it fail with ENOSPC (No space left on device) and at most "
+        "the cap is allocated (statvfs and allocated blocks inside the container and the bytes "
+        "read back on the host)"
+    ),
+    "r-m3-disk-per-file-limit": (
+        "A single allocation larger than the per-file limit the receipt records, yet small enough "
+        "for the volume, is stopped by the kernel's RLIMIT_FSIZE (SIGXFSZ) and allocates nothing, "
+        "while one below the limit succeeds"
     ),
     "r-m3-disk-receipt-and-readback": (
         "The receipt records the kernel-capped-volume mechanism with the profile's byte and "
@@ -857,8 +864,44 @@ _SMALL_OUT_MIB = 8
 _SMALL_WORKSPACE_INODES = 4000
 _SMALL_OUT_INODES = 64
 _BURST_PROCESSES = 8
-_BURST_BIG_MIB = 64
+_BURST_BIG_MIB = 6
 _BURST_CHUNK_MIB = 2
+_FILE_UNDER_MIB = 4
+_FILE_OVER_MIB = 12
+_PER_FILE_LIMIT_BYTES = min(_SMALL_WORKSPACE_MIB, _SMALL_OUT_MIB) * _MIB
+"""The per-file size limit the launcher gives a worker: the smaller of the two volumes."""
+
+
+def _large_allocations(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """How each ``fallocate`` of the parallel burst ended, and whether only the volume refused any.
+
+    Each allocation is below the per-file limit, so nothing but the volume's size cap can refuse
+    one, and a refusal is the kernel's own ``ENOSPC`` (``fallocate`` exits 1 with that message).
+    A signal (the per-file limit), a missing command, a timeout or any other failure is neither a
+    grant nor a refusal by the volume, and fails the verdict.
+    """
+    entries = [report.get("big_fallocate") or {} for report in reports]
+    granted = [entry for entry in entries if entry.get("exit") == 0]
+    refused = [
+        entry
+        for entry in entries
+        if entry.get("exit") == 1 and "No space left on device" in str(entry.get("stderr", ""))
+    ]
+    return {
+        "granted": len(granted),
+        "refused_with_enospc": len(refused),
+        "exits": [entry.get("exit") for entry in entries],
+        "signals": sorted({str(entry.get("signal")) for entry in entries}),
+        "messages": sorted({str(entry.get("stderr", "")) for entry in entries}),
+        "by_the_volume": (
+            len(reports) == _BURST_PROCESSES
+            and len(granted) + len(refused) == len(entries)
+            and bool(refused)
+            and len(granted) * _BURST_BIG_MIB <= _SMALL_WORKSPACE_MIB
+            and _BURST_BIG_MIB * _MIB < _PER_FILE_LIMIT_BYTES
+            and _BURST_PROCESSES * _BURST_BIG_MIB > _SMALL_WORKSPACE_MIB
+        ),
+    }
 
 
 def _small_profile(gate: Gate) -> RunnerProfile:
@@ -932,11 +975,14 @@ def _kernel_cap_bounds(attempt: AttemptResult, profile: RunnerProfile) -> dict[s
 def step_m3_disk(gate: Gate) -> None:
     """The disk bounds are the kernel's: a worker that outgrows a capped volume gets ``ENOSPC``.
 
-    Small capped volumes (16 MiB workspace, 8 MiB result, 4000 / 64 inodes) are exercised on
-    whichever engine the gate runs on. A worker writes past each cap, creates entries past each
-    inode cap and runs a parallel ``fallocate`` burst; in every case the worker itself sees the
-    refusal, the launcher kills nothing (outcome ``exited``), the volume statistics read inside
-    the container stay within the cap, and the tree the launcher reads back to the host does too.
+    Small capped volumes (16 MiB workspace, 8 MiB result, 4000 / 64 inodes, so an 8 MiB per-file
+    limit) are exercised on whichever engine the gate runs on. A worker writes past each cap,
+    creates entries past each inode cap and runs a parallel ``fallocate`` burst whose allocations
+    each fit the per-file limit but together exceed the volume; in every case the worker itself
+    sees the refusal, the launcher kills nothing (outcome ``exited``), the volume statistics read
+    inside the container stay within the cap, and the tree the launcher reads back to the host does
+    too. A single allocation above the per-file limit, which the volume would hold, is stopped by
+    that limit alone and is asserted separately.
     """
     profile = _small_profile(gate)
     cap_bytes = _SMALL_WORKSPACE_MIB * _MIB
@@ -997,6 +1043,18 @@ def step_m3_disk(gate: Gate) -> None:
         },
         profile=profile,
         time_budget=180,
+    )
+    filesize = gate.attempt(
+        "m3-disk-filesize",
+        "disk",
+        {
+            "kind": "filesize",
+            "where": "/workspace",
+            "under_mib": _FILE_UNDER_MIB,
+            "over_mib": _FILE_OVER_MIB,
+        },
+        profile=profile,
+        time_budget=120,
     )
     memory_profile = RunnerProfile(
         network=gate.internal_network,
@@ -1139,14 +1197,13 @@ def step_m3_disk(gate: Gate) -> None:
         attempts=(ws_entries, out_entries),
     )
 
-    # --- a parallel fallocate burst is capped ---------------------------------------------------
+    # --- a parallel fallocate burst is capped by the volume ---------------------------------------
     reports = list((burst.obs or {}).get("fill", {}).get("reports", []))
     burst_after = seen(burst, "volume_after")
     burst_tree = seen(burst, "fill_tree")
     burst_host = _host_tree(burst.workspace / "gate-fill")
-    big_all_failed = len(reports) == _BURST_PROCESSES and all(
-        (report.get("big_fallocate") or {}).get("exit") not in (0, None) for report in reports
-    )
+    per_file_limit = _PER_FILE_LIMIT_BYTES
+    large = _large_allocations(reports)
     chunked_total = sum(report.get("chunks_allocated", 0) for report in reports) * _BURST_CHUNK_MIB
     all_refused = all(report.get("failure") == "ENOSPC" for report in reports)
     _assert(
@@ -1154,9 +1211,9 @@ def step_m3_disk(gate: Gate) -> None:
         "r-m3-disk-parallel-fallocate-capped",
         passed=_launched_clean(burst)
         and _ran_to_completion(burst)
-        and big_all_failed
+        and large["by_the_volume"]
         and all_refused
-        and chunked_total * _MIB <= cap_bytes
+        and (large["granted"] * _BURST_BIG_MIB + chunked_total) * _MIB <= cap_bytes
         and burst_after.get("total_bytes") == cap_bytes
         and burst_after.get("used_bytes", cap_bytes + 1) <= cap_bytes
         and burst_tree.get("allocated_bytes", cap_bytes + 1) <= cap_bytes
@@ -1165,18 +1222,22 @@ def step_m3_disk(gate: Gate) -> None:
         commands=[
             *_attempt_commands(gate, burst),
             f"[in container] {_BURST_PROCESSES} processes, each: fallocate -l {_BURST_BIG_MIB}M "
-            f"<file> ; then posix_fallocate {_BURST_CHUNK_MIB} MiB files until the first error",
+            f"<file> (below the {per_file_limit // _MIB} MiB per-file limit; together "
+            f"{_BURST_PROCESSES * _BURST_BIG_MIB} MiB for a {_SMALL_WORKSPACE_MIB} MiB volume) ; "
+            f"then posix_fallocate {_BURST_CHUNK_MIB} MiB files until the first error",
             "[in container] os.statvfs(/workspace) after the burst",
         ],
         observed={
             "workspace_cap_bytes": cap_bytes,
+            "per_file_limit_bytes": per_file_limit,
+            "each_allocation_mib": _BURST_BIG_MIB,
+            "parallel_allocations_mib_total": _BURST_PROCESSES * _BURST_BIG_MIB,
             "processes": len(reports),
-            "large_fallocate_exits": [
-                (report.get("big_fallocate") or {}).get("exit") for report in reports
-            ],
-            "large_fallocate_messages": sorted(
-                {(report.get("big_fallocate") or {}).get("stderr", "") for report in reports}
-            ),
+            "allocations_granted": large["granted"],
+            "allocations_refused_with_enospc": large["refused_with_enospc"],
+            "allocation_exits": large["exits"],
+            "allocation_signals": large["signals"],
+            "allocation_messages": large["messages"],
             "chunked_allocations_mib_total": chunked_total,
             "worker_errors": sorted({str(report.get("failure")) for report in reports}),
             "volume_after_in_container": burst_after,
@@ -1185,15 +1246,77 @@ def step_m3_disk(gate: Gate) -> None:
             "launcher_outcome": burst.outcome,
         },
         expected=(
-            "every large fallocate of a parallel burst is refused, the chunked allocations end "
-            "with ENOSPC, and no more than the workspace cap is allocated (statvfs and the "
-            "allocated blocks inside the container, and the bytes read back on the host)"
+            "parallel allocations that each fit the per-file limit but together exceed the volume "
+            "are partly refused with ENOSPC (No space left on device) by the volume's cap, the "
+            "chunked allocations end with ENOSPC, and no more than the workspace cap is allocated "
+            "(statvfs and the allocated blocks inside the container, and the bytes read back on "
+            "the host)"
         ),
         observer={
-            "source": "container: statvfs and allocated blocks and each process's own errno; "
-            "host: the workspace read back"
+            "source": "container: statvfs and allocated blocks and each process's own exit and "
+            "errno; host: the workspace read back"
         },
         attempts=(burst,),
+    )
+
+    # --- the per-file size limit, which the volume cap would not enforce ---------------------
+    file_fill = seen(filesize, "fill")
+    under, over = file_fill.get("under_limit", {}), file_fill.get("over_limit", {})
+    file_after = seen(filesize, "volume_after")
+    file_bounds = None if filesize.receipt is None else filesize.receipt.bounds
+    recorded_limit = None if file_bounds is None else file_bounds.max_file_bytes
+
+    def host_file_size(name: str) -> int | None:
+        try:
+            return (filesize.workspace / "gate-fill" / name).lstat().st_size
+        except OSError:
+            return None
+
+    under_host, over_host = host_file_size("under_limit"), host_file_size("over_limit")
+    under_bytes, over_bytes = _FILE_UNDER_MIB * _MIB, _FILE_OVER_MIB * _MIB
+    _assert(
+        gate,
+        "r-m3-disk-per-file-limit",
+        passed=_launched_clean(filesize)
+        and _ran_to_completion(filesize)
+        and under_bytes < per_file_limit < over_bytes < cap_bytes
+        and recorded_limit == per_file_limit
+        and file_fill.get("rlimit_fsize") == [per_file_limit, per_file_limit]
+        and under.get("exit") == 0
+        and under.get("allocated_bytes") == under_bytes
+        and under_host == under_bytes
+        and over.get("signal") == "SIGXFSZ"
+        and over.get("allocated_bytes") in (None, 0)
+        and over_host in (None, 0)
+        and file_after.get("total_bytes") == cap_bytes
+        and file_after.get("used_bytes", cap_bytes + 1) <= cap_bytes,
+        commands=[
+            *_attempt_commands(gate, filesize),
+            f"[in container] fallocate -l {_FILE_UNDER_MIB}M /workspace/gate-fill/under_limit ; "
+            f"fallocate -l {_FILE_OVER_MIB}M /workspace/gate-fill/over_limit",
+            "[in container] resource.getrlimit(RLIMIT_FSIZE) ; os.statvfs(/workspace)",
+            "RunnerReceipt.bounds.max_file_bytes",
+        ],
+        observed={
+            "per_file_limit_bytes": per_file_limit,
+            "receipt_max_file_bytes": recorded_limit,
+            "rlimit_fsize_in_container": file_fill.get("rlimit_fsize"),
+            "workspace_cap_bytes": cap_bytes,
+            "below_the_limit": {**under, "bytes_read_back_on_host": under_host},
+            "above_the_limit_below_the_volume": {**over, "bytes_read_back_on_host": over_host},
+            "volume_after_in_container": file_after,
+            "launcher_outcome": filesize.outcome,
+        },
+        expected=(
+            "a file below the per-file limit is allocated, one above the limit that the volume "
+            "would hold is ended by SIGXFSZ with nothing allocated, the in-container RLIMIT_FSIZE "
+            "and the receipt's recorded limit both equal the smaller of the two caps"
+        ),
+        observer={
+            "source": "container: the process's own exit, the signal that ended it, "
+            "RLIMIT_FSIZE and statvfs; host: the runner receipt and the workspace read back"
+        },
+        attempts=(filesize,),
     )
 
     # --- receipt bounds and what may come back to the host ------------------------------------
@@ -2286,6 +2409,7 @@ def run(gate: Gate) -> None:
                 "r-m3-disk-enospc-bytes",
                 "r-m3-disk-enospc-inodes",
                 "r-m3-disk-parallel-fallocate-capped",
+                "r-m3-disk-per-file-limit",
                 "r-m3-disk-receipt-and-readback",
                 "r-m3-memory-fill-exit-137",
             ],

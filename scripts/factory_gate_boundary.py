@@ -340,6 +340,7 @@ OBSERVED_ON_BOTH: frozenset[str] = frozenset(
         "r-m3-disk-enospc-bytes",
         "r-m3-disk-enospc-inodes",
         "r-m3-disk-parallel-fallocate-capped",
+        "r-m3-disk-per-file-limit",
         "r-m3-git-bomb-refused-at-intake",
         "r-m5-validation-and-none-mode-cannot-reach-relay",
         "r-m5-concurrent-workers-isolated-networks",

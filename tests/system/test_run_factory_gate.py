@@ -1065,6 +1065,7 @@ def test_disk_assertions_are_the_kernel_cap_scenario() -> None:
         "r-m3-disk-enospc-bytes",
         "r-m3-disk-enospc-inodes",
         "r-m3-disk-parallel-fallocate-capped",
+        "r-m3-disk-per-file-limit",
         "r-m3-disk-receipt-and-readback",
         "r-m3-memory-fill-exit-137",
     ):
@@ -1084,7 +1085,55 @@ def test_every_required_assertion_has_one_observation_site() -> None:
     assert sum(len(site) for site in sites) == len(everything)
     assert set().union(*sites) == set(everything)
     base = {**boundary.REQUIRED, **review.REQUIRED}
-    assert len(base) == 63
+    assert len(base) == 64
     assert len(boundary.OBSERVED_ON_HOST) == 28
     assert len(boundary.OBSERVED_IN_CONTAINER) == 19
-    assert len(boundary.OBSERVED_ON_BOTH - set(boundary.REAL_GATEWAY)) == 16
+    assert len(boundary.OBSERVED_ON_BOTH - set(boundary.REAL_GATEWAY)) == 17
+
+
+def _burst(*exits: tuple[int, str]) -> list[dict[str, Any]]:
+    return [{"big_fallocate": {"exit": code, "stderr": message}} for code, message in exits]
+
+
+ENOSPC_MESSAGE = "fallocate: fallocate failed: No space left on device"
+
+
+def test_the_parallel_burst_asks_for_more_than_the_volume_but_less_than_the_file_limit() -> None:
+    import factory_gate_review as review
+
+    total_mib = review._BURST_PROCESSES * review._BURST_BIG_MIB
+    assert review._BURST_BIG_MIB * review._MIB < review._PER_FILE_LIMIT_BYTES
+    assert total_mib > review._SMALL_WORKSPACE_MIB
+    # The over-limit allocation fits the volume, so only the per-file limit can stop it.
+    assert review._PER_FILE_LIMIT_BYTES < review._FILE_OVER_MIB * review._MIB
+    assert review._FILE_OVER_MIB < review._SMALL_WORKSPACE_MIB
+    assert review._FILE_UNDER_MIB * review._MIB < review._PER_FILE_LIMIT_BYTES
+
+
+def test_a_large_allocation_counts_as_refused_by_the_volume_only_with_enospc() -> None:
+    import factory_gate_review as review
+
+    granted, refused = (0, ""), (1, ENOSPC_MESSAGE)
+    # Two 6 MiB grants fit the 16 MiB volume; the other six are refused by it.
+    by_the_volume = review._large_allocations(_burst(*[granted] * 2, *[refused] * 6))
+    assert by_the_volume["by_the_volume"] is True
+    assert (by_the_volume["granted"], by_the_volume["refused_with_enospc"]) == (2, 6)
+    assert review._large_allocations(_burst(*[refused] * 8))["by_the_volume"] is True
+    # What the gate used to accept: every allocation killed by the per-file limit (SIGXFSZ, -25).
+    sigxfsz = review._large_allocations(
+        [{"big_fallocate": {"exit": -25, "signal": "SIGXFSZ", "stderr": ""}}] * 8
+    )
+    assert sigxfsz["by_the_volume"] is False
+    # Any other failure is not the volume's refusal: a missing command, a timeout, a crash, a
+    # different message.
+    for other in (
+        (127, "sh: fallocate: not found"),
+        (1, "fallocate: fallocate failed: Operation not permitted"),
+        (-9, ""),
+    ):
+        assert review._large_allocations(_burst(*[refused] * 7, other))["by_the_volume"] is False
+    # More grants than the volume holds, or a burst with a missing process, is not capped either.
+    assert (
+        review._large_allocations(_burst(*[granted] * 3, *[refused] * 5))["by_the_volume"] is False
+    )
+    assert review._large_allocations(_burst(*[refused] * 7))["by_the_volume"] is False
