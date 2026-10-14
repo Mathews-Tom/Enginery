@@ -333,6 +333,15 @@ class Stage1ProgressionAction(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class _OpenPrBinding:
+    """The attempt id the ``open_pr`` node runs under and the approval it is bound to, if any."""
+
+    attempt_id: str
+    approval: dict[str, object] | None
+    approval_round: int
+
+
+@dataclass(frozen=True, slots=True)
 class Stage1Progression:
     """The next Stage 1 action and the durable run it was derived from."""
 
@@ -1285,20 +1294,17 @@ class Stage1RunService:
             target_scope=request.repository_id,
             ordinal=0,
         )
-        approval = (
-            None
+        binding = (
+            _OpenPrBinding(attempt_id=f"open-pr-{generation}", approval=None, approval_round=0)
             if publisher is None
-            else self._protected_publication_approval(request, generation=generation)
+            else self._open_pr_binding(request, generation=generation)
         )
+        approval = binding.approval
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
                 request,
                 node_id="open_pr",
-                attempt_id=(
-                    f"open-pr-{generation}"
-                    if approval is None
-                    else f"open-pr-approved-{generation}"
-                ),
+                attempt_id=binding.attempt_id,
                 operation_id=str(operation_id),
                 command=("open_pr",),
                 dependencies=((str(request.run.id), "review"),),
@@ -1306,7 +1312,19 @@ class Stage1RunService:
             request.manifest,
         )
         epoch = self.runtime.register_node(
-            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+            dispatch=dispatch,
+            now=now,
+            heartbeat_window=heartbeat_window,
+            # The approved digest and reason travel with the re-registered node, so a retry or a
+            # crash after the approval still compares against exactly what was approved.
+            extra=(
+                None
+                if approval is None
+                else {
+                    "publication_approval": dict(approval),
+                    "approval_round": binding.approval_round,
+                }
+            ),
         )
         publication: dict[str, object] = {}
         if publisher is not None:
@@ -1414,44 +1432,70 @@ class Stage1RunService:
             )
         return head_revision
 
-    def _protected_publication_approval(
-        self, request: Stage1RunRequest, *, generation: int
-    ) -> dict[str, object] | None:
-        """Return the operator's recorded approval of this generation's held publication, if any.
+    def _open_pr_binding(self, request: Stage1RunRequest, *, generation: int) -> _OpenPrBinding:
+        """Return the attempt id and the operator's approval the ``open_pr`` node runs under.
 
         The only approval is the typed ``stage1 approve`` decision on the held ``open_pr`` node,
         read back from its durable state: a node that is passed by a decision, carries the held
-        record and has not created a pull request. Once an approval has been consumed the node
-        is re-registered under an attempt id that names it, so a crash after the approval still
-        resumes as approved. A recorded rejection is final and is never overridden.
+        record and has not created a pull request. Consuming it re-registers the node under an
+        attempt id that names the approval and carries the approved digest and reason in its
+        own state, so a retry or a crash after the approval is still bound to exactly the set
+        that was approved and is compared again every time. A node that is still waiting, or
+        queued without an approval, keeps its attempt id. A recorded rejection is final and is
+        never overridden.
         """
+        default = _OpenPrBinding(
+            attempt_id=f"open-pr-{generation}", approval=None, approval_round=0
+        )
         state = self._node_state_optional(request.run.id, "open_pr")
         if state is None:
-            return None
+            return default
         attempt_id = _string(state, "attempt_id")
         if _generation(attempt_id) != generation:
-            return None
-        if attempt_id == f"open-pr-approved-{generation}":
-            return {"operator_decision": "approved"}
+            return default
+        status = state.get("status")
         decision = state.get("operator_decision")
-        if state.get("status") == "failed" and decision == "rejected":
+        if status == "failed" and decision == "rejected":
             raise ExternalConflictError(
                 "the operator rejected publishing this branch, which changes protected paths",
                 details={"run_id": str(request.run.id), "reason": str(state.get("reason"))},
             )
+        approved_attempt = attempt_id.startswith("open-pr-approved-")
+        previous_round = _approval_round(state) if approved_attempt else 0
         held = state.get("protected_publication")
         if (
-            state.get("status") == "passed"
+            status == "passed"
             and decision == "approved"
             and isinstance(held, Mapping)
             and "pull_request_number" not in state
         ):
-            return {
-                "operator_decision": "approved",
-                "reason": str(state.get("reason")),
-                "approved_protected_publication_digest": str(held.get("digest")),
-            }
-        return None
+            # A decision on a node that was held again after an approval stopped matching is a
+            # new approval: it is consumed under a fresh attempt id, never the spent one.
+            approval_round = previous_round + 1
+            return _OpenPrBinding(
+                attempt_id=(
+                    f"open-pr-approved-{generation}"
+                    if approval_round == 1
+                    else f"open-pr-approved-r{approval_round}-{generation}"
+                ),
+                approval={
+                    "operator_decision": "approved",
+                    "reason": str(state.get("reason")),
+                    "approved_protected_publication_digest": str(held.get("digest")),
+                },
+                approval_round=approval_round,
+            )
+        if status == "queued" and approved_attempt:
+            carried = state.get("publication_approval")
+            if isinstance(carried, Mapping):
+                return _OpenPrBinding(
+                    attempt_id=attempt_id,
+                    approval=dict(carried),
+                    approval_round=previous_round,
+                )
+        if status in {"queued", "awaiting_human"}:
+            return _OpenPrBinding(attempt_id=attempt_id, approval=None, approval_round=0)
+        return default
 
     def _require_protected_publication_decision(
         self,
@@ -1466,8 +1510,9 @@ class Stage1RunService:
         """Return the protected-path record of the verified branch, holding it unless approved.
 
         The changed paths are read by the host from its own verified repository, never from a
-        worker claim, and matched against the protected set. A match with no recorded approval
-        puts the ``open_pr`` node into a durable human wait and raises: nothing is pushed.
+        worker claim, and matched against the protected set. A match with no recorded approval,
+        or whose approved digest differs from the current one, puts the ``open_pr`` node into a
+        durable human wait and raises: nothing is pushed.
         """
         head_revision = self._verified_head_revision(
             attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
@@ -1501,28 +1546,25 @@ class Stage1RunService:
         }
         if not matched:
             return record
+        lapsed = ""
         if approval is not None:
-            approved_digest = approval.get("approved_protected_publication_digest")
-            if approved_digest is not None and approved_digest != record["digest"]:
-                raise ExternalConflictError(
-                    "the approved protected-path publication no longer matches the verified "
-                    "branch or the protected set; it is not published",
-                    details={
-                        "run_id": str(request.run.id),
-                        "approved_digest": str(approved_digest),
-                        "current_digest": str(record["digest"]),
-                    },
-                )
-            return record
+            # The digest is compared on every call, never only on the first one after the
+            # decision: a retry or a crash resumes under exactly what was approved.
+            if approval.get("approved_protected_publication_digest") == record["digest"]:
+                return record
+            lapsed = (
+                "the approved protected-path publication no longer matches the verified branch "
+                "or the protected set, so the approval is void; "
+            )
         approve = _decision_command("approve", request)
         reject = _decision_command("reject", request)
         shown = ", ".join(matched[:5]) + (
             f" and {len(matched) - 5} more" if len(matched) > 5 else ""
         )
         reason = (
-            f"the verified branch changes protected paths ({shown}); it is held and nothing is "
-            f"published. Review the change, then publish it with `{approve}` or refuse it with "
-            f"`{reject}`"
+            f"{lapsed}the verified branch changes protected paths ({shown}); it is held and "
+            f"nothing is published. Review the change, then publish it with `{approve}` or "
+            f"refuse it with `{reject}`"
         )
         if self._node_status(request.run.id, "open_pr") == "queued":
             self.runtime.await_human_node(
@@ -1997,6 +2039,12 @@ def _scheduled_implementation(
             details={"run_id": str(run_id), "operation_id": str(operation_id)},
         )
     return matching[0] if matching else None
+
+
+def _approval_round(state: Mapping[str, object]) -> int:
+    """How many protected-path approvals the ``open_pr`` node has consumed; one when unrecorded."""
+    recorded = state.get("approval_round")
+    return recorded if isinstance(recorded, int) and not isinstance(recorded, bool) else 1
 
 
 def _generation(attempt_id: str) -> int:

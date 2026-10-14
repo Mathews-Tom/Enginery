@@ -368,7 +368,14 @@ class CoordinatorRuntime:
         dispatch: WorkflowNodeDispatch,
         now: datetime,
         heartbeat_window: timedelta,
+        extra: Mapping[str, object] | None = None,
     ) -> CoordinatorEpoch:
+        """Register a node, or replace a terminal one, carrying ``extra`` on the fresh state.
+
+        ``extra`` is written in the same event that queues the node, so a crash can never leave
+        a node queued without what the caller meant it to carry. It has no effect when the node
+        is already registered with this exact request.
+        """
         self._require_completed_dependencies(dispatch.request)
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
         self._register(
@@ -376,6 +383,7 @@ class CoordinatorRuntime:
             actor_type=dispatch.actor_type,
             epoch=epoch.epoch,
             now=now,
+            extra=extra,
         )
         return epoch
 
@@ -1056,6 +1064,7 @@ class CoordinatorRuntime:
         actor_type: ActorType,
         epoch: int,
         now: datetime,
+        extra: Mapping[str, object] | None = None,
     ) -> None:
         projection = self._ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
@@ -1105,12 +1114,18 @@ class CoordinatorRuntime:
                 ):
                     self._workspaces.resume(reservation, epoch=epoch, now=now)
             self._replace_request(
-                request=request, epoch=epoch, now=now, event_type="runtime_node.retried"
+                request=request,
+                epoch=epoch,
+                now=now,
+                event_type="runtime_node.retried",
+                extra=extra,
             )
             self._fault("node_retried")
             return
         state = _request_state(request, status="queued", actor_type=actor_type)
         state["queued_at"] = now.isoformat()
+        if extra is not None:
+            state.update(extra)
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"runtime-node-register:{_node_id(request)}",
@@ -1193,7 +1208,13 @@ class CoordinatorRuntime:
         )
 
     def _replace_request(
-        self, *, request: FixtureDispatch, epoch: int, now: datetime, event_type: str
+        self,
+        *,
+        request: FixtureDispatch,
+        epoch: int,
+        now: datetime,
+        event_type: str,
+        extra: Mapping[str, object] | None = None,
     ) -> None:
         projection = self._ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
@@ -1206,6 +1227,8 @@ class CoordinatorRuntime:
             actor_type=_actor_type_from_state(projection.state),
         )
         state["queued_at"] = now.isoformat()
+        if extra is not None:
+            state.update(extra)
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"{event_type}:{_node_id(request)}:{request.attempt_id}",

@@ -1237,6 +1237,7 @@ def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_ag
     with pytest.raises(HumanActionRequiredError):
         ready.open()
     _decide(ready, "approve")
+    held_digest = _held_digest(ledger_service)
     flaky = _FailingOnce(ready.publisher.inner)
     ready.service = replace(ready.service, branch_publisher=cast(BranchPublicationPort, flaky))
 
@@ -1245,21 +1246,34 @@ def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_ag
     interrupted = _node(ledger_service, "open_pr")
     assert interrupted is not None and interrupted["status"] == "queued"
     assert interrupted["attempt_id"] == "open-pr-approved-0"
+    assert interrupted["publication_approval"] == {
+        "operator_decision": "approved",
+        "reason": "reviewed the workflow change",
+        "approved_protected_publication_digest": held_digest,
+    }, "the approved digest and reason travel with the re-registered node"
     ready.open()
 
     assert ready.remote_branch() == ready.head
     node = _node(ledger_service, "open_pr")
     assert node is not None and node["status"] == "passed"
-    assert node["publication_approval"] == {"operator_decision": "approved"}
+    record = node["protected_publication"]
+    assert isinstance(record, dict)
+    assert node["publication_approval"] == {
+        "operator_decision": "approved",
+        "reason": "reviewed the workflow change",
+        "approved_protected_publication_digest": record["digest"],
+    }, "the final record keeps the approval's reason and digest"
 
 
-def test_a_protected_set_that_changed_after_the_approval_does_not_publish_on_it(
-    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
-    with pytest.raises(HumanActionRequiredError):
-        ready.open()
-    _decide(ready, "approve")
+def _held_digest(ledger: LedgerService) -> str:
+    node = _node(ledger, "open_pr")
+    assert node is not None
+    record = node["protected_publication"]
+    assert isinstance(record, dict)
+    return str(record["digest"])
+
+
+def _widen_protected_set(monkeypatch: pytest.MonkeyPatch) -> None:
     # The request itself is digest-bound, so only a different built-in set (a newer release) can
     # differ from the one the operator approved the matched paths under.
     monkeypatch.setattr(
@@ -1268,10 +1282,82 @@ def test_a_protected_set_that_changed_after_the_approval_does_not_publish_on_it(
         (*branch_publication.DEFAULT_PROTECTED_PATH_PATTERNS, "*.yml"),
     )
 
-    with pytest.raises(ExternalConflictError, match="no longer matches"):
+
+def test_a_protected_set_that_changed_after_the_approval_is_held_again_on_every_attempt(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    _decide(ready, "approve")
+    _widen_protected_set(monkeypatch)
+
+    for attempt in range(2):
+        # The first call after the change says why the approval is void; the held node then
+        # simply keeps waiting for a decision.
+        with pytest.raises(
+            HumanActionRequiredError, match="no longer matches" if attempt == 0 else "held"
+        ):
+            ready.open()
+
+        node = _node(ledger_service, "open_pr")
+        assert node is not None and node["status"] == "awaiting_human", (
+            "the node waits for a human again, it is never left queued to be advanced"
+        )
+        assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+        assert ready.remote_branch() is None and ready.publisher.requests == []
+        assert ready.accepted_pushes() == [] and ready.events == []
+
+
+def test_a_new_approval_of_the_changed_set_publishes_under_its_own_digest_and_reason(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    _decide(ready, "approve", reason="first look")
+    first_digest = _held_digest(ledger_service)
+    _widen_protected_set(monkeypatch)
+    with pytest.raises(HumanActionRequiredError, match="no longer matches"):
+        ready.open()
+    held = _node(ledger_service, "open_pr")
+    assert held is not None and held["protected_publication"]["digest"] != first_digest  # type: ignore[index]
+
+    _decide(ready, "approve", reason="second look at the wider set")
+    ready.open()
+
+    node = _node(ledger_service, "open_pr")
+    assert node is not None and node["status"] == "passed"
+    assert node["attempt_id"] == "open-pr-approved-r2-0"
+    assert ready.remote_branch() == ready.head and ready.events == ["publish", "pull_request"]
+    record = node["protected_publication"]
+    assert isinstance(record, dict) and record["digest"] != first_digest
+    assert node["publication_approval"] == {
+        "operator_decision": "approved",
+        "reason": "second look at the wider set",
+        "approved_protected_publication_digest": record["digest"],
+    }
+
+
+def test_a_set_that_changes_between_a_publication_failure_and_its_retry_is_held_again(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    _decide(ready, "approve")
+    flaky = _FailingOnce(ready.publisher.inner)
+    ready.service = replace(ready.service, branch_publisher=cast(BranchPublicationPort, flaky))
+    with pytest.raises(ExternalConflictError, match="simulated crash"):
+        ready.open()
+    _widen_protected_set(monkeypatch)
+
+    with pytest.raises(HumanActionRequiredError, match="no longer matches"):
         ready.open()
 
-    assert ready.remote_branch() is None and ready.publisher.requests == []
+    node = _node(ledger_service, "open_pr")
+    assert node is not None and node["status"] == "awaiting_human"
+    assert ready.remote_branch() is None and ready.accepted_pushes() == []
 
 
 def test_an_ordinary_change_publishes_unheld_and_records_the_empty_match(
