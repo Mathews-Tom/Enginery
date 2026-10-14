@@ -1375,7 +1375,9 @@ receipt's custody text is built from the gateway URL and host you pass and the
 mode actually observed; the Lima wording appears only for `ubuntu-lima` or a
 `host.lima.internal` gateway.
 
-An abridged receipt for the Lima host:
+The Lima receipt for a conforming host, as built by the command (shown pretty-printed
+in declaration order; the file itself is canonical compact JSON with sorted keys, and
+the dummy token file here was 43 bytes):
 
 ```json
 {
@@ -1392,14 +1394,30 @@ An abridged receipt for the Lima host:
   },
   "custody": {
     "location": "remote-through-macos-gateway",
-    "description": "custody stays on the macOS host: the VM reaches the macOS gateway through host.lima.internal and holds only a token copy at /home/user.linux/.config/enginery/gateway.token (mode 0600)",
+    "description": "custody stays on the macOS host: the VM reaches the macOS gateway at http://host.lima.internal:7011 (host host.lima.internal) and holds only a token copy at /home/user.linux/.config/enginery/gateway.token (observed mode 0600, required 0600)",
     "token_file": {"path": "/home/user.linux/.config/enginery/gateway.token", "exists": true, "regular_file": true, "symlink": false, "mode": "0600", "size_bytes": 43}
   },
-  "exposure": ["the relay holds the gateway bearer token", "workers hold only the dummy credential ...", "..."],
-  "refresh": "the broker on the macOS host refreshes provider credentials; ...",
-  "revocation": ["on the macOS host: omp auth-gateway token --regenerate (...)", "restart the macOS gateway ..."],
-  "cleanup": ["stop the relay in the VM: enginery runner relay down", "...", "remove the VM token copy at ..."],
-  "owner_decisions": ["2026-10-13: auth-custody design approved", "..."],
+  "exposure": [
+    "the relay holds the gateway bearer token",
+    "workers hold only the dummy credential and can reach models only through the relay",
+    "no worker, image, or run request carries a provider credential or refresh token"
+  ],
+  "refresh": "the broker on the macOS host refreshes provider credentials; the relay and workers never hold a refresh token",
+  "revocation": [
+    "on the macOS host: omp auth-gateway token --regenerate (invalidates the VM's copy)",
+    "restart the macOS gateway so it only accepts the regenerated token"
+  ],
+  "cleanup": [
+    "stop the relay in the VM: enginery runner relay down",
+    "regenerate the gateway token on the macOS host: omp auth-gateway token --regenerate",
+    "remove the VM token copy at /home/user.linux/.config/enginery/gateway.token"
+  ],
+  "owner_decisions": [
+    "2026-10-13: auth-custody design approved",
+    "2026-10-13: worker-readable gateway token accepted",
+    "2026-10-13: relay allowlist anthropic+openai-codex ordered",
+    "2026-10-13: Lima Ubuntu second host approved"
+  ],
   "findings": [],
   "conforms": true
 }
