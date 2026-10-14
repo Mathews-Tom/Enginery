@@ -7,7 +7,7 @@ import pytest
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
-from enginery.domain.execution_catalog import InstalledHost
+from enginery.domain.execution_catalog import ExactHostVersion, InstalledHost, RangedHostVersion
 from enginery.domain.execution_receipt import (
     EffectiveControl,
     EffectiveState,
@@ -20,6 +20,7 @@ from enginery.domain.execution_selection import (
     detect_host_drift,
     validate_against_catalog,
 )
+from enginery.domain.version_range import Version, VersionRange
 from tests.support.execution import selection_for
 
 MODEL = "openai/gpt-5.2"
@@ -142,7 +143,8 @@ def test_host_drift_holds_only_a_selection_that_needs_native_controls() -> None:
         hold = detect_host_drift(pinned, installed=installed)
         assert hold is not None
         assert hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
-        assert hold.details["bound_executable_version"] == "18.10.3"
+        assert hold.details["bound_executable_versions"] == ">=18.10.3,<19.0.0"
+        assert hold.details["bound_tested_executable_version"] == "18.10.3"
 
 
 def test_a_run_bound_to_the_first_catalog_holds_against_the_omp_the_current_catalog_names() -> None:
@@ -158,7 +160,7 @@ def test_a_run_bound_to_the_first_catalog_holds_against_the_omp_the_current_cata
     assert catalog_hold is not None
     assert catalog_hold.reason is HoldReason.CATALOG_DRIFT
     assert catalog_hold.details["bound_catalog_version"] == "1"
-    assert catalog_hold.details["current_catalog_version"] == "2"
+    assert catalog_hold.details["current_catalog_version"] == "3"
 
 
 def test_validation_against_the_catalog_rejects_forged_tier_fingerprint_or_catalog() -> None:
@@ -167,7 +169,14 @@ def test_validation_against_the_catalog_rejects_forged_tier_fingerprint_or_catal
 
     assert validate_against_catalog(pinned, catalog=catalog).harness == "omp"
     with pytest.raises(InvalidInputError, match="tested host entry"):
-        validate_against_catalog(replace(pinned, host_executable_version="1.0"), catalog=catalog)
+        validate_against_catalog(
+            replace(pinned, host_version=ExactHostVersion("1.0")), catalog=catalog
+        )
+    widened = RangedHostVersion(
+        accepted=VersionRange.parse(">=18.0.0,<20.0.0"), tested=Version.parse("18.10.3")
+    )
+    with pytest.raises(InvalidInputError, match="tested host entry"):
+        validate_against_catalog(replace(pinned, host_version=widened), catalog=catalog)
     with pytest.raises(InvalidInputError, match="different catalog"):
         validate_against_catalog(
             replace(pinned, catalog_digest=Digest.of_bytes(b"x")), catalog=catalog

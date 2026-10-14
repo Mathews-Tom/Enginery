@@ -18,19 +18,27 @@ never labeled with a level or model the run did not request.
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import InternalInvariantViolationError, InvalidInputError
 from enginery.domain.execution_catalog import (
+    ExactHostVersion,
     ExecutionCatalog,
     HostCapability,
+    HostVersion,
     InstalledHost,
+    RangedHostVersion,
     SupportTier,
 )
+from enginery.domain.version_range import Version, VersionRange
 
-EXECUTION_SELECTION_SCHEMA_VERSION = 1
+EXECUTION_SELECTION_SCHEMA_VERSION = 2
+"""The schema of a range-bound selection. Exact-bound and legacy selections keep serializing
+as schema 1, byte-identically, so their digests never change."""
+
+_EXACT_SCHEMA_VERSION = 1
 
 
 class SelectionLayer(enum.Enum):
@@ -157,9 +165,10 @@ class ExecutionSelection:
     strict_effective: bool
     catalog_version: str | None
     catalog_digest: Digest | None
-    host_executable_version: str | None
+    host_version: HostVersion | None
     host_protocol_fingerprint: str | None
     support_tier: SupportTier | None
+    observed_host_version: str | None = None
     legacy: bool = False
 
     def __post_init__(self) -> None:
@@ -183,12 +192,21 @@ class ExecutionSelection:
             self.harness_source is None
             or self.catalog_version is None
             or self.catalog_digest is None
-            or self.host_executable_version is None
+            or self.host_version is None
             or self.host_protocol_fingerprint is None
             or self.support_tier is None
         ):
             raise InvalidInputError(
                 "a bound execution selection must name its harness source and catalog identity"
+            )
+        if self.observed_host_version is not None and not (
+            isinstance(self.host_version, RangedHostVersion)
+            and self.host_version.accepts(self.observed_host_version)
+        ):
+            raise InvalidInputError(
+                "an observed host version is recorded only for a range-bound selection, "
+                "and must be inside the bound range",
+                details={"observed": self.observed_host_version},
             )
         expected_mode = self._derived_mode()
         if self.mode is not expected_mode:
@@ -226,7 +244,7 @@ class ExecutionSelection:
             strict_effective=False,
             catalog_version=None,
             catalog_digest=None,
-            host_executable_version=None,
+            host_version=None,
             host_protocol_fingerprint=None,
             support_tier=None,
             legacy=True,
@@ -234,7 +252,7 @@ class ExecutionSelection:
 
     def to_state(self) -> dict[str, object]:
         return {
-            "schema_version": EXECUTION_SELECTION_SCHEMA_VERSION,
+            "schema_version": self._schema_version(),
             "harness": {
                 "value": self.harness,
                 "source": None if self.harness_source is None else self.harness_source.value,
@@ -247,11 +265,7 @@ class ExecutionSelection:
                 "version": self.catalog_version,
                 "digest": None if self.catalog_digest is None else str(self.catalog_digest),
             },
-            "host": {
-                "executable_version": self.host_executable_version,
-                "protocol_fingerprint": self.host_protocol_fingerprint,
-                "support_tier": None if self.support_tier is None else self.support_tier.value,
-            },
+            "host": self._host_state(),
         }
 
     @classmethod
@@ -260,7 +274,7 @@ class ExecutionSelection:
         if not isinstance(state, dict):
             raise InvalidInputError("execution selection must be a mapping")
         version = state.get("schema_version")
-        if version != EXECUTION_SELECTION_SCHEMA_VERSION:
+        if version not in (_EXACT_SCHEMA_VERSION, EXECUTION_SELECTION_SCHEMA_VERSION):
             raise InvalidInputError(
                 "execution selection schema version is unsupported",
                 details={"schema_version": str(version)},
@@ -289,7 +303,8 @@ class ExecutionSelection:
             strict_effective=_boolean(state, "strict_effective"),
             catalog_version=_required_text(catalog, "version"),
             catalog_digest=Digest(algorithm=algorithm, hex_value=hex_value),
-            host_executable_version=_required_text(host, "executable_version"),
+            host_version=_host_version_from_state(host, schema_version=version),
+            observed_host_version=_optional_text(host, "observed_executable_version"),
             host_protocol_fingerprint=_required_text(host, "protocol_fingerprint"),
             support_tier=_enum(SupportTier, host.get("support_tier"), "support tier"),
         )
@@ -301,6 +316,29 @@ class ExecutionSelection:
             return SelectionMode.CONFIGURED_DEFAULT
         return SelectionMode.HOST_DEFAULT
 
+    def _schema_version(self) -> int:
+        if isinstance(self.host_version, RangedHostVersion):
+            return EXECUTION_SELECTION_SCHEMA_VERSION
+        return _EXACT_SCHEMA_VERSION
+
+    def _host_state(self) -> dict[str, object]:
+        host: dict[str, object]
+        if isinstance(self.host_version, RangedHostVersion):
+            host = {
+                "executable_versions": str(self.host_version.accepted),
+                "tested_executable_version": str(self.host_version.tested),
+                "observed_executable_version": self.observed_host_version,
+            }
+        else:
+            host = {
+                "executable_version": None
+                if self.host_version is None
+                else self.host_version.version
+            }
+        host["protocol_fingerprint"] = self.host_protocol_fingerprint
+        host["support_tier"] = None if self.support_tier is None else self.support_tier.value
+        return host
+
     def _require_legacy_shape(self) -> None:
         if (
             self.requires_native_controls
@@ -308,6 +346,8 @@ class ExecutionSelection:
             or self.strict_effective
             or self.catalog_digest is not None
             or self.support_tier is not None
+            or self.host_version is not None
+            or self.observed_host_version is not None
         ):
             raise InvalidInputError("a legacy execution selection is a bare host default")
 
@@ -349,7 +389,10 @@ class LayerControls:
 
 
 def resolve_execution_selection(
-    layers: Sequence[LayerControls], *, catalog: ExecutionCatalog
+    layers: Sequence[LayerControls],
+    *,
+    catalog: ExecutionCatalog,
+    probe_host: Callable[[str], InstalledHost | None] | None = None,
 ) -> ExecutionSelection:
     """Resolve explicit layer inputs into one validated, catalog-bound selection.
 
@@ -432,6 +475,9 @@ def resolve_execution_selection(
         if model.value is not None or effort.value is not None
         else SelectionMode.HOST_DEFAULT
     )
+    observed_version: str | None = None
+    if probe_host is not None and (model.value is not None or effort.value is not None):
+        observed_version = _observe_host(host, probe_host(harness_name))
     return ExecutionSelection(
         harness=harness_name,
         harness_source=harness_layer,
@@ -443,7 +489,8 @@ def resolve_execution_selection(
         strict_effective=strict,
         catalog_version=catalog.version,
         catalog_digest=catalog.digest,
-        host_executable_version=host.executable_version,
+        host_version=host.version,
+        observed_host_version=observed_version,
         host_protocol_fingerprint=host.protocol_fingerprint,
         support_tier=host.support_tier,
     )
@@ -478,30 +525,41 @@ def detect_catalog_drift(
 def detect_host_drift(
     selection: ExecutionSelection, *, installed: InstalledHost | None
 ) -> ExecutionHold | None:
-    """Return a hold when the installed host is not the fingerprint a selection was bound to.
+    """Return a hold when the installed host is not one a selection's controls are bound to.
 
     Only a selection that needs native controls depends on the host's tested flags, so a
     bare host default never holds on the installed version.
+
+    An exact-bound selection (frozen catalogs) holds on any difference from its bound
+    version. A range-bound selection holds only when the installed version leaves the
+    bound range (or is not a plain numeric version) or the protocol differs: a different
+    version still inside the range is not a hold, and is recorded by the receipt and the
+    diagnostics instead.
     """
     if selection.legacy or not selection.requires_native_controls:
         return None
-    bound = InstalledHost(
-        executable_version=str(selection.host_executable_version),
-        protocol_fingerprint=str(selection.host_protocol_fingerprint),
-    )
-    if installed == bound:
+    bound_version = selection.host_version
+    bound_protocol = str(selection.host_protocol_fingerprint)
+    if bound_version is None:
+        raise InternalInvariantViolationError("a bound execution selection names no host version")
+    if (
+        installed is not None
+        and installed.protocol_fingerprint == bound_protocol
+        and bound_version.accepts(installed.executable_version)
+    ):
         return None
     return ExecutionHold(
         reason=HoldReason.HOST_FINGERPRINT_DRIFT,
         message=(
-            f"the installed {selection.harness} is not the executable this run's controls were "
-            "bound to; the run is held and its original binding is retained. Restore the "
-            "bound host version, or start a new run from a rebuilt request"
+            f"the installed {selection.harness} is not a host this run's controls were "
+            f"bound to ({bound_version.expectation}); the run is held and its original "
+            "binding is retained. Restore a bound host version, or start a new run from a "
+            "rebuilt request"
         ),
         details={
             "harness": selection.harness,
-            "bound_executable_version": bound.executable_version,
-            "bound_protocol_fingerprint": bound.protocol_fingerprint,
+            **bound_version.bound_details(),
+            "bound_protocol_fingerprint": bound_protocol,
             "installed_executable_version": (
                 "unobservable" if installed is None else installed.executable_version
             ),
@@ -535,7 +593,7 @@ def validate_against_catalog(
     host = catalog.host(selection.harness)
     host.require_usable()
     if (
-        selection.host_executable_version != host.executable_version
+        selection.host_version != host.version
         or selection.host_protocol_fingerprint != host.protocol_fingerprint
         or selection.support_tier is not host.support_tier
     ):
@@ -634,6 +692,33 @@ def _enforce_constraints(
                 f"({', '.join(allowed)})",
                 details={"layer": item.layer.value, "control": name, "value": value},
             )
+
+
+def _observe_host(host: HostCapability, installed: InstalledHost | None) -> str | None:
+    """Return the installed version to record for a range-bound host, or reject the host.
+
+    An unobservable host records nothing (the adapter rejects it again at launch). A host
+    the catalog does not accept, such as an out-of-range or pre-release version, is
+    rejected here rather than bound. An exact-bound host records no observation.
+    """
+    if not isinstance(host.version, RangedHostVersion) or installed is None:
+        return None
+    host.require_installed(installed)
+    return installed.executable_version
+
+
+def _host_version_from_state(host: Mapping[str, object], *, schema_version: object) -> HostVersion:
+    """Decode a persisted host version policy; its shape must match the schema version."""
+    if schema_version == _EXACT_SCHEMA_VERSION:
+        if "executable_versions" in host:
+            raise InvalidInputError("a schema 1 execution selection cannot bind a version range")
+        return ExactHostVersion(_required_text(host, "executable_version"))
+    if "executable_version" in host:
+        raise InvalidInputError("a schema 2 execution selection cannot bind an exact version")
+    return RangedHostVersion(
+        accepted=VersionRange.parse(_required_text(host, "executable_versions")),
+        tested=Version.parse(_required_text(host, "tested_executable_version")),
+    )
 
 
 def _strip_selected(state: Mapping[str, object]) -> dict[str, object]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from enginery.domain.execution_catalog import RangedHostVersion
 from enginery.domain.execution_receipt import ExecutionReceipt
 from enginery.domain.execution_selection import ExecutionHold, ExecutionSelection, RequestedControl
 from enginery.ledger.service import LedgerService
@@ -42,10 +43,7 @@ def execution_report(
             "version": selection.catalog_version,
             "digest": None if selection.catalog_digest is None else str(selection.catalog_digest),
         },
-        "tested_host": {
-            "executable_version": selection.host_executable_version,
-            "protocol_fingerprint": selection.host_protocol_fingerprint,
-        },
+        "host": _host(selection),
         "strict_effective": selection.strict_effective,
         "requested": {
             "model": _requested(selection.model),
@@ -58,6 +56,29 @@ def execution_report(
         "submitted": None if receipt is None else list(receipt.submitted_arguments),
         "effective": _effective(selection, receipt),
         "holds": holds,
+    }
+
+
+def _host(selection: ExecutionSelection) -> dict[str, object]:
+    """Report what the catalog accepts, what it tested, and what was observed at bind time.
+
+    The observed version is never presented as tested: an in-range version the catalog
+    accepts is reported as accepted and observed, and only the catalog's own tested
+    version is reported as tested.
+    """
+    version = selection.host_version
+    if version is None:
+        binding, accepted, tested = "legacy", None, None
+    elif isinstance(version, RangedHostVersion):
+        binding, accepted, tested = "range", str(version.accepted), str(version.tested)
+    else:
+        binding, accepted, tested = "exact", None, version.version
+    return {
+        "binding": binding,
+        "accepted_executable_versions": accepted,
+        "tested_executable_version": tested,
+        "observed_executable_version_at_bind": selection.observed_host_version,
+        "protocol_fingerprint": selection.host_protocol_fingerprint,
     }
 
 

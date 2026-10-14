@@ -17,7 +17,12 @@ from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.execution_controls import build_receipt
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError, StaleEvidenceError
-from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost, SupportTier
+from enginery.domain.execution_catalog import (
+    ExactHostVersion,
+    ExecutionCatalog,
+    InstalledHost,
+    SupportTier,
+)
 from enginery.domain.execution_receipt import evaluate_effective_requirement
 from enginery.domain.execution_selection import (
     ExecutionSelection,
@@ -417,7 +422,7 @@ def _tampered(selection: ExecutionSelection) -> list[tuple[ExecutionSelection, s
             "cannot be pinned",
         ),
         (replace(selection, support_tier=SupportTier.QUALIFIED), "tested host entry"),
-        (replace(selection, host_executable_version="9.9.9"), "tested host entry"),
+        (replace(selection, host_version=ExactHostVersion("9.9.9")), "tested host entry"),
     ]
 
 
@@ -503,7 +508,7 @@ def test_a_changed_or_unobservable_host_holds_a_run_with_native_controls(
     assert progression.action is Stage1ProgressionAction.HOLD
     assert progression.hold is not None
     assert progression.hold.reason is HoldReason.HOST_FINGERPRINT_DRIFT
-    with pytest.raises(HumanActionRequiredError, match="not the executable"):
+    with pytest.raises(HumanActionRequiredError, match="not a host this run"):
         drifted.dispatch_implementation(
             request, now=now, heartbeat_window=_WINDOW, lease_window=_WINDOW, limits=_LIMITS
         )
@@ -528,7 +533,7 @@ def test_a_new_run_with_a_forged_support_tier_or_fingerprint_is_rejected(
     )
     forged = replace(
         request,
-        execution_selection=replace(_PIN, host_executable_version="0.0.1"),
+        execution_selection=replace(_PIN, host_version=ExactHostVersion("0.0.1")),
     )
 
     with pytest.raises(InvalidInputError, match="tested host entry"):
