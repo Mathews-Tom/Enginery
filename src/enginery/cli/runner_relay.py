@@ -70,7 +70,9 @@ def add_relay_parsers(
     )
     up.add_argument("--wait-seconds", type=float, default=30.0)
     up.add_argument("--docker-context", default=None, help="Docker context of the engine.")
-    down = relay_subparsers.add_parser("down", help="Remove the relay container.")
+    down = relay_subparsers.add_parser(
+        "down", help="Remove the relay container and the egress network it leaves unused."
+    )
     down.add_argument("--docker-context", default=None, help="Docker context of the engine.")
     status = relay_subparsers.add_parser(
         "status", help="Report whether the relay is present, hardened and healthy."

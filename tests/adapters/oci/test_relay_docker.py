@@ -268,5 +268,10 @@ def test_up_again_is_idempotent_and_down_removes_the_relay(stack: Stack) -> None
 
     assert first.healthy and second.healthy
     assert stack.engine.container_inspect(stack.manager.container_name)["Id"] == created
+    assert stack.engine.network_info(stack.egress) is not None
     assert stack.manager.down().present is False
     assert stack.manager.status().present is False
+    # ``relay down`` also removes the egress network it created, and again is idempotent.
+    assert stack.engine.network_info(stack.egress) is None
+    assert stack.manager.down().present is False
+    assert stack.engine.network_info(stack.egress) is None

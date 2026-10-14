@@ -539,6 +539,10 @@ class OciEngine:
             )
         for container in info.containers:
             self.disconnect_network(name, container, force=True)
+        self.remove_network(name)
+
+    def remove_network(self, name: str) -> None:
+        """Remove network ``name`` (no attached container may remain); an absent one is fine."""
         completed = self.run_cli(("network", "rm", name), timeout=_COMMAND_TIMEOUT_SECONDS)
         if completed.returncode != 0:
             failure = self._failure(("network", "rm", name), completed)

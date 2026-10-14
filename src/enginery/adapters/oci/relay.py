@@ -383,8 +383,14 @@ class RelayManager:
         return self._await_healthy(wait_seconds)
 
     def down(self) -> RelayStatus:
-        """Remove the relay container (the egress network stays); idempotent."""
+        """Remove the relay container and then the egress network it leaves unused; idempotent.
+
+        The egress network goes only when the runner created it (it carries the runner label) and
+        nothing is attached to it any more, so a network an operator made, or one another
+        container still uses, is left alone. ``up`` creates it again.
+        """
         self._remove_relay()
+        self._remove_egress_network()
         return self.status()
 
     def attach(self, network: str) -> None:
@@ -469,6 +475,12 @@ class RelayManager:
                 "refusing to replace it"
             )
         self.engine.remove(self.container_name)
+
+    def _remove_egress_network(self) -> None:
+        info = self.engine.network_info(self.egress_network)
+        if info is None or info.labels.get(RUNNER_LABEL) != "1" or info.containers:
+            return
+        self.engine.remove_network(self.egress_network)
 
     def _ensure_egress_network(self) -> None:
         """Create the egress bridge network, or verify it is a non-internal one."""

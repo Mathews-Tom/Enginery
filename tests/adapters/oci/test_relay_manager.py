@@ -60,6 +60,8 @@ class FakeRelayDocker:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.networks: dict[str, bool] = {}
+        self.network_labels: dict[str, dict[str, str]] = {}
+        self.foreign_members: dict[str, list[str]] = {}
         self.images: dict[str, dict[str, str]] = {
             RELAY_IMAGE: {
                 image.RELAY_IMAGE_LABEL: "1",
@@ -128,9 +130,39 @@ class FakeRelayDocker:
                 return _done(
                     call, 1, stderr=f"Error response from daemon: network {name} not found"
                 )
-            return _done(call, stdout=json.dumps([{"Name": name, "Internal": self.networks[name]}]))
+            members = list(self.foreign_members.get(name, []))
+            if self.container is not None and name in self.container["NetworkSettings"]["Networks"]:
+                members.append(RELAY_CONTAINER_NAME)
+            document = {
+                "Name": name,
+                "Internal": self.networks[name],
+                "Labels": self.network_labels.get(name, {}),
+                "Containers": {f"id{index}": {"Name": item} for index, item in enumerate(members)},
+            }
+            return _done(call, stdout=json.dumps([document]))
+        if args[1] == "rm":
+            if args[2] not in self.networks:
+                return _done(
+                    call, 1, stderr=f"Error response from daemon: network {args[2]} not found"
+                )
+            attached = (
+                self.container is not None
+                and args[2] in (self.container["NetworkSettings"]["Networks"])
+            )
+            if attached or self.foreign_members.get(args[2]):
+                return _done(
+                    call,
+                    1,
+                    stderr=f"Error response from daemon: network {args[2]} has active endpoints",
+                )
+            del self.networks[args[2]]
+            self.network_labels.pop(args[2], None)
+            return _done(call)
         if args[1] == "create":
             self.networks[args[-1]] = "--internal" in args
+            self.network_labels[args[-1]] = dict(
+                item.split("=", 1) for flag, item in itertools.pairwise(args) if flag == "--label"
+            )
             return _done(call)
         if args[1] == "connect":
             assert self.container is not None
@@ -413,13 +445,55 @@ def test_a_same_named_container_that_is_not_the_relay_is_never_replaced(
     assert manager.status().healthy is False
 
 
-def test_down_removes_the_relay_and_is_idempotent(fake: FakeRelayDocker, token: Path) -> None:
+def test_down_removes_the_relay_and_its_egress_network_and_is_idempotent(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    assert EGRESS_NETWORK in fake.networks
+
+    assert manager.down().present is False
+    assert EGRESS_NETWORK not in fake.networks
+    removals = fake.calls_of("network", "rm")
+    assert [call[-1] for call in removals] == [EGRESS_NETWORK]
+    assert manager.down().present is False  # nothing left to remove, and no error
+    assert fake.calls_of("network", "rm") == removals
+    assert manager.status().detail == "the model access relay container does not exist"
+
+    # The next ``up`` makes the network again.
+    assert _up(manager, token).healthy
+    assert EGRESS_NETWORK in fake.networks
+
+
+def test_down_leaves_an_egress_network_another_container_still_uses(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    manager = _manager(fake)
+    _up(manager, token)
+    fake.foreign_members[EGRESS_NETWORK] = ["someone-elses-container"]
+
+    assert manager.down().present is False
+
+    assert EGRESS_NETWORK in fake.networks
+    assert fake.calls_of("network", "rm") == []
+
+
+def test_down_leaves_an_egress_network_the_runner_did_not_create(
+    fake: FakeRelayDocker, token: Path
+) -> None:
+    fake.networks[EGRESS_NETWORK] = False  # an operator's own network: no runner label
     manager = _manager(fake)
     _up(manager, token)
 
     assert manager.down().present is False
-    assert manager.down().present is False
-    assert manager.status().detail == "the model access relay container does not exist"
+
+    assert EGRESS_NETWORK in fake.networks
+    assert fake.calls_of("network", "rm") == []
+
+
+def test_down_without_a_relay_or_network_changes_nothing(fake: FakeRelayDocker) -> None:
+    assert _manager(fake).down().present is False
+    assert fake.calls_of("network", "rm") == []
 
 
 # --- refusals ---------------------------------------------------------------------------------
