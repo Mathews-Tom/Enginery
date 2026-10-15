@@ -257,9 +257,29 @@ def _gateway_prerequisites(options: GateOptions) -> None:
 
 
 _TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+_deferred: list[str] | None = None
+"""While cleanup or the final checks run, the names of the termination signals that arrived."""
+
+
+@contextlib.contextmanager
+def _deferring_termination(arrived: list[str]) -> Iterator[None]:
+    """Termination signals that arrive inside the block are recorded in ``arrived``, not raised.
+
+    Cleanup and the final checks are what the first signal unwinds into; a signal that arrives
+    while they run must not cut them short and leave objects on the engine.
+    """
+    global _deferred
+    _deferred = arrived
+    try:
+        yield
+    finally:
+        _deferred = None
 
 
 def _interrupt(number: int, _frame: Any) -> None:
+    if _deferred is not None:
+        _deferred.append(signal.Signals(number).name)
+        return
     # The first signal unwinds the run through its cleanup; a second one must not cut that short.
     for other in _TERMINATION_SIGNALS:
         signal.signal(other, signal.SIG_IGN)
@@ -334,6 +354,7 @@ def _execute(
         )
     gate: Gate | None = None
     interrupted = False
+    late: list[str] = []  # termination signals that arrived during cleanup or the final checks
     try:
         _gateway_prerequisites(options)
         gate = prepare(options, evidence, scrubber, engine_factory, need_relay=spec.need_relay)
@@ -347,11 +368,16 @@ def _execute(
         except Exception as error:
             evidence.abort(f"the scenario stopped on {type(error).__name__}: {error}")
         finally:
-            gate.cleanup()
-        try:
-            spec.finalize(gate)
-        except Exception as error:
-            evidence.abort(f"final checks stopped on {type(error).__name__}: {error}")
+            with _deferring_termination(late):
+                gate.cleanup()
+        with _deferring_termination(late):
+            try:
+                spec.finalize(gate)
+            except Exception as error:
+                evidence.abort(f"final checks stopped on {type(error).__name__}: {error}")
+        if late and not interrupted:
+            interrupted = True
+            evidence.abort(_interrupted_reason(KeyboardInterrupt(late[0])))
     except GateHoldError as hold:
         evidence.hold(str(hold))
     except KeyboardInterrupt as stop:  # before the scenario started, or while it was finalized

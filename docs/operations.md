@@ -1797,7 +1797,8 @@ directory of raw artifacts beside it. The exit status is `0` only if every
 required assertion ran and passed, `1` if any failed or did not run, `2` for a
 usage error, `3` (verdict `hold`) when the engine, an image or a permission is
 missing, and `130` when the run was interrupted (Ctrl-C, SIGTERM or SIGHUP; what the
-run created is still removed before it exits). An assertion that cannot run fails or
+run created is still removed before it exits; a SIGTERM or SIGHUP that arrives during that
+cleanup is held until it is done). An assertion that cannot run fails or
 holds the run; none is skipped. At the end the run lists the engine's containers (the
 per-attempt store containers included), volumes and networks and fails if any it
 created remains, if it had to remove a store, a volume or an attempt network that the

@@ -489,6 +489,33 @@ def test_a_termination_signal_still_runs_the_gate_cleanup(
     assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
 
 
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP])
+def test_a_termination_signal_during_cleanup_does_not_cut_the_cleanup_short(
+    tmp_path: Path, number: signal.Signals
+) -> None:
+    class SignalledDuringCleanup(FakeGate):
+        finished_cleanup = False
+
+        def cleanup(self) -> None:
+            os.kill(os.getpid(), number)
+            self.finished_cleanup = True  # not reached if the signal unwound the cleanup
+
+    holder: list[FakeGate] = []
+
+    def prepare(options: Any, evidence: EvidenceBuilder, *args: Any, **kwargs: Any) -> FakeGate:
+        gate = SignalledDuringCleanup(evidence)
+        holder.append(gate)
+        return gate
+
+    document, code = execute(
+        parse_options(_argv(tmp_path)), scenarios=_spec(_record_all), prepare=prepare
+    )
+
+    assert holder[0].finished_cleanup is True  # type: ignore[attr-defined]
+    assert (document["verdict"], code) == ("fail", 130)
+    assert f"interrupted by {number.name}" in document["reason"]
+
+
 def test_an_interrupted_launcher_group_is_stopped_before_the_gate_moves_on(
     tmp_path: Path,
 ) -> None:
