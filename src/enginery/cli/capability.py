@@ -1,12 +1,17 @@
 """``enginery capability lock --check``: on-disk materialized-store drift check.
 
 This verifies that every capability an existing lockfile records still
-has matching bytes under the content-addressed materialized store
-(:func:`enginery.capabilities.materialize.digest_path`). It never
-re-fetches from a live source and never grants an approval; it only
-detects drift in what was already immutably materialized -- the on-disk
-analog of :class:`enginery.capabilities.errors.CapabilityLockDriftError`,
+has a materialized closure under the content-addressed store
+(:func:`enginery.capabilities.materialize.digest_path`) that matches the
+locked file records exactly -- no missing, changed, or extra file and no
+symlink. It never re-fetches from a live source and never grants an
+approval; it only detects drift in what was already immutably materialized
+-- the on-disk analog of :class:`enginery.capabilities.errors.CapabilityLockDriftError`,
 which catches drift at resolution time.
+
+A lockfile in the previous single-blob schema cannot be checked against a
+closure at all: every entry is reported as needing re-resolution rather than
+being silently upgraded.
 """
 
 from __future__ import annotations
@@ -14,10 +19,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from enginery.capabilities.errors import CapabilityIntegrityError
 from enginery.capabilities.lock import LockedCapability
-from enginery.capabilities.materialize import digest_path
-from enginery.capabilities.serialization import read_lock
-from enginery.domain.digests import Digest
+from enginery.capabilities.materialize import verify_materialized
+from enginery.capabilities.serialization import (
+    is_legacy_lock,
+    legacy_lock_from_json,
+    lock_from_json,
+    read_lock_document,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,30 +58,35 @@ def check_lock(*, lockfile: Path, capabilities_root: Path) -> CapabilityLockChec
 
     if not lockfile.exists():
         return CapabilityLockCheckReport(lockfile=None, findings=())
-    lock = read_lock(lockfile)
+    document = read_lock_document(lockfile)
+    if is_legacy_lock(document):
+        legacy = legacy_lock_from_json(document)
+        findings = tuple(
+            CapabilityDriftFinding(
+                name=entry.name,
+                version=entry.version,
+                ok=False,
+                detail="legacy single-blob lock entry has no closure; re-resolve the capability",
+            )
+            for entry in legacy.entries
+        )
+        return CapabilityLockCheckReport(lockfile=lockfile, findings=findings)
+    lock = lock_from_json(document)
     findings = tuple(_check_entry(entry, capabilities_root) for entry in lock.entries)
     return CapabilityLockCheckReport(lockfile=lockfile, findings=findings)
 
 
 def _check_entry(entry: LockedCapability, root: Path) -> CapabilityDriftFinding:
-    path = digest_path(root, entry.digest)
-    if not path.exists():
+    try:
+        verify_materialized(entry, root)
+    except CapabilityIntegrityError as error:
+        differences = error.details.get("differences")
+        suffix = f" ({'; '.join(map(str, differences))})" if isinstance(differences, list) else ""
         return CapabilityDriftFinding(
-            name=entry.name,
-            version=entry.version,
-            ok=False,
-            detail="materialized bytes are missing from the capabilities root",
-        )
-    actual = Digest.of_bytes(path.read_bytes())
-    if actual != entry.digest:
-        return CapabilityDriftFinding(
-            name=entry.name,
-            version=entry.version,
-            ok=False,
-            detail="on-disk bytes no longer match the locked digest",
+            name=entry.name, version=entry.version, ok=False, detail=f"{error}{suffix}"
         )
     return CapabilityDriftFinding(
-        name=entry.name, version=entry.version, ok=True, detail="matches the locked digest"
+        name=entry.name, version=entry.version, ok=True, detail="matches the locked closure"
     )
 
 

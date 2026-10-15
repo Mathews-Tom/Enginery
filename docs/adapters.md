@@ -47,7 +47,7 @@ uv run python scripts/check_import_boundaries.py <layer>
 | `ValidationPort` | `application/delivery_ports.py` | `LocalValidation` (`local-validation`) | `probe`, `validate`, `reconcile` |
 | `ReleasePort` | `application/delivery_ports.py` | `LocalPublication`, `GitHubReleaseAdapter`, `PyPiAdapter` | `probe`, `publish`, `verify`, `reconcile` |
 | `DeploymentPort` | `application/delivery_ports.py` | `LocalDeploymentFixture`, `LocalServiceDeploymentAdapter` | `probe`, `deploy`, `rollback`, `reconcile` |
-| `CapabilitySourcePort` | `application/delivery_ports.py` | `LocalCapabilitySource`, `ArmoryCapabilitySource` | `probe`, `discover`, `resolve`, `fetch` |
+| `CapabilitySourcePort` | `application/delivery_ports.py` | `LocalCapabilitySource`, `ArmoryCapabilitySource` | `probe`, `discover`, `resolve`, `fetch_closure` |
 
 Every port shares the same identity/reconciliation shape, described next.
 
@@ -211,10 +211,10 @@ Repositories and delivery systems receive verified outcomes.
 ```
 
 `ArmoryCapabilitySource` (`src/enginery/adapters/armory.py`) implements
-`CapabilitySourcePort` against Armory's real, current interface: a single
-`manifest.yaml` fetched over HTTPS, with no MCP server, no per-package
-signature, and no checksum field of its own. Two facts about this adapter
-matter operationally:
+`CapabilitySourcePort` against Armory's real, current interface: a
+`manifest.yaml` catalog of package directories on GitHub, with no MCP
+server, no per-package signature, and no checksum, license, or dependency
+field of its own. Four facts about this adapter matter operationally:
 
 - **It is not a runtime dependency.** Importing the module needs only the
   standard library; every network-reaching method requires the optional
@@ -225,6 +225,25 @@ matter operationally:
   this release** — using it today means writing Python against
   `CapabilitySourcePort` directly, the same way `tests/adapters/armory`
   exercises it.
+- **Every read is bound to one immutable commit.** The adapter resolves its
+  configured ref (default `main`) to a commit sha once, or takes an explicit
+  40-character `revision`, and reads the catalog, the recursive file
+  listing, every package file, and the repository `LICENSE` at that sha
+  through the injected fetcher. The descriptor's `revision` is that sha. It
+  never executes or imports fetched content.
+- **A package is its complete closure.** The closure is every file under the
+  catalog `path`. A symlink, submodule, or other non-regular tree entry
+  rejects the package; the closure builder additionally rejects unsafe
+  paths and unreviewed asset types (see "Package closures and the lock"
+  below), so a package that ships a `.pyc`, database, or image is
+  unlockable rather than silently hashed. Armory packages carry no
+  Enginery manifest, so the adapter synthesizes a minimal one (identity
+  from the catalog row, kind `instruction`, no permissions, no
+  dependencies) and includes it in the closure; it grants no authority and
+  declares no command, so an Armory package is installed as inert files and
+  is never run by Enginery. The license is the repository `LICENSE`
+  detected at the pinned revision — declared metadata only; an unrecognized
+  or unreachable license is `unknown` and holds redistribution.
 - **Every capability it returns is `provenance="armory"`, which
   `CapabilityResolver` classifies as `unauthenticated`.** Content
   addressing (Enginery's own fetch-and-hash step) is not the same as
@@ -235,6 +254,62 @@ matter operationally:
   repository-local capability added or changed by the active run. There is
   no "authenticated-by-TLS" fast path; TLS or transport identity alone is
   explicitly insufficient.
+
+## Package closures and the lock
+
+A capability is a package directory, not a single file. Every
+`CapabilitySourcePort` returns the package's complete file list
+(`fetch_closure`) and a `CapabilityDescriptor` whose `digest` is the
+source's claim of the package's canonical **closure digest**. The resolver
+rebuilds the closure from the fetched files and rejects a source whose
+files do not hash to the claimed digest.
+
+- **Manifest.** Each package ships `capability.json` at its root: a strict,
+  versioned JSON document declaring `name`, `version`, `kind`
+  (`instruction`, `command`, `hook`, or `adapter`), an optional SPDX
+  `license`, transitive `dependencies` pinned to `name`, `version`, and
+  `closure_digest`, `permissions` from a closed vocabulary, and
+  `compatibility` (adapter API range and platforms). Unknown and duplicate
+  keys are rejected. The manifest is itself an asset of the closure, so
+  every field it declares is covered by the digest.
+- **Closure.** Every file is recorded as a normalized relative POSIX path,
+  an asset kind (`instruction`, `reference`, `script`, `data`, `metadata`),
+  a SHA-256, a size, and an executable bit. The closure digest covers all
+  of those and every dependency pin in a fixed order, so a changed sibling
+  script, reference, data file, executable bit, or dependency pin changes
+  the digest.
+- **Rejected content.** Symlinks, hardlinked or non-regular files,
+  absolute, `..`, backslash, and non-NFC paths, duplicate or case-colliding
+  paths, executable bits on non-scripts, and any file outside the reviewed
+  layout (root `*.md`, `instructions/*.md`, `references/` docs,
+  `scripts/` `.py` `.sh` `.js` `.mjs` `.ts`, and `data/`, `schemas/`,
+  `evals/` data files) fail with an explicit `CapabilityError` subclass,
+  as do packages beyond 512 files, 2 MiB per file, or 16 MiB in total.
+- **Lock.** A lock entry binds the closure digest to the origin (source
+  label and immutable revision), license, kind, permissions, compatibility,
+  dependency pins, and the trust classification. All of these are bound
+  into `CapabilityLock.digest()`, so changing any of them supersedes an
+  approval recorded against the old digest. A digest never proves
+  publisher authenticity: only a signature that verifies against a pinned
+  publisher key yields `authenticated`, and even then a run-introduced
+  capability still needs exact-digest human approval. Each transitive
+  dependency is a lock entry of its own, checked against its pin and
+  approved and license-checked package by package.
+- **License.** Only SPDX identifiers on the reviewed permissive list
+  (`0BSD`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `CC0-1.0`, `ISC`,
+  `MIT`, `Unlicense`, `Zlib`) are redistributable. An absent, `unknown`, or
+  unreviewed license holds redistribution for every package the run
+  introduces, and materialization refuses it even with an approval.
+- **Materialization.** A verified closure is written once, as a whole
+  directory, under its closure-digest path and never overwritten; every
+  later use re-verifies the directory (no missing, changed, or extra file,
+  no symlink) against the lock entry.
+- **Lock schema.** The lock file declares `schema_version: 2`. A lock
+  without a `schema_version` is the previous single-blob schema: it decodes
+  read-only as legacy entries that carry no closure, cannot be
+  materialized or approved, and must be re-resolved —
+  `enginery capability lock --check` reports each such entry as needing
+  re-resolution and consumers of the lock refuse it.
 
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an

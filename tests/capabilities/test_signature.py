@@ -104,6 +104,7 @@ def test_descriptor_verifier_upgrades_a_correctly_signed_descriptor() -> None:
         version="1",
         digest=digest,
         provenance="external-registry",
+        revision="rev-1",
         signature=_sign(private_key, digest),
         signer_key_id="publisher-1",
     )
@@ -116,7 +117,11 @@ def test_descriptor_verifier_upgrades_a_correctly_signed_descriptor() -> None:
 def test_descriptor_verifier_returns_none_for_an_unsigned_descriptor() -> None:
     keyring = PinnedKeyring([])
     descriptor = CapabilityDescriptor(
-        name="skill-a", version="1", digest=Digest.of_bytes(b"payload"), provenance="tls-only"
+        name="skill-a",
+        version="1",
+        digest=Digest.of_bytes(b"payload"),
+        provenance="tls-only",
+        revision="rev-1",
     )
 
     verify = descriptor_verifier(keyring)
@@ -131,5 +136,6 @@ def test_descriptor_requires_signature_and_signer_key_id_together() -> None:
             version="1",
             digest=Digest.of_bytes(b"payload"),
             provenance="external-registry",
+            revision="rev-1",
             signature=b"orphan-signature",
         )

@@ -1,71 +1,124 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Callable
+import json
+from pathlib import Path
 
 import pytest
 import yaml
+from tests.support.capabilities import descriptor_for, package_files
 
 from enginery.adapters.armory import ArmoryCapabilitySource
+from enginery.adapters.local import LocalCapabilitySource
 from enginery.application.adapter_types import AdapterAvailability
-from enginery.capabilities.lock import ProvenanceStatus
-from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
-from enginery.domain.digests import Digest
-from enginery.domain.errors import MissingPrerequisiteError, TransientProviderFailureError
-
-_MANIFEST_URL = "https://raw.githubusercontent.com/Mathews-Tom/armory/main/manifest.yaml"
-_LICENSE_URL = "https://raw.githubusercontent.com/Mathews-Tom/armory/main/LICENSE"
-_SKILL_SOURCE = "https://github.com/Mathews-Tom/armory/blob/main/skills/adr-writer/SKILL.md"
-_SKILL_RAW_URL = (
-    "https://raw.githubusercontent.com/Mathews-Tom/armory/main/skills/adr-writer/SKILL.md"
+from enginery.capabilities.closure import build_closure
+from enginery.capabilities.errors import (
+    CapabilityApprovalRequiredError,
+    CapabilityAssetTypeError,
+    CapabilityLicenseHoldError,
+    CapabilityPathError,
+    CapabilitySymlinkError,
 )
-_SKILL_CONTENT = b"# ADR writer skill body"
+from enginery.capabilities.lock import ProvenanceStatus
+from enginery.capabilities.materialize import materialize_lock
+from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
+from enginery.domain.errors import (
+    InvalidInputError,
+    MissingPrerequisiteError,
+    TransientProviderFailureError,
+)
+
+_REPO = "Mathews-Tom/armory"
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+_COMMIT_URL = f"https://api.github.com/repos/{_REPO}/commits/main"
+_TREE_URL = f"https://api.github.com/repos/{_REPO}/git/trees/{_SHA}?recursive=1"
+_PACKAGE = "skills/adr-writer"
 _LICENSE_TEXT = b"MIT License\n\nCopyright (c) 2026 Tom\n"
+_FILES: dict[str, bytes] = {
+    f"{_PACKAGE}/SKILL.md": b"# ADR writer skill body",
+    f"{_PACKAGE}/references/adr-template.md": b"template",
+    f"{_PACKAGE}/scripts/check.py": b"print('check')\n",
+    f"{_PACKAGE}/evals/cases.yaml": b"cases: []\n",
+    "skills/adr-writer-extra/SKILL.md": b"a sibling package that must not leak in",
+    "README.md": b"# armory",
+}
 
 
-def _manifest_yaml() -> bytes:
+def _raw(path: str) -> str:
+    return f"https://raw.githubusercontent.com/{_REPO}/{_SHA}/{path}"
+
+
+def _manifest_yaml(path: str = _PACKAGE) -> bytes:
     document = {
         "packages": {
             "skills": [
-                {
-                    "name": "adr-writer",
-                    "version": "1.1.1",
-                    "path": "skills/adr-writer",
-                    "source": _SKILL_SOURCE,
-                },
-                {"name": "missing-source", "version": "1.0.0"},
+                {"name": "adr-writer", "version": "1.1.1", "path": path},
+                {"name": "missing-path", "version": "1.0.0"},
             ]
         }
     }
     return yaml.safe_dump(document).encode("utf-8")
 
 
-def _fetcher(routes: dict[str, bytes]) -> Callable[[str, float], bytes]:
-    def fetch(url: str, timeout: float) -> bytes:
+def _tree_json(
+    files: dict[str, bytes], *, modes: dict[str, str] | None = None, truncated: bool = False
+) -> bytes:
+    modes = modes or {}
+    entries = [
+        {"path": path, "mode": modes.get(path, "100644"), "type": "blob", "size": len(content)}
+        for path, content in sorted(files.items())
+    ]
+    entries.append({"path": "skills", "mode": "040000", "type": "tree", "sha": "x"})
+    return json.dumps({"sha": _SHA, "tree": entries, "truncated": truncated}).encode("utf-8")
+
+
+class _Fetcher:
+    def __init__(self, routes: dict[str, bytes]) -> None:
+        self.routes = routes
+        self.urls: list[str] = []
+
+    def __call__(self, url: str, timeout: float) -> bytes:
         del timeout
-        if url not in routes:
+        self.urls.append(url)
+        if url not in self.routes:
             raise TimeoutError(f"no fixture route for {url}")
-        return routes[url]
-
-    return fetch
+        return self.routes[url]
 
 
-def _source(routes: dict[str, bytes] | None = None) -> ArmoryCapabilitySource:
-    all_routes = {
-        _MANIFEST_URL: _manifest_yaml(),
-        _SKILL_RAW_URL: _SKILL_CONTENT,
-        _LICENSE_URL: _LICENSE_TEXT,
+def _routes(
+    files: dict[str, bytes] | None = None,
+    *,
+    modes: dict[str, str] | None = None,
+    manifest_path: str = _PACKAGE,
+    license_text: bytes | None = _LICENSE_TEXT,
+) -> dict[str, bytes]:
+    files = dict(_FILES if files is None else files)
+    routes = {
+        _COMMIT_URL: json.dumps({"sha": _SHA}).encode("utf-8"),
+        _TREE_URL: _tree_json(files, modes=modes),
+        _raw("manifest.yaml"): _manifest_yaml(manifest_path),
     }
-    if routes:
-        all_routes.update(routes)
-    return ArmoryCapabilitySource(manifest_url=_MANIFEST_URL, fetcher=_fetcher(all_routes))
+    routes.update({_raw(path): content for path, content in files.items()})
+    if license_text is not None:
+        routes[_raw("LICENSE")] = license_text
+    return routes
 
 
-def test_probe_reports_available_when_manifest_is_reachable() -> None:
-    status = _source().probe()
+def _source(
+    routes: dict[str, bytes] | None = None, *, revision: str | None = None
+) -> tuple[ArmoryCapabilitySource, _Fetcher]:
+    fetcher = _Fetcher(_routes() if routes is None else routes)
+    return ArmoryCapabilitySource(fetcher=fetcher, revision=revision), fetcher
+
+
+def test_probe_reports_available_when_the_catalog_is_reachable() -> None:
+    source, _ = _source()
+
+    status = source.probe()
 
     assert status.availability is AdapterAvailability.AVAILABLE
     assert status.fingerprint is not None
+    assert _SHA in status.detail
 
 
 def test_probe_reports_unavailable_without_pyyaml(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,116 +130,311 @@ def test_probe_reports_unavailable_without_pyyaml(monkeypatch: pytest.MonkeyPatc
         return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+    source, _ = _source()
 
-    status = _source().probe()
+    status = source.probe()
 
     assert status.availability is AdapterAvailability.UNAVAILABLE
     assert "armory" in status.detail.lower()
 
 
-def test_probe_reports_misconfigured_for_unreachable_manifest() -> None:
-    source = ArmoryCapabilitySource(manifest_url=_MANIFEST_URL, fetcher=_fetcher({}))
+def test_probe_reports_misconfigured_for_an_unreachable_catalog() -> None:
+    source, _ = _source({})
 
-    status = source.probe()
-
-    assert status.availability is AdapterAvailability.MISCONFIGURED
+    assert source.probe().availability is AdapterAvailability.MISCONFIGURED
 
 
-def test_resolve_returns_a_content_addressed_descriptor() -> None:
-    descriptor = _source().resolve("adr-writer", "1.1.1")
+def test_resolve_returns_a_closure_addressed_descriptor_bound_to_the_commit() -> None:
+    source, _ = _source()
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
 
     assert descriptor is not None
-    assert descriptor.digest == Digest.of_bytes(_SKILL_CONTENT)
+    assert descriptor.revision == _SHA
     assert descriptor.provenance == "armory"
     assert descriptor.license == "MIT"
+    assert descriptor.digest == build_closure(source.fetch_closure("adr-writer", "1.1.1")).digest
 
 
-def test_resolve_skips_entries_missing_a_source_url() -> None:
-    assert _source().resolve("missing-source", "1.0.0") is None
+def test_every_read_is_bound_to_the_resolved_commit_never_the_mutable_ref() -> None:
+    source, fetcher = _source()
+
+    source.resolve("adr-writer", "1.1.1")
+
+    raw_reads = [url for url in fetcher.urls if "raw.githubusercontent.com" in url]
+    assert raw_reads
+    assert all(f"/{_SHA}/" in url for url in raw_reads)
+    assert not any("/main/" in url for url in raw_reads)
 
 
-def test_resolve_returns_none_for_unknown_capability() -> None:
-    assert _source().resolve("does-not-exist", "1.0.0") is None
+def test_an_explicit_revision_skips_ref_resolution() -> None:
+    source, fetcher = _source(revision=_SHA)
+
+    assert source.resolve("adr-writer", "1.1.1") is not None
+    assert _COMMIT_URL not in fetcher.urls
 
 
-def test_fetch_returns_the_exact_bytes_backing_the_descriptor() -> None:
-    source = _source()
-    descriptor = source.resolve("adr-writer", "1.1.1")
-    assert descriptor is not None
+def test_fetch_closure_returns_every_package_file_with_relative_paths() -> None:
+    source, _ = _source()
 
-    content = source.fetch("adr-writer", "1.1.1")
+    files = {item.path: item for item in source.fetch_closure("adr-writer", "1.1.1")}
 
-    assert Digest.of_bytes(content) == descriptor.digest
+    assert set(files) == {
+        "SKILL.md",
+        "references/adr-template.md",
+        "scripts/check.py",
+        "evals/cases.yaml",
+        "capability.json",
+    }
+    assert files["SKILL.md"].content == b"# ADR writer skill body"
+    assert files["scripts/check.py"].executable is False
 
 
-def test_fetch_raises_for_unknown_capability() -> None:
+def test_a_sibling_package_sharing_a_name_prefix_is_not_swept_into_the_closure() -> None:
+    source, _ = _source()
+
+    paths = {item.path for item in source.fetch_closure("adr-writer", "1.1.1")}
+
+    assert not any("extra" in path for path in paths)
+
+
+def test_the_executable_bit_comes_from_the_pinned_tree_mode() -> None:
+    routes = _routes(modes={f"{_PACKAGE}/scripts/check.py": "100755"})
+    source, _ = _source(routes)
+
+    files = {item.path: item for item in source.fetch_closure("adr-writer", "1.1.1")}
+
+    assert files["scripts/check.py"].executable is True
+
+
+def test_a_synthesized_manifest_grants_no_authority_and_declares_no_command() -> None:
+    source, _ = _source()
+
+    closure = build_closure(source.fetch_closure("adr-writer", "1.1.1"))
+
+    manifest = closure.manifest
+    assert (manifest.name, manifest.version) == ("adr-writer", "1.1.1")
+    assert manifest.kind.value == "instruction"
+    assert manifest.permissions == ()
+    assert manifest.dependencies == ()
+    assert manifest.license is None
+
+
+def test_a_package_shipped_manifest_is_used_instead_of_a_synthesized_one() -> None:
+    shipped = json.dumps(
+        {
+            "schema_version": 1,
+            "name": "adr-writer",
+            "version": "1.1.1",
+            "kind": "instruction",
+            "license": "MIT",
+            "permissions": ["repository.read"],
+        }
+    ).encode("utf-8")
+    files = {**_FILES, f"{_PACKAGE}/capability.json": shipped}
+    source, _ = _source(_routes(files))
+
+    closure = build_closure(source.fetch_closure("adr-writer", "1.1.1"))
+
+    assert [permission.value for permission in closure.manifest.permissions] == ["repository.read"]
+
+
+def test_a_sibling_script_change_at_the_pinned_tree_changes_the_closure_digest() -> None:
+    original, _ = _source()
+    changed_files = {**_FILES, f"{_PACKAGE}/scripts/check.py": b"print('changed')\n"}
+    changed, _ = _source(_routes(changed_files))
+
+    first = original.resolve("adr-writer", "1.1.1")
+    second = changed.resolve("adr-writer", "1.1.1")
+
+    assert first is not None and second is not None
+    assert first.digest != second.digest
+
+
+def test_a_reference_change_at_the_pinned_tree_changes_the_closure_digest() -> None:
+    original, _ = _source()
+    changed_files = {**_FILES, f"{_PACKAGE}/references/adr-template.md": b"edited"}
+    changed, _ = _source(_routes(changed_files))
+
+    first = original.resolve("adr-writer", "1.1.1")
+    second = changed.resolve("adr-writer", "1.1.1")
+
+    assert first is not None and second is not None
+    assert first.digest != second.digest
+
+
+def test_resolve_skips_entries_missing_a_package_path() -> None:
+    source, _ = _source()
+
+    assert source.resolve("missing-path", "1.0.0") is None
+
+
+def test_resolve_returns_none_for_an_unknown_capability() -> None:
+    source, _ = _source()
+
+    assert source.resolve("does-not-exist", "1.0.0") is None
+
+
+def test_fetch_closure_raises_for_an_unknown_capability() -> None:
+    source, _ = _source()
+
     with pytest.raises(MissingPrerequisiteError):
-        _source().fetch("does-not-exist", "1.0.0")
+        source.fetch_closure("does-not-exist", "1.0.0")
 
 
 def test_discover_returns_every_resolvable_entry() -> None:
-    descriptors = _source().discover()
+    source, _ = _source()
 
-    assert [d.name for d in descriptors] == ["adr-writer"]
-
-
-def test_non_github_blob_source_is_rejected() -> None:
-    routes = {
-        _MANIFEST_URL: yaml.safe_dump(
-            {
-                "packages": {
-                    "skills": [
-                        {
-                            "name": "bad-source",
-                            "version": "1.0.0",
-                            "source": "https://example.com/not-a-blob-url",
-                        }
-                    ]
-                }
-            }
-        ).encode("utf-8")
-    }
-    source = _source(routes)
-
-    with pytest.raises(MissingPrerequisiteError):
-        source.resolve("bad-source", "1.0.0")
+    assert [d.name for d in source.discover()] == ["adr-writer"]
 
 
-def test_unreachable_content_raises_transient_failure() -> None:
-    source = ArmoryCapabilitySource(
-        manifest_url=_MANIFEST_URL, fetcher=_fetcher({_MANIFEST_URL: _manifest_yaml()})
+def test_a_traversing_catalog_path_is_rejected() -> None:
+    source, _ = _source(_routes(manifest_path="../outside"))
+
+    with pytest.raises(CapabilityPathError):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_a_catalog_path_with_no_files_at_the_revision_is_a_missing_prerequisite() -> None:
+    source, _ = _source(_routes(manifest_path="skills/not-there"))
+
+    with pytest.raises(MissingPrerequisiteError, match="no files"):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_a_symlink_in_the_pinned_tree_is_rejected() -> None:
+    routes = _routes(modes={f"{_PACKAGE}/references/adr-template.md": "120000"})
+    source, _ = _source(routes)
+
+    with pytest.raises(CapabilitySymlinkError):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_a_submodule_in_the_pinned_tree_is_rejected() -> None:
+    routes = _routes()
+    tree = json.loads(routes[_TREE_URL])
+    tree["tree"].append(
+        {"path": f"{_PACKAGE}/vendored", "mode": "160000", "type": "commit", "sha": "x"}
     )
+    routes[_TREE_URL] = json.dumps(tree).encode("utf-8")
+    source, _ = _source(routes)
+
+    with pytest.raises(CapabilitySymlinkError):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_an_unreviewed_asset_type_makes_the_package_unlockable() -> None:
+    files = {**_FILES, f"{_PACKAGE}/scripts/__pycache__/check.cpython-312.pyc": b"\x00bytecode"}
+    source, _ = _source(_routes(files))
+
+    with pytest.raises(CapabilityAssetTypeError):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_a_truncated_file_listing_is_rejected() -> None:
+    routes = _routes()
+    routes[_TREE_URL] = _tree_json(_FILES, truncated=True)
+    source, _ = _source(routes)
+
+    with pytest.raises(MissingPrerequisiteError, match="truncated"):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_a_ref_that_does_not_resolve_to_a_commit_sha_is_rejected() -> None:
+    routes = _routes()
+    routes[_COMMIT_URL] = json.dumps({"sha": "not-a-sha"}).encode("utf-8")
+    source, _ = _source(routes)
+
+    with pytest.raises(MissingPrerequisiteError, match="commit sha"):
+        source.resolve("adr-writer", "1.1.1")
+
+
+@pytest.mark.parametrize("revision", ["main", "abc123", "G" * 40, "A" * 40])
+def test_a_revision_must_be_a_full_lowercase_commit_sha(revision: str) -> None:
+    with pytest.raises(InvalidInputError):
+        ArmoryCapabilitySource(revision=revision)
+
+
+def test_unreachable_package_content_raises_transient_failure() -> None:
+    routes = _routes()
+    del routes[_raw(f"{_PACKAGE}/SKILL.md")]
+    source, _ = _source(routes)
 
     with pytest.raises(TransientProviderFailureError):
         source.resolve("adr-writer", "1.1.1")
+
+
+def test_an_unreachable_license_is_reported_as_unknown() -> None:
+    source, _ = _source(_routes(license_text=None))
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert descriptor.license == "unknown"
 
 
 def test_armory_sourced_capability_is_always_unauthenticated_when_run_introduced() -> None:
     """No per-package signature exists today; every Armory capability a run
     introduces must stay unauthenticated regardless of a clean digest fetch."""
 
-    resolver = CapabilityResolver([_source()])
+    source, _ = _source()
 
-    lock = resolver.resolve([CapabilityRequest(name="adr-writer", version="1.1.1")])
+    lock = CapabilityResolver([source]).resolve(
+        [CapabilityRequest(name="adr-writer", version="1.1.1")]
+    )
 
     entry = lock.get("adr-writer")
     assert entry is not None
     assert entry.introduced_by_run is True
     assert entry.provenance.status is ProvenanceStatus.UNAUTHENTICATED
+    assert entry.revision == _SHA
     assert entry.requires_human_approval() is True
+
+
+def test_approved_armory_package_materializes_its_complete_closure(tmp_path: Path) -> None:
+    source, _ = _source()
+    resolved = CapabilityResolver([source]).resolve_with_files(
+        [CapabilityRequest(name="adr-writer", version="1.1.1")]
+    )
+
+    with pytest.raises(CapabilityApprovalRequiredError):
+        materialize_lock(resolved.lock, resolved.files_by_name, root=tmp_path)
+    materialized = materialize_lock(
+        resolved.lock,
+        resolved.files_by_name,
+        root=tmp_path,
+        approved_names=frozenset({"adr-writer"}),
+    )
+
+    directory = materialized["adr-writer"]
+    assert (directory / "SKILL.md").read_bytes() == b"# ADR writer skill body"
+    assert (directory / "references" / "adr-template.md").read_bytes() == b"template"
+    assert (directory / "scripts" / "check.py").read_bytes() == b"print('check')\n"
+    assert (directory / "capability.json").is_file()
+
+
+def test_armory_package_with_an_unknown_license_is_held_even_when_approved(tmp_path: Path) -> None:
+    source, _ = _source(_routes(license_text=b"Some bespoke terms\n"))
+    resolved = CapabilityResolver([source]).resolve_with_files(
+        [CapabilityRequest(name="adr-writer", version="1.1.1")]
+    )
+
+    with pytest.raises(CapabilityLicenseHoldError):
+        materialize_lock(
+            resolved.lock,
+            resolved.files_by_name,
+            root=tmp_path,
+            approved_names=frozenset({"adr-writer"}),
+        )
 
 
 def test_engine_resolves_capabilities_without_armory_installed() -> None:
     """The reviewed-base, local-only resolution path must not require Armory at all."""
 
-    from enginery.adapters.local import LocalCapabilitySource
-    from enginery.application.delivery_ports import CapabilityDescriptor
-
-    descriptor = CapabilityDescriptor(
-        name="repository-read", version="1", digest=Digest.of_bytes(b"content"), provenance="local"
-    )
+    files = package_files("repository-read")
+    descriptor = descriptor_for(files)
     local_source = LocalCapabilitySource(
-        capabilities=(descriptor,), content_by_key={("repository-read", "1"): b"content"}
+        capabilities=(descriptor,), packages={("repository-read", "1"): files}
     )
     resolver = CapabilityResolver(
         [local_source], reviewed_base=frozenset({("repository-read", "1")})

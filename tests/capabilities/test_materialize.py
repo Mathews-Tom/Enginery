@@ -1,106 +1,244 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from enginery.capabilities.errors import CapabilityApprovalRequiredError, CapabilityIntegrityError
-from enginery.capabilities.lock import (
-    CapabilityLock,
-    LockedCapability,
-    ProvenanceRecord,
-    ProvenanceStatus,
+from enginery.application.delivery_ports import PackageFile
+from enginery.capabilities.errors import (
+    CapabilityApprovalRequiredError,
+    CapabilityAssetTypeError,
+    CapabilityIntegrityError,
+    CapabilityLicenseHoldError,
 )
-from enginery.capabilities.materialize import materialize_capability, materialize_lock
-from enginery.domain.digests import Digest
-
-_NOW = datetime(2026, 1, 1, tzinfo=UTC)
-
-
-def _entry(
-    name: str,
-    payload: bytes,
-    *,
-    introduced_by_run: bool = False,
-    status: ProvenanceStatus = ProvenanceStatus.LOCAL_TRUSTED,
-) -> LockedCapability:
-    return LockedCapability(
-        name=name,
-        version="1",
-        digest=Digest.of_bytes(payload),
-        provenance=ProvenanceRecord(
-            status=status,
-            source_label="test-source",
-            signer_key_id="key-1" if status is ProvenanceStatus.AUTHENTICATED else None,
-            verified_at=_NOW,
-        ),
-        license="MIT",
-        introduced_by_run=introduced_by_run,
-    )
+from enginery.capabilities.materialize import (
+    digest_path,
+    materialize_capability,
+    materialize_lock,
+    verify_materialized,
+)
+from tests.support.capabilities import (
+    lock_of,
+    locked_entry,
+    package_files,
+    replace_file,
+)
 
 
-def test_materialize_capability_writes_content_addressed_bytes(tmp_path: Path) -> None:
-    entry = _entry("skill-a", b"payload-a")
-
-    path = materialize_capability(entry, b"payload-a", root=tmp_path)
-
-    assert path.read_bytes() == b"payload-a"
-    assert path.name == entry.digest.hex_value
+def _scripted() -> tuple[PackageFile, ...]:
+    return package_files("skill-a", extra={"scripts/run.py": b"print('ok')\n"})
 
 
-def test_materialize_capability_rejects_mismatched_bytes(tmp_path: Path) -> None:
-    entry = _entry("skill-a", b"payload-a")
+def test_materialize_capability_writes_the_whole_closure(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
 
-    with pytest.raises(CapabilityIntegrityError):
-        materialize_capability(entry, b"tampered-bytes", root=tmp_path)
+    directory = materialize_capability(entry, files, root=tmp_path)
+
+    assert directory == digest_path(tmp_path, entry.digest)
+    for item in files:
+        assert (directory / item.path).read_bytes() == item.content
 
 
-def test_materialize_capability_is_idempotent_for_identical_bytes(tmp_path: Path) -> None:
-    entry = _entry("skill-a", b"payload-a")
+def test_materialize_capability_preserves_the_executable_bit_only_for_scripts(
+    tmp_path: Path,
+) -> None:
+    files = replace_file(_scripted(), "scripts/run.py", b"print('ok')\n", executable=True)
+    entry = locked_entry(files=files)
 
-    first = materialize_capability(entry, b"payload-a", root=tmp_path)
-    second = materialize_capability(entry, b"payload-a", root=tmp_path)
+    directory = materialize_capability(entry, files, root=tmp_path)
+
+    assert os.access(directory / "scripts" / "run.py", os.X_OK)
+    assert not os.access(directory / "SKILL.md", os.X_OK)
+    assert not stat.S_IMODE((directory / "SKILL.md").stat().st_mode) & 0o222
+
+
+def test_materialize_capability_rejects_a_changed_sibling_script(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    tampered = replace_file(files, "scripts/run.py", b"print('tampered')\n")
+
+    with pytest.raises(CapabilityIntegrityError) as excinfo:
+        materialize_capability(entry, tampered, root=tmp_path)
+
+    assert excinfo.value.details["differences"] == ["changed: scripts/run.py"]
+    assert not digest_path(tmp_path, entry.digest).exists()
+
+
+def test_materialize_capability_rejects_an_added_file(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    extended = (*files, PackageFile("references/extra.md", b"smuggled"))
+
+    with pytest.raises(CapabilityIntegrityError) as excinfo:
+        materialize_capability(entry, extended, root=tmp_path)
+
+    assert excinfo.value.details["differences"] == ["unexpected: references/extra.md"]
+
+
+def test_materialize_capability_rejects_a_removed_file(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    reduced = tuple(item for item in files if item.path != "references/guide.md")
+
+    with pytest.raises(CapabilityIntegrityError) as excinfo:
+        materialize_capability(entry, reduced, root=tmp_path)
+
+    assert excinfo.value.details["differences"] == ["missing: references/guide.md"]
+
+
+def test_materialize_capability_rejects_an_unreviewed_asset_before_writing(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    hostile = (*files, PackageFile("scripts/payload.rb", b"puts 1"))
+
+    with pytest.raises(CapabilityAssetTypeError):
+        materialize_capability(entry, hostile, root=tmp_path)
+
+    assert not any(tmp_path.rglob("payload.rb"))
+
+
+def test_materialize_capability_is_idempotent_for_an_identical_closure(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+
+    first = materialize_capability(entry, files, root=tmp_path)
+    second = materialize_capability(entry, files, root=tmp_path)
 
     assert first == second
-    assert first.read_bytes() == b"payload-a"
+    assert verify_materialized(entry, tmp_path) == first
+
+
+def test_existing_materialization_is_never_overwritten_and_tampering_is_detected(
+    tmp_path: Path,
+) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    directory = materialize_capability(entry, files, root=tmp_path)
+    target = directory / "scripts" / "run.py"
+    target.chmod(0o644)
+    target.write_bytes(b"print('tampered on disk')\n")
+
+    with pytest.raises(CapabilityIntegrityError, match="no longer matches"):
+        materialize_capability(entry, files, root=tmp_path)
+
+    assert target.read_bytes() == b"print('tampered on disk')\n"
+
+
+def test_verify_materialized_detects_an_extra_file(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    directory = materialize_capability(entry, files, root=tmp_path)
+    (directory / "references" / "smuggled.md").write_text("extra", encoding="utf-8")
+
+    with pytest.raises(CapabilityIntegrityError) as excinfo:
+        verify_materialized(entry, tmp_path)
+
+    assert excinfo.value.details["differences"] == ["unexpected: references/smuggled.md"]
+
+
+def test_verify_materialized_detects_a_missing_file(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    directory = materialize_capability(entry, files, root=tmp_path)
+    (directory / "references" / "guide.md").unlink()
+
+    with pytest.raises(CapabilityIntegrityError) as excinfo:
+        verify_materialized(entry, tmp_path)
+
+    assert excinfo.value.details["differences"] == ["missing: references/guide.md"]
+
+
+def test_verify_materialized_detects_a_file_replaced_by_a_symlink(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    directory = materialize_capability(entry, files, root=tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(files[1].content)
+    victim = directory / "SKILL.md"
+    victim.unlink()
+    victim.symlink_to(outside)
+
+    with pytest.raises(CapabilityIntegrityError, match="no longer a valid package"):
+        verify_materialized(entry, tmp_path)
+
+
+def test_verify_materialized_reports_a_missing_directory(tmp_path: Path) -> None:
+    entry = locked_entry(files=_scripted())
+
+    with pytest.raises(CapabilityIntegrityError, match="missing"):
+        verify_materialized(entry, tmp_path)
 
 
 def test_materialize_lock_writes_every_approved_entry(tmp_path: Path) -> None:
-    trusted = _entry("skill-a", b"payload-a", introduced_by_run=False)
-    lock = CapabilityLock(entries=(trusted,))
+    files = _scripted()
+    trusted = locked_entry(files=files, introduced_by_run=False)
 
-    materialized = materialize_lock(lock, {trusted.digest: b"payload-a"}, root=tmp_path)
+    materialized = materialize_lock(lock_of(trusted), {"skill-a": files}, root=tmp_path)
 
-    assert materialized["skill-a"].read_bytes() == b"payload-a"
+    assert (materialized["skill-a"] / "SKILL.md").read_bytes() == files[1].content
 
 
 def test_materialize_lock_refuses_unapproved_run_introduced_entry(tmp_path: Path) -> None:
-    pending = _entry(
-        "skill-a", b"payload-a", introduced_by_run=True, status=ProvenanceStatus.UNAUTHENTICATED
-    )
-    lock = CapabilityLock(entries=(pending,))
+    files = _scripted()
+    pending = locked_entry(files=files, introduced_by_run=True)
 
     with pytest.raises(CapabilityApprovalRequiredError):
-        materialize_lock(lock, {pending.digest: b"payload-a"}, root=tmp_path)
+        materialize_lock(lock_of(pending), {"skill-a": files}, root=tmp_path)
+
+    assert not digest_path(tmp_path, pending.digest).exists()
 
 
 def test_materialize_lock_allows_run_introduced_entry_once_approved(tmp_path: Path) -> None:
-    pending = _entry(
-        "skill-a", b"payload-a", introduced_by_run=True, status=ProvenanceStatus.UNAUTHENTICATED
-    )
-    lock = CapabilityLock(entries=(pending,))
+    files = _scripted()
+    pending = locked_entry(files=files, introduced_by_run=True)
 
     materialized = materialize_lock(
-        lock, {pending.digest: b"payload-a"}, root=tmp_path, approved_names=frozenset({"skill-a"})
+        lock_of(pending), {"skill-a": files}, root=tmp_path, approved_names=frozenset({"skill-a"})
     )
 
-    assert materialized["skill-a"].read_bytes() == b"payload-a"
+    assert (materialized["skill-a"] / "scripts" / "run.py").read_bytes() == b"print('ok')\n"
 
 
-def test_materialize_lock_rejects_missing_content_for_a_locked_digest(tmp_path: Path) -> None:
-    trusted = _entry("skill-a", b"payload-a", introduced_by_run=False)
-    lock = CapabilityLock(entries=(trusted,))
+@pytest.mark.parametrize("license_id", [None, "unknown", "GPL-3.0"])
+def test_materialize_lock_holds_an_approved_entry_with_an_unreviewed_license(
+    tmp_path: Path, license_id: str | None
+) -> None:
+    files = package_files("skill-a", license_id=license_id)
+    pending = locked_entry(files=files, introduced_by_run=True, license_id=license_id)
 
-    with pytest.raises(CapabilityIntegrityError):
-        materialize_lock(lock, {}, root=tmp_path)
+    with pytest.raises(CapabilityLicenseHoldError):
+        materialize_lock(
+            lock_of(pending),
+            {"skill-a": files},
+            root=tmp_path,
+            approved_names=frozenset({"skill-a"}),
+        )
+
+    assert not digest_path(tmp_path, pending.digest).exists()
+
+
+def test_materialize_lock_checks_every_entry_before_writing_any(tmp_path: Path) -> None:
+    ready_files = package_files("skill-a")
+    held_files = package_files("skill-b", license_id=None)
+    ready = locked_entry(files=ready_files, introduced_by_run=False)
+    held = locked_entry(files=held_files, introduced_by_run=True, license_id=None)
+
+    with pytest.raises(CapabilityLicenseHoldError):
+        materialize_lock(
+            lock_of(ready, held),
+            {"skill-a": ready_files, "skill-b": held_files},
+            root=tmp_path,
+            approved_names=frozenset({"skill-b"}),
+        )
+
+    assert not digest_path(tmp_path, ready.digest).exists()
+
+
+def test_materialize_lock_rejects_missing_files_for_a_locked_entry(tmp_path: Path) -> None:
+    trusted = locked_entry("skill-a", introduced_by_run=False)
+
+    with pytest.raises(CapabilityIntegrityError, match="no files were supplied"):
+        materialize_lock(lock_of(trusted), {}, root=tmp_path)

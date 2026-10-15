@@ -112,16 +112,32 @@ def test_validation_result_rejects_blank_revision() -> None:
             target=" ", artifact_digest=_ARTIFACT.digest, deployment_id="deployment-1"
         ),
         lambda: CapabilityDescriptor(
-            name=" ", version="1", digest=Digest.of_bytes(b"capability"), provenance="local"
+            name=" ",
+            version="1",
+            digest=Digest.of_bytes(b"capability"),
+            provenance="local",
+            revision="rev-1",
         ),
         lambda: CapabilityDescriptor(
             name="capability",
             version=" ",
             digest=Digest.of_bytes(b"capability"),
             provenance="local",
+            revision="rev-1",
         ),
         lambda: CapabilityDescriptor(
-            name="capability", version="1", digest=Digest.of_bytes(b"capability"), provenance=" "
+            name="capability",
+            version="1",
+            digest=Digest.of_bytes(b"capability"),
+            provenance=" ",
+            revision="rev-1",
+        ),
+        lambda: CapabilityDescriptor(
+            name="capability",
+            version="1",
+            digest=Digest.of_bytes(b"capability"),
+            provenance="local",
+            revision=" ",
         ),
     ],
 )
