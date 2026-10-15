@@ -17,6 +17,7 @@ REPOSITORY_REDIRECT_VARIABLES: frozenset[str] = frozenset(
     {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_COMMON_DIR",
+        "GIT_CONFIG",
         "GIT_DIR",
         "GIT_INDEX_FILE",
         "GIT_NAMESPACE",

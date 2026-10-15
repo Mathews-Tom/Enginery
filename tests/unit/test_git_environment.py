@@ -50,6 +50,11 @@ def test_a_copy_of_the_environment_drops_every_redirecting_variable() -> None:
     assert repository_isolated_environment(source) == {"PATH": "/usr/bin"}
 
 
+def test_git_config_is_a_scrubbed_variable() -> None:
+    assert "GIT_CONFIG" in REPOSITORY_REDIRECT_VARIABLES
+    assert repository_isolated_environment({"GIT_CONFIG": "/x", "PATH": "/p"}) == {"PATH": "/p"}
+
+
 def test_scrubbing_reports_and_removes_what_it_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_DIR", "/nowhere")
     monkeypatch.setenv("GIT_WORK_TREE", "/nowhere")
