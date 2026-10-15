@@ -468,3 +468,89 @@ def test_validate_instance_rejects_an_instance_nested_too_deeply() -> None:
 def test_validate_instance_rejects_an_instance_that_is_not_json() -> None:
     with pytest.raises(CapabilityInputSchemaError, match="not JSON"):
         validate_instance({}, {"a": object()})
+
+
+# --- JSON semantics and resource bounds --------------------------------------------------------
+
+
+def _deep_dicts(levels: int) -> object:
+    instance: object = 1
+    for _ in range(levels):
+        instance = {"a": instance}
+    return instance
+
+
+def test_instance_depth_is_bounded_even_when_the_schema_never_descends() -> None:
+    with pytest.raises(CapabilityInputSchemaError, match="nested too deeply") as caught:
+        validate_instance({"type": "object"}, _deep_dicts(MAX_INSTANCE_DEPTH + 40))
+
+    assert str(caught.value.details["path"]).startswith("$.a.a")
+
+
+def test_an_instance_deeper_than_the_recursion_limit_is_a_schema_error_not_a_crash() -> None:
+    with pytest.raises(CapabilityInputSchemaError, match="nested too deeply"):
+        validate_instance({"type": "object"}, _deep_dicts(50_000))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_in_an_instance_are_rejected(value: float) -> None:
+    with pytest.raises(CapabilityInputSchemaError, match="non-finite") as caught:
+        validate_instance({}, {"a": [value]})
+
+    assert caught.value.details["path"] == "$.a[0]"
+
+
+@pytest.mark.parametrize(
+    ("schema", "instance"),
+    [
+        ({"const": {"a": 1}}, {"a": True}),
+        ({"const": [0]}, [False]),
+        ({"enum": [{"a": [1, 2]}]}, {"a": [1, True]}),
+        ({"const": 1}, True),
+        ({"const": True}, 1),
+        ({"const": {"a": 1}}, {"b": 1}),
+        ({"const": [1, 2]}, [1]),
+    ],
+)
+def test_const_and_enum_keep_booleans_distinct_from_numbers_at_every_depth(
+    schema: dict[str, object], instance: object
+) -> None:
+    with pytest.raises(CapabilityInputSchemaError):
+        validate_instance(schema, instance)
+
+
+@pytest.mark.parametrize(
+    ("schema", "instance"),
+    [
+        ({"const": 1}, 1.0),
+        ({"const": 1.0}, 1),
+        ({"enum": [{"n": [2.0]}]}, {"n": [2]}),
+        ({"const": {"a": [True, None, "x"]}}, {"a": [True, None, "x"]}),
+    ],
+)
+def test_const_and_enum_treat_equal_numbers_as_equal_per_json(
+    schema: dict[str, object], instance: object
+) -> None:
+    validate_instance(schema, instance)
+
+
+def test_the_integer_type_accepts_an_integral_float_and_rejects_a_fractional_one() -> None:
+    validate_instance({"type": "integer"}, 3.0)
+    with pytest.raises(CapabilityInputSchemaError):
+        validate_instance({"type": "integer"}, 3.5)
+
+
+def test_a_schema_too_deep_to_serialize_is_a_manifest_error_not_a_crash() -> None:
+    nested: object = 1
+    for _ in range(5_000):
+        nested = [nested]
+
+    error = _declaration_problem({"const": nested})
+
+    assert "nested too deeply" in str(error)
+
+
+def test_a_schema_with_a_non_finite_number_is_a_manifest_error() -> None:
+    error = _declaration_problem({"const": float("nan")})
+
+    assert "not JSON-serializable" in str(error)

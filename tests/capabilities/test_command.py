@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from enginery.application.delivery_ports import PackageFile
+from enginery.capabilities import command as command_module
 from enginery.capabilities.command import CommandResult, run_package_command
 from enginery.capabilities.compatibility import CompatibilityReceipt, CompatibilityStatus
 from enginery.capabilities.errors import (
@@ -29,12 +30,18 @@ from enginery.capabilities.errors import (
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.install import OWNED_MANIFEST_NAME, install_lock, uninstall_install
-from enginery.capabilities.lock import CapabilityLock
+from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock
 from enginery.capabilities.manifest import CommandSpec, PackageKind
 from enginery.capabilities.materialize import digest_path, load_verified_closure
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.sources import CapabilitySource
-from tests.support.capabilities import lock_of, package_files, project_source, user_source
+from tests.support.capabilities import (
+    lock_of,
+    locked_entry,
+    package_files,
+    project_source,
+    user_source,
+)
 
 INTERPRETERS = {"python3": sys.executable}
 NAME = "tool"
@@ -63,14 +70,20 @@ class Installed:
         name: str = NAME,
         lock: CapabilityLock | None = None,
         approved: frozenset[str] = frozenset(),
+        approvals: ApprovedCapabilities | None = None,
     ) -> CommandResult:
+        chosen = self.lock if lock is None else lock
         return run_package_command(
-            self.lock if lock is None else lock,
+            chosen,
             name,
             payload,
             install_root=self.install_root,
             capabilities_root=self.capabilities_root,
-            approved_names=approved,
+            approvals=(
+                ApprovedCapabilities.for_entries(chosen, approved)
+                if approvals is None
+                else approvals
+            ),
             interpreter_paths=INTERPRETERS,
         )
 
@@ -101,7 +114,7 @@ def _install(
         resolved,
         install_root=install_root,
         capabilities_root=capabilities_root,
-        approved_names=approved,
+        approvals=ApprovedCapabilities.for_entries(resolved.lock, approved),
     )
     return Installed(resolved.lock, install_root, capabilities_root)
 
@@ -161,7 +174,7 @@ def test_run_returns_canonical_output_and_parsed_output(tmp_path: Path) -> None:
     assert entry is not None
     assert (result.name, result.version, result.closure_digest) == (NAME, "1", entry.digest)
     assert result.argv[0] == sys.executable
-    assert result.argv[1:] == ("scripts/run.py",)
+    assert result.argv[1:] == ("-B", "-s", "-E", "scripts/run.py")
 
 
 def test_run_passes_the_payload_as_canonical_json_on_stdin(tmp_path: Path) -> None:
@@ -492,8 +505,9 @@ def test_a_license_hold_refuses_to_run(tmp_path: Path) -> None:
     held = lock_of(dataclasses.replace(entry, license=None))
     _rebind_install(installed, held)
 
+    approvals = ApprovedCapabilities.for_entries(held, [NAME])
     with pytest.raises(CapabilityLicenseHoldError):
-        installed.run({"marker": str(marker)}, lock=held, approved=frozenset({NAME}))
+        installed.run({"marker": str(marker)}, lock=held, approvals=approvals)
 
     assert not marker.exists()
 
@@ -543,7 +557,7 @@ def test_shell_metacharacters_in_the_payload_have_no_side_effect(tmp_path: Path)
 
     assert result.output == {"text": hostile}
     assert not marker.exists()
-    assert result.argv == (sys.executable, "scripts/run.py")
+    assert result.argv == (sys.executable, "-B", "-s", "-E", "scripts/run.py")
 
 
 def test_running_leaves_no_bytecode_and_the_closure_still_verifies(tmp_path: Path) -> None:
@@ -563,3 +577,162 @@ def test_running_leaves_no_bytecode_and_the_closure_still_verifies(tmp_path: Pat
     entry = installed.lock.get(NAME)
     assert entry is not None
     load_verified_closure(entry, installed.capabilities_root)
+
+
+# --- hardening ---------------------------------------------------------------------------------
+
+
+def test_an_approval_computed_for_another_lock_does_not_authorize_a_run(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    files = _command_package(_marker_script())
+    installed = _install(tmp_path, files, source=user_source(files), approved=frozenset({NAME}))
+    entry = installed.lock.get(NAME)
+    assert entry is not None
+    other_lock = lock_of(entry, locked_entry("other", introduced_by_run=True))
+    foreign = ApprovedCapabilities.for_entries(other_lock, [NAME])
+
+    with pytest.raises(CapabilityApprovalRequiredError):
+        installed.run({"marker": str(marker)}, approvals=foreign)
+
+    assert not marker.exists()
+
+
+def test_a_run_requires_the_install_record_to_hold_the_approved_closure(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    files = _command_package(_marker_script())
+    installed = _install(tmp_path, files, source=user_source(files), approved=frozenset({NAME}))
+    path = installed.install_root / OWNED_MANIFEST_NAME
+    document = json.loads(path.read_text())
+    document["approved_closures"] = {}
+    path.unlink()
+    path.write_text(json.dumps(document))
+
+    with pytest.raises(CapabilityApprovalRequiredError, match="active install"):
+        installed.run({"marker": str(marker)}, approved=frozenset({NAME}))
+
+    assert not marker.exists()
+
+
+def test_a_receipt_recorded_for_another_host_refuses_to_run(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    installed = _install(tmp_path, _command_package(_marker_script()))
+    entry = installed.lock.get(NAME)
+    assert entry is not None
+    foreign_receipt = CompatibilityReceipt(
+        host_adapter_api_version=entry.receipt.host_adapter_api_version,
+        host_platform="another-platform",
+        status=CompatibilityStatus.COMPATIBLE,
+    )
+    foreign = lock_of(dataclasses.replace(entry, receipt=foreign_receipt))
+    _rebind_install(installed, foreign)
+
+    with pytest.raises(CapabilityIncompatibleError, match="not recorded for this host"):
+        installed.run({"marker": str(marker)}, lock=foreign)
+
+    assert not marker.exists()
+
+
+def test_a_background_grandchild_does_not_outlive_a_successful_run(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    script = _script(
+        "import json, subprocess, sys",
+        "payload = json.load(sys.stdin)",
+        "child = subprocess.Popen(",
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'],",
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,",
+        ")",
+        "open(payload['pid_file'], 'w').write(str(child.pid))",
+        "print('{}')",
+    )
+    installed = _install(tmp_path, _command_package(script))
+
+    installed.run({"pid_file": str(pid_file)})
+
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and _alive(pid):
+        time.sleep(0.05)
+    alive = _alive(pid)
+    if alive:
+        os.kill(pid, 9)
+    assert not alive
+
+
+def test_python_commands_run_without_user_site_or_environment_hooks(tmp_path: Path) -> None:
+    script = _script(
+        "import json, sys",
+        "flags = sys.flags",
+        "json.dump({'no_user_site': flags.no_user_site,",
+        "           'ignore_environment': flags.ignore_environment,",
+        "           'dont_write_bytecode': flags.dont_write_bytecode}, sys.stdout)",
+    )
+    installed = _install(tmp_path, _command_package(script))
+
+    result = installed.run({})
+
+    assert result.output == {"no_user_site": 1, "ignore_environment": 1, "dont_write_bytecode": 1}
+
+
+def test_deeply_nested_command_output_is_a_command_output_error(tmp_path: Path) -> None:
+    script = _script("import sys", "sys.stdout.write('[' * 5000 + ']' * 5000)")
+    installed = _install(tmp_path, _command_package(script))
+
+    with pytest.raises(CapabilityCommandOutputError, match="nested too deeply"):
+        installed.run({})
+
+
+def test_node_runs_under_its_permission_model_limited_to_the_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "closure"
+    directory.mkdir()
+    expected_read = f"--allow-fs-read={directory.resolve()}"
+
+    monkeypatch.setattr(command_module, "_node_version", lambda located: (23, 7))
+    assert command_module._interpreter_flags("node", "/usr/bin/node", directory) == (
+        "--permission",
+        expected_read,
+    )
+    monkeypatch.setattr(command_module, "_node_version", lambda located: (22, 3))
+    assert command_module._interpreter_flags("node", "/usr/bin/node", directory) == (
+        "--experimental-permission",
+        expected_read,
+    )
+    monkeypatch.setattr(command_module, "_node_version", lambda located: (18, 19))
+    with pytest.raises(CapabilityCommandNotRunnableError, match="permission model"):
+        command_module._interpreter_flags("node", "/usr/bin/node", directory)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_node_cannot_resolve_a_bare_module_from_an_ancestor_node_modules(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    assert node is not None
+    if command_module._node_version(node) < (20, 0):
+        pytest.skip("node is too old for the permission model")
+    planted = tmp_path / "node_modules" / "planted"
+    planted.mkdir(parents=True)
+    (planted / "index.js").write_text("module.exports = 'loaded';\n")
+    script = _script(
+        "let outcome;",
+        "try { require('planted'); outcome = 'resolved'; } catch (error) { outcome = 'blocked'; }",
+        "process.stdout.write(JSON.stringify({outcome}));",
+    )
+    spec = CommandSpec.create(argv=("node", "scripts/run.js"), input_schema={"type": "object"})
+    files = package_files(NAME, kind=PackageKind.COMMAND, command=spec, script=script)
+    resolved = CapabilityResolver([project_source(files)]).resolve_with_files(
+        [CapabilityRequest(NAME, "1")]
+    )
+    install_lock(
+        resolved, install_root=tmp_path / "install", capabilities_root=tmp_path / "capabilities"
+    )
+
+    result = run_package_command(
+        resolved.lock,
+        NAME,
+        {},
+        install_root=tmp_path / "install",
+        capabilities_root=tmp_path / "capabilities",
+        interpreter_paths={"node": node},
+    )
+
+    assert result.output == {"outcome": "blocked"}

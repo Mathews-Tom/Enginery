@@ -130,6 +130,9 @@ def descriptor_for(
     )
 
 
+PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
 class FakeCapabilitySource:
     """A minimal in-memory ``CapabilitySourcePort`` backed by explicit package file lists."""
 
@@ -137,13 +140,20 @@ class FakeCapabilitySource:
         self,
         descriptors: Mapping[tuple[str, str], CapabilityDescriptor],
         packages: Mapping[tuple[str, str], tuple[PackageFile, ...]],
+        *,
+        pinned_commit: str | None = None,
     ) -> None:
         self._descriptors = dict(descriptors)
         self._packages = dict(packages)
+        # A project-kind source must be pinned to a commit; the fake only declares one.
+        self.pinned_commit = pinned_commit
 
     @classmethod
     def of(
-        cls, *packages: Sequence[PackageFile], provenance: str = "repository-local"
+        cls,
+        *packages: Sequence[PackageFile],
+        provenance: str = "repository-local",
+        pinned_commit: str | None = None,
     ) -> FakeCapabilitySource:
         descriptors: dict[tuple[str, str], CapabilityDescriptor] = {}
         contents: dict[tuple[str, str], tuple[PackageFile, ...]] = {}
@@ -152,7 +162,7 @@ class FakeCapabilitySource:
             key = (descriptor.name, descriptor.version)
             descriptors[key] = descriptor
             contents[key] = tuple(files)
-        return cls(descriptors, contents)
+        return cls(descriptors, contents, pinned_commit=pinned_commit)
 
     def probe(self) -> AdapterStatus:  # pragma: no cover - unused by the resolver
         raise NotImplementedError
@@ -236,7 +246,11 @@ def capability_source(
     return CapabilitySource(
         kind=kind,
         label=label or f"{kind.value}-source",
-        port=FakeCapabilitySource.of(*packages, provenance=kind.value),
+        port=FakeCapabilitySource.of(
+            *packages,
+            provenance=kind.value,
+            pinned_commit=PINNED_COMMIT if kind is SourceKind.PROJECT else None,
+        ),
     )
 
 
@@ -259,6 +273,7 @@ def wrap_source(port: CapabilitySourcePort, kind: SourceKind = SourceKind.USER) 
 __all__ = [
     "HOST",
     "NOW",
+    "PINNED_COMMIT",
     "FakeCapabilitySource",
     "capability_source",
     "closure_digest_of",

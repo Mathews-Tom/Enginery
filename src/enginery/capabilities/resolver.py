@@ -32,7 +32,6 @@ from enginery.capabilities.compatibility import HostProfile, current_host, evalu
 from enginery.capabilities.errors import (
     CapabilityDependencyError,
     CapabilityDigestMismatchError,
-    CapabilityError,
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
     CapabilityManifestError,
@@ -55,6 +54,7 @@ from enginery.capabilities.sources import (
     SourceSelection,
     order_sources,
 )
+from enginery.domain.errors import EngineryError
 
 # Given a resolved descriptor, return the signer key ID that verified the
 # capability's signature, or ``None`` when no signature verified. Injected
@@ -292,7 +292,7 @@ class CapabilityResolver:
                 continue
             try:
                 alternative = source.port.resolve(request.name, request.version)
-            except CapabilityError as error:
+            except EngineryError as error:
                 shadowed.append(
                     SourceCandidate(kind=source.kind, label=source.label, problem=str(error))
                 )

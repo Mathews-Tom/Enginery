@@ -3,28 +3,32 @@ from __future__ import annotations
 import json
 import shutil
 import stat
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 
+from enginery.application.delivery_ports import PackageFile
 from enginery.capabilities import install as install_module
 from enginery.capabilities.compatibility import HostProfile
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
     CapabilityIncompatibleError,
     CapabilityInstallConflictError,
+    CapabilityIntegrityError,
     CapabilityLicenseHoldError,
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.install import (
     OWNED_MANIFEST_NAME,
-    REVOKED_RECORD_NAME,
+    REVOKED_RECORD_PREFIX,
     BlockerKind,
     build_install_plan,
     install_lock,
     load_owned_manifest,
     uninstall_install,
 )
+from enginery.capabilities.lock import ApprovedCapabilities
 from enginery.capabilities.manifest import PackageCompatibility
 from enginery.capabilities.materialize import digest_path
 from enginery.capabilities.resolver import (
@@ -37,6 +41,7 @@ from tests.support.capabilities import (
     HOST,
     package_files,
     project_source,
+    replace_file,
     user_source,
 )
 
@@ -58,14 +63,12 @@ def _tree(root: Path) -> set[str]:
     return {str(path.relative_to(root)) for path in root.rglob("*")} if root.exists() else set()
 
 
-def _install(
-    resolved: ResolvedCapabilities, tmp_path: Path, approved: frozenset[str] = frozenset()
-) -> Path:
+def _install(resolved: ResolvedCapabilities, tmp_path: Path, approved: Iterable[str] = ()) -> Path:
     install_lock(
         resolved,
         install_root=tmp_path / "installed",
         capabilities_root=tmp_path / "store",
-        approved_names=approved,
+        approvals=ApprovedCapabilities.for_entries(resolved.lock, approved),
     )
     return tmp_path / "installed"
 
@@ -119,7 +122,9 @@ def test_preview_is_ready_once_the_approval_is_supplied(tmp_path: Path) -> None:
     resolved = _resolve(user_source(package_files("skill-a")))
 
     plan = build_install_plan(
-        resolved, install_root=tmp_path / "installed", approved_names=frozenset({"skill-a"})
+        resolved,
+        install_root=tmp_path / "installed",
+        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["skill-a"]),
     )
 
     assert plan.ready
@@ -154,7 +159,9 @@ def test_preview_reports_license_and_compatibility_holds(tmp_path: Path) -> None
     resolved = _resolve(user_source(files), host=HostProfile(1, "linux"))
 
     plan = build_install_plan(
-        resolved, install_root=tmp_path / "installed", approved_names=frozenset({"skill-a"})
+        resolved,
+        install_root=tmp_path / "installed",
+        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["skill-a"]),
     )
 
     kinds = {blocker.kind for blocker in plan.blockers}
@@ -372,8 +379,9 @@ def test_uninstall_revokes_the_install_record_with_a_tombstone(tmp_path: Path) -
     report = uninstall_install(root)
 
     assert load_owned_manifest(root) is None
-    assert report.revocation_record == root / REVOKED_RECORD_NAME
-    tombstone = json.loads((root / REVOKED_RECORD_NAME).read_text(encoding="utf-8"))
+    expected = f"{REVOKED_RECORD_PREFIX}{resolved.lock.digest().hex_value}-1.json"
+    assert report.revocation_record == root / expected
+    tombstone = json.loads(report.revocation_record.read_text(encoding="utf-8"))
     assert tombstone["revoked_lock_digest"] == str(resolved.lock.digest())
     assert sorted(tombstone["removed"]) == sorted(report.removed)
     with pytest.raises(CapabilityNotInstalledError):
@@ -409,3 +417,157 @@ def test_a_reinstall_after_uninstall_succeeds(tmp_path: Path) -> None:
     assert not report.already_installed
     assert load_owned_manifest(root) is not None
     assert (root / "skill-a" / "SKILL.md").is_file()
+
+
+# --------------------------------------------------------------------------- hardening
+
+
+def test_an_approval_computed_for_one_lock_does_not_authorize_a_drifted_lock(
+    tmp_path: Path,
+) -> None:
+    first = _resolve(user_source(package_files("skill-a")))
+    approvals = ApprovedCapabilities.for_entries(first.lock, ["skill-a"])
+    drifted = _resolve(user_source(package_files("skill-a", body=b"# drifted closure\n")))
+
+    with pytest.raises(CapabilityApprovalRequiredError):
+        install_lock(
+            drifted,
+            install_root=tmp_path / "installed",
+            capabilities_root=tmp_path / "store",
+            approvals=approvals,
+        )
+
+    assert not (tmp_path / "installed").exists()
+    assert not (tmp_path / "store").exists()
+
+
+def test_an_approval_for_the_same_closure_in_a_different_lock_is_refused(tmp_path: Path) -> None:
+    alone = _resolve(user_source(package_files("skill-a")))
+    approvals = ApprovedCapabilities.for_entries(alone.lock, ["skill-a"])
+    widened = _resolve(
+        user_source(package_files("skill-a"), package_files("skill-b")),
+        names=("skill-a", "skill-b"),
+    )
+
+    with pytest.raises(CapabilityApprovalRequiredError):
+        install_lock(
+            widened,
+            install_root=tmp_path / "installed",
+            capabilities_root=tmp_path / "store",
+            approvals=approvals,
+        )
+
+
+def test_two_install_uninstall_cycles_keep_both_revocation_records(tmp_path: Path) -> None:
+    first = _resolve(project_source(package_files("skill-a")))
+    second = _resolve(project_source(package_files("skill-b")), names=("skill-b",))
+    root = _install(first, tmp_path)
+    first_report = uninstall_install(root)
+    first_record = first_report.revocation_record.read_bytes()
+    install_lock(second, install_root=root, capabilities_root=tmp_path / "store")
+
+    second_report = uninstall_install(root)
+
+    assert first_report.revocation_record != second_report.revocation_record
+    assert first_report.revocation_record.read_bytes() == first_record
+    revoked = {
+        json.loads(path.read_text(encoding="utf-8"))["revoked_lock_digest"]
+        for path in root.glob(f"{REVOKED_RECORD_PREFIX}*.json")
+    }
+    assert revoked == {str(first.lock.digest()), str(second.lock.digest())}
+
+
+def test_revoking_the_same_lock_twice_never_overwrites_the_earlier_record(tmp_path: Path) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    root = _install(resolved, tmp_path)
+    first = uninstall_install(root).revocation_record
+    first_record = first.read_bytes()
+    install_lock(resolved, install_root=root, capabilities_root=tmp_path / "store")
+
+    second = uninstall_install(root).revocation_record
+
+    assert first != second
+    assert first.read_bytes() == first_record
+    assert second.is_file()
+
+
+@pytest.mark.parametrize(
+    "planted_name",
+    [f"{OWNED_MANIFEST_NAME}.tmp", f"{REVOKED_RECORD_PREFIX[:-1]}.json.tmp"],
+)
+def test_a_planted_symlink_at_the_old_temporary_name_is_never_written_through(
+    tmp_path: Path, planted_name: str
+) -> None:
+    ledger = tmp_path / "ledger.db"
+    ledger.write_bytes(b"ledger bytes")
+    resolved = _resolve(project_source(package_files("skill-a")))
+    root = tmp_path / "installed"
+    root.mkdir()
+    (root / planted_name).symlink_to(ledger)
+
+    _install(resolved, tmp_path)
+    uninstall_install(root)
+
+    assert ledger.read_bytes() == b"ledger bytes"
+
+
+def test_install_writes_only_bytes_that_still_hash_to_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    real_reader = install_module.read_package_directory
+
+    def swapped(directory: Path) -> list[PackageFile]:
+        return [
+            PackageFile(item.path, b"tampered after verification", item.executable)
+            if item.path == "SKILL.md"
+            else item
+            for item in real_reader(directory)
+        ]
+
+    monkeypatch.setattr(install_module, "read_package_directory", swapped)
+
+    with pytest.raises(CapabilityIntegrityError, match="no longer matches the lock"):
+        _install(resolved, tmp_path)
+
+    root = tmp_path / "installed"
+    assert not any(path.is_file() for path in root.rglob("*"))
+    assert not (root / OWNED_MANIFEST_NAME).exists()
+
+
+def test_installed_modes_are_set_on_the_open_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_chmod = Path.chmod
+
+    def no_install_path_chmod(self: Path, mode: int) -> None:
+        if "installed" in self.parts:
+            raise AssertionError("an installed file's mode must be set on its open descriptor")
+        real_chmod(self, mode)
+
+    monkeypatch.setattr(Path, "chmod", no_install_path_chmod)
+    files = replace_file(
+        package_files("skill-a"), "scripts/run.sh", b"#!/bin/sh\n", executable=True
+    )
+    resolved = _resolve(project_source(files))
+
+    root = _install(resolved, tmp_path)
+
+    assert stat.S_IMODE((root / "skill-a" / "SKILL.md").stat().st_mode) == 0o444
+    assert stat.S_IMODE((root / "skill-a" / "scripts" / "run.sh").stat().st_mode) == 0o555
+
+
+def test_a_failed_manifest_write_leaves_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+
+    def refuse(source: object, destination: object) -> None:
+        raise OSError("replace refused")
+
+    monkeypatch.setattr(install_module.os, "replace", refuse)
+
+    with pytest.raises(OSError, match="replace refused"):
+        _install(resolved, tmp_path)
+
+    assert not list((tmp_path / "installed").rglob("*.tmp"))

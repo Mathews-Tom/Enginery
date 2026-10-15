@@ -26,7 +26,7 @@ from enginery.capabilities.errors import (
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
 )
-from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
+from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock, ProvenanceStatus
 from enginery.capabilities.manifest import PackageKind, PackageManifest, render_manifest
 from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
@@ -85,7 +85,14 @@ def _descriptor(
     )
 
 
+_PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
 class _FakeSource:
+    """An in-memory stand-in; a project-kind source must declare the commit it is pinned to."""
+
+    pinned_commit = _PINNED_COMMIT
+
     def __init__(self, descriptor: CapabilityDescriptor, files: tuple[PackageFile, ...]) -> None:
         self._descriptor = descriptor
         self._files = files
@@ -215,7 +222,10 @@ def _case_run_introduced_capability_blocks_without_approval(rng: random.Random) 
         lambda: materialize_lock(lock, {name: files}, root=_scratch_root()),
     )
     materialized = materialize_lock(
-        lock, {name: files}, root=_scratch_root(), approved_names=frozenset({name})
+        lock,
+        {name: files},
+        root=_scratch_root(),
+        approvals=ApprovedCapabilities.for_entries(lock, [name]),
     )
     _assert(name in materialized, "an approved run-introduced capability must materialize")
 

@@ -8,10 +8,9 @@ from urllib.parse import quote
 
 import pytest
 import yaml
-from tests.support.capabilities import descriptor_for, package_files, wrap_source
+from tests.support.capabilities import package_files, project_source, wrap_source
 
 from enginery.adapters.armory import ArmoryCapabilitySource
-from enginery.adapters.local import LocalCapabilitySource
 from enginery.application.adapter_types import AdapterAvailability
 from enginery.capabilities.closure import MAX_FILE_BYTES, build_closure
 from enginery.capabilities.errors import (
@@ -24,7 +23,7 @@ from enginery.capabilities.errors import (
     CapabilityPathError,
     CapabilitySymlinkError,
 )
-from enginery.capabilities.lock import ProvenanceStatus
+from enginery.capabilities.lock import ApprovedCapabilities, ProvenanceStatus
 from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.sources import CapabilitySource, SourceKind
@@ -181,6 +180,33 @@ def test_probe_reports_unavailable_without_pyyaml(monkeypatch: pytest.MonkeyPatc
 
     assert status.availability is AdapterAvailability.UNAVAILABLE
     assert "armory" in status.detail.lower()
+
+
+def test_a_missing_armory_extra_is_a_prerequisite_error_and_a_shadowed_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "yaml":
+            raise ImportError("no module named yaml")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    source, _ = _source()
+    files = package_files("adr-writer", "1.1.1")
+    resolver = CapabilityResolver([project_source(files), _armory(source)])
+
+    with pytest.raises(MissingPrerequisiteError, match="pyyaml"):
+        source.resolve("adr-writer", "1.1.1")
+    resolved = resolver.resolve_with_files(
+        [CapabilityRequest(name="adr-writer", version="1.1.1")], report_shadowed=True
+    )
+
+    (candidate,) = resolved.selections["adr-writer"].shadowed
+    assert candidate.kind is SourceKind.ARMORY
+    assert candidate.problem is not None
+    assert "pyyaml" in candidate.problem
 
 
 def test_probe_reports_misconfigured_for_an_unreachable_catalog() -> None:
@@ -481,7 +507,7 @@ def test_approved_armory_package_materializes_its_complete_closure(tmp_path: Pat
         resolved.lock,
         resolved.files_by_name,
         root=tmp_path,
-        approved_names=frozenset({"adr-writer"}),
+        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["adr-writer"]),
     )
 
     directory = materialized["adr-writer"]
@@ -502,7 +528,7 @@ def test_armory_package_with_an_unknown_license_is_held_even_when_approved(tmp_p
             resolved.lock,
             resolved.files_by_name,
             root=tmp_path,
-            approved_names=frozenset({"adr-writer"}),
+            approvals=ApprovedCapabilities.for_entries(resolved.lock, ["adr-writer"]),
         )
 
 
@@ -779,11 +805,7 @@ def test_engine_resolves_capabilities_without_armory_installed() -> None:
     """The reviewed-base, local-only resolution path must not require Armory at all."""
 
     files = package_files("repository-read")
-    descriptor = descriptor_for(files)
-    local_source = LocalCapabilitySource(
-        capabilities=(descriptor,), packages={("repository-read", "1"): files}
-    )
-    resolver = CapabilityResolver([wrap_source(local_source, SourceKind.PROJECT)])
+    resolver = CapabilityResolver([project_source(files)])
 
     lock = resolver.resolve([CapabilityRequest(name="repository-read", version="1")])
 

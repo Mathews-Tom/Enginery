@@ -137,6 +137,21 @@ def test_non_object_or_non_utf8_manifests_are_rejected(raw: bytes) -> None:
         parse_manifest(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"[" * 200_000,
+        b'{"schema_version": 1, "name": "a", "version": "1", "kind": "instruction", "x": '
+        + b"[" * 200_000
+        + b"]" * 200_000
+        + b"}",
+    ],
+)
+def test_a_manifest_nested_beyond_the_recursion_limit_is_a_manifest_error(raw: bytes) -> None:
+    with pytest.raises(CapabilityManifestError):
+        parse_manifest(raw)
+
+
 def test_manifest_dataclass_rejects_a_self_dependency() -> None:
     pin = DependencyPin("skill-a", "1", Digest.of_bytes(b"x"))
 

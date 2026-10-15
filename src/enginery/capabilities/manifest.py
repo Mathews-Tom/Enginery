@@ -336,7 +336,7 @@ def parse_manifest(raw: bytes) -> PackageManifest:
 
     try:
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise CapabilityManifestError(
             "package manifest is not valid UTF-8 JSON", details={"reason": str(error)}
         ) from error
@@ -344,7 +344,7 @@ def parse_manifest(raw: bytes) -> PackageManifest:
         raise CapabilityManifestError("package manifest root must be a JSON object")
     try:
         return _manifest_from_document(document)
-    except (InvalidInputError, ValueError) as error:
+    except (InvalidInputError, ValueError, RecursionError) as error:
         raise CapabilityManifestError(
             "package manifest is invalid", details={"reason": str(error)}
         ) from error

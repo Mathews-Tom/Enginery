@@ -263,17 +263,13 @@ def test_discover_on_a_missing_root_fails_loudly(tmp_path: Path) -> None:
         DirectoryCapabilitySource(tmp_path / "missing").discover()
 
 
-def test_a_project_registered_directory_resolves_as_local_trusted(tmp_path: Path) -> None:
+def test_a_directory_can_never_be_registered_as_the_reviewed_project_source(
+    tmp_path: Path,
+) -> None:
     _write_package(tmp_path, "skill-a", package_files("skill-a"))
 
-    lock = _resolver(SourceKind.PROJECT, tmp_path).resolve(
-        [CapabilityRequest(name="skill-a", version="1")]
-    )
-
-    entry = lock.entries[0]
-    assert entry.provenance.status is ProvenanceStatus.LOCAL_TRUSTED
-    assert entry.introduced_by_run is False
-    assert not entry.requires_human_approval()
+    with pytest.raises(InvalidInputError, match="never a reviewed base"):
+        CapabilitySource(SourceKind.PROJECT, "project", DirectoryCapabilitySource(tmp_path))
 
 
 def test_a_user_registered_directory_resolves_as_run_introduced_and_unauthenticated(

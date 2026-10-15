@@ -502,7 +502,12 @@ class ArmoryCapabilitySource:
             ) from error
 
     def _entries(self) -> tuple[ArmoryPackageEntry, ...]:
-        import yaml
+        try:
+            import yaml
+        except ImportError as error:
+            raise MissingPrerequisiteError(
+                "pyyaml is not installed; run `uv sync --extra armory` to enable Armory"
+            ) from error
 
         raw = self._fetch_bytes(self._raw_url(_CATALOG_MANIFEST))
         entry = self._tree().get(_CATALOG_MANIFEST)

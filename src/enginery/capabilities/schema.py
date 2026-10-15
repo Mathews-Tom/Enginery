@@ -25,6 +25,7 @@ or remote or recursive reference of any kind.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 
 from enginery.capabilities.errors import CapabilityInputSchemaError, CapabilityManifestError
@@ -55,12 +56,32 @@ _KEYWORDS = _ANNOTATIONS | frozenset(
 _TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
 
 
+def exceeds_depth(value: object, limit: int) -> bool:
+    """Whether JSON-like ``value`` nests deeper than ``limit`` levels, checked iteratively."""
+
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > limit:
+            return True
+        if isinstance(node, dict):
+            pending.extend((child, depth + 1) for child in node.values())
+        elif isinstance(node, list | tuple):
+            pending.extend((child, depth + 1) for child in node)
+    return False
+
+
 def check_schema(schema: object) -> None:
     """Reject a schema outside the supported subset; raises ``CapabilityManifestError``."""
 
+    if exceeds_depth(schema, MAX_SCHEMA_DEPTH + MAX_INSTANCE_DEPTH):
+        raise CapabilityManifestError(
+            "input schema is nested too deeply",
+            details={"limit": MAX_SCHEMA_DEPTH + MAX_INSTANCE_DEPTH},
+        )
     try:
-        encoded = json.dumps(schema, sort_keys=True)
-    except (TypeError, ValueError) as error:
+        encoded = json.dumps(schema, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as error:
         raise CapabilityManifestError("input schema is not JSON-serializable") from error
     if len(encoded.encode("utf-8")) > MAX_SCHEMA_BYTES:
         raise CapabilityManifestError(
@@ -153,15 +174,38 @@ def validate_instance(schema: Mapping[str, object], instance: object) -> None:
     violation, or when the instance itself exceeds the size or depth bounds.
     """
 
+    _check_instance_shape(instance)
     try:
-        encoded = json.dumps(instance, sort_keys=True)
-    except (TypeError, ValueError) as error:
+        encoded = json.dumps(instance, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as error:
         raise CapabilityInputSchemaError("input is not JSON-serializable") from error
     if len(encoded.encode("utf-8")) > MAX_INSTANCE_BYTES:
         raise CapabilityInputSchemaError(
             "input is too large", details={"limit": MAX_INSTANCE_BYTES}
         )
     _validate(schema, instance, "$", depth=1)
+
+
+def _check_instance_shape(instance: object) -> None:
+    """Bound the instance's nesting depth and reject non-finite numbers, iteratively.
+
+    This runs before anything recursive touches the instance and does not depend
+    on the schema, so a schema that never descends (``{"type": "object"}``) still
+    cannot be handed an arbitrarily deep input.
+    """
+
+    pending: list[tuple[object, int, str]] = [(instance, 1, "$")]
+    while pending:
+        node, depth, path = pending.pop()
+        if depth > MAX_INSTANCE_DEPTH:
+            raise _violation(path, "input is nested too deeply")
+        if isinstance(node, float) and not math.isfinite(node):
+            raise _violation(path, "input contains a non-finite number")
+        if isinstance(node, dict):
+            pending.extend((child, depth + 1, f"{path}.{key}") for key, child in node.items())
+        elif isinstance(node, list | tuple):
+            children = enumerate(node)
+            pending.extend((child, depth + 1, f"{path}[{index}]") for index, child in children)
 
 
 def _violation(path: str, message: str) -> CapabilityInputSchemaError:
@@ -189,9 +233,31 @@ def _validate(schema: Mapping[str, object], instance: object, path: str, *, dept
         _validate_number(schema, instance, path)
 
 
+def _scalars_equal(first: object, second: object) -> bool:
+    if isinstance(first, bool) or isinstance(second, bool):
+        return isinstance(first, bool) and isinstance(second, bool) and first == second
+    if _is_number(first) and _is_number(second):
+        return first == second
+    return type(first) is type(second) and first == second
+
+
 def _equal(left: object, right: object) -> bool:
-    # JSON equality: ``True == 1`` in Python but not in JSON.
-    return type(left) is type(right) and left == right
+    """JSON equality, iteratively: ``bool`` stays distinct from numbers, ``1`` equals ``1.0``."""
+
+    pending = [(left, right)]
+    while pending:
+        first, second = pending.pop()
+        if isinstance(first, dict) and isinstance(second, dict):
+            if first.keys() != second.keys():
+                return False
+            pending.extend((first[key], second[key]) for key in first)
+        elif isinstance(first, list) and isinstance(second, list):
+            if len(first) != len(second):
+                return False
+            pending.extend(zip(first, second, strict=True))
+        elif not _scalars_equal(first, second):
+            return False
+    return True
 
 
 def _type_matches(name: str, instance: object) -> bool:
@@ -206,6 +272,8 @@ def _type_matches(name: str, instance: object) -> bool:
     if name == "null":
         return instance is None
     if name == "integer":
+        if isinstance(instance, float):
+            return instance.is_integer()
         return isinstance(instance, int) and not isinstance(instance, bool)
     return _is_number(instance)
 
@@ -271,5 +339,6 @@ __all__ = [
     "MAX_SCHEMA_BYTES",
     "MAX_SCHEMA_DEPTH",
     "check_schema",
+    "exceeds_depth",
     "validate_instance",
 ]

@@ -15,14 +15,20 @@ rejects unsafe paths and unreviewed asset types the same way it does for every
 other source. The configured sha must resolve to exactly that commit; an
 abbreviated sha, a ref name, or an unknown commit is refused.
 
-Every git subprocess uses an argument vector (never a shell), a timeout, and a
-scrubbed environment: no repository-redirecting or ``GIT_CONFIG*`` variables,
-no system or global configuration, and no terminal prompt. The adapter never
-writes git configuration and never touches a local repository it was pointed
-at; a URL is fetched only into the adapter's own cache directory.
+Every git subprocess uses an argument vector (never a shell), a timeout, and an
+environment built from an allowlist (``PATH``, ``HOME``, ``LANG``/``LC_*``,
+``SSH_AUTH_SOCK``) plus no system or global configuration, no replacement
+objects (``--no-replace-objects`` and ``GIT_NO_REPLACE_OBJECTS``, so ``git
+replace`` cannot change what a pinned commit contains), ``core.fsmonitor``
+off, and no terminal prompt. The adapter never writes git configuration and
+never touches a local repository it was pointed at; a URL is fetched only into
+the adapter's own cache directory. A package whose tree sizes already exceed
+the package-wide byte limit is refused before any blob is read.
 
 A Git source's packages are unauthenticated unless a pinned signature over the
-closure digest verifies; ``signatures`` is the only way to supply one.
+closure digest verifies; ``signatures`` is the only way to supply one. The
+reviewed project source is also a Git source: pinned to the run's base commit
+and registered with the ``project`` kind (see ``pinned_commit``).
 """
 
 from __future__ import annotations
@@ -49,10 +55,10 @@ from enginery.application.delivery_ports import (
     CapabilityListing,
     PackageFile,
 )
-from enginery.application.git_environment import repository_isolated_environment
 from enginery.capabilities.closure import (
     MAX_FILE_BYTES,
     MAX_FILE_COUNT,
+    MAX_TOTAL_BYTES,
     build_closure,
     normalize_path,
 )
@@ -79,26 +85,30 @@ _URL_PATTERN = re.compile(r"^(https://|ssh://|file://|git@[A-Za-z0-9._-]+:)[^\s]
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _PROVENANCE_LABEL = "git"
 _ALLOWED_PROTOCOLS = "file:https:ssh"
+_INHERITED_VARIABLES = frozenset({"PATH", "HOME", "LANG", "SSH_AUTH_SOCK"})
 
 
 def git_environment(*, ceiling: Path | None = None) -> dict[str, str]:
     """A scrubbed environment for one git invocation.
 
-    Drops every repository-redirecting variable and every ``GIT_CONFIG*``
-    variable, ignores system and global configuration, forbids prompting and
-    unreviewed transports, and (optionally) stops git from discovering a
-    repository above ``ceiling``.
+    Built from an allowlist of the caller's environment (``PATH``, ``HOME``,
+    ``LANG``/``LC_*`` and ``SSH_AUTH_SOCK``), so no proxy, askpass, ssh-command,
+    exec-path, token or repository-redirecting variable is inherited. System
+    and global configuration are ignored, replacement objects are ignored,
+    prompting and unreviewed transports are forbidden, and (optionally) git is
+    stopped from discovering a repository above ``ceiling``.
     """
 
     environment = {
         key: value
-        for key, value in repository_isolated_environment().items()
-        if not key.startswith("GIT_CONFIG")
+        for key, value in os.environ.items()
+        if key in _INHERITED_VARIABLES or key.startswith("LC_")
     }
     environment.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_ALLOW_PROTOCOL": _ALLOWED_PROTOCOLS,
@@ -158,6 +168,16 @@ class GitCapabilitySource:
         self._signatures = dict(signatures or {})
         self._timeout_seconds = timeout_seconds
         self._verified_repository: Path | None = None
+
+    @property
+    def pinned_commit(self) -> str:
+        """The full commit sha every read is pinned to."""
+
+        return self._revision
+
+    @property
+    def repository(self) -> str:
+        return self._repository
 
     # ------------------------------------------------------------------ port
 
@@ -303,9 +323,16 @@ class GitCapabilitySource:
             raise CapabilityClosureLimitError(
                 "package has too many files", details={"name": name, "limit": MAX_FILE_COUNT}
             )
+        total = 0
+        for item in items:
+            self._require_regular(item)
+            total += item.size
+            if total > MAX_TOTAL_BYTES:
+                raise CapabilityClosureLimitError(
+                    "package is too large", details={"name": name, "limit": MAX_TOTAL_BYTES}
+                )
         files: list[PackageFile] = []
         for item in sorted(items, key=lambda entry: entry.path):
-            self._require_regular(item)
             files.append(
                 PackageFile(
                     path=item.path[len(prefix) :],
@@ -379,7 +406,15 @@ class GitCapabilitySource:
             raise CapabilitySourceError("git is not installed")
         try:
             return subprocess.run(
-                [executable, "-C", str(repository), *arguments],
+                [
+                    executable,
+                    "--no-replace-objects",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-C",
+                    str(repository),
+                    *arguments,
+                ],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 check=False,

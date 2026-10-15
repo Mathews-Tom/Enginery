@@ -7,17 +7,19 @@ import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
-from tests.support.capabilities import HOST, package_files
+from tests.support.capabilities import HOST, FakeCapabilitySource, package_files
 
 from enginery.adapters.git_capability import GitCapabilitySource, git_environment
 from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.delivery_ports import PackageFile
 from enginery.application.git_environment import repository_isolated_environment
-from enginery.capabilities.closure import build_closure
+from enginery.capabilities.closure import MAX_FILE_BYTES, MAX_TOTAL_BYTES, build_closure
 from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
+    CapabilityClosureLimitError,
     CapabilityManifestError,
     CapabilitySourceError,
     CapabilitySymlinkError,
@@ -490,3 +492,100 @@ def test_a_git_registered_package_is_unauthenticated_run_introduced_and_needs_ap
     assert entry.provenance.status is ProvenanceStatus.UNAUTHENTICATED
     assert entry.introduced_by_run is True
     assert entry.requires_human_approval()
+
+
+def test_a_git_replace_of_the_pinned_commit_does_not_change_the_closure_read(
+    tmp_path: Path,
+) -> None:
+    repo, pinned, files = _packaged_repo(tmp_path)
+    _write_package(repo, "packages/skill-a", package_files("skill-a", body=b"# swapped body\n"))
+    impostor = _commit(repo, "impostor")
+    _git(repo, "replace", pinned, impostor)
+    source = _source(repo, pinned)
+
+    descriptor = source.resolve("skill-a", "1")
+    fetched = source.fetch_closure("skill-a", "1")
+
+    assert descriptor is not None
+    assert descriptor.revision == pinned
+    assert descriptor.digest == build_closure(files).digest
+    assert _as_set(fetched) == _as_set(files)
+
+
+def test_git_environment_is_built_from_an_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inherited = {"SSH_AUTH_SOCK": str(tmp_path / "agent.sock"), "LC_CTYPE": "en_US.UTF-8"}
+    ambient = {
+        "GIT_SSH_COMMAND": "ssh -o ProxyCommand=evil",
+        "GIT_ASKPASS": "/tmp/askpass",
+        "GIT_EXEC_PATH": "/tmp/exec",
+        "GIT_PROXY_COMMAND": "/tmp/proxy",
+        "GITHUB_TOKEN": "secret",
+        "HTTPS_PROXY": "http://proxy.invalid",
+    }
+    for key, value in {**inherited, **ambient}.items():
+        monkeypatch.setenv(key, value)
+
+    environment = git_environment()
+
+    assert not [key for key in ambient if key in environment]
+    assert all(environment[key] == value for key, value in inherited.items())
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert environment["GIT_ALLOW_PROTOCOL"] == "file:https:ssh"
+    assert "PATH" in environment
+
+
+def test_the_package_wide_byte_limit_is_enforced_before_any_blob_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = MAX_TOTAL_BYTES // MAX_FILE_BYTES + 1
+    bulk = {f"references/bulk-{index}.md": b"x" * MAX_FILE_BYTES for index in range(count)}
+    repo, sha, _ = _packaged_repo(tmp_path, package_files("skill-a", extra=bulk))
+    source = _source(repo, sha)
+    read: list[str] = []
+    real_blob = GitCapabilitySource._blob
+
+    def recording_blob(self: GitCapabilitySource, item: Any) -> bytes:
+        read.append(item.path)
+        return real_blob(self, item)
+
+    monkeypatch.setattr(GitCapabilitySource, "_blob", recording_blob)
+
+    with pytest.raises(CapabilityClosureLimitError, match="too large"):
+        source.fetch_closure("skill-a", "1")
+
+    assert read == ["packages/skill-a/capability.json"]
+
+
+def test_a_project_source_over_a_pinned_commit_is_local_trusted_at_that_revision(
+    tmp_path: Path,
+) -> None:
+    repo, pinned, files = _packaged_repo(tmp_path)
+    _write_package(repo, "packages/skill-a", package_files("skill-a", body=b"# later commit\n"))
+    _commit(repo, "a later commit")
+    (repo / "packages" / "skill-a" / "SKILL.md").write_bytes(b"# uncommitted edit\n")
+    source = CapabilitySource(SourceKind.PROJECT, f"project:{repo}", _source(repo, pinned))
+
+    lock = CapabilityResolver([source], host=HOST).resolve(
+        [CapabilityRequest(name="skill-a", version="1")]
+    )
+
+    (entry,) = lock.entries
+    assert entry.revision == pinned
+    assert entry.digest == build_closure(files).digest
+    assert entry.provenance.status is ProvenanceStatus.LOCAL_TRUSTED
+    assert entry.introduced_by_run is False
+    assert not entry.requires_human_approval()
+
+
+@pytest.mark.parametrize("pinned_commit", [None, "", "main", "abc123", "A" * 40])
+def test_a_project_source_must_be_pinned_to_a_full_lowercase_commit(
+    pinned_commit: str | None,
+) -> None:
+    port = FakeCapabilitySource.of(pinned_commit=pinned_commit)
+
+    with pytest.raises(InvalidInputError, match="never a reviewed base"):
+        CapabilitySource(SourceKind.PROJECT, "project", port)

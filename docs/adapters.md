@@ -383,7 +383,11 @@ files do not hash to the claimed digest.
   read-only as legacy entries that carry no closure, cannot be
   materialized or approved, and must be re-resolved —
   `enginery capability lock --check` reports each such entry as needing
-  re-resolution and consumers of the lock refuse it.
+  re-resolution and consumers of the lock refuse it. The explicit way
+  forward is `enginery capability install ... --replace-legacy-lock`
+  (`inspect` and `preview` accept the flag too): resolution starts fresh and
+  `install` replaces the legacy file; without the flag the file is never
+  touched.
 
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an
@@ -399,8 +403,8 @@ permission typing.
 
 | Kind | Adapter | Trust |
 |---|---|---|
-| `project` | `DirectoryCapabilitySource` over the reviewed repository base revision | `local_trusted`, not run-introduced; no approval |
-| `user` | `DirectoryCapabilitySource` over a user-local directory | run-introduced, `unauthenticated` |
+| `project` | `GitCapabilitySource` over the reviewed repository at the run's bound base commit (`--project-source REPOSITORY@COMMIT`, optional `--project-subdir`); the commit sha is the locked revision | `local_trusted`, not run-introduced; no approval |
+| `user` | `DirectoryCapabilitySource` over a user-local directory (the only directory-backed kind) | run-introduced, `unauthenticated` |
 | `git` | `GitCapabilitySource`: repository path or URL plus a full 40-hex commit sha | run-introduced, `unauthenticated` |
 | `armory` | `ArmoryCapabilitySource` | run-introduced, `unauthenticated` |
 
@@ -417,16 +421,24 @@ package still needs exact-digest human approval.
 - **Directory sources** read `<root>/<name>/capability.json` and the files
   beside it, never following a link. A directory has no immutable revision
   of its own, so the locked revision is the closure digest. A subdirectory
-  without a `capability.json` is not a package.
+  without a `capability.json` is not a package. A directory is mutable, so it
+  backs only the `user` kind; `CapabilitySource` refuses to register one as
+  the `project` source.
 - **Git sources** read the *tracked tree* of one commit with
   `git ls-tree -r -z -l` and `git cat-file` — never the working tree, index,
   or untracked files. Tree entries with mode `120000` (symlink) or `160000`
-  (submodule) make the package unlockable and fail with the offending path.
-  The sha must resolve to exactly that commit. Every git subprocess uses an
-  argument vector, a timeout, and a scrubbed environment (no `GIT_DIR`,
-  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, or `GIT_CONFIG*`,
-  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`); it never writes
-  git configuration. A URL is fetched only into a private bare cache.
+  (submodule) make the package unlockable and fail with the offending path,
+  and a package whose tree sizes already exceed the package-wide byte limit is
+  refused before any blob is read. The sha must resolve to exactly that commit.
+  Every git subprocess uses an argument vector, a timeout, `--no-replace-objects`
+  (with `GIT_NO_REPLACE_OBJECTS=1`, so `git replace` cannot swap a pinned
+  commit's content), `-c core.fsmonitor=false`, and an environment built from an
+  allowlist (`PATH`, `HOME`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`) plus
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` and
+  `GIT_ALLOW_PROTOCOL`; it never writes git configuration. A URL is fetched
+  only into a private bare cache (a temporary directory for the read-only
+  `inspect` and `preview` commands, which therefore read the network but
+  write nothing to the workspace).
 - **Armory** `discover()` lists catalog rows cheaply and never fetches or
   locks a package; a package's closure is computed only when it is selected
   (`resolve` or `fetch_closure`), and a selected package that cannot be

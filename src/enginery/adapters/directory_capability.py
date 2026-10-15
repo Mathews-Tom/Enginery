@@ -1,11 +1,13 @@
 """Directory-backed capability source: packages laid out as subdirectories of one root.
 
 ``root/<name>/`` holds one package: a ``capability.json`` manifest plus its
-instruction, reference, script, and data files. The same adapter serves two
-trust classes, chosen by the :class:`~enginery.capabilities.sources.SourceKind`
-it is registered under: the reviewed project (packages committed in the
-repository base revision) and a user-local directory. The adapter itself
-grants no trust; it only reads files.
+instruction, reference, script, and data files. It serves only the user-local
+trust class (:attr:`~enginery.capabilities.sources.SourceKind.USER`): a working
+directory is mutable, so it can never be the reviewed project source, which
+must be read from a pinned commit by the Git adapter. A
+:class:`~enginery.capabilities.sources.CapabilitySource` refuses to register
+this adapter as a project source. The adapter itself grants no trust; it only
+reads files.
 
 Reading never follows a link: the package directory and every file inside are
 opened without following symlinks, and the closure builder rejects symlinks,

@@ -14,7 +14,6 @@ from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
     CapabilityDependencyError,
     CapabilityDigestMismatchError,
-    CapabilityError,
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
     CapabilityManifestError,
@@ -36,7 +35,12 @@ from enginery.capabilities.sources import (
     order_sources,
 )
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import (
+    EngineryError,
+    InvalidInputError,
+    MissingPrerequisiteError,
+    TransientProviderFailureError,
+)
 from tests.support.capabilities import (
     HOST,
     FakeCapabilitySource,
@@ -68,7 +72,7 @@ class _RecordingSource:
     """A source port that records every ``resolve`` and can fail on demand."""
 
     def __init__(
-        self, inner: FakeCapabilitySource, *, failure: CapabilityError | None = None
+        self, inner: FakeCapabilitySource, *, failure: EngineryError | None = None
     ) -> None:
         self._inner = inner
         self._failure = failure
@@ -511,6 +515,34 @@ def test_a_failing_shadowed_source_is_reported_with_its_problem() -> None:
     assert candidate.descriptor is None
     assert candidate.problem is not None
     assert "unlockable asset" in candidate.problem
+    assert resolved.lock.entries[0].digest == closure_digest_of(files)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TransientProviderFailureError("armory is unreachable"),
+        MissingPrerequisiteError("pyyaml is not installed"),
+    ],
+)
+def test_a_shadowed_provider_failure_is_reported_and_does_not_abort(
+    failure: EngineryError,
+) -> None:
+    files = package_files("skill-a")
+    offline = _RecordingSource(FakeCapabilitySource.of(files), failure=failure)
+    resolver = CapabilityResolver(
+        [
+            project_source(files),
+            CapabilitySource(kind=SourceKind.ARMORY, label="armory-source", port=offline),
+        ]
+    )
+
+    resolved = resolver.resolve_with_files([_request()], report_shadowed=True)
+
+    (candidate,) = resolved.selections["skill-a"].shadowed
+    assert candidate.kind is SourceKind.ARMORY
+    assert candidate.problem is not None
+    assert str(failure) in candidate.problem
     assert resolved.lock.entries[0].digest == closure_digest_of(files)
 
 

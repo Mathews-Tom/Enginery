@@ -35,7 +35,12 @@ from enginery.capabilities.errors import (
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
 )
-from enginery.capabilities.lock import CapabilityLock, LockedCapability
+from enginery.capabilities.lock import (
+    NO_APPROVALS,
+    ApprovedCapabilities,
+    CapabilityLock,
+    LockedCapability,
+)
 from enginery.domain.digests import Digest
 
 _MAX_REPORTED_DIFFERENCES = 10
@@ -183,21 +188,22 @@ def materialize_lock(
     files_by_name: Mapping[str, Sequence[PackageFile]],
     *,
     root: Path,
-    approved_names: frozenset[str] = frozenset(),
+    approvals: ApprovedCapabilities = NO_APPROVALS,
 ) -> Mapping[str, Path]:
     """Materialize every entry in ``lock`` and return ``name -> directory``.
 
     Every entry is checked before any file is written. An entry
     :meth:`LockedCapability.requires_human_approval` reports ``True`` for must
-    have its name in ``approved_names`` -- the caller's already-recorded,
-    digest-bound ``capability.materialize`` approval -- and an entry whose
-    license is held for redistribution is refused, rather than silently
+    be covered by ``approvals`` -- the caller's already-recorded ``capability.materialize``
+    approval, bound to this entry's closure digest *and* this lock's digest -- and
+    an entry whose license is held for redistribution is refused, rather than silently
     skipping or downgrading trust. Dependencies are lock entries of their own
     and are checked package by package.
     """
 
+    lock_digest = lock.digest()
     for entry in lock.entries:
-        if entry.requires_human_approval() and entry.name not in approved_names:
+        if not approvals.covers(entry, lock_digest):
             raise CapabilityApprovalRequiredError(
                 "capability requires interactive exact-digest human approval before it can execute",
                 details={"name": entry.name, "version": entry.version},

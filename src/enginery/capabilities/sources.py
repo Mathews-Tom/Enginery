@@ -7,7 +7,8 @@ yields the same manifest-declared permissions, so no source gets different
 permission typing. What differs is only *trust*, and trust follows the
 source's kind, never a package's own claim:
 
-* ``project``: packages in the reviewed repository base revision. This is the
+* ``project``: packages in the reviewed repository base revision, read with git
+  plumbing from one pinned commit (never a working tree). This is the
   only source that resolves as ``local_trusted`` and not run-introduced.
 * ``user``: a user-local directory; run-introduced and unauthenticated.
 * ``git``: a repository URL pinned to an immutable commit sha;
@@ -25,6 +26,7 @@ silently dropped.
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -47,6 +49,9 @@ SOURCE_PRECEDENCE: tuple[SourceKind, ...] = (
 )
 
 
+_PINNED_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilitySource:
     """A source port registered with its kind and a human-readable label."""
@@ -58,6 +63,13 @@ class CapabilitySource:
     def __post_init__(self) -> None:
         if not self.label.strip():
             raise InvalidInputError("capability source label must be non-blank")
+        if self.kind is SourceKind.PROJECT and not _PINNED_COMMIT.fullmatch(
+            str(getattr(self.port, "pinned_commit", ""))
+        ):
+            raise InvalidInputError(
+                "a project source must be a Git source pinned to a full 40-hex commit; a "
+                "working directory is never a reviewed base"
+            )
 
     @property
     def reviewed_base(self) -> bool:

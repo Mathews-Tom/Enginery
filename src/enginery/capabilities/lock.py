@@ -17,11 +17,13 @@ drift, not a silent update (see ``enginery.capabilities.resolver``).
 from __future__ import annotations
 
 import enum
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from enginery.capabilities.closure import AssetRecord, closure_digest
 from enginery.capabilities.compatibility import CompatibilityReceipt
+from enginery.capabilities.errors import CapabilityLockDriftError
 from enginery.capabilities.license import LicenseDisposition, classify_license
 from enginery.capabilities.manifest import (
     CapabilityPermission,
@@ -210,9 +212,89 @@ class CapabilityLock:
         return tuple(entry for entry in self.entries if entry.requires_human_approval())
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityApproval:
+    """One approval bound to the exact closure and whole-lock digests it was given for."""
+
+    name: str
+    closure_digest: Digest
+    lock_digest: Digest
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedCapabilities:
+    """The digest-bound approvals a caller holds; a bare name authorizes nothing.
+
+    An entry is covered only by an approval naming it with *its* closure digest
+    and the digest of the lock being installed, materialized, or run, so an
+    approval computed for one lock never carries over to a drifted lock.
+    """
+
+    approvals: frozenset[CapabilityApproval] = frozenset()
+
+    @classmethod
+    def for_entries(cls, lock: CapabilityLock, names: Iterable[str]) -> ApprovedCapabilities:
+        """Approvals for the named entries of ``lock``, bound to that lock's digests."""
+
+        lock_digest = lock.digest()
+        chosen = frozenset(names)
+        return cls(
+            frozenset(
+                CapabilityApproval(entry.name, entry.digest, lock_digest)
+                for entry in lock.entries
+                if entry.name in chosen
+            )
+        )
+
+    def covers(self, entry: LockedCapability, lock_digest: Digest) -> bool:
+        """Whether this entry may proceed under ``lock_digest``: reviewed, or approved exactly."""
+
+        if not entry.requires_human_approval():
+            return True
+        return CapabilityApproval(entry.name, entry.digest, lock_digest) in self.approvals
+
+    def names(self) -> frozenset[str]:
+        return frozenset(approval.name for approval in self.approvals)
+
+
+NO_APPROVALS = ApprovedCapabilities()
+
+
+def merge_locks(previous: CapabilityLock | None, resolved: CapabilityLock) -> CapabilityLock:
+    """``resolved`` plus every earlier pin it does not replace, so no pin is forgotten.
+
+    A name present in both must keep its version: a different version of an
+    already-pinned name is refused rather than silently dropping the old pin.
+    Same-version entries take the freshly resolved record (its closure was
+    already drift-checked against the earlier pin).
+    """
+
+    if previous is None:
+        return resolved
+    merged = {entry.name: entry for entry in previous.entries}
+    for entry in resolved.entries:
+        earlier = merged.get(entry.name)
+        if earlier is not None and earlier.version != entry.version:
+            raise CapabilityLockDriftError(
+                "the lockfile already pins this capability at a different version; "
+                "remove the lockfile deliberately to change a pinned version",
+                details={
+                    "name": entry.name,
+                    "locked_version": earlier.version,
+                    "requested_version": entry.version,
+                },
+            )
+        merged[entry.name] = entry
+    return CapabilityLock(entries=tuple(merged.values()))
+
+
 __all__ = [
+    "NO_APPROVALS",
+    "ApprovedCapabilities",
+    "CapabilityApproval",
     "CapabilityLock",
     "LockedCapability",
     "ProvenanceRecord",
     "ProvenanceStatus",
+    "merge_locks",
 ]

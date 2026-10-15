@@ -25,21 +25,34 @@ import enum
 import json
 import os
 import stat
-from collections.abc import Iterable
+import tempfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from enginery.capabilities.closure import AssetKind, normalize_path, read_package_directory
+from enginery.capabilities.closure import (
+    AssetKind,
+    AssetRecord,
+    normalize_path,
+    read_package_directory,
+)
 from enginery.capabilities.compatibility import CompatibilityReceipt
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
     CapabilityIncompatibleError,
     CapabilityInstallConflictError,
+    CapabilityIntegrityError,
     CapabilityLicenseHoldError,
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.license import LicenseDisposition
-from enginery.capabilities.lock import CapabilityLock, LockedCapability, ProvenanceStatus
+from enginery.capabilities.lock import (
+    NO_APPROVALS,
+    ApprovedCapabilities,
+    CapabilityLock,
+    LockedCapability,
+    ProvenanceStatus,
+)
 from enginery.capabilities.manifest import (
     CapabilityPermission,
     PackageKind,
@@ -53,7 +66,8 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 
 OWNED_MANIFEST_NAME = ".enginery-install.json"
-REVOKED_RECORD_NAME = ".enginery-install-revoked.json"
+REVOKED_RECORD_PREFIX = ".enginery-install-revoked-"
+_MAX_REVOCATION_RECORDS = 10_000
 INSTALL_SCHEMA_VERSION = 1
 
 
@@ -365,13 +379,70 @@ def _owned_file(package: str, entry: object) -> OwnedFile:
     return OwnedFile(path=path, digest=digest_from_text(digest), size=size, executable=executable)
 
 
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_temporary(directory: Path, document: object) -> Path:
+    """Write ``document`` to a fresh, exclusively created file in ``directory``.
+
+    ``mkstemp`` picks an unpredictable name and creates it with ``O_EXCL``, so a
+    planted file or symlink can never be written through.
+    """
+
+    payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor, name = tempfile.mkstemp(dir=directory, prefix=".enginery-install-", suffix=".tmp")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
 def _write_json_atomically(path: Path, document: object) -> None:
-    temporary = path.with_name(f"{path.name}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    temporary = _write_temporary(path.parent, document)
+    try:
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    _fsync_directory(path.parent)
+
+
+def _write_revocation(install_root: Path, lock_digest: Digest, document: object) -> Path:
+    """Write a revocation record under a name keyed by the revoked lock digest.
+
+    The record is hard-linked into place, which fails rather than replaces when
+    the name exists, so an earlier record is never overwritten; a repeated
+    revocation of the same lock digest takes the next free index.
+    """
+
+    temporary = _write_temporary(install_root, document)
+    try:
+        for index in range(1, _MAX_REVOCATION_RECORDS + 1):
+            final = install_root / f"{REVOKED_RECORD_PREFIX}{lock_digest.hex_value}-{index}.json"
+            try:
+                os.link(temporary, final)
+            except FileExistsError:
+                continue
+            _fsync_directory(install_root)
+            return final
+    finally:
+        temporary.unlink(missing_ok=True)
+    raise CapabilityInstallConflictError(
+        "too many revocation records exist for this lock", details={"path": str(install_root)}
+    )
 
 
 # --------------------------------------------------------------------------- filesystem guards
@@ -445,7 +516,7 @@ def build_install_plan(
     resolved: ResolvedCapabilities,
     *,
     install_root: Path,
-    approved_names: frozenset[str] = frozenset(),
+    approvals: ApprovedCapabilities = NO_APPROVALS,
 ) -> InstallPlan:
     """Describe installing ``resolved`` into ``install_root`` without any side effect."""
 
@@ -453,7 +524,7 @@ def build_install_plan(
     lock_digest = lock.digest()
     owned = load_owned_manifest(install_root) if os.path.lexists(install_root) else None
     packages: list[PlannedPackage] = []
-    approvals: list[PlannedApproval] = []
+    approvals_required: list[PlannedApproval] = []
     blockers: list[PlanBlocker] = []
     if owned is not None and owned.lock_digest != lock_digest:
         blockers.append(
@@ -465,7 +536,7 @@ def build_install_plan(
         )
     for entry in lock.entries:
         planned_files = _destinations(entry)
-        approved = (not entry.requires_human_approval()) or entry.name in approved_names
+        approved = approvals.covers(entry, lock_digest)
         packages.append(
             PlannedPackage(
                 name=entry.name,
@@ -489,7 +560,7 @@ def build_install_plan(
             )
         )
         if not approved:
-            approvals.append(
+            approvals_required.append(
                 PlannedApproval(
                     name=entry.name,
                     version=entry.version,
@@ -522,7 +593,7 @@ def build_install_plan(
         lock_digest=lock_digest,
         install_root=install_root,
         packages=tuple(packages),
-        approvals_required=tuple(approvals),
+        approvals_required=tuple(approvals_required),
         blockers=tuple(blockers),
     )
 
@@ -585,20 +656,18 @@ def install_lock(
     *,
     install_root: Path,
     capabilities_root: Path,
-    approved_names: frozenset[str] = frozenset(),
+    approvals: ApprovedCapabilities = NO_APPROVALS,
 ) -> InstallReport:
     """Install every package of ``resolved`` into ``install_root`` and record ownership."""
 
-    plan = build_install_plan(resolved, install_root=install_root, approved_names=approved_names)
+    plan = build_install_plan(resolved, install_root=install_root, approvals=approvals)
     for kind in _BLOCKER_PRIORITY:
         for blocker in plan.blockers:
             if blocker.kind is kind:
                 _raise_for(blocker)
     lock = resolved.lock
     owned = load_owned_manifest(install_root) if os.path.lexists(install_root) else None
-    materialize_lock(
-        lock, resolved.files_by_name, root=capabilities_root, approved_names=approved_names
-    )
+    materialize_lock(lock, resolved.files_by_name, root=capabilities_root, approvals=approvals)
     install_root.mkdir(parents=True, exist_ok=True)
     _require_real_directory(install_root, what="install root")
     created_files: list[Path] = []
@@ -607,7 +676,7 @@ def install_lock(
         written = _write_packages(
             lock, capabilities_root, install_root, created_files, created_directories
         )
-        manifest = _owned_manifest(lock, approved_names)
+        manifest = _owned_manifest(lock, approvals)
         _write_json_atomically(install_root / OWNED_MANIFEST_NAME, manifest.to_json())
     except BaseException:
         for path in reversed(created_files):
@@ -636,17 +705,32 @@ def _write_packages(
     for entry in lock.entries:
         verify_materialized(entry, capabilities_root)
         directory = digest_path(capabilities_root, entry.digest)
-        sources = {item.path: item for item in read_package_directory(directory)}
+        sources = {item.path: item.content for item in read_package_directory(directory)}
         for record in entry.files:
             relative = f"{entry.name}/{record.path}"
             target = _guard_destination(install_root, relative)
             if _file_digest(target) == record.digest:
                 continue
             _make_directories(install_root, relative, created_directories)
-            _create_exclusive(target, sources[record.path].content, executable=record.executable)
+            content = _verified_content(entry, record, sources)
+            _create_exclusive(target, content, executable=record.executable)
             created_files.append(target)
             written.append(relative)
     return written
+
+
+def _verified_content(
+    entry: LockedCapability, record: AssetRecord, sources: Mapping[str, bytes]
+) -> bytes:
+    """The bytes to install for ``record``: only content that still hashes to the lock."""
+
+    content = sources.get(record.path)
+    if content is None or Digest.of_bytes(content) != record.digest:
+        raise CapabilityIntegrityError(
+            "a materialized file no longer matches the lock; nothing unverified is installed",
+            details={"name": entry.name, "path": record.path},
+        )
+    return content
 
 
 def _make_directories(root: Path, relative: str, created: list[Path]) -> None:
@@ -667,13 +751,14 @@ def _create_exclusive(target: Path, content: bytes, *, executable: bool) -> None
             "install destination appeared during install", details={"path": str(target)}
         ) from error
     with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o555 if executable else 0o444)
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-    target.chmod(0o555 if executable else 0o444)
 
 
-def _owned_manifest(lock: CapabilityLock, approved_names: frozenset[str]) -> OwnedManifest:
+def _owned_manifest(lock: CapabilityLock, approvals: ApprovedCapabilities) -> OwnedManifest:
+    lock_digest = lock.digest()
     packages = tuple(
         OwnedPackage(
             name=entry.name,
@@ -694,7 +779,7 @@ def _owned_manifest(lock: CapabilityLock, approved_names: frozenset[str]) -> Own
     approved = tuple(
         (entry.name, entry.digest)
         for entry in lock.entries
-        if entry.requires_human_approval() and entry.name in approved_names
+        if entry.requires_human_approval() and approvals.covers(entry, lock_digest)
     )
     return OwnedManifest(lock_digest=lock.digest(), packages=packages, approved_closures=approved)
 
@@ -737,7 +822,7 @@ def uninstall_install(install_root: Path) -> UninstallReport:
             removed.append(item.path)
     for directory in sorted(directories, key=lambda value: (-value.count("/"), value)):
         _remove_if_empty(install_root / directory)
-    revocation = install_root / REVOKED_RECORD_NAME
+    revoked_digest = manifest.lock_digest
     record = {
         "schema_version": INSTALL_SCHEMA_VERSION,
         "revoked_lock_digest": str(manifest.lock_digest),
@@ -749,7 +834,7 @@ def uninstall_install(install_root: Path) -> UninstallReport:
         "retained": [{"path": item.path, "reason": item.reason} for item in retained],
         "already_absent": absent,
     }
-    _write_json_atomically(revocation, record)
+    revocation = _write_revocation(install_root, revoked_digest, record)
     (install_root / OWNED_MANIFEST_NAME).unlink()
     return UninstallReport(
         lock_digest=manifest.lock_digest,
@@ -782,7 +867,7 @@ def _remove_if_empty(directory: Path) -> None:
 __all__ = [
     "INSTALL_SCHEMA_VERSION",
     "OWNED_MANIFEST_NAME",
-    "REVOKED_RECORD_NAME",
+    "REVOKED_RECORD_PREFIX",
     "BlockerKind",
     "InstallPlan",
     "InstallReport",
