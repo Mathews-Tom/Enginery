@@ -249,7 +249,8 @@ def _manifest_from_document(document: dict[str, object]) -> PackageManifest:
         raise InvalidInputError(
             "package manifest contains unknown keys", details={"keys": sorted(unknown)}
         )
-    if document.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    version = document.get("schema_version")
+    if type(version) is not int or version != MANIFEST_SCHEMA_VERSION:
         raise InvalidInputError(
             f"package manifest schema_version must be {MANIFEST_SCHEMA_VERSION}"
         )

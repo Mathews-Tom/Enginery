@@ -80,7 +80,7 @@ def lock_from_json(data: object) -> CapabilityLock:
             "capability lock uses the legacy single-blob schema and must be re-resolved",
             details={"entries": len(entries)},
         )
-    if data["schema_version"] != LOCK_SCHEMA_VERSION:
+    if type(data["schema_version"]) is not int or data["schema_version"] != LOCK_SCHEMA_VERSION:
         raise InvalidInputError(
             "unsupported capability lock schema_version",
             details={"schema_version": str(data["schema_version"])},

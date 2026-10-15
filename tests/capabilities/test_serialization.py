@@ -158,6 +158,14 @@ def test_lock_from_json_rejects_an_unknown_schema_version() -> None:
         lock_from_json(payload)
 
 
+def test_lock_from_json_rejects_a_non_integer_schema_version() -> None:
+    payload = lock_to_json(_lock())
+    payload["schema_version"] = float(LOCK_SCHEMA_VERSION)
+
+    with pytest.raises(InvalidInputError, match="schema_version"):
+        lock_from_json(payload)
+
+
 def test_lock_from_json_rejects_an_unknown_package_kind() -> None:
     payload = lock_to_json(lock_of(locked_entry("skill-a")))
     _entries(payload)[0]["kind"] = "plugin"

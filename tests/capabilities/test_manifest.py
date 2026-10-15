@@ -81,6 +81,8 @@ def test_rendering_is_canonical_regardless_of_declaration_order() -> None:
     "overrides",
     [
         {"schema_version": 2},
+        {"schema_version": True},
+        {"schema_version": 1.0},
         {"kind": "plugin"},
         {"name": "../escape"},
         {"name": ""},
