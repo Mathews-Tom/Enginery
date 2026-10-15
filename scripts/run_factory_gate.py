@@ -53,6 +53,7 @@ if _HERE not in sys.path:
 
 from enginery.adapters.oci.engine import OciEngine  # noqa: E402
 from enginery.adapters.oci.relay import check_token_file, validate_upstream  # noqa: E402
+from enginery.application.git_environment import scrub_repository_variables  # noqa: E402
 from enginery.domain.errors import EngineryError  # noqa: E402
 from factory_gate_context import (  # noqa: E402
     Gate,
@@ -401,6 +402,9 @@ def main(
     prepare: PrepareGate = prepare_gate,
     environ: Mapping[str, str] | None = None,
 ) -> int:
+    # A gate started under `git rebase --exec` or a hook inherits GIT_DIR; every fixture
+    # repository it builds must stay its own.
+    scrub_repository_variables()
     options = parse_options(argv, environ)
     try:
         options.evidence_out.parent.mkdir(parents=True, exist_ok=True)

@@ -1202,3 +1202,17 @@ def test_a_large_allocation_counts_as_refused_by_the_volume_only_with_enospc() -
         review._large_allocations(_burst(*[granted] * 3, *[refused] * 5))["by_the_volume"] is False
     )
     assert review._large_allocations(_burst(*[refused] * 7))["by_the_volume"] is False
+
+
+def test_the_driver_removes_repository_redirecting_variables_before_it_builds_fixtures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import run_factory_gate
+
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "enclosing" / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "enclosing"))
+
+    with pytest.raises(SystemExit):
+        run_factory_gate.main(["--scenario", "runner-boundary"])
+
+    assert "GIT_DIR" not in os.environ and "GIT_WORK_TREE" not in os.environ
