@@ -170,6 +170,22 @@ class HostCapability:
             installed.executable_version
         )
 
+    @property
+    def tested_executable_version(self) -> str:
+        """The one executable version this host's controls were actually tested against."""
+        version = self.version
+        return str(version.tested) if isinstance(version, RangedHostVersion) else version.version
+
+    def matches_tested(self, installed: InstalledHost) -> bool:
+        """Return whether an observed host has the protocol and exactly the tested version.
+
+        For a pinned runner image, where a version merely inside the accepted range is not
+        what was qualified. The tested version is always inside the accepted range.
+        """
+        return self.matches(installed) and (
+            installed.executable_version == self.tested_executable_version
+        )
+
     def require_installed(self, installed: InstalledHost | None) -> None:
         """Reject native controls against a host the catalog does not accept.
 

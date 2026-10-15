@@ -281,6 +281,34 @@ def test_the_current_catalog_matches_inside_the_range_and_rejects_everything_els
     assert not host.matches(InstalledHost(matching[1], "other-protocol=1"))
 
 
+@pytest.mark.parametrize(
+    ("harness", "fingerprint", "tested", "untested"),
+    [
+        ("omp", "json-protocol=3", "18.10.3", "18.10.4"),
+        ("claude-code", "stream-json-schema=1", "2.1.296", "2.1.297"),
+    ],
+)
+def test_a_pinned_image_matches_only_the_tested_version_not_the_whole_range(
+    harness: str, fingerprint: str, tested: str, untested: str
+) -> None:
+    host = load_execution_catalog().host(harness)
+
+    assert host.tested_executable_version == tested
+    assert host.matches_tested(InstalledHost(tested, fingerprint))
+    assert host.matches(InstalledHost(untested, fingerprint))  # accepted, never tested
+    assert not host.matches_tested(InstalledHost(untested, fingerprint))
+    assert not host.matches_tested(InstalledHost(tested, "other-protocol=1"))
+    assert not host.matches_tested(InstalledHost("garbage", fingerprint))
+
+
+def test_an_exact_frozen_host_reports_its_one_version_as_the_tested_one() -> None:
+    second = load_execution_catalog("2").host("omp")
+
+    assert second.tested_executable_version == "18.10.3"
+    assert second.matches_tested(InstalledHost("18.10.3", "json-protocol=3"))
+    assert not second.matches_tested(InstalledHost("18.10.4", "json-protocol=3"))
+
+
 def test_a_version_rejection_names_the_accepted_range_and_the_tested_version() -> None:
     host = load_execution_catalog().host("omp")
 
