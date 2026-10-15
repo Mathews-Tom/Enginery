@@ -8,8 +8,8 @@ from enginery.application.delivery_ports import (
     CapabilityListing,
     PackageFile,
 )
-from enginery.capabilities.compatibility import CompatibilityStatus, HostProfile
 from enginery.capabilities import license_text
+from enginery.capabilities.compatibility import CompatibilityStatus, HostProfile
 from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
     CapabilityDependencyError,

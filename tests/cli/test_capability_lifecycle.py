@@ -729,6 +729,29 @@ def test_a_symlinked_state_directory_refuses_install_and_uninstall(
     assert (other / "moved" / "installed" / ".enginery-install.json").is_file()
 
 
+def test_a_lockfile_under_a_symlinked_directory_is_refused_before_anything_is_written(
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    other = tmp_path / "other-project-state"
+    other.mkdir()
+    (tmp_path / "linked").symlink_to(other, target_is_directory=True)
+    flags = _project_flags(paths, sha)
+    flags[flags.index("--lockfile") + 1] = "linked/capabilities.lock.json"
+    monkeypatch.chdir(tmp_path)
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *flags)
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert "symbolic link" in output
+    assert list(other.iterdir()) == []
+    assert not paths.installed.exists()
+    assert not paths.store.exists()
+
+
 # --------------------------------------------------------------------------- project binding
 
 

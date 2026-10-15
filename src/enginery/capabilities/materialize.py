@@ -129,6 +129,7 @@ def load_verified_package(
     could return something other than what was verified.
     """
 
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=False)
     target = digest_path(root, entry.digest)
     if not os.path.lexists(target):
         raise CapabilityIntegrityError(
@@ -163,14 +164,30 @@ def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
             os.fchmod(handle.fileno(), 0o555 if item.executable else 0o444)
 
 
+def _require_unlinked_store_directories(root: Path, digest: Digest, *, with_tmp: bool) -> None:
+    """Refuse a planted link on the store's own directories that exist (always checked).
+
+    Covers ``<algorithm>``, ``<xx>`` and, when ``with_tmp``, ``.tmp``; a missing one is fine.
+    """
+
+    inner = digest_path(root, digest).parent
+    directories = [inner.parent, inner]
+    if with_tmp:
+        directories.append(root / ".tmp")
+    for directory in directories:
+        require_no_link_chain(directory, what="capability store directory")
+
+
 def _publish_closure(root: Path, entry: LockedCapability, files: Sequence[PackageFile]) -> Path:
     require_no_link_chain(root, what="capabilities root")
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=True)
     target = digest_path(root, entry.digest)
     if os.path.lexists(target):
         return verify_materialized(entry, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = root / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=True)
     staging = Path(tempfile.mkdtemp(dir=tmp_dir))
     try:
         _write_closure(staging, files)

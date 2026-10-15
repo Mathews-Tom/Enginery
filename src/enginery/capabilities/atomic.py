@@ -12,7 +12,9 @@ owned manifest or store into another tree. The rule: the anchor is the current
 directory (``os.getcwd()``, which the operating system reports without links),
 the directory the command line resolves relative paths against. A path inside
 the anchor, relative or absolute, has every existing component strictly below
-the anchor checked with ``lstat``. A path outside the anchor is operator-chosen:
+the anchor checked with ``lstat``; "inside" is decided by real location, so a path
+spelled through a symbolic link to the current directory counts. A path outside
+the anchor is operator-chosen:
 its ancestors are never checked (system links such as macOS ``/tmp`` and
 ``/var`` are legitimate), only the named root itself, and only when the caller
 asks for it; what the tool owns beneath that root is guarded by the install
@@ -39,15 +41,34 @@ def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = Tru
 
     anchor = Path(os.path.realpath(os.getcwd()))
     absolute = Path(os.path.abspath(path))
-    if not absolute.is_relative_to(anchor):
+    base = _anchor_prefix(absolute, anchor)
+    if base is None:
         if check_named_root:
             _refuse_link(absolute, path, what)
         return
-    current = anchor
-    for part in absolute.relative_to(anchor).parts:
+    current = base
+    for part in absolute.relative_to(base).parts:
         current = current / part
         if not _refuse_link(current, path, what):
             return
+
+
+def _anchor_prefix(absolute: Path, anchor: Path) -> Path | None:
+    """The shortest prefix of ``absolute`` whose real location is ``anchor``, if any.
+
+    Classifying by real location rather than spelling covers a path written through a
+    symbolic link to the current directory (the ``$PWD`` form under a linked workspace).
+    """
+
+    prefix = Path(absolute.anchor)
+    candidates = [prefix]
+    for part in absolute.relative_to(prefix).parts:
+        prefix = prefix / part
+        candidates.append(prefix)
+    for candidate in candidates:
+        if os.path.realpath(candidate) == str(anchor):
+            return candidate
+    return None
 
 
 def _refuse_link(candidate: Path, path: Path, what: str) -> bool:

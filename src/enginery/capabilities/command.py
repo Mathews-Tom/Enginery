@@ -302,7 +302,12 @@ def run_package_command(
     approvals: ApprovedCapabilities = NO_APPROVALS,
     interpreter_paths: Mapping[str, str] | None = None,
 ) -> CommandResult:
-    """Run the declared command of installed package ``name`` with ``payload`` as JSON input."""
+    """Run the declared command of installed package ``name`` with ``payload`` as JSON input.
+
+    The caller must pass a ``lock`` it resolved itself, never one decoded from a
+    workspace-writable lockfile: the trust classes recorded in the lock are honored, so a
+    lock someone else can edit can promote a package's trust.
+    """
 
     entry = lock.get(name)
     if entry is None:

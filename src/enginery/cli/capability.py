@@ -54,6 +54,7 @@ from typing import Any
 from enginery.adapters.armory import ArmoryCapabilitySource
 from enginery.adapters.directory_capability import DirectoryCapabilitySource
 from enginery.adapters.git_capability import GitCapabilitySource
+from enginery.capabilities.atomic import require_no_link_chain
 from enginery.capabilities.errors import (
     CapabilityError,
     CapabilityIntegrityError,
@@ -545,6 +546,10 @@ def _run_install(args: argparse.Namespace) -> int:
             for line in lines:
                 print(line)
         return exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
+    # Refuse a linked lockfile directory or lockfile before anything (store, install root,
+    # owned manifest) is written, so a refusal leaves nothing behind.
+    require_no_link_chain(args.lockfile.parent, what="lockfile directory", check_named_root=False)
+    require_no_link_chain(args.lockfile, what="lockfile")
     report = install_lock(
         resolved,
         install_root=args.install_root,

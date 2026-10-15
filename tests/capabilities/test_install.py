@@ -321,6 +321,27 @@ def test_install_refuses_a_capabilities_root_behind_a_symlink(
     assert not (tmp_path / "installed").exists()
 
 
+def test_install_refuses_a_planted_link_when_the_path_is_spelled_through_a_cwd_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    workspace, other = _linked_workspace(tmp_path, monkeypatch)
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    before = _tree(other)
+
+    with pytest.raises(CapabilitySymlinkError):
+        install_lock(
+            resolved,
+            install_root=alias / ".enginery" / "installed",
+            capabilities_root=tmp_path / "store",
+            approvals=approvals_for(resolved.lock, ()),
+        )
+
+    assert _tree(other) == before
+    assert not (tmp_path / "store").exists()
+
+
 def test_uninstall_refuses_a_symlinked_parent_of_the_install_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -370,7 +391,8 @@ def test_install_refuses_an_install_root_that_is_itself_a_symlink(
     other = tmp_path / "other"
     other.mkdir()
     (tmp_path / "installed").symlink_to(other, target_is_directory=True)
-    monkeypatch.chdir(tmp_path / "other")
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
 
     with pytest.raises(CapabilitySymlinkError):
         install_lock(

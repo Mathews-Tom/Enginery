@@ -166,8 +166,8 @@ requests against typed sources and manages a task-local install:
 | `enginery capability lock --check [--lockfile PATH] [--capabilities-root PATH] [--json]` | Verify the content-addressed store against the lockfile. Exit `12` on drift. |
 | `enginery capability inspect NAME@VERSION... SOURCE-FLAGS [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Report each package's closure digest, trust, license, permissions, compatibility, approval requirement, and the selected source with every shadowed alternative; a shadowed source that fails (offline Armory, missing extra) is reported as that alternative's problem, not fatal. Reads sources only: nothing is materialized, written to the workspace, or executed (URL Git sources and Armory are read over the network). Exit `0`; `3` on drift against the lockfile or a source that cannot be read; `12` on a legacy lockfile or an invalid package; `2` on bad input. |
 | `enginery capability preview NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | The same resolution plus the exact install plan: files to write (task-local destination, kind, size, digest), blockers, and approvals still required. No side effects beyond the same network reads. Exit `0` when ready; otherwise the blocker's code (`3` drift, including a pinned name at another version; `12` license hold or incompatible; `9` conflict; `5` approval required); also `3` on drift or an unreadable source found while resolving, `12` on a legacy lockfile or an invalid package, `2` on bad input. |
-| `enginery capability install NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | Materialize the verified closures and copy them into the install root (only bytes that still hash to the lock are written), then record the owned-install manifest and the lockfile (the installed lock plus earlier pins as retained pins). Refuses license holds, incompatible packages, and destinations it does not own. Exit `0`; `5` when held for approval; `3` on drift or a pinned name at another version; `9` on a conflict; `12` on a license hold, incompatibility, legacy lockfile, or invalid package; `2` on bad input. |
-| `enginery capability uninstall [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Revoke the active install record, then remove the owned, unmodified files (see below). Exit `0`; `3` when no install is recorded under the install root; `2` on bad input. |
+| `enginery capability install NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | Materialize the verified closures and copy them into the install root (only bytes that still hash to the lock are written), then record the owned-install manifest and the lockfile (the installed lock plus earlier pins as retained pins). Refuses license holds, incompatible packages, and destinations it does not own. Exit `0`; `5` when held for approval; `3` on drift or a pinned name at another version; `9` on a conflict; `12` on a license hold, incompatibility, legacy lockfile, invalid package, or a symbolic link on the install root, capabilities root or lockfile path (refused before anything is written); `2` on bad input. |
+| `enginery capability uninstall [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Revoke the active install record, then remove the owned, unmodified files (see below). Exit `0`; `3` when no install is recorded under the install root; `12` when the install root is reached through a symbolic link; `2` on bad input (including an unreadable owned manifest). |
 
 Source flags (at least one is required; precedence is project, user, git,
 Armory — the first source offering `name@version` is selected and the rest
@@ -226,6 +226,15 @@ anchor must not be a symlink. A path outside the anchor is operator-chosen:
 its ancestors are never checked (so `/tmp` or `$TMPDIR` on macOS work), only
 the install root and capabilities root themselves must not be symlinks, and
 what the tool owns beneath them is guarded by the install code.
+Whether a path is "inside" the anchor is decided by its real location, so an
+absolute path spelled through a symbolic link to the current directory is
+checked the same way. `install` checks the lockfile's directory and the lockfile
+itself before it writes anything. The store's own `.tmp`, `<algorithm>` and
+`<xx>` directories must not be symbolic links either: materialization and
+verification refuse (exit `12`) a store reached through one.
+`run_package_command` honors the trust classes recorded in the lock it is given,
+so its caller must pass a lock it resolved itself, never one decoded from a
+workspace-writable lockfile.
 An install
 of a different lock than the one recorded under the install root is refused
 until the active install is uninstalled.

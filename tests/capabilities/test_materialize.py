@@ -216,6 +216,43 @@ def test_materialize_lock_refuses_a_store_that_is_itself_a_symlink(tmp_path: Pat
     assert list(other.iterdir()) == []
 
 
+@pytest.mark.parametrize("planted", ["algorithm", "prefix", "tmp"])
+def test_materialize_refuses_a_link_planted_on_the_stores_own_directories(
+    tmp_path: Path, planted: str
+) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files, introduced_by_run=False)
+    store = tmp_path / "store"
+    store.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = {
+        "algorithm": store / entry.digest.algorithm,
+        "prefix": store / entry.digest.algorithm / entry.digest.hex_value[:2],
+        "tmp": store / ".tmp",
+    }[planted]
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_capability(entry, files, root=store)
+
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_verification_refuses_a_store_directory_replaced_by_a_link(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files, introduced_by_run=False)
+    store = tmp_path / "store"
+    materialize_capability(entry, files, root=store)
+    moved = tmp_path / "moved"
+    (store / entry.digest.algorithm).rename(moved)
+    (store / entry.digest.algorithm).symlink_to(moved, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        verify_materialized(entry, store)
+
+
 def test_materialize_lock_refuses_unapproved_run_introduced_entry(tmp_path: Path) -> None:
     files = _scripted()
     pending = locked_entry(files=files, introduced_by_run=True)
