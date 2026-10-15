@@ -24,13 +24,17 @@ dependencies, no license) and includes it in the closure; it grants no
 authority and declares no command, so an Armory package is installed as
 inert files. Armory content is unauthenticated: it is never executed on
 discovery and never without exact-digest human approval. A package's
-license is the license file it ships at its root (``LICENSE``,
-``LICENSE.md``, ``LICENSE.txt``, ``COPYING``, ``NOTICE``) when it carries
-one, else the repository ``LICENSE`` at the pinned revision. A shipped file
-that is unrecognized, ambiguous (dual-licensed or merely mentioning another
+license is the license file it ships at its root (any ``LICENSE*`` or
+``COPYING*`` variant the closure accepts) when it carries one, else the
+repository ``LICENSE`` at the pinned revision. A shipped file that is
+unrecognized, ambiguous (dual-licensed or merely mentioning another
 license), or disagrees with the repository license is reported as
-``unknown``. Every fetched file is verified against the git blob sha in the
-pinned tree. All licenses are declared metadata only.
+``unknown``; a ``NOTICE*`` file is attribution only but makes the license
+``unknown`` when it carries another license's marker. The repository
+``LICENSE`` and the catalog ``manifest.yaml`` are verified against the git
+blob sha in the pinned tree, as is every package file (a mismatched
+``LICENSE`` is ``unknown``; a mismatched manifest is an integrity failure).
+All licenses are declared metadata only.
 
 Armory is never a runtime dependency of the engine: importing this module
 needs only the standard library, and every method that reaches the
@@ -67,6 +71,7 @@ from enginery.application.adapter_types import (
 )
 from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
 from enginery.capabilities.closure import (
+    LICENSE_FILE_NAMES,
     MAX_FILE_BYTES,
     MAX_FILE_COUNT,
     MAX_TOTAL_BYTES,
@@ -131,7 +136,7 @@ def _default_fetcher(url: str, timeout: float) -> bytes:
         return bytes(response.read())
 
 
-_LICENSE_FILE_NAMES = frozenset({"LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "NOTICE"})
+_CATALOG_MANIFEST = "manifest.yaml"
 _UNKNOWN_LICENSE = "unknown"
 _HEADER_WINDOW = 300
 _OTHER_LICENSE_MARKERS = (
@@ -144,22 +149,50 @@ _OTHER_LICENSE_MARKERS = (
     "at your option",
     "choose either",
 )
+_OTHER_LICENSE_ABBREVIATION = re.compile(r"\b(?:gpl|lgpl|agpl|mpl|proprietary)\b")
 _MIT_GRANT = "permission is hereby granted, free of charge"
+_MIT_ENDING = (
+    "arising from, out of or in connection with the software "
+    "or the use or other dealings in the software."
+)
 _APACHE_HEADER = "apache license version 2.0, january 2004"
+_PERMISSIVE_GRANT_MARKERS = (_MIT_GRANT, "licensed under the apache license")
+
+
+def _decode(item: PackageFile) -> str:
+    return item.content.decode("utf-8", errors="replace")
+
+
+def _notice_conflicts(text: str) -> bool:
+    """Whether an attribution notice carries another license's marker."""
+
+    normalized = " ".join(text.lower().split())
+    if any(marker in normalized for marker in _OTHER_LICENSE_MARKERS):
+        return True
+    if _OTHER_LICENSE_ABBREVIATION.search(normalized) is not None:
+        return True
+    return "all rights reserved" in normalized and not any(
+        marker in normalized for marker in _PERMISSIVE_GRANT_MARKERS
+    )
 
 
 def _detect_spdx_license(text: str) -> str:
     """Classify one license text by its distinctive header; anything else is ``unknown``.
 
     A text that also carries another license family's marker (a dual license
-    or a mere mention) is ambiguous and is never classified.
+    or a mere mention) is ambiguous and is never classified. An MIT text must
+    end with the canonical warranty disclaimer: appended terms make it unknown.
     """
 
     normalized = " ".join(text.lower().split())
     if any(marker in normalized for marker in _OTHER_LICENSE_MARKERS):
         return _UNKNOWN_LICENSE
     head = normalized[:_HEADER_WINDOW]
-    mit = head.startswith("mit license") and _MIT_GRANT in normalized
+    mit = (
+        head.startswith("mit license")
+        and _MIT_GRANT in normalized
+        and normalized.endswith(_MIT_ENDING)
+    )
     apache = _APACHE_HEADER in head and "terms and conditions for use" in normalized
     if mit and not apache:
         return "MIT"
@@ -243,7 +276,11 @@ class ArmoryCapabilitySource:
             )
         try:
             self._entries()
-        except (TransientProviderFailureError, MissingPrerequisiteError) as error:
+        except (
+            TransientProviderFailureError,
+            MissingPrerequisiteError,
+            CapabilityIntegrityError,
+        ) as error:
             return AdapterStatus(
                 kind=ProviderKind.CAPABILITY_SOURCE,
                 availability=AdapterAvailability.MISCONFIGURED,
@@ -423,29 +460,43 @@ class ArmoryCapabilitySource:
         return tree
 
     def _package_license(self, files: Sequence[PackageFile]) -> str:
-        """The package's own license file when it ships one, else the repository license."""
+        """The package's own license file when it ships one, else the repository license.
 
-        shipped = [item for item in files if item.path in _LICENSE_FILE_NAMES]
+        ``LICENSE*``/``COPYING*`` files decide the license; ``NOTICE*`` files are
+        attribution only and can merely make the license ``unknown`` when their
+        text carries another license's marker.
+        """
+
+        shipped = [item for item in files if item.path in LICENSE_FILE_NAMES]
         repository = self._license()
-        if not shipped:
+        for item in shipped:
+            if item.path.startswith("NOTICE") and _notice_conflicts(_decode(item)):
+                return _UNKNOWN_LICENSE
+        deciding = [item for item in shipped if not item.path.startswith("NOTICE")]
+        if not deciding:
             return repository
-        found = {
-            _detect_spdx_license(item.content.decode("utf-8", errors="replace")) for item in shipped
-        }
+        found = {_detect_spdx_license(_decode(item)) for item in deciding}
         if len(found) != 1:
             return _UNKNOWN_LICENSE
         (package_license,) = found
         return package_license if package_license == repository else _UNKNOWN_LICENSE
 
     def _license(self) -> str:
+        """The repository license, trusted only when it matches its pinned tree blob."""
+
         if self._license_cache is not None:
             return self._license_cache
+        entry = self._tree().get("LICENSE")
         try:
-            text = self._fetch_bytes(self._raw_url("LICENSE")).decode("utf-8", errors="replace")
+            content = self._fetch_bytes(self._raw_url("LICENSE"))
         except TransientProviderFailureError:
             self._license_cache = _UNKNOWN_LICENSE
         else:
-            self._license_cache = _detect_spdx_license(text)
+            if entry is None or _git_blob_sha(content) != entry.sha:
+                self._license_cache = _UNKNOWN_LICENSE
+            else:
+                text = content.decode("utf-8", errors="replace")
+                self._license_cache = _detect_spdx_license(text)
         return self._license_cache
 
     def _fetch_bytes(self, url: str) -> bytes:
@@ -468,7 +519,18 @@ class ArmoryCapabilitySource:
     def _entries(self) -> tuple[ArmoryPackageEntry, ...]:
         import yaml
 
-        raw = self._fetch_bytes(self._raw_url("manifest.yaml"))
+        raw = self._fetch_bytes(self._raw_url(_CATALOG_MANIFEST))
+        entry = self._tree().get(_CATALOG_MANIFEST)
+        if entry is None:
+            raise MissingPrerequisiteError(
+                "Armory catalog manifest is not in the pinned tree",
+                details={"path": _CATALOG_MANIFEST},
+            )
+        if _git_blob_sha(raw) != entry.sha:
+            raise CapabilityIntegrityError(
+                "fetched Armory catalog manifest does not match the pinned tree",
+                details={"path": _CATALOG_MANIFEST},
+            )
         try:
             document = yaml.safe_load(raw)
         except yaml.YAMLError as error:

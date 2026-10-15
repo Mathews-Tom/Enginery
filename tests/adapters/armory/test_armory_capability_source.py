@@ -41,7 +41,12 @@ _LICENSE_TEXT = (
     b"MIT License\n\nCopyright (c) 2026 Tom\n\n"
     b"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
     b"of this software and associated documentation files, to deal\n"
-    b"in the Software without restriction.\n"
+    b"in the Software without restriction.\n\n"
+    b'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n'
+    b"IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\n"
+    b"CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR\n"
+    b"OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE\n"
+    b"OR OTHER DEALINGS IN THE SOFTWARE.\n"
 )
 _FILES: dict[str, bytes] = {
     f"{_PACKAGE}/SKILL.md": b"# ADR writer skill body",
@@ -109,6 +114,15 @@ class _Fetcher:
         return self.routes[url]
 
 
+def _metadata(
+    license_text: bytes | None = _LICENSE_TEXT, manifest_path: str = _PACKAGE
+) -> dict[str, bytes]:
+    metadata = {"manifest.yaml": _manifest_yaml(manifest_path)}
+    if license_text is not None:
+        metadata["LICENSE"] = license_text
+    return metadata
+
+
 def _routes(
     files: dict[str, bytes] | None = None,
     *,
@@ -117,14 +131,12 @@ def _routes(
     license_text: bytes | None = _LICENSE_TEXT,
 ) -> dict[str, bytes]:
     files = dict(_FILES if files is None else files)
+    tree_files = {**files, **_metadata(license_text, manifest_path)}
     routes = {
         _COMMIT_URL: json.dumps({"sha": _SHA}).encode("utf-8"),
-        _TREE_URL: _tree_json(files, modes=modes),
-        _raw("manifest.yaml"): _manifest_yaml(manifest_path),
+        _TREE_URL: _tree_json(tree_files, modes=modes),
     }
-    routes.update({_raw(path): content for path, content in files.items()})
-    if license_text is not None:
-        routes[_raw("LICENSE")] = license_text
+    routes.update({_raw(path): content for path, content in tree_files.items()})
     return routes
 
 
@@ -164,6 +176,14 @@ def test_probe_reports_unavailable_without_pyyaml(monkeypatch: pytest.MonkeyPatc
 
 def test_probe_reports_misconfigured_for_an_unreachable_catalog() -> None:
     source, _ = _source({})
+
+    assert source.probe().availability is AdapterAvailability.MISCONFIGURED
+
+
+def test_probe_reports_misconfigured_for_a_tampered_catalog_manifest() -> None:
+    routes = _routes()
+    routes[_raw("manifest.yaml")] = _manifest_yaml("skills/adr-writer-extra")
+    source, _ = _source(routes)
 
     assert source.probe().availability is AdapterAvailability.MISCONFIGURED
 
@@ -357,7 +377,7 @@ def test_an_unreviewed_asset_type_makes_the_package_unlockable() -> None:
 
 def test_a_truncated_file_listing_is_rejected() -> None:
     routes = _routes()
-    routes[_TREE_URL] = _tree_json(_FILES, truncated=True)
+    routes[_TREE_URL] = _tree_json({**_FILES, **_metadata()}, truncated=True)
     source, _ = _source(routes)
 
     with pytest.raises(MissingPrerequisiteError, match="truncated"):
@@ -494,6 +514,65 @@ def test_a_package_license_agreeing_with_the_repository_is_reported() -> None:
     assert _package_license(_LICENSE_TEXT, name="COPYING") == "MIT"
 
 
+def test_a_package_shipping_a_gpl_copying_variant_is_unknown() -> None:
+    assert _package_license(_GPL_TEXT, name="COPYING.txt") == "unknown"
+    assert _package_license(_GPL_TEXT, name="COPYING.md") == "unknown"
+
+
+def test_a_notice_that_defers_to_the_repository_license_keeps_the_repository_license() -> None:
+    notice = b"The files in this package are under the repository license.\n"
+
+    assert _package_license(notice, name="NOTICE.md") == "MIT"
+
+
+def test_a_notice_carrying_another_license_marker_makes_the_license_unknown() -> None:
+    notice = b"Portions of this package are available under the GPL.\n"
+
+    assert _package_license(notice, name="NOTICE.txt") == "unknown"
+
+
+def test_a_notice_reserving_all_rights_without_a_grant_makes_the_license_unknown() -> None:
+    assert _package_license(b"Copyright Tom. All rights reserved.\n", name="NOTICE") == "unknown"
+
+
+def test_mit_text_with_appended_terms_is_not_mit() -> None:
+    text = _LICENSE_TEXT + b'\n"Commons Clause" License Condition v1.0: no selling the Software.\n'
+
+    assert _package_license(text) == "unknown"
+
+
+def test_a_tampered_repository_license_is_unknown() -> None:
+    routes = _routes()
+    routes[_raw("LICENSE")] = _LICENSE_TEXT + b"\n"
+    source, _ = _source(routes)
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert descriptor.license == "unknown"
+
+
+def test_a_repository_license_missing_from_the_pinned_tree_is_unknown() -> None:
+    routes = _routes()
+    routes[_TREE_URL] = _tree_json({**_FILES, **_metadata(license_text=None)})
+    routes[_raw("LICENSE")] = _LICENSE_TEXT
+    source, _ = _source(routes)
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert descriptor.license == "unknown"
+
+
+def test_a_catalog_manifest_that_does_not_match_the_pinned_tree_is_rejected() -> None:
+    routes = _routes()
+    routes[_raw("manifest.yaml")] = _manifest_yaml("skills/adr-writer-extra")
+    source, _ = _source(routes)
+
+    with pytest.raises(CapabilityIntegrityError):
+        source.resolve("adr-writer", "1.1.1")
+
+
 def test_a_package_without_a_license_file_uses_the_repository_license() -> None:
     source, _ = _source()
 
@@ -527,7 +606,9 @@ def test_a_package_over_the_total_size_limit_is_rejected_before_any_blob_is_fetc
     extra = {f"{_PACKAGE}/data/part{index}.md": b"x" for index in range(9)}
     files = {**_FILES, **extra}
     routes = _routes(files)
-    routes[_TREE_URL] = _tree_json(files, sizes=dict.fromkeys(extra, MAX_FILE_BYTES))
+    routes[_TREE_URL] = _tree_json(
+        {**files, **_metadata()}, sizes=dict.fromkeys(extra, MAX_FILE_BYTES)
+    )
     source, fetcher = _source(routes)
 
     with pytest.raises(CapabilityClosureLimitError):

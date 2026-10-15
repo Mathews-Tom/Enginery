@@ -55,7 +55,7 @@ MAX_PATH_LENGTH = 255
 MAX_PATH_DEPTH = 12
 
 _DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-_LICENSE_FILE_NAMES = frozenset(
+LICENSE_FILE_NAMES = frozenset(
     {
         "LICENSE",
         "LICENSE.md",
@@ -146,7 +146,7 @@ def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
 
 def _kind_for(parts: list[str], name: str, suffix: str) -> AssetKind | None:
     if len(parts) == 1:
-        if name == MANIFEST_FILE_NAME or name in _LICENSE_FILE_NAMES:
+        if name == MANIFEST_FILE_NAME or name in LICENSE_FILE_NAMES:
             return AssetKind.METADATA
         return AssetKind.INSTRUCTION if suffix == ".md" else None
     top = parts[0]
@@ -414,6 +414,7 @@ def build_closure_from_directory(directory: Path) -> PackageClosure:
 
 __all__ = [
     "CLOSURE_SCHEMA_VERSION",
+    "LICENSE_FILE_NAMES",
     "MAX_FILE_BYTES",
     "MAX_FILE_COUNT",
     "MAX_PATH_DEPTH",

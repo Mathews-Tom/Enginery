@@ -242,13 +242,20 @@ field of its own. Four facts about this adapter matter operationally:
   dependencies) and includes it in the closure; it grants no authority and
   declares no command, so an Armory package is installed as inert files and
   is never run by Enginery without approval. A package's license is the
-  root license file it ships (`LICENSE`, `LICENSE.md`, `LICENSE.txt`,
-  `COPYING`, `NOTICE`) when it has one, else the repository `LICENSE`
-  detected at the pinned revision — declared metadata only. A shipped file
-  that is unrecognized, ambiguous (dual-licensed or mentioning another
-  license), or disagrees with the repository license is `unknown`, as is
-  an unreachable repository license, and holds redistribution. Every
-  fetched file is verified against its git blob sha in the pinned tree.
+  root license file it ships (any `LICENSE*` or `COPYING*` variant the
+  closure accepts) when it has one, else the repository `LICENSE` detected
+  at the pinned revision — declared metadata only. A shipped file that is
+  unrecognized, ambiguous (dual-licensed or mentioning another license),
+  disagrees with the repository license, or is MIT text with extra terms
+  appended is `unknown`, as is an unreachable repository license, and
+  holds redistribution. A `NOTICE*` file is attribution only and does not
+  decide the license, but one that carries another license's marker (GPL,
+  LGPL, AGPL, MPL, dual-license, "at your option", proprietary, or "all
+  rights reserved" with no permissive grant) makes it `unknown`. Every
+  fetched file, including the catalog `manifest.yaml` and the repository
+  `LICENSE`, is verified against its git blob sha in the pinned tree: a
+  mismatched or absent `LICENSE` is `unknown`, and a mismatched
+  `manifest.yaml` or package file is an integrity failure.
 - **Every capability it returns is `provenance="armory"`, which
   `CapabilityResolver` classifies as `unauthenticated`.** Content
   addressing (Enginery's own fetch-and-hash step) is not the same as
