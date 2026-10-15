@@ -2,9 +2,15 @@
 
 Covers an unsigned external asset, a wrong signer, a digest swap, a license
 mismatch, a run-introduced capability without approval, and an active-run
-mutation (mutable-reference drift against an in-flight lock). Every case
-builds a complete package closure (manifest, instruction, and a sibling
-reference) and attacks the resolver, lock, or materializer around it.
+mutation (mutable-reference drift against an in-flight lock), plus the
+closure cases: a changed sibling script, reference, or dependency pin, a
+symlink escape, path traversal, an unreviewed asset type, an unknown-license
+redistribution hold, an unauthenticated asset without approval, an approval
+superseded after drift, and an uninstall that retains evidence and the
+ledger. Every case builds a complete package closure and attacks the
+resolver, lock, materializer, install, or uninstall around it; each guard it
+exercises has a mutation test (``tests/governance/test_capability_gate.py``)
+proving the case fails when that guard is removed.
 """
 
 from __future__ import annotations
@@ -13,25 +19,49 @@ import random
 import secrets
 import string
 import tempfile
+from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from enginery.adapters.git_capability import GitCapabilitySource
+from enginery.adapters.directory_capability import DirectoryCapabilitySource
 from enginery.application.adapter_types import AdapterStatus
 from enginery.application.delivery_ports import CapabilityDescriptor, CapabilityListing, PackageFile
 from enginery.capabilities.approval import approved_capabilities, materialize_approval_schema
+from enginery.capabilities import approval as approval_module
 from enginery.capabilities.closure import build_closure
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
+    CapabilityAssetTypeError,
+    CapabilityDependencyError,
     CapabilityDigestMismatchError,
+    CapabilityInstallConflictError,
+    CapabilityIntegrityError,
+    CapabilityLicenseHoldError,
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
+    CapabilityNotInstalledError,
+    CapabilityPathError,
+    CapabilitySymlinkError,
+)
+from enginery.capabilities.install import (
+    REVOKED_RECORD_NAME,
+    install_lock,
+    load_owned_manifest,
+    uninstall_install,
 )
 from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock, ProvenanceStatus
-from enginery.capabilities.manifest import PackageKind, PackageManifest, render_manifest
-from enginery.capabilities.materialize import materialize_lock
+from enginery.capabilities.manifest import (
+    DependencyPin,
+    PackageKind,
+    PackageManifest,
+    render_manifest,
+)
+from enginery.capabilities.materialize import digest_path, materialize_lock, verify_materialized
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
+from enginery.capabilities.serialization import write_lock
 from enginery.capabilities.signature import PinnedKeyring, PinnedPublisherKey, descriptor_verifier
 from enginery.capabilities.sources import CapabilitySource, SourceKind
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
@@ -48,25 +78,40 @@ def _assert(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def _expect(exception_type: type[Exception], operation: object) -> None:
+def _expect(exception_type: type[Exception], operation: Callable[[], object]) -> None:
     try:
-        operation()  # type: ignore[operator]
+        operation()
     except exception_type:
         return
+    except Exception as error:
+        raise RuntimeError(
+            f"expected {exception_type.__name__} but got {type(error).__name__}: {error}"
+        ) from error
     raise RuntimeError(f"expected {exception_type.__name__} was not raised")
 
 
 def _package(
-    name: str, payload: bytes, *, license_id: str | None = "MIT"
+    name: str,
+    payload: bytes,
+    *,
+    license_id: str | None = "MIT",
+    extra: Mapping[str, bytes] | None = None,
+    dependencies: Sequence[DependencyPin] = (),
 ) -> tuple[PackageFile, ...]:
     manifest = PackageManifest(
-        name=name, version="1", kind=PackageKind.INSTRUCTION, license=license_id
+        name=name,
+        version="1",
+        kind=PackageKind.INSTRUCTION,
+        license=license_id,
+        dependencies=tuple(dependencies),
     )
-    return (
+    files = [
         PackageFile("capability.json", render_manifest(manifest)),
         PackageFile("SKILL.md", payload),
         PackageFile("references/notes.md", payload + b"-reference"),
-    )
+    ]
+    files.extend(PackageFile(path, content) for path, content in (extra or {}).items())
+    return tuple(files)
 
 
 def _descriptor(
@@ -148,6 +193,86 @@ def _source(
 ) -> CapabilitySource:
     port = _FakeSource(descriptor, files)
     return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=port)
+
+
+class _MultiSource:
+    """An in-memory source serving several packages, each with its own descriptor and files."""
+
+    def __init__(self, *packages: tuple[CapabilityDescriptor, tuple[PackageFile, ...]]) -> None:
+        self._packages = {(item[0].name, item[0].version): item for item in packages}
+
+    def probe(self) -> AdapterStatus:  # pragma: no cover - unused by the resolver
+        raise NotImplementedError
+
+    def discover(self) -> tuple[CapabilityListing, ...]:  # pragma: no cover - unused
+        return tuple(
+            CapabilityListing(
+                name=descriptor.name,
+                version=descriptor.version,
+                provenance=descriptor.provenance,
+                revision=descriptor.revision,
+            )
+            for descriptor, _ in self._packages.values()
+        )
+
+    def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
+        package = self._packages.get((name, version))
+        return None if package is None else package[0]
+
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]:
+        return self._packages[(name, version)][1]
+
+
+def _served(kind: SourceKind, *packages: tuple[PackageFile, ...]) -> CapabilitySource:
+    """A typed in-memory source serving each of ``packages`` under their own manifest identity."""
+
+    served = tuple(
+        (_descriptor(build_closure(files).manifest.name, files, provenance=kind.value), files)
+        for files in packages
+    )
+    return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=_MultiSource(*served))
+
+
+def _directory_source(root: Path, kind: SourceKind) -> CapabilitySource:
+    port = DirectoryCapabilitySource(root, provenance=kind.value)
+    return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=port)
+
+
+def _request(name: str) -> CapabilityRequest:
+    return CapabilityRequest(name=name, version="1")
+
+
+def _replace(files: tuple[PackageFile, ...], path: str, content: bytes) -> tuple[PackageFile, ...]:
+    _assert(any(item.path == path for item in files), f"{path} is not part of the package")
+    return tuple(
+        PackageFile(item.path, content, item.executable) if item.path == path else item
+        for item in files
+    )
+
+
+def _write_directory(root: Path, name: str, files: Sequence[PackageFile]) -> Path:
+    directory = root / name
+    for item in files:
+        target = directory / item.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(item.content)
+        if item.executable:
+            target.chmod(0o755)
+    return directory
+
+
+_OPERATOR = AuthorityPrincipal(
+    id="operator-gate",
+    principal_type=PrincipalType.HUMAN,
+    role="operator",
+    authorization_source="cli",
+)
+_RUN = AuthorityPrincipal(
+    id="run-gate",
+    principal_type=PrincipalType.AGENT,
+    role="run",
+    authorization_source="coordinator",
+)
 
 
 def _case_unsigned_external_asset(rng: random.Random) -> None:
@@ -286,24 +411,383 @@ def _approve(lock: CapabilityLock, names: list[str]) -> ApprovedCapabilities:
     return approved_capabilities(lock, evaluator, requesting_principal_id=_RUN.id)
 
 
+def _case_sibling_script_drift(rng: random.Random) -> None:
+    """A changed sibling script changes the lock digest and is drift against a prior lock."""
+
+    name = f"skill-{_token(rng)}"
+    payload = _token(rng).encode()
+    reviewed = _package(name, payload, extra={"scripts/helper.py": b"print('reviewed')\n"})
+    drifted = _replace(reviewed, "scripts/helper.py", b"print('changed after review')\n")
+    original = CapabilityResolver([_served(SourceKind.PROJECT, reviewed)])
+    changed = CapabilityResolver([_served(SourceKind.PROJECT, drifted)])
+
+    previous = original.resolve([_request(name)])
+    current = changed.resolve([_request(name)])
+
+    _assert(
+        previous.digest() != current.digest(),
+        "a sibling script change must change the lock digest",
+    )
+    _expect(
+        CapabilityLockDriftError,
+        lambda: changed.resolve([_request(name)], previous_lock=previous),
+    )
+
+
+def _case_reference_drift(rng: random.Random) -> None:
+    """A reference changed in the materialized store is rejected on every later use."""
+
+    name = f"skill-{_token(rng)}"
+    files = _package(name, _token(rng).encode())
+    with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+        base = Path(scratch)
+        _write_directory(base / "packages", name, files)
+        resolved = CapabilityResolver(
+            [_directory_source(base / "packages", SourceKind.PROJECT)]
+        ).resolve_with_files([_request(name)])
+        install_root, store = base / "installed", base / "store"
+        install_lock(resolved, install_root=install_root, capabilities_root=store)
+        entry = resolved.lock.entries[0]
+        reference = digest_path(store, entry.digest) / "references" / "notes.md"
+        reference.chmod(0o644)
+        reference.write_bytes(b"edited after the closure was locked")
+
+        _expect(CapabilityIntegrityError, lambda: verify_materialized(entry, store))
+        _expect(
+            CapabilityIntegrityError,
+            lambda: install_lock(resolved, install_root=install_root, capabilities_root=store),
+        )
+
+
+def _case_dependency_pin_drift(rng: random.Random) -> None:
+    """A dependency that no longer matches its pinned closure digest fails resolution."""
+
+    parent, dependency = f"skill-{_token(rng)}", f"dep-{_token(rng)}"
+    payload = _token(rng).encode()
+    dependency_files = _package(
+        dependency, _token(rng).encode(), extra={"scripts/check.py": b"print('reviewed')\n"}
+    )
+    changed_dependency = _replace(dependency_files, "scripts/check.py", b"print('changed')\n")
+    pin = DependencyPin(dependency, "1", build_closure(dependency_files).digest)
+    repin = DependencyPin(dependency, "1", build_closure(changed_dependency).digest)
+    parent_files = _package(parent, payload, dependencies=(pin,))
+    repinned_files = _package(parent, payload, dependencies=(repin,))
+
+    honest = CapabilityResolver([_served(SourceKind.PROJECT, parent_files, dependency_files)])
+    lock = honest.resolve([_request(parent)])
+    _assert(
+        lock.get(dependency) is not None,
+        "a declared dependency must be locked as an entry of its own",
+    )
+    _assert(
+        build_closure(parent_files).digest != build_closure(repinned_files).digest,
+        "a dependency pin change must change the parent closure digest",
+    )
+    tampered = CapabilityResolver([_served(SourceKind.PROJECT, parent_files, changed_dependency)])
+
+    _expect(CapabilityDependencyError, lambda: tampered.resolve([_request(parent)]))
+
+
+def _case_symlink_escape(rng: random.Random) -> None:
+    """A symlink cannot pull outside content into a closure or redirect an install."""
+
+    name = f"skill-{_token(rng)}"
+    files = _package(name, _token(rng).encode())
+    with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+        base = Path(scratch)
+        secret = base / "secret.md"
+        secret.write_bytes(b"content outside the package")
+        directory = _write_directory(base / "packages", name, files)
+        (directory / "references" / "escape.md").symlink_to(secret)
+        source = DirectoryCapabilitySource(base / "packages", provenance="user-directory")
+
+        _expect(CapabilitySymlinkError, lambda: source.resolve(name, "1"))
+        _expect(CapabilitySymlinkError, lambda: source.fetch_closure(name, "1"))
+
+        _write_directory(base / "clean", name, files)
+        resolved = CapabilityResolver(
+            [_directory_source(base / "clean", SourceKind.PROJECT)]
+        ).resolve_with_files([_request(name)])
+        outside, install_root = base / "outside", base / "installed"
+        outside.mkdir()
+        install_root.mkdir()
+        (install_root / name).symlink_to(outside, target_is_directory=True)
+
+        _expect(
+            CapabilityInstallConflictError,
+            lambda: install_lock(
+                resolved, install_root=install_root, capabilities_root=base / "store"
+            ),
+        )
+        _assert(not any(outside.iterdir()), "an install wrote through a symlinked destination")
+
+
+def _resolve_served(
+    name: str, descriptor: CapabilityDescriptor, files: tuple[PackageFile, ...]
+) -> CapabilityLock:
+    """Resolve ``name`` from a source that claims ``descriptor`` but serves ``files``."""
+
+    source = CapabilitySource(
+        kind=SourceKind.USER, label="user-gate", port=_FakeSource(descriptor, files)
+    )
+    return CapabilityResolver([source]).resolve([_request(name)])
+
+
+def _case_path_traversal(rng: random.Random) -> None:
+    """Absolute, traversing, backslash, and empty-segment paths never enter a closure."""
+
+    name = f"skill-{_token(rng)}"
+    clean = _package(name, _token(rng).encode())
+    descriptor = _descriptor(name, clean)
+    hostile_paths = (
+        "../escape.md",
+        "references/../../escape.md",
+        "/etc/escape.md",
+        "references\\escape.md",
+        "references//escape.md",
+    )
+    for hostile in hostile_paths:
+        attack = partial(_resolve_served, name, descriptor, (*clean, PackageFile(hostile, b"x")))
+        _expect(CapabilityPathError, attack)
+
+
+def _case_unreviewed_asset_type(rng: random.Random) -> None:
+    """Files outside the reviewed layout, and executable non-scripts, are refused."""
+
+    name = f"skill-{_token(rng)}"
+    clean = _package(name, _token(rng).encode())
+    descriptor = _descriptor(name, clean)
+    unreviewed = (
+        PackageFile("scripts/payload.exe", b"MZ"),
+        PackageFile("bin/helper", b"#!/bin/sh\n", executable=True),
+        PackageFile("references/archive.zip", b"PK"),
+        PackageFile("data/model.pkl", b"pickle"),
+        PackageFile("__pycache__/module.cpython-312.pyc", b"bytecode"),
+    )
+    for extra in unreviewed:
+        attack = partial(_resolve_served, name, descriptor, (*clean, extra))
+        _expect(CapabilityAssetTypeError, attack)
+    executable_instruction = tuple(
+        PackageFile(item.path, item.content, executable=True) if item.path == "SKILL.md" else item
+        for item in clean
+    )
+    _expect(
+        CapabilityAssetTypeError,
+        partial(_resolve_served, name, descriptor, executable_instruction),
+    )
+
+
+def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
+    """An absent or unreviewed license holds redistribution even with an approval."""
+
+    for license_id in (None, "GPL-3.0-only", "Proprietary"):
+        name = f"skill-{_token(rng)}"
+        files = _package(name, _token(rng).encode(), license_id=license_id)
+        resolved = CapabilityResolver([_served(SourceKind.USER, files)]).resolve_with_files(
+            [_request(name)]
+        )
+        with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+            base = Path(scratch)
+            _expect(
+                CapabilityLicenseHoldError,
+                partial(
+                    install_lock,
+                    resolved,
+                    install_root=base / "installed",
+                    capabilities_root=base / "store",
+                    approved_names=frozenset({name}),
+                ),
+            )
+            _assert(not (base / "store").exists(), "a held package was materialized")
+    parent, dependency = f"skill-{_token(rng)}", f"dep-{_token(rng)}"
+    dependency_files = _package(dependency, _token(rng).encode(), license_id=None)
+    pin = DependencyPin(dependency, "1", build_closure(dependency_files).digest)
+    parent_files = _package(parent, _token(rng).encode(), dependencies=(pin,))
+    resolved = CapabilityResolver(
+        [_served(SourceKind.USER, parent_files, dependency_files)]
+    ).resolve_with_files([_request(parent)])
+    with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+        base = Path(scratch)
+        _expect(
+            CapabilityLicenseHoldError,
+            partial(
+                install_lock,
+                resolved,
+                install_root=base / "installed",
+                capabilities_root=base / "store",
+                approved_names=frozenset({parent, dependency}),
+            ),
+        )
+
+
+def _case_unauthenticated_asset_requires_approval(rng: random.Random) -> None:
+    """Every non-project source is unauthenticated and needs the exact-digest approval."""
+
+    for kind in (SourceKind.USER, SourceKind.GIT, SourceKind.ARMORY):
+        name = f"skill-{_token(rng)}"
+        files = _package(name, _token(rng).encode(), extra={"scripts/helper.py": b"print(1)\n"})
+        resolved = CapabilityResolver([_served(kind, files)]).resolve_with_files([_request(name)])
+        entry = resolved.lock.entries[0]
+        _assert(
+            entry.provenance.status is ProvenanceStatus.UNAUTHENTICATED,
+            f"a {kind.value} asset must not classify as authenticated without a signature",
+        )
+        with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+            base = Path(scratch)
+            for approved in (frozenset[str](), frozenset({"some-other-package"})):
+                _expect(
+                    CapabilityApprovalRequiredError,
+                    partial(
+                        install_lock,
+                        resolved,
+                        install_root=base / "installed",
+                        capabilities_root=base / "store",
+                        approved_names=approved,
+                    ),
+                )
+            _assert(
+                not (base / "installed").exists() and not (base / "store").exists(),
+                "an unapproved asset wrote files",
+            )
+
+
+def _case_approval_superseded_after_drift(rng: random.Random) -> None:
+    """An approval recorded for one closure never applies to a drifted closure."""
+
+    name = f"skill-{_token(rng)}"
+    payload = _token(rng).encode()
+    reviewed = _package(name, payload, extra={"scripts/run.py": b"print('reviewed')\n"})
+    drifted = _replace(reviewed, "scripts/run.py", b"print('changed after approval')\n")
+    first = CapabilityResolver([_served(SourceKind.USER, reviewed)]).resolve_with_files(
+        [_request(name)]
+    )
+    second = CapabilityResolver([_served(SourceKind.USER, drifted)]).resolve_with_files(
+        [_request(name)]
+    )
+    registry = ApprovalRegistry([_OPERATOR])
+    evaluator = PolicyEvaluator("capability-gate-policy", approval_registry=registry)
+    schema = approval_module.materialize_approval_schema(
+        first.lock.entries[0], first.lock, requesting_principal_id=_RUN.id
+    )
+    registry.record_approval(schema, [_OPERATOR])
+
+    approved = approval_module.approved_capability_names(
+        first.lock, evaluator, requesting_principal_id=_RUN.id
+    )
+    superseded = approval_module.approved_capability_names(
+        second.lock, evaluator, requesting_principal_id=_RUN.id
+    )
+
+    _assert(approved == frozenset({name}), "a recorded approval must allow its exact closure")
+    _assert(superseded == frozenset(), "an approval survived a sibling script change")
+    with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+        base = Path(scratch)
+        _expect(
+            CapabilityApprovalRequiredError,
+            partial(
+                install_lock,
+                second,
+                install_root=base / "installed",
+                capabilities_root=base / "store",
+                approved_names=superseded,
+            ),
+        )
+
+
+def _tree_listing(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def _content(path: Path) -> bytes | None:
+    """The file's bytes, or ``None`` when it no longer exists."""
+
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _case_uninstall_retains_evidence_and_ledger(rng: random.Random) -> None:
+    """Uninstall removes only owned, unmodified files and revokes authority, nothing else."""
+
+    name = f"skill-{_token(rng)}"
+    files = _package(name, _token(rng).encode(), extra={"scripts/helper.py": b"print(1)\n"})
+    with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+        base = Path(scratch)
+        _write_directory(base / "packages", name, files)
+        resolved = CapabilityResolver(
+            [_directory_source(base / "packages", SourceKind.PROJECT)]
+        ).resolve_with_files([_request(name)])
+        install_root, store = base / "task" / "installed", base / "store"
+        install_lock(resolved, install_root=install_root, capabilities_root=store)
+        ledger = base / "ledger.db"
+        ledger.write_bytes(b"ledger bytes")
+        raw_evidence = base / "evidence" / "raw.bin"
+        raw_evidence.parent.mkdir()
+        raw_evidence.write_bytes(b"raw evidence bytes")
+        lockfile = base / "capabilities.lock.json"
+        write_lock(resolved.lock, lockfile)
+        foreign = install_root / name / "operator-notes.txt"
+        foreign.write_bytes(b"operator notes")
+        edited = install_root / name / "scripts" / "helper.py"
+        edited.chmod(0o644)
+        edited.write_bytes(b"print('edited locally')\n")
+        store_before = _tree_listing(store)
+
+        report = uninstall_install(install_root)
+
+        _assert(_content(ledger) == b"ledger bytes", "uninstall touched the ledger")
+        _assert(_content(raw_evidence) == b"raw evidence bytes", "uninstall touched evidence")
+        _assert(lockfile.is_file(), "uninstall deleted the lockfile")
+        _assert(_tree_listing(store) == store_before, "uninstall changed the content store")
+        _assert(_content(foreign) == b"operator notes", "uninstall deleted a foreign file")
+        _assert(
+            _content(edited) == b"print('edited locally')\n",
+            "uninstall deleted a file modified after install",
+        )
+        removed_unmodified = f"{name}/SKILL.md" in report.removed
+        _assert(
+            removed_unmodified and not (install_root / name / "SKILL.md").exists(),
+            "uninstall did not remove an owned, unmodified file",
+        )
+        _assert(
+            load_owned_manifest(install_root) is None
+            and (install_root / REVOKED_RECORD_NAME).is_file(),
+            "uninstall did not revoke the install record",
+        )
+        _expect(CapabilityNotInstalledError, lambda: uninstall_install(install_root))
+
+
 def _scratch_root() -> Path:
     return Path(tempfile.mkdtemp(prefix="enginery-capability-gate-"))
+
+
+CASES: dict[str, Callable[[random.Random], None]] = {
+    "unsigned_external_asset": _case_unsigned_external_asset,
+    "wrong_signer": _case_wrong_signer,
+    "digest_swap": _case_digest_swap,
+    "license_mismatch": _case_license_mismatch,
+    "run_introduced_without_approval": _case_run_introduced_capability_blocks_without_approval,
+    "active_run_mutation": _case_active_run_mutation,
+    "sibling_script_drift": _case_sibling_script_drift,
+    "reference_drift": _case_reference_drift,
+    "dependency_pin_drift": _case_dependency_pin_drift,
+    "symlink_escape": _case_symlink_escape,
+    "path_traversal": _case_path_traversal,
+    "unreviewed_asset_type": _case_unreviewed_asset_type,
+    "unknown_license_redistribution_hold": _case_unknown_license_redistribution_hold,
+    "unauthenticated_asset_requires_approval": _case_unauthenticated_asset_requires_approval,
+    "approval_superseded_after_drift": _case_approval_superseded_after_drift,
+    "uninstall_retains_evidence_and_ledger": _case_uninstall_retains_evidence_and_ledger,
+}
 
 
 def run_gate() -> None:
     seed = secrets.randbits(64)
     rng = random.Random(seed)
-    cases = (
-        _case_unsigned_external_asset,
-        _case_wrong_signer,
-        _case_digest_swap,
-        _case_license_mismatch,
-        _case_run_introduced_capability_blocks_without_approval,
-        _case_active_run_mutation,
-    )
-    for case in cases:
+    for case in CASES.values():
         case(rng)
-    print(f"PASS capability adversarial cases={len(cases)} seed={seed}")
+    print(f"PASS capability adversarial cases={len(CASES)} seed={seed}")
 
 
 if __name__ == "__main__":
