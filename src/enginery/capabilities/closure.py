@@ -55,19 +55,8 @@ MAX_PATH_LENGTH = 255
 MAX_PATH_DEPTH = 12
 
 _DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-LICENSE_FILE_NAMES = frozenset(
-    {
-        "LICENSE",
-        "LICENSE.md",
-        "LICENSE.txt",
-        "COPYING",
-        "COPYING.md",
-        "COPYING.txt",
-        "NOTICE",
-        "NOTICE.md",
-        "NOTICE.txt",
-    }
-)
+_LICENSE_STEMS = frozenset({"license", "licence", "copying", "notice"})
+_LICENSE_EXTENSIONS = frozenset({"", ".md", ".txt", ".rst"})
 _SCRIPT_EXTENSIONS = frozenset({".py", ".sh", ".js", ".mjs", ".ts"})
 _REFERENCE_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
 _DATA_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".csv", ".toml", ".txt"})
@@ -121,6 +110,20 @@ def _path_problem(raw: str) -> str | None:
     return None
 
 
+def is_license_file_name(path: str) -> bool:
+    """Whether ``path`` is a root license-style file.
+
+    The name stem (before the first dot) is ``license``, ``licence``,
+    ``copying`` or ``notice`` in any case, with no extension or ``.md``,
+    ``.txt`` or ``.rst``. Nested paths never match.
+    """
+
+    if "/" in path:
+        return False
+    stem, dot, rest = path.partition(".")
+    return stem.casefold() in _LICENSE_STEMS and (dot + rest).casefold() in _LICENSE_EXTENSIONS
+
+
 def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
     """Map a normalized path to its reviewed asset kind, or reject it.
 
@@ -146,7 +149,7 @@ def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
 
 def _kind_for(parts: list[str], name: str, suffix: str) -> AssetKind | None:
     if len(parts) == 1:
-        if name == MANIFEST_FILE_NAME or name in LICENSE_FILE_NAMES:
+        if name == MANIFEST_FILE_NAME or is_license_file_name(name):
             return AssetKind.METADATA
         return AssetKind.INSTRUCTION if suffix == ".md" else None
     top = parts[0]
@@ -414,7 +417,6 @@ def build_closure_from_directory(directory: Path) -> PackageClosure:
 
 __all__ = [
     "CLOSURE_SCHEMA_VERSION",
-    "LICENSE_FILE_NAMES",
     "MAX_FILE_BYTES",
     "MAX_FILE_COUNT",
     "MAX_PATH_DEPTH",
@@ -427,6 +429,7 @@ __all__ = [
     "build_closure_from_directory",
     "classify_asset",
     "closure_digest",
+    "is_license_file_name",
     "normalize_path",
     "read_package_directory",
 ]

@@ -24,13 +24,20 @@ dependencies, no license) and includes it in the closure; it grants no
 authority and declares no command, so an Armory package is installed as
 inert files. Armory content is unauthenticated: it is never executed on
 discovery and never without exact-digest human approval. A package's
-license is the license file it ships at its root (any ``LICENSE*`` or
-``COPYING*`` variant the closure accepts) when it carries one, else the
-repository ``LICENSE`` at the pinned revision. A shipped file that is
-unrecognized, ambiguous (dual-licensed or merely mentioning another
-license), or disagrees with the repository license is reported as
-``unknown``; a ``NOTICE*`` file is attribution only but makes the license
-``unknown`` when it carries another license's marker. The repository
+license is decided by the license files it ships at its root (a name whose
+stem is ``license``, ``licence`` or ``copying``, in any case, with no
+extension or ``.md``/``.txt``/``.rst``) when it carries any, else by the
+repository ``LICENSE`` at the pinned revision. A license file is classified
+only by exact match with a canonical MIT, Apache-2.0, BSD-2-Clause,
+BSD-3-Clause or ISC text after case-folding, heading-marker removal,
+copyright-line removal and whitespace collapsing; any other text (inserted
+or appended terms, carve-outs, dual licensing, other licenses) is
+``unknown``. Every shipped file must classify to one SPDX id that equals
+the repository license, else the package license is ``unknown``. A
+``NOTICE`` file never decides the license but makes it ``unknown`` when it
+names another license family (GPL/LGPL/AGPL, MPL, SSPL, Creative Commons,
+non-commercial, Commons Clause, proprietary, dual licensing, "at your
+option") or reserves all rights without a permissive grant. The repository
 ``LICENSE`` and the catalog ``manifest.yaml`` are verified against the git
 blob sha in the pinned tree, as is every package file (a mismatched
 ``LICENSE`` is ``unknown``; a mismatched manifest is an integrity failure).
@@ -61,6 +68,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from enginery.adapters.armory_license import (
+    UNKNOWN_LICENSE,
+    classify_license_text,
+    notice_conflicts,
+)
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -71,11 +83,11 @@ from enginery.application.adapter_types import (
 )
 from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
 from enginery.capabilities.closure import (
-    LICENSE_FILE_NAMES,
     MAX_FILE_BYTES,
     MAX_FILE_COUNT,
     MAX_TOTAL_BYTES,
     build_closure,
+    is_license_file_name,
     normalize_path,
 )
 from enginery.capabilities.errors import (
@@ -137,68 +149,10 @@ def _default_fetcher(url: str, timeout: float) -> bytes:
 
 
 _CATALOG_MANIFEST = "manifest.yaml"
-_UNKNOWN_LICENSE = "unknown"
-_HEADER_WINDOW = 300
-_OTHER_LICENSE_MARKERS = (
-    "gnu general public license",
-    "gnu lesser general public license",
-    "gnu affero general public license",
-    "mozilla public license",
-    "dual licen",
-    "dual-licen",
-    "at your option",
-    "choose either",
-)
-_OTHER_LICENSE_ABBREVIATION = re.compile(r"\b(?:gpl|lgpl|agpl|mpl|proprietary)\b")
-_MIT_GRANT = "permission is hereby granted, free of charge"
-_MIT_ENDING = (
-    "arising from, out of or in connection with the software "
-    "or the use or other dealings in the software."
-)
-_APACHE_HEADER = "apache license version 2.0, january 2004"
-_PERMISSIVE_GRANT_MARKERS = (_MIT_GRANT, "licensed under the apache license")
 
 
 def _decode(item: PackageFile) -> str:
     return item.content.decode("utf-8", errors="replace")
-
-
-def _notice_conflicts(text: str) -> bool:
-    """Whether an attribution notice carries another license's marker."""
-
-    normalized = " ".join(text.lower().split())
-    if any(marker in normalized for marker in _OTHER_LICENSE_MARKERS):
-        return True
-    if _OTHER_LICENSE_ABBREVIATION.search(normalized) is not None:
-        return True
-    return "all rights reserved" in normalized and not any(
-        marker in normalized for marker in _PERMISSIVE_GRANT_MARKERS
-    )
-
-
-def _detect_spdx_license(text: str) -> str:
-    """Classify one license text by its distinctive header; anything else is ``unknown``.
-
-    A text that also carries another license family's marker (a dual license
-    or a mere mention) is ambiguous and is never classified. An MIT text must
-    end with the canonical warranty disclaimer: appended terms make it unknown.
-    """
-
-    normalized = " ".join(text.lower().split())
-    if any(marker in normalized for marker in _OTHER_LICENSE_MARKERS):
-        return _UNKNOWN_LICENSE
-    head = normalized[:_HEADER_WINDOW]
-    mit = (
-        head.startswith("mit license")
-        and _MIT_GRANT in normalized
-        and normalized.endswith(_MIT_ENDING)
-    )
-    apache = _APACHE_HEADER in head and "terms and conditions for use" in normalized
-    if mit and not apache:
-        return "MIT"
-    if apache and not mit:
-        return "Apache-2.0"
-    return _UNKNOWN_LICENSE
 
 
 def _git_blob_sha(content: bytes) -> str:
@@ -462,24 +416,24 @@ class ArmoryCapabilitySource:
     def _package_license(self, files: Sequence[PackageFile]) -> str:
         """The package's own license file when it ships one, else the repository license.
 
-        ``LICENSE*``/``COPYING*`` files decide the license; ``NOTICE*`` files are
-        attribution only and can merely make the license ``unknown`` when their
-        text carries another license's marker.
+        Root license-style files decide the license only by exact canonical
+        template match; ``NOTICE`` files never decide it and make it ``unknown``
+        when they name another license family or reserve all rights.
         """
 
-        shipped = [item for item in files if item.path in LICENSE_FILE_NAMES]
+        shipped = [item for item in files if is_license_file_name(item.path)]
         repository = self._license()
-        for item in shipped:
-            if item.path.startswith("NOTICE") and _notice_conflicts(_decode(item)):
-                return _UNKNOWN_LICENSE
-        deciding = [item for item in shipped if not item.path.startswith("NOTICE")]
+        notices = [item for item in shipped if item.path.partition(".")[0].casefold() == "notice"]
+        if any(notice_conflicts(_decode(item)) for item in notices):
+            return UNKNOWN_LICENSE
+        deciding = [item for item in shipped if item not in notices]
         if not deciding:
             return repository
-        found = {_detect_spdx_license(_decode(item)) for item in deciding}
+        found = {classify_license_text(_decode(item)) for item in deciding}
         if len(found) != 1:
-            return _UNKNOWN_LICENSE
+            return UNKNOWN_LICENSE
         (package_license,) = found
-        return package_license if package_license == repository else _UNKNOWN_LICENSE
+        return package_license if package_license == repository else UNKNOWN_LICENSE
 
     def _license(self) -> str:
         """The repository license, trusted only when it matches its pinned tree blob."""
@@ -490,13 +444,13 @@ class ArmoryCapabilitySource:
         try:
             content = self._fetch_bytes(self._raw_url("LICENSE"))
         except TransientProviderFailureError:
-            self._license_cache = _UNKNOWN_LICENSE
+            self._license_cache = UNKNOWN_LICENSE
         else:
             if entry is None or _git_blob_sha(content) != entry.sha:
-                self._license_cache = _UNKNOWN_LICENSE
+                self._license_cache = UNKNOWN_LICENSE
             else:
                 text = content.decode("utf-8", errors="replace")
-                self._license_cache = _detect_spdx_license(text)
+                self._license_cache = classify_license_text(text)
         return self._license_cache
 
     def _fetch_bytes(self, url: str) -> bytes:

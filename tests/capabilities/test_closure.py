@@ -14,6 +14,7 @@ from enginery.capabilities.closure import (
     AssetKind,
     build_closure,
     build_closure_from_directory,
+    is_license_file_name,
     read_package_directory,
 )
 from enginery.capabilities.errors import (
@@ -55,6 +56,33 @@ def test_closure_records_every_file_with_kind_digest_and_size() -> None:
     assert by_path["data/table.json"].kind is AssetKind.DATA
     assert by_path["capability.json"].kind is AssetKind.METADATA
     assert by_path["scripts/run.py"].size == len(b"print('one')\n")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "LICENSE",
+        "license.md",
+        "LICENCE.md",
+        "LICENSE.MD",
+        "COPYING.MD",
+        "Copying.rst",
+        "Notice.txt",
+        "NOTICE",
+    ],
+)
+def test_root_license_style_files_are_metadata_never_instructions(name: str) -> None:
+    closure = build_closure(package_files("skill-a", extra={name: b"terms"}))
+
+    assert {record.path: record.kind for record in closure.files}[name] is AssetKind.METADATA
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["LICENSE.md.txt", "LICENSES.md", "license-notes.md", "docs/LICENSE", "LICENSE.json", ""],
+)
+def test_other_names_are_not_license_files(name: str) -> None:
+    assert not is_license_file_name(name)
 
 
 def test_closure_digest_is_independent_of_file_order() -> None:

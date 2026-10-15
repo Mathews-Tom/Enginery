@@ -40,13 +40,20 @@ _PACKAGE = "skills/adr-writer"
 _LICENSE_TEXT = (
     b"MIT License\n\nCopyright (c) 2026 Tom\n\n"
     b"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
-    b"of this software and associated documentation files, to deal\n"
-    b"in the Software without restriction.\n\n"
+    b'of this software and associated documentation files (the "Software"), to deal\n'
+    b"in the Software without restriction, including without limitation the rights\n"
+    b"to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+    b"copies of the Software, and to permit persons to whom the Software is\n"
+    b"furnished to do so, subject to the following conditions:\n\n"
+    b"The above copyright notice and this permission notice shall be included in all\n"
+    b"copies or substantial portions of the Software.\n\n"
     b'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n'
-    b"IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\n"
-    b"CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR\n"
-    b"OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE\n"
-    b"OR OTHER DEALINGS IN THE SOFTWARE.\n"
+    b"IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+    b"FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+    b"AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+    b"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+    b"OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+    b"SOFTWARE.\n"
 )
 _FILES: dict[str, bytes] = {
     f"{_PACKAGE}/SKILL.md": b"# ADR writer skill body",
@@ -539,6 +546,83 @@ def test_mit_text_with_appended_terms_is_not_mit() -> None:
     text = _LICENSE_TEXT + b'\n"Commons Clause" License Condition v1.0: no selling the Software.\n'
 
     assert _package_license(text) == "unknown"
+
+
+def test_mit_text_with_an_inserted_carve_out_is_not_mit() -> None:
+    text = _LICENSE_TEXT.replace(
+        b"copies or substantial portions of the Software.\n",
+        b"copies or substantial portions of the Software.\n"
+        b"This license does not permit use in commercial products.\n",
+    )
+
+    assert text != _LICENSE_TEXT
+    assert _package_license(text) == "unknown"
+
+
+def test_mit_text_with_terms_hidden_on_a_copyright_line_is_not_mit() -> None:
+    text = _LICENSE_TEXT.replace(
+        b"Copyright (c) 2026 Tom\n", b"Copyright (c) 2026 Tom. Free for educational use.\n"
+    )
+
+    assert _package_license(text) == "unknown"
+
+
+def test_mit_text_with_a_different_copyright_holder_and_heading_markers_is_mit() -> None:
+    text = _LICENSE_TEXT.replace(b"MIT License", b"# MIT License").replace(b"Tom", b"Acme & Co.")
+
+    assert _package_license(text) == "MIT"
+
+
+@pytest.mark.parametrize(
+    "name", ["license.md", "LICENCE.md", "LICENSE.MD", "COPYING.MD", "License.rst", "licence"]
+)
+def test_license_files_with_other_casing_and_extensions_are_classified(name: str) -> None:
+    assert _package_license(_LICENSE_TEXT, name=name) == "MIT"
+    assert _package_license(_GPL_TEXT, name=name) == "unknown"
+    assert _package_license(_LICENSE_TEXT + b"\nDual licensed.\n", name=name) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        b"This package is licensed under the GPLv3.\n",
+        b"Parts are LGPLv2.1 licensed.\n",
+        b"Network use is covered by the AGPLv3.\n",
+        b"Released under GPL2.\n",
+        b"Released under GPL-3.0-only.\n",
+        b"Released under the SSPL.\n",
+        b"Content is CC BY-NC 4.0.\n",
+        b"Free for non-commercial use.\n",
+        b"Free for noncommercial use.\n",
+        b'Licensed with the "Commons Clause" condition.\n',
+    ],
+)
+@pytest.mark.parametrize("name", ["NOTICE", "notice.md", "Notice.txt", "NOTICE.rst"])
+def test_a_notice_naming_another_license_family_makes_the_license_unknown(
+    notice: bytes, name: str
+) -> None:
+    assert _package_license(notice, name=name) == "unknown"
+
+
+def test_a_notice_that_names_a_separate_unbundled_project_keeps_the_repository_license() -> None:
+    notice = (
+        b"# Attribution and terms\n\n## Hyperframes\n\n"
+        b"This package drives the open-source Hyperframes command-line tool, licensed under "
+        b"[Apache License 2.0](https://example.invalid/LICENSE). The tool is **not bundled or "
+        b"redistributed** here. The templates, scripts, tests and references in this package "
+        b"are original work released under the licence of the repository that contains them.\n"
+    )
+
+    assert _package_license(notice, name="NOTICE.md") == "MIT"
+
+
+def test_a_notice_never_decides_the_license() -> None:
+    files = {**_FILES, f"{_PACKAGE}/NOTICE": b"Original notice.\n"}
+    source, _ = _source(_routes(files, license_text=None))
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert descriptor.license == "unknown"
 
 
 def test_a_tampered_repository_license_is_unknown() -> None:

@@ -241,17 +241,23 @@ field of its own. Four facts about this adapter matter operationally:
   from the catalog row, kind `instruction`, no permissions, no
   dependencies) and includes it in the closure; it grants no authority and
   declares no command, so an Armory package is installed as inert files and
-  is never run by Enginery without approval. A package's license is the
-  root license file it ships (any `LICENSE*` or `COPYING*` variant the
-  closure accepts) when it has one, else the repository `LICENSE` detected
-  at the pinned revision — declared metadata only. A shipped file that is
-  unrecognized, ambiguous (dual-licensed or mentioning another license),
-  disagrees with the repository license, or is MIT text with extra terms
-  appended is `unknown`, as is an unreachable repository license, and
-  holds redistribution. A `NOTICE*` file is attribution only and does not
-  decide the license, but one that carries another license's marker (GPL,
-  LGPL, AGPL, MPL, dual-license, "at your option", proprietary, or "all
-  rights reserved" with no permissive grant) makes it `unknown`. Every
+  is never run by Enginery without approval. A package's license is decided
+  by the license files it ships at its root (a name whose stem is `license`,
+  `licence` or `copying`, in any case, with no extension or `.md`, `.txt` or
+  `.rst`) when it has any, else by the repository `LICENSE` at the pinned
+  revision — declared metadata only. A license file is classified only by
+  exact match with a canonical MIT, Apache-2.0 (with or without its
+  appendix), BSD-2-Clause, BSD-3-Clause or ISC text after case-folding,
+  heading-marker removal, copyright-line removal and whitespace collapsing;
+  any other text (inserted or appended terms, carve-outs, dual licensing,
+  other licenses) is `unknown`. Every shipped file must classify to one
+  SPDX id equal to the repository license, else the license is `unknown`,
+  as is an unreachable repository license, and `unknown` holds
+  redistribution. A `NOTICE` file never decides the license, but one that
+  names another license family (GPL, LGPL, AGPL, MPL, SSPL, Creative
+  Commons, non-commercial, Commons Clause, proprietary, dual licensing, "at
+  your option") or reserves all rights without a permissive grant makes it
+  `unknown`. Every
   fetched file, including the catalog `manifest.yaml` and the repository
   `LICENSE`, is verified against its git blob sha in the pinned tree: a
   mismatched or absent `LICENSE` is `unknown`, and a mismatched
