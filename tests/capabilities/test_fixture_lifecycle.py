@@ -58,6 +58,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator
+from tests.support.capabilities import approvals_for
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "capabilities" / "project"
 PACKAGE = "word-counter"
@@ -130,8 +131,8 @@ def reviewed(tmp_path: Path) -> _Reviewed:
     return _Reviewed(repository, _commit_all(repository, "add the reviewed capability package"))
 
 
-def _copy_fixture(tmp_path: Path) -> Path:
-    destination = tmp_path / "user-packages"
+def _copy_fixture(tmp_path: Path, name: str = "user-packages") -> Path:
+    destination = tmp_path / name
     shutil.copytree(FIXTURE_ROOT, destination)
     return destination
 
@@ -142,7 +143,9 @@ def _resolve_at(
     """Resolve the package as the project source pinned to ``commit``."""
 
     port = GitCapabilitySource(repository=str(repository), revision=commit, package_root=SUBDIR)
-    source = CapabilitySource(kind=SourceKind.PROJECT, label=f"project:{repository}", port=port)
+    source = CapabilitySource(
+        kind=SourceKind.PROJECT, label=f"project:{repository.resolve()}", port=port
+    )
     return CapabilityResolver([source]).resolve_with_files(
         [CapabilityRequest(name=PACKAGE, version=VERSION)], previous_lock=previous_lock
     )
@@ -385,7 +388,7 @@ def test_the_same_package_from_a_user_source_needs_exact_digest_approval(tmp_pat
 
 def test_a_digest_bound_approval_lets_a_user_package_install_and_run(tmp_path: Path) -> None:
     resolved = _resolve_user(_copy_fixture(tmp_path))
-    approvals = ApprovedCapabilities.for_entries(resolved.lock, [PACKAGE])
+    approvals = approvals_for(resolved.lock, [PACKAGE])
 
     install_root, store = _install(resolved, tmp_path, approvals)
 
@@ -407,7 +410,7 @@ def test_an_unknown_license_holds_a_user_package_even_when_approved(tmp_path: Pa
             resolved,
             install_root=tmp_path / "installed",
             capabilities_root=tmp_path / "store",
-            approvals=ApprovedCapabilities.for_entries(resolved.lock, [PACKAGE]),
+            approvals=approvals_for(resolved.lock, [PACKAGE]),
         )
 
     assert not (tmp_path / "store").exists()
@@ -425,7 +428,7 @@ def test_an_approval_is_superseded_when_a_sibling_script_changes(tmp_path: Path)
         [_OPERATOR],
     )
     approved = approved_capabilities(first.lock, evaluator, requesting_principal_id=_RUN.id)
-    assert approved == ApprovedCapabilities.for_entries(first.lock, [PACKAGE])
+    assert approved == approvals_for(first.lock, [PACKAGE])
     _append(_script(root), "# changed after approval\n")
     drifted = _resolve_user(root)
 
@@ -535,6 +538,13 @@ def test_the_documented_operator_smoke_runs_through_the_cli(
     code, _ = cli("preview", request, *base)
     assert code == 0
 
+    # While the install is active, the same closure from a user directory is a conflict.
+    user_packages = _copy_fixture(tmp_path)
+    code, output = cli("install", request, "--user-source", str(user_packages))
+    assert code == 9
+    assert "already recorded" in output
+    assert installed.read_bytes() == installed_bytes
+
     code, output = cli("uninstall", "--json")
     assert code == 0
     document: dict[str, Any] = json.loads(output)
@@ -549,12 +559,25 @@ def test_the_documented_operator_smoke_runs_through_the_cli(
     assert revocation.name == f"{REVOKED_RECORD_PREFIX}{lock_hex}-1.json"
     assert revocation.is_file()
 
-    # A user directory is never the reviewed base: in a fresh workspace the same package is held.
+    # A user directory is never the reviewed base: after the uninstall the same closure is held.
+    closure_digest = build_closure_from_directory(FIXTURE_ROOT / PACKAGE).digest
+    code, output = cli("install", request, "--user-source", str(user_packages))
+    assert code == 5
+    assert f"HOLD {request}: closure {closure_digest} lock " in output
+    assert not installed.exists()
+
+    # Only a user copy whose closure differs from the retained pin is rejected as drift.
+    differing = _copy_fixture(tmp_path, "differing-packages")
+    _append(_script(differing), "# differs\n")
+    code, output = cli("install", request, "--user-source", str(differing))
+    assert code == 3
+    assert "different closure digest" in output
+    assert not installed.exists()
+
+    # In a fresh workspace the same package is held as well.
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     monkeypatch.chdir(fresh)
-    user_packages = _copy_fixture(tmp_path)
-    closure_digest = build_closure_from_directory(FIXTURE_ROOT / PACKAGE).digest
     code, output = cli("install", request, "--user-source", str(user_packages))
     assert code == 5
     assert f"HOLD {request}: closure {closure_digest} lock " in output

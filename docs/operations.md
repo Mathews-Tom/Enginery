@@ -360,11 +360,15 @@ enginery capability preview word-counter@1.0.0 "${CHANGED[@]}"    # exit 3, reje
 enginery capability install word-counter@1.0.0 "${CHANGED[@]}"    # exit 3, installed copy untouched
 enginery capability preview word-counter@1.0.0 "${PIN[@]}"        # exit 0, the pinned commit still serves the original
 
+# A user directory is never the reviewed base. While the install is active the same closure conflicts:
+cp -R "$CHECKOUT/tests/fixtures/capabilities/project" "$WORK/user-packages"
+enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 9, uninstall first
+
 enginery capability uninstall                                      # exit 0
 find .enginery -maxdepth 2                                         # store and lockfile remain
 
-# A user directory is never the reviewed base: in a fresh workspace the same package is held.
-cp -R "$CHECKOUT/tests/fixtures/capabilities/project" "$WORK/user-packages"
+# After the uninstall, and in a fresh workspace, the same package is held:
+enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 5, nothing written
 mkdir "$WORK/fresh" && cd "$WORK/fresh"
 enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 5, nothing written
 ```
@@ -373,11 +377,13 @@ enginery capability install word-counter@1.0.0 --user-source "$WORK/user-package
 `.enginery/capabilities` (the content-addressed store) and
 `.enginery/capabilities.lock.json` as retained; the revocation record is
 `.enginery/installed/.enginery-install-revoked-<lock digest hex>-1.json`. The
-last `install` prints a `HOLD word-counter@1.0.0: closure <digest> lock
+held `install` prints a `HOLD word-counter@1.0.0: closure <digest> lock
 <digest> …` line with the closure and lock digests to approve, and writes
-nothing. In a workspace that already pins `word-counter@1.0.0` the same
-`--user-source` install is not held but resolved against that pin, so a
-user-source copy whose closure differs from it is rejected as drift (exit `3`).
+nothing. The same unmodified `--user-source` copy is held (exit `5`) in a fresh
+workspace and in one where the install was uninstalled, and is a conflict
+(exit `9`, "an install of lock … is already recorded") while an install is
+active. Only a user-source copy whose closure differs from the pinned
+`word-counter@1.0.0` is rejected as drift (exit `3`).
 
 ### Gate G4 operational evidence
 
