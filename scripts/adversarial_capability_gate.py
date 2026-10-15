@@ -8,9 +8,19 @@ symlink escape, path traversal, an unreviewed asset type, an unknown-license
 redistribution hold, an unauthenticated asset without approval, an approval
 superseded after drift, and an uninstall that retains evidence and the
 ledger. Every case builds a complete package closure and attacks the
-resolver, lock, materializer, install, or uninstall around it; each guard it
-exercises has a mutation test (``tests/governance/test_capability_gate.py``)
-proving the case fails when that guard is removed.
+resolver, lock, materializer, install, or uninstall around it.
+
+A hostile closure is served under a digest that vouches for it (a directory
+source with the file on disk, or a source declaring the digest of what it
+serves), so the digest check cannot be what refuses it. Those cases approve
+everything the lock holds, attempt the install, and require both the expected
+refusal and that nothing was written. Approvals are digest-bound: a case that
+needs one builds it for the exact lock, and the unauthenticated and superseded
+cases also present approvals computed for a different lock.
+
+Each guard a case exercises has a mutation test
+(``tests/governance/test_capability_gate.py``) proving the case fails, with
+that case's own message, when the guard is removed.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ import secrets
 import string
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -31,7 +42,8 @@ from enginery.application.adapter_types import AdapterStatus
 from enginery.application.delivery_ports import CapabilityDescriptor, CapabilityListing, PackageFile
 from enginery.capabilities.approval import approved_capabilities, materialize_approval_schema
 from enginery.capabilities import approval as approval_module
-from enginery.capabilities.closure import build_closure
+from enginery.capabilities import install as install_module
+from enginery.capabilities.closure import AssetRecord, build_closure, classify_asset, closure_digest
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
     CapabilityAssetTypeError,
@@ -47,12 +59,17 @@ from enginery.capabilities.errors import (
     CapabilitySymlinkError,
 )
 from enginery.capabilities.install import (
-    REVOKED_RECORD_NAME,
+    REVOKED_RECORD_PREFIX,
     install_lock,
     load_owned_manifest,
     uninstall_install,
 )
-from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock, ProvenanceStatus
+from enginery.capabilities.lock import (
+    NO_APPROVALS,
+    ApprovedCapabilities,
+    CapabilityLock,
+    ProvenanceStatus,
+)
 from enginery.capabilities.manifest import (
     DependencyPin,
     PackageKind,
@@ -64,6 +81,7 @@ from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.serialization import write_lock
 from enginery.capabilities.signature import PinnedKeyring, PinnedPublisherKey, descriptor_verifier
 from enginery.capabilities.sources import CapabilitySource, SourceKind
+from enginery.domain.digests import Digest
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator
@@ -197,6 +215,8 @@ def _source(
 
 class _MultiSource:
     """An in-memory source serving several packages, each with its own descriptor and files."""
+
+    pinned_commit = _PINNED_COMMIT
 
     def __init__(self, *packages: tuple[CapabilityDescriptor, tuple[PackageFile, ...]]) -> None:
         self._packages = {(item[0].name, item[0].version): item for item in packages}
@@ -443,10 +463,13 @@ def _case_reference_drift(rng: random.Random) -> None:
         base = Path(scratch)
         _write_directory(base / "packages", name, files)
         resolved = CapabilityResolver(
-            [_directory_source(base / "packages", SourceKind.PROJECT)]
+            [_directory_source(base / "packages", SourceKind.USER)]
         ).resolve_with_files([_request(name)])
+        approvals = ApprovedCapabilities.for_entries(resolved.lock, [name])
         install_root, store = base / "installed", base / "store"
-        install_lock(resolved, install_root=install_root, capabilities_root=store)
+        install_lock(
+            resolved, install_root=install_root, capabilities_root=store, approvals=approvals
+        )
         entry = resolved.lock.entries[0]
         reference = digest_path(store, entry.digest) / "references" / "notes.md"
         reference.chmod(0o644)
@@ -455,7 +478,9 @@ def _case_reference_drift(rng: random.Random) -> None:
         _expect(CapabilityIntegrityError, lambda: verify_materialized(entry, store))
         _expect(
             CapabilityIntegrityError,
-            lambda: install_lock(resolved, install_root=install_root, capabilities_root=store),
+            lambda: install_lock(
+                resolved, install_root=install_root, capabilities_root=store, approvals=approvals
+            ),
         )
 
 
@@ -506,7 +531,7 @@ def _case_symlink_escape(rng: random.Random) -> None:
 
         _write_directory(base / "clean", name, files)
         resolved = CapabilityResolver(
-            [_directory_source(base / "clean", SourceKind.PROJECT)]
+            [_directory_source(base / "clean", SourceKind.USER)]
         ).resolve_with_files([_request(name)])
         outside, install_root = base / "outside", base / "installed"
         outside.mkdir()
@@ -516,65 +541,157 @@ def _case_symlink_escape(rng: random.Random) -> None:
         _expect(
             CapabilityInstallConflictError,
             lambda: install_lock(
-                resolved, install_root=install_root, capabilities_root=base / "store"
+                resolved,
+                install_root=install_root,
+                capabilities_root=base / "store",
+                approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
             ),
         )
         _assert(not any(outside.iterdir()), "an install wrote through a symlinked destination")
 
 
-def _resolve_served(
-    name: str, descriptor: CapabilityDescriptor, files: tuple[PackageFile, ...]
-) -> CapabilityLock:
-    """Resolve ``name`` from a source that claims ``descriptor`` but serves ``files``."""
+def _resolve_and_install(source: CapabilitySource, name: str, work: Path) -> None:
+    """Resolve ``name`` from ``source`` and install it, approving everything the lock holds.
 
-    source = CapabilitySource(
-        kind=SourceKind.USER, label="user-gate", port=_FakeSource(descriptor, files)
+    With every approval granted, only the closure guards can stop the attack, not the
+    approval requirement.
+    """
+
+    resolved = CapabilityResolver([source]).resolve_with_files([_request(name)])
+    approvals = ApprovedCapabilities.for_entries(
+        resolved.lock, [entry.name for entry in resolved.lock.entries]
     )
-    return CapabilityResolver([source]).resolve([_request(name)])
+    install_lock(
+        resolved,
+        install_root=work / "installed",
+        capabilities_root=work / "store",
+        approvals=approvals,
+    )
+
+
+def _refused(
+    error_type: type[Exception], attack: Callable[[], object], *, written: Path, what: str
+) -> None:
+    """``attack`` must raise ``error_type`` and must leave nothing under ``written``.
+
+    The filesystem is checked before the exception, so with the guard removed a hostile closure
+    that was resolved and installed is reported as what it did, not as a missing exception.
+    """
+
+    raised: Exception | None = None
+    try:
+        attack()
+    except Exception as error:
+        raised = error
+    leftovers = _tree_listing(written)
+    _assert(not leftovers, f"{what} reached the filesystem: {leftovers[:3]}")
+    if raised is None:
+        raise RuntimeError(f"{what} was not refused; expected {error_type.__name__}")
+    if not isinstance(raised, error_type):
+        raise RuntimeError(
+            f"{what} was refused by {type(raised).__name__}, "
+            f"expected {error_type.__name__}: {raised}"
+        )
+
+
+def _closure_digest_including(clean: tuple[PackageFile, ...], hostile: PackageFile) -> Digest:
+    """The closure digest of ``clean`` plus ``hostile``, as a source serving both would declare it.
+
+    The hostile record is built under a safe path and re-pathed afterwards, because constructing
+    it directly is exactly what the path guard refuses.
+    """
+
+    record = AssetRecord(
+        path="references/placeholder.md",
+        kind=classify_asset(hostile.path),
+        digest=Digest.of_bytes(hostile.content),
+        size=len(hostile.content),
+        executable=False,
+    )
+    object.__setattr__(record, "path", hostile.path)
+    return closure_digest([*build_closure(clean).files, record], ())
 
 
 def _case_path_traversal(rng: random.Random) -> None:
-    """Absolute, traversing, backslash, and empty-segment paths never enter a closure."""
+    """A closure whose digest vouches for an unsafe path is never resolved or installed.
+
+    The source declares the digest of what it actually serves, so only path validation stands
+    between the hostile closure and the install. Each attempt must be refused with nothing
+    written, and the install destination guard must refuse the same path on its own.
+    """
 
     name = f"skill-{_token(rng)}"
     clean = _package(name, _token(rng).encode())
-    descriptor = _descriptor(name, clean)
     hostile_paths = (
-        "../escape.md",
-        "references/../../escape.md",
-        "/etc/escape.md",
-        "references\\escape.md",
-        "references//escape.md",
+        f"references/../../../{_token(rng)}.md",
+        f"references//{_token(rng)}.md",
+        f"references/./{_token(rng)}.md",
+        f"references\\{_token(rng)}.md",
     )
-    for hostile in hostile_paths:
-        attack = partial(_resolve_served, name, descriptor, (*clean, PackageFile(hostile, b"x")))
-        _expect(CapabilityPathError, attack)
+    for hostile_path in hostile_paths:
+        hostile = PackageFile(hostile_path, _token(rng).encode())
+        descriptor = replace(
+            _descriptor(name, clean), digest=_closure_digest_including(clean, hostile)
+        )
+        source = _source(descriptor, (*clean, hostile))
+        with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
+            work = Path(scratch)
+            _refused(
+                CapabilityPathError,
+                partial(_resolve_and_install, source, name, work),
+                written=work,
+                what=f"a closure carrying {hostile_path!r}",
+            )
+            _expect(
+                CapabilityPathError,
+                partial(
+                    install_module._guard_destination,
+                    work / "installed",
+                    f"{name}/{hostile_path}",
+                ),
+            )
 
 
 def _case_unreviewed_asset_type(rng: random.Random) -> None:
-    """Files outside the reviewed layout, and executable non-scripts, are refused."""
+    """A package that ships an unreviewed asset type is never resolved or installed.
+
+    The hostile file is really on disk, so the closure the source declares is the closure it
+    serves; only asset classification stands between it and the install.
+    """
 
     name = f"skill-{_token(rng)}"
     clean = _package(name, _token(rng).encode())
-    descriptor = _descriptor(name, clean)
-    unreviewed = (
-        PackageFile("scripts/payload.exe", b"MZ"),
-        PackageFile("bin/helper", b"#!/bin/sh\n", executable=True),
-        PackageFile("references/archive.zip", b"PK"),
-        PackageFile("data/model.pkl", b"pickle"),
-        PackageFile("__pycache__/module.cpython-312.pyc", b"bytecode"),
-    )
-    for extra in unreviewed:
-        attack = partial(_resolve_served, name, descriptor, (*clean, extra))
-        _expect(CapabilityAssetTypeError, attack)
     executable_instruction = tuple(
         PackageFile(item.path, item.content, executable=True) if item.path == "SKILL.md" else item
         for item in clean
     )
-    _expect(
-        CapabilityAssetTypeError,
-        partial(_resolve_served, name, descriptor, executable_instruction),
-    )
+    hostile_closures = [
+        (*clean, PackageFile("scripts/payload.exe", b"MZ")),
+        (*clean, PackageFile("bin/helper", b"#!/bin/sh\n", executable=True)),
+        (*clean, PackageFile("references/archive.zip", b"PK")),
+        (*clean, PackageFile("data/model.pkl", b"pickle")),
+        (*clean, PackageFile("__pycache__/module.cpython-312.pyc", b"bytecode")),
+        executable_instruction,
+    ]
+    for files in hostile_closures:
+        offending = next(item.path for item in files if item not in clean)
+        with (
+            tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as sources,
+            tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch,
+        ):
+            _write_directory(Path(sources), name, files)
+            work = Path(scratch)
+            _refused(
+                CapabilityAssetTypeError,
+                partial(
+                    _resolve_and_install,
+                    _directory_source(Path(sources), SourceKind.USER),
+                    name,
+                    work,
+                ),
+                written=work,
+                what=f"an unreviewed asset {offending!r}",
+            )
 
 
 def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
@@ -595,7 +712,7 @@ def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
                     resolved,
                     install_root=base / "installed",
                     capabilities_root=base / "store",
-                    approved_names=frozenset({name}),
+                    approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
                 ),
             )
             _assert(not (base / "store").exists(), "a held package was materialized")
@@ -615,7 +732,7 @@ def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
                 resolved,
                 install_root=base / "installed",
                 capabilities_root=base / "store",
-                approved_names=frozenset({parent, dependency}),
+                approvals=ApprovedCapabilities.for_entries(resolved.lock, [parent, dependency]),
             ),
         )
 
@@ -626,7 +743,9 @@ def _case_unauthenticated_asset_requires_approval(rng: random.Random) -> None:
     for kind in (SourceKind.USER, SourceKind.GIT, SourceKind.ARMORY):
         name = f"skill-{_token(rng)}"
         files = _package(name, _token(rng).encode(), extra={"scripts/helper.py": b"print(1)\n"})
+        other = _package(name, _token(rng).encode(), extra={"scripts/helper.py": b"print(2)\n"})
         resolved = CapabilityResolver([_served(kind, files)]).resolve_with_files([_request(name)])
+        elsewhere = CapabilityResolver([_served(kind, other)]).resolve([_request(name)])
         entry = resolved.lock.entries[0]
         _assert(
             entry.provenance.status is ProvenanceStatus.UNAUTHENTICATED,
@@ -634,7 +753,12 @@ def _case_unauthenticated_asset_requires_approval(rng: random.Random) -> None:
         )
         with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
             base = Path(scratch)
-            for approved in (frozenset[str](), frozenset({"some-other-package"})):
+            insufficient = (
+                NO_APPROVALS,
+                ApprovedCapabilities.for_entries(resolved.lock, ["some-other-package"]),
+                ApprovedCapabilities.for_entries(elsewhere, [name]),
+            )
+            for approvals in insufficient:
                 _expect(
                     CapabilityApprovalRequiredError,
                     partial(
@@ -642,7 +766,7 @@ def _case_unauthenticated_asset_requires_approval(rng: random.Random) -> None:
                         resolved,
                         install_root=base / "installed",
                         capabilities_root=base / "store",
-                        approved_names=approved,
+                        approvals=approvals,
                     ),
                 )
             _assert(
@@ -671,31 +795,49 @@ def _case_approval_superseded_after_drift(rng: random.Random) -> None:
     )
     registry.record_approval(schema, [_OPERATOR])
 
-    approved = approval_module.approved_capability_names(
+    approved = approval_module.approved_capabilities(
         first.lock, evaluator, requesting_principal_id=_RUN.id
     )
-    superseded = approval_module.approved_capability_names(
+    superseded = approval_module.approved_capabilities(
         second.lock, evaluator, requesting_principal_id=_RUN.id
     )
 
-    _assert(approved == frozenset({name}), "a recorded approval must allow its exact closure")
-    _assert(superseded == frozenset(), "an approval survived a sibling script change")
+    _assert(
+        approved.covers(first.lock.entries[0], first.lock.digest()),
+        "a recorded approval must allow its exact closure",
+    )
+    _assert(
+        not superseded.covers(second.lock.entries[0], second.lock.digest()),
+        "an approval survived a sibling script change",
+    )
     with tempfile.TemporaryDirectory(prefix="enginery-capability-gate-") as scratch:
         base = Path(scratch)
-        _expect(
-            CapabilityApprovalRequiredError,
-            partial(
-                install_lock,
-                second,
-                install_root=base / "installed",
-                capabilities_root=base / "store",
-                approved_names=superseded,
-            ),
-        )
+        for approvals in (superseded, approved):
+            _expect(
+                CapabilityApprovalRequiredError,
+                partial(
+                    install_lock,
+                    second,
+                    install_root=base / "installed",
+                    capabilities_root=base / "store",
+                    approvals=approvals,
+                ),
+            )
+        _assert(not (base / "store").exists(), "a superseded approval materialized the closure")
 
 
 def _tree_listing(root: Path) -> list[str]:
     return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` with its bytes, so a comparison sees a change, not just a loss."""
+
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def _content(path: Path) -> bytes | None:
@@ -708,7 +850,12 @@ def _content(path: Path) -> bytes | None:
 
 
 def _case_uninstall_retains_evidence_and_ledger(rng: random.Random) -> None:
-    """Uninstall removes only owned, unmodified files and revokes authority, nothing else."""
+    """Uninstall removes only owned, unmodified files and revokes authority, nothing else.
+
+    The layout mirrors the CLI: the install root sits beside the content store and the lockfile
+    under one state directory, and the ledger and raw evidence live elsewhere in the workspace.
+    Every retained file is compared byte for byte with what it held before the uninstall.
+    """
 
     name = f"skill-{_token(rng)}"
     files = _package(name, _token(rng).encode(), extra={"scripts/helper.py": b"print(1)\n"})
@@ -716,30 +863,36 @@ def _case_uninstall_retains_evidence_and_ledger(rng: random.Random) -> None:
         base = Path(scratch)
         _write_directory(base / "packages", name, files)
         resolved = CapabilityResolver(
-            [_directory_source(base / "packages", SourceKind.PROJECT)]
+            [_directory_source(base / "packages", SourceKind.USER)]
         ).resolve_with_files([_request(name)])
-        install_root, store = base / "task" / "installed", base / "store"
-        install_lock(resolved, install_root=install_root, capabilities_root=store)
+        state = base / ".enginery"
+        install_root, store = state / "installed", state / "capabilities"
+        lockfile = state / "capabilities.lock.json"
+        install_lock(
+            resolved,
+            install_root=install_root,
+            capabilities_root=store,
+            approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
+        )
+        write_lock(resolved.lock, lockfile)
         ledger = base / "ledger.db"
         ledger.write_bytes(b"ledger bytes")
         raw_evidence = base / "evidence" / "raw.bin"
         raw_evidence.parent.mkdir()
         raw_evidence.write_bytes(b"raw evidence bytes")
-        lockfile = base / "capabilities.lock.json"
-        write_lock(resolved.lock, lockfile)
         foreign = install_root / name / "operator-notes.txt"
         foreign.write_bytes(b"operator notes")
         edited = install_root / name / "scripts" / "helper.py"
         edited.chmod(0o644)
         edited.write_bytes(b"print('edited locally')\n")
-        store_before = _tree_listing(store)
+        lockfile_before, store_before = lockfile.read_bytes(), _snapshot(store)
 
         report = uninstall_install(install_root)
 
         _assert(_content(ledger) == b"ledger bytes", "uninstall touched the ledger")
         _assert(_content(raw_evidence) == b"raw evidence bytes", "uninstall touched evidence")
-        _assert(lockfile.is_file(), "uninstall deleted the lockfile")
-        _assert(_tree_listing(store) == store_before, "uninstall changed the content store")
+        _assert(_content(lockfile) == lockfile_before, "uninstall changed the lockfile")
+        _assert(_snapshot(store) == store_before, "uninstall changed the content store")
         _assert(_content(foreign) == b"operator notes", "uninstall deleted a foreign file")
         _assert(
             _content(edited) == b"print('edited locally')\n",
@@ -750,9 +903,12 @@ def _case_uninstall_retains_evidence_and_ledger(rng: random.Random) -> None:
             removed_unmodified and not (install_root / name / "SKILL.md").exists(),
             "uninstall did not remove an owned, unmodified file",
         )
+        digest = resolved.lock.digest().hex_value
+        revocation = install_root / f"{REVOKED_RECORD_PREFIX}{digest}-1.json"
         _assert(
             load_owned_manifest(install_root) is None
-            and (install_root / REVOKED_RECORD_NAME).is_file(),
+            and report.revocation_record == revocation
+            and revocation.is_file(),
             "uninstall did not revoke the install record",
         )
         _expect(CapabilityNotInstalledError, lambda: uninstall_install(install_root))
