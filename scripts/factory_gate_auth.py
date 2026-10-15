@@ -50,6 +50,7 @@ from enginery.domain.custody import (
     AuthCustodyReceipt,
     CustodyHost,
     build_custody_receipt,
+    custody_receipt_matches_host,
 )
 from enginery.domain.errors import EngineryError
 from enginery.domain.execution_selection import (
@@ -505,13 +506,14 @@ def load_live_custody(
             raw = handle.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise GateHoldError("the custody receipt is larger than 1 MiB")
-        receipt = AuthCustodyReceipt.from_state(json.loads(raw.decode("utf-8")))
+        state = json.loads(raw.decode("utf-8"))
+        receipt = AuthCustodyReceipt.from_state(state)
     except GateHoldError:
         raise
     except (OSError, ValueError, EngineryError) as error:
         raise GateHoldError(f"the custody receipt cannot be used: {error}") from error
     gate_host = _custody_host() if host is None else host
-    if receipt.host is not gate_host:
+    if not custody_receipt_matches_host(state, gate_host):
         raise GateHoldError(
             f"the custody receipt was made for {receipt.host.value}, but this gate runs on "
             f"{gate_host.value}; make one on this host"
