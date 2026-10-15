@@ -1,0 +1,37 @@
+{
+  "command": {
+    "argv": [
+      "python3",
+      "scripts/count_words.py"
+    ],
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "maxLength": 10000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "max_output_bytes": 4096,
+    "timeout_seconds": 5
+  },
+  "compatibility": {
+    "adapter_api_max": null,
+    "adapter_api_min": 1,
+    "platforms": []
+  },
+  "dependencies": [],
+  "kind": "command",
+  "license": "MIT",
+  "name": "word-counter",
+  "permissions": [
+    "process.execute"
+  ],
+  "schema_version": 1,
+  "version": "1.0.0"
+}

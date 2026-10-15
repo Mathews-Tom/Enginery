@@ -321,6 +321,40 @@ ledger, or any evidence or raw artifact, and it reports what it removed and
 what it retained (modified files, the store, and the lockfile are listed as
 retained).
 
+#### Operator smoke with the committed fixture package
+
+`tests/fixtures/capabilities/project/word-counter` is a reviewed multi-file
+package (manifest, instruction, reference, and script) that needs no network.
+Run it from a scratch copy, never from the checkout:
+
+```bash
+CHECKOUT=/path/to/enginery
+enginery() { uv run --project "$CHECKOUT" enginery "$@"; }
+WORK=$(mktemp -d)
+cp -R "$CHECKOUT/tests/fixtures/capabilities/project" "$WORK/capability-packages"
+cd "$WORK"
+
+enginery capability inspect word-counter@1.0.0 --project-source capability-packages    # exit 0, no files written
+enginery capability preview word-counter@1.0.0 --project-source capability-packages    # exit 0, lists the four files
+enginery capability install word-counter@1.0.0 --project-source capability-packages    # exit 0
+enginery capability lock --check                                                       # exit 0, "no drift"
+
+# Change a script the package references, in the source:
+echo '# changed' >> capability-packages/word-counter/scripts/count_words.py
+enginery capability preview word-counter@1.0.0 --project-source capability-packages    # exit 3, rejected as drift
+enginery capability install word-counter@1.0.0 --project-source capability-packages    # exit 3, installed copy untouched
+
+enginery capability uninstall                                                          # exit 0
+find .enginery -maxdepth 2                                                             # store and lockfile remain
+```
+
+`uninstall` lists the four owned files as removed and
+`.enginery/capabilities` (the content-addressed store) and
+`.enginery/capabilities.lock.json` as retained; the revocation record is
+`.enginery/installed/.enginery-install-revoked.json`. Pointing the same
+package at `--user-source` instead of `--project-source` makes `install`
+hold with exit `5` and print the closure and lock digests to approve.
+
 ### Gate G4 operational evidence
 
 G4 is a measurement gate, not a self-improvement capability. A failing or unmeasured status blocks the later self-improvement work; it never creates a pass through a local flag, manually edited ledger row, or a command transcript.
