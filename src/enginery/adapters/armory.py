@@ -22,9 +22,15 @@ Armory packages carry no Enginery manifest. For one that does not ship a
 (identity from the catalog row, kind ``instruction``, no permissions, no
 dependencies, no license) and includes it in the closure; it grants no
 authority and declares no command, so an Armory package is installed as
-inert files and is never executed by Enginery. The package license is the
-repository ``LICENSE`` detected at the pinned revision, reported as declared
-metadata only.
+inert files. Armory content is unauthenticated: it is never executed on
+discovery and never without exact-digest human approval. A package's
+license is the license file it ships at its root (``LICENSE``,
+``LICENSE.md``, ``LICENSE.txt``, ``COPYING``, ``NOTICE``) when it carries
+one, else the repository ``LICENSE`` at the pinned revision. A shipped file
+that is unrecognized, ambiguous (dual-licensed or merely mentioning another
+license), or disagrees with the repository license is reported as
+``unknown``. Every fetched file is verified against the git blob sha in the
+pinned tree. All licenses are declared metadata only.
 
 Armory is never a runtime dependency of the engine: importing this module
 needs only the standard library, and every method that reaches the
@@ -42,12 +48,14 @@ requires interactive exact-digest human approval before it can execute.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from urllib.parse import quote
 
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
@@ -61,10 +69,15 @@ from enginery.application.delivery_ports import CapabilityDescriptor, PackageFil
 from enginery.capabilities.closure import (
     MAX_FILE_BYTES,
     MAX_FILE_COUNT,
+    MAX_TOTAL_BYTES,
     build_closure,
     normalize_path,
 )
-from enginery.capabilities.errors import CapabilityClosureLimitError, CapabilitySymlinkError
+from enginery.capabilities.errors import (
+    CapabilityClosureLimitError,
+    CapabilityIntegrityError,
+    CapabilitySymlinkError,
+)
 from enginery.capabilities.manifest import (
     MANIFEST_FILE_NAME,
     PackageKind,
@@ -109,6 +122,7 @@ class _TreeEntry:
     mode: str
     kind: str
     size: int
+    sha: str
 
 
 def _default_fetcher(url: str, timeout: float) -> bytes:
@@ -117,13 +131,45 @@ def _default_fetcher(url: str, timeout: float) -> bytes:
         return bytes(response.read())
 
 
+_LICENSE_FILE_NAMES = frozenset({"LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "NOTICE"})
+_UNKNOWN_LICENSE = "unknown"
+_HEADER_WINDOW = 300
+_OTHER_LICENSE_MARKERS = (
+    "gnu general public license",
+    "gnu lesser general public license",
+    "gnu affero general public license",
+    "mozilla public license",
+    "dual licen",
+    "dual-licen",
+    "at your option",
+    "choose either",
+)
+_MIT_GRANT = "permission is hereby granted, free of charge"
+_APACHE_HEADER = "apache license version 2.0, january 2004"
+
+
 def _detect_spdx_license(text: str) -> str:
-    head = text[:400]
-    if "MIT License" in head:
+    """Classify one license text by its distinctive header; anything else is ``unknown``.
+
+    A text that also carries another license family's marker (a dual license
+    or a mere mention) is ambiguous and is never classified.
+    """
+
+    normalized = " ".join(text.lower().split())
+    if any(marker in normalized for marker in _OTHER_LICENSE_MARKERS):
+        return _UNKNOWN_LICENSE
+    head = normalized[:_HEADER_WINDOW]
+    mit = head.startswith("mit license") and _MIT_GRANT in normalized
+    apache = _APACHE_HEADER in head and "terms and conditions for use" in normalized
+    if mit and not apache:
         return "MIT"
-    if "Apache License" in head and "Version 2.0" in head:
+    if apache and not mit:
         return "Apache-2.0"
-    return "unknown"
+    return _UNKNOWN_LICENSE
+
+
+def _git_blob_sha(content: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(content) + content, usedforsecurity=False).hexdigest()
 
 
 def _parse_manifest(document: object) -> tuple[ArmoryPackageEntry, ...]:
@@ -257,7 +303,7 @@ class ArmoryCapabilitySource:
             digest=closure.digest,
             provenance=_PROVENANCE_LABEL,
             revision=self._pinned_revision(),
-            license=self._license(),
+            license=self._package_license(files),
         )
         self._package_cache[key] = (descriptor, files)
         return descriptor, files
@@ -278,7 +324,7 @@ class ArmoryCapabilitySource:
             raise CapabilityClosureLimitError(
                 "package has too many files", details={"name": entry.name, "limit": MAX_FILE_COUNT}
             )
-        files: list[PackageFile] = []
+        total = 0
         for item in selected:
             if item.mode not in _REGULAR_MODES or item.kind != "blob":
                 raise CapabilitySymlinkError(
@@ -290,10 +336,23 @@ class ArmoryCapabilitySource:
                     "package file is too large",
                     details={"path": item.path, "limit": MAX_FILE_BYTES},
                 )
+            total += item.size
+        if total > MAX_TOTAL_BYTES:
+            raise CapabilityClosureLimitError(
+                "package is too large", details={"name": entry.name, "limit": MAX_TOTAL_BYTES}
+            )
+        files: list[PackageFile] = []
+        for item in selected:
+            content = self._fetch_bytes(self._raw_url(item.path))
+            if _git_blob_sha(content) != item.sha:
+                raise CapabilityIntegrityError(
+                    "fetched Armory file does not match the pinned tree",
+                    details={"name": entry.name, "path": item.path},
+                )
             files.append(
                 PackageFile(
                     path=item.path[len(prefix) :],
-                    content=self._fetch_bytes(self._raw_url(item.path)),
+                    content=content,
                     executable=_REGULAR_MODES[item.mode],
                 )
             )
@@ -327,7 +386,10 @@ class ArmoryCapabilitySource:
 
     def _raw_url(self, path: str) -> str:
         revision = self._pinned_revision()
-        return f"https://raw.githubusercontent.com/{self._repository}/{revision}/{path}"
+        return (
+            f"https://raw.githubusercontent.com/{self._repository}/{revision}/"
+            f"{quote(path, safe='/')}"
+        )
 
     def _tree(self) -> dict[str, _TreeEntry]:
         if self._tree_cache is not None:
@@ -349,14 +411,31 @@ class ArmoryCapabilitySource:
             if not isinstance(item, dict) or item.get("type") == "tree":
                 continue
             path, mode, kind = item.get("path"), item.get("mode"), item.get("type")
-            size = item.get("size", 0)
+            size, sha = item.get("size", 0), item.get("sha")
             if not isinstance(path, str) or not isinstance(mode, str) or not isinstance(kind, str):
                 raise MissingPrerequisiteError("Armory file listing has a malformed entry")
             if not isinstance(size, int) or isinstance(size, bool):
                 raise MissingPrerequisiteError("Armory file listing has a malformed size")
-            tree[path] = _TreeEntry(path=path, mode=mode, kind=kind, size=size)
+            if not isinstance(sha, str) or not _SHA_PATTERN.fullmatch(sha):
+                raise MissingPrerequisiteError("Armory file listing has a malformed blob sha")
+            tree[path] = _TreeEntry(path=path, mode=mode, kind=kind, size=size, sha=sha)
         self._tree_cache = tree
         return tree
+
+    def _package_license(self, files: Sequence[PackageFile]) -> str:
+        """The package's own license file when it ships one, else the repository license."""
+
+        shipped = [item for item in files if item.path in _LICENSE_FILE_NAMES]
+        repository = self._license()
+        if not shipped:
+            return repository
+        found = {
+            _detect_spdx_license(item.content.decode("utf-8", errors="replace")) for item in shipped
+        }
+        if len(found) != 1:
+            return _UNKNOWN_LICENSE
+        (package_license,) = found
+        return package_license if package_license == repository else _UNKNOWN_LICENSE
 
     def _license(self) -> str:
         if self._license_cache is not None:
@@ -364,7 +443,7 @@ class ArmoryCapabilitySource:
         try:
             text = self._fetch_bytes(self._raw_url("LICENSE")).decode("utf-8", errors="replace")
         except TransientProviderFailureError:
-            self._license_cache = "unknown"
+            self._license_cache = _UNKNOWN_LICENSE
         else:
             self._license_cache = _detect_spdx_license(text)
         return self._license_cache

@@ -56,7 +56,17 @@ MAX_PATH_DEPTH = 12
 
 _DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 _LICENSE_FILE_NAMES = frozenset(
-    {"LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md", "NOTICE.txt"}
+    {
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "COPYING",
+        "COPYING.md",
+        "COPYING.txt",
+        "NOTICE",
+        "NOTICE.md",
+        "NOTICE.txt",
+    }
 )
 _SCRIPT_EXTENSIONS = frozenset({".py", ".sh", ".js", ".mjs", ".ts"})
 _REFERENCE_EXTENSIONS = frozenset({".md", ".txt", ".rst"})

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -11,10 +13,12 @@ from tests.support.capabilities import descriptor_for, package_files
 from enginery.adapters.armory import ArmoryCapabilitySource
 from enginery.adapters.local import LocalCapabilitySource
 from enginery.application.adapter_types import AdapterAvailability
-from enginery.capabilities.closure import build_closure
+from enginery.capabilities.closure import MAX_FILE_BYTES, build_closure
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
     CapabilityAssetTypeError,
+    CapabilityClosureLimitError,
+    CapabilityIntegrityError,
     CapabilityLicenseHoldError,
     CapabilityPathError,
     CapabilitySymlinkError,
@@ -33,7 +37,12 @@ _SHA = "0123456789abcdef0123456789abcdef01234567"
 _COMMIT_URL = f"https://api.github.com/repos/{_REPO}/commits/main"
 _TREE_URL = f"https://api.github.com/repos/{_REPO}/git/trees/{_SHA}?recursive=1"
 _PACKAGE = "skills/adr-writer"
-_LICENSE_TEXT = b"MIT License\n\nCopyright (c) 2026 Tom\n"
+_LICENSE_TEXT = (
+    b"MIT License\n\nCopyright (c) 2026 Tom\n\n"
+    b"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+    b"of this software and associated documentation files, to deal\n"
+    b"in the Software without restriction.\n"
+)
 _FILES: dict[str, bytes] = {
     f"{_PACKAGE}/SKILL.md": b"# ADR writer skill body",
     f"{_PACKAGE}/references/adr-template.md": b"template",
@@ -45,7 +54,7 @@ _FILES: dict[str, bytes] = {
 
 
 def _raw(path: str) -> str:
-    return f"https://raw.githubusercontent.com/{_REPO}/{_SHA}/{path}"
+    return f"https://raw.githubusercontent.com/{_REPO}/{_SHA}/{quote(path, safe='/')}"
 
 
 def _manifest_yaml(path: str = _PACKAGE) -> bytes:
@@ -60,12 +69,27 @@ def _manifest_yaml(path: str = _PACKAGE) -> bytes:
     return yaml.safe_dump(document).encode("utf-8")
 
 
+def _blob_sha(content: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(content) + content, usedforsecurity=False).hexdigest()
+
+
 def _tree_json(
-    files: dict[str, bytes], *, modes: dict[str, str] | None = None, truncated: bool = False
+    files: dict[str, bytes],
+    *,
+    modes: dict[str, str] | None = None,
+    sizes: dict[str, int] | None = None,
+    truncated: bool = False,
 ) -> bytes:
     modes = modes or {}
+    sizes = sizes or {}
     entries = [
-        {"path": path, "mode": modes.get(path, "100644"), "type": "blob", "size": len(content)}
+        {
+            "path": path,
+            "mode": modes.get(path, "100644"),
+            "type": "blob",
+            "size": sizes.get(path, len(content)),
+            "sha": _blob_sha(content),
+        }
         for path, content in sorted(files.items())
     ]
     entries.append({"path": "skills", "mode": "040000", "type": "tree", "sha": "x"})
@@ -314,7 +338,7 @@ def test_a_submodule_in_the_pinned_tree_is_rejected() -> None:
     routes = _routes()
     tree = json.loads(routes[_TREE_URL])
     tree["tree"].append(
-        {"path": f"{_PACKAGE}/vendored", "mode": "160000", "type": "commit", "sha": "x"}
+        {"path": f"{_PACKAGE}/vendored", "mode": "160000", "type": "commit", "sha": "a" * 40}
     )
     routes[_TREE_URL] = json.dumps(tree).encode("utf-8")
     source, _ = _source(routes)
@@ -426,6 +450,90 @@ def test_armory_package_with_an_unknown_license_is_held_even_when_approved(tmp_p
             root=tmp_path,
             approved_names=frozenset({"adr-writer"}),
         )
+
+
+_APACHE_TEXT = (
+    b"                                 Apache License\n"
+    b"                           Version 2.0, January 2004\n"
+    b"                        http://www.apache.org/licenses/\n\n"
+    b"   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n"
+)
+_GPL_TEXT = (
+    b"                    GNU GENERAL PUBLIC LICENSE\n"
+    b"                       Version 3, 29 June 2007\n"
+)
+
+
+def _package_license(license_text: bytes, *, name: str = "LICENSE") -> str | None:
+    files = {**_FILES, f"{_PACKAGE}/{name}": license_text}
+    source, _ = _source(_routes(files))
+    descriptor = source.resolve("adr-writer", "1.1.1")
+    assert descriptor is not None
+    return descriptor.license
+
+
+def test_a_package_shipping_an_apache_license_inside_an_mit_repository_is_not_mit() -> None:
+    assert _package_license(_APACHE_TEXT, name="LICENSE.txt") == "unknown"
+
+
+def test_a_package_shipping_a_gpl_license_is_held_as_unknown() -> None:
+    assert _package_license(_GPL_TEXT) == "unknown"
+
+
+def test_a_package_shipping_an_unrecognized_license_text_is_unknown() -> None:
+    assert _package_license(b"Do what you like, mostly.\n") == "unknown"
+
+
+def test_a_package_license_that_only_mentions_a_known_name_is_unknown() -> None:
+    text = b"See the MIT License for details; this package is also GNU General Public License.\n"
+
+    assert _package_license(text) == "unknown"
+
+
+def test_a_package_license_agreeing_with_the_repository_is_reported() -> None:
+    assert _package_license(_LICENSE_TEXT, name="COPYING") == "MIT"
+
+
+def test_a_package_without_a_license_file_uses_the_repository_license() -> None:
+    source, _ = _source()
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert descriptor.license == "MIT"
+
+
+def test_a_fetched_file_that_does_not_match_the_pinned_tree_sha_is_rejected() -> None:
+    routes = _routes()
+    routes[_raw(f"{_PACKAGE}/SKILL.md")] = b"# substituted content of the same kind"
+    source, _ = _source(routes)
+
+    with pytest.raises(CapabilityIntegrityError):
+        source.resolve("adr-writer", "1.1.1")
+
+
+def test_path_segments_are_url_quoted_when_fetching() -> None:
+    files = {**_FILES, f"{_PACKAGE}/references/odd name?x#y.md": b"odd"}
+    source, fetcher = _source(_routes(files))
+
+    descriptor = source.resolve("adr-writer", "1.1.1")
+
+    assert descriptor is not None
+    assert any(url.endswith("/references/odd%20name%3Fx%23y.md") for url in fetcher.urls)
+    assert not any("?x#y" in url for url in fetcher.urls)
+
+
+def test_a_package_over_the_total_size_limit_is_rejected_before_any_blob_is_fetched() -> None:
+    extra = {f"{_PACKAGE}/data/part{index}.md": b"x" for index in range(9)}
+    files = {**_FILES, **extra}
+    routes = _routes(files)
+    routes[_TREE_URL] = _tree_json(files, sizes=dict.fromkeys(extra, MAX_FILE_BYTES))
+    source, fetcher = _source(routes)
+
+    with pytest.raises(CapabilityClosureLimitError):
+        source.resolve("adr-writer", "1.1.1")
+
+    assert not any("/data/" in url or "SKILL.md" in url for url in fetcher.urls)
 
 
 def test_engine_resolves_capabilities_without_armory_installed() -> None:

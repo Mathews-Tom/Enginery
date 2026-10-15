@@ -241,9 +241,14 @@ field of its own. Four facts about this adapter matter operationally:
   from the catalog row, kind `instruction`, no permissions, no
   dependencies) and includes it in the closure; it grants no authority and
   declares no command, so an Armory package is installed as inert files and
-  is never run by Enginery. The license is the repository `LICENSE`
-  detected at the pinned revision — declared metadata only; an unrecognized
-  or unreachable license is `unknown` and holds redistribution.
+  is never run by Enginery without approval. A package's license is the
+  root license file it ships (`LICENSE`, `LICENSE.md`, `LICENSE.txt`,
+  `COPYING`, `NOTICE`) when it has one, else the repository `LICENSE`
+  detected at the pinned revision — declared metadata only. A shipped file
+  that is unrecognized, ambiguous (dual-licensed or mentioning another
+  license), or disagrees with the repository license is `unknown`, as is
+  an unreachable repository license, and holds redistribution. Every
+  fetched file is verified against its git blob sha in the pinned tree.
 - **Every capability it returns is `provenance="armory"`, which
   `CapabilityResolver` classifies as `unauthenticated`.** Content
   addressing (Enginery's own fetch-and-hash step) is not the same as
