@@ -56,8 +56,27 @@ MAX_PATH_DEPTH = 12
 
 _DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 _LICENSE_STEMS = frozenset({"license", "licence", "copying", "notice"})
-_LICENSE_WORDS = ("licen", "copying", "notice", "unlicense", "copyright")
-_LICENSE_EXTENSIONS = frozenset({"", ".md", ".txt", ".rst"})
+_LICENSE_WORDS = (
+    "licen",
+    "copying",
+    "notice",
+    "unlicense",
+    "copyright",
+    "eula",
+    "legal",
+    "terms",
+    "patent",
+)
+_TEXT_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
+_LICENSE_EXTENSIONS = frozenset({"", *_TEXT_EXTENSIONS})
+_FORBIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
+_NON_TEXT_SUFFIXES = frozenset(
+    {
+        *("sh", "bash", "zsh", "py", "pth", "pyc", "js", "mjs", "cjs", "ts", "rb", "pl", "php"),
+        *("bat", "cmd", "exe", "dll", "so", "dylib", "bin", "jar", "class", "wasm", "lib", "o"),
+        *("a", "ps", "com", "scr", "app", "dat"),
+    }
+)
 _SCRIPT_EXTENSIONS = frozenset({".py", ".sh", ".js", ".mjs", ".ts"})
 _REFERENCE_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
 _DATA_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".csv", ".toml", ".txt"})
@@ -108,6 +127,8 @@ def _path_problem(raw: str) -> str | None:
         return "path is too deep"
     if any(part in {"", ".", ".."} for part in parts):
         return "path has an empty, '.', or '..' segment"
+    if any(unicodedata.category(char) in _FORBIDDEN_CATEGORIES for char in raw):
+        return "path contains format or separator characters"
     return None
 
 
@@ -133,9 +154,10 @@ def is_license_like_name(path: str) -> bool:
     """Whether a root file is named like a license, notice or copyright file.
 
     After NFKC normalization and case folding, the name contains ``licen``,
-    ``copying``, ``notice``, ``unlicense`` or ``copyright``, or its stem (split
-    on the first ``.``, ``-`` or ``_``) is one of those words. Every such file
-    is metadata and decides the package license: a canonical name is
+    ``copying``, ``notice``, ``unlicense``, ``copyright``, ``eula``, ``legal``,
+    ``terms`` or ``patent``, or the normalized name is not ASCII (fails
+    closed). Such a file is accepted only with a plain text shape and UTF-8
+    content, is metadata, and decides the package license: a canonical name is
     classified by its text, any other name only counts when its text equals a
     canonical template exactly, and otherwise the license is ``unknown``.
     """
@@ -143,8 +165,9 @@ def is_license_like_name(path: str) -> bool:
     if "/" in path:
         return False
     name = _folded(path)
-    stem = re.split(r"[.\-_]", name, maxsplit=1)[0]
-    return stem in _LICENSE_WORDS or any(word in name for word in _LICENSE_WORDS)
+    if not name.isascii():
+        return True
+    return any(word in name for word in _LICENSE_WORDS)
 
 
 def is_notice_file_name(path: str) -> bool:
@@ -153,18 +176,21 @@ def is_notice_file_name(path: str) -> bool:
     return is_license_file_name(path) and _folded(path).partition(".")[0] == "notice"
 
 
-def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
+def classify_asset(
+    path: str, *, executable: bool = False, content: bytes | None = None
+) -> AssetKind:
     """Map a normalized path to its reviewed asset kind, or reject it.
 
-    The mapping is by location and extension only (never by content), and
-    deliberately small: a file outside these shapes is an *unreviewed asset
-    type* and is refused rather than hashed and shipped.
+    The mapping is by location and extension (and, for a root license-like
+    file, that its content is UTF-8 text), and deliberately small: a file
+    outside these shapes is an *unreviewed asset type* and is refused rather
+    than hashed and shipped.
     """
 
     parts = path.split("/")
     name = parts[-1]
     suffix = posixpath.splitext(name)[1].lower()
-    kind = _kind_for(parts, name, suffix)
+    kind = _kind_for(parts, name, suffix, content)
     if kind is None:
         raise CapabilityAssetTypeError(
             "package contains an unreviewed asset type", details={"path": path}
@@ -176,9 +202,13 @@ def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
     return kind
 
 
-def _kind_for(parts: list[str], name: str, suffix: str) -> AssetKind | None:
+def _kind_for(parts: list[str], name: str, suffix: str, content: bytes | None) -> AssetKind | None:
     if len(parts) == 1:
-        if name == MANIFEST_FILE_NAME or is_license_file_name(name) or is_license_like_name(name):
+        if name == MANIFEST_FILE_NAME:
+            return AssetKind.METADATA
+        if is_license_file_name(name) or is_license_like_name(name):
+            if not _license_name_shape_ok(name) or not _decodes_as_utf8(content):
+                return None
             return AssetKind.METADATA
         return AssetKind.INSTRUCTION if suffix == ".md" else None
     top = parts[0]
@@ -191,6 +221,35 @@ def _kind_for(parts: list[str], name: str, suffix: str) -> AssetKind | None:
     if top in _DATA_DIRECTORIES and suffix in _DATA_EXTENSIONS:
         return AssetKind.DATA
     return None
+
+
+def _decodes_as_utf8(content: bytes | None) -> bool:
+    if content is None:
+        return True
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _license_name_shape_ok(name: str) -> bool:
+    """Whether a license-like root name is plain text shaped.
+
+    After NFKC normalization and case folding and after dropping one ``.md``,
+    ``.txt`` or ``.rst`` extension, the name is ASCII letters in one to three
+    words joined by ``.``, ``-`` or ``_``; a final word after a separator is at
+    most ten letters and not an executable, binary or script extension.
+    """
+
+    folded = _folded(name)
+    core, dot, ext = folded.rpartition(".")
+    if dot and f".{ext}" in _TEXT_EXTENSIONS:
+        folded = core
+    words = re.split(r"[.\-_]", folded)
+    if not 1 <= len(words) <= 3 or not all(re.fullmatch(r"[a-z]+", word) for word in words):
+        return False
+    return len(words) == 1 or (len(words[-1]) <= 10 and words[-1] not in _NON_TEXT_SUFFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +368,7 @@ def build_closure(files: Iterable[PackageFile]) -> PackageClosure:
             raise CapabilityClosureLimitError(
                 "package is too large", details={"limit": MAX_TOTAL_BYTES}
             )
-        kind = classify_asset(path, executable=item.executable)
+        kind = classify_asset(path, executable=item.executable, content=item.content)
         records.append(
             AssetRecord(
                 path=path,

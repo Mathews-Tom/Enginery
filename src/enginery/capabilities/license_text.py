@@ -1,4 +1,4 @@
-"""Exact-template license classification for Armory packages.
+"""Exact-template license classification for capability packages.
 
 A license file is classified only by equality with a canonical license text
 after normalization: case-folded, markdown heading markers removed, strictly
@@ -6,18 +6,22 @@ shaped copyright lines in the leading block (and the Apache appendix's
 ``Copyright [yyyy] [name of copyright owner]`` line) removed, whitespace collapsed.
 A removable copyright line is ``copyright``, ``(c)`` or ``©`` (optionally
 followed by ``(c)``/``©``), a year, year range or list, or ``[yyyy]``, and an
-optional holder of letters, digits, spaces and ``.,'&-`` (at most 80
-characters, no sentence break, no terms word, no other-license marker); the
-leading block ends at the first line longer than 40 characters that is not
-such a copyright line. Copyright lines anywhere else stay and break the match.
+optional holder of one to five name-like tokens (letters, digits, ``.``, ``'``,
+``-``, ``&``, ``and``), optionally followed by ``, `` and exactly one of a
+closed list of suffixes (``inc``, ``ltd``, ``llc``, ``gmbh``, ``corp``, ``co.``,
+``pbc``, ``and contributors``, ``et al.``) and a final ``.``; no other
+commas, dashes between words, colons or semicolons. The leading block ends at
+the first non-blank line that is neither a license title nor such a copyright
+line. Copyright lines anywhere else stay and break the match.
 Text with Unicode format characters, line or paragraph separators, control
 characters, HTML comments or any non-ASCII character other than ``©`` is
 ``unknown``, as are inserted terms, appended terms, carve-outs, dual
 licensing, and every other license text.
 ``NOTICE`` files never decide a license; they only make it ``unknown`` when
-they carry another license's marker (a GPL, MPL, SSPL, Creative Commons,
-BUSL, Elastic, EPL, PolyForm or OSL family name, copyleft, non-commercial
-terms, a proprietary or dual-license statement) or reserve all rights.
+they carry another license's marker (a GPL, AGPL, MPL, SSPL, Creative Commons,
+BUSL, Elastic, EPL, PolyForm or OSL family name, copyleft, share-alike,
+non-commercial terms, a proprietary or dual-license statement), reserve all
+rights, or contain suspect (hidden or non-ASCII) characters.
 """
 
 from __future__ import annotations
@@ -28,20 +32,21 @@ UNKNOWN_LICENSE = "unknown"
 
 _APACHE_APPENDIX_COPYRIGHT = "copyright [yyyy] [name of copyright owner]"
 # A removable copyright line is a bare attribution: a prefix, a year (range or list) or
-# ``[yyyy]``, then an optional holder of letters, digits, spaces and ``.,'&-``.
+# ``[yyyy]``, then an optional holder of one to five name-like tokens (letters, digits,
+# ``.``, ``'``, ``-``, ``&``, ``and``), then optionally ``, `` and one closed suffix.
+_HOLDER_TOKEN = r"(?:[a-z0-9][a-z0-9.'-]*|&)"
 _COPYRIGHT_LINE = re.compile(
-    r"^(?:copyright|\(c\)|\u00a9)(?:\s*(?:\(c\)|\u00a9))?\s+"
+    r"^(?:copyright(?:\s*(?:\(c\)|\u00a9))?|\(c\)|\u00a9)\s+"
     r"(?:\d{4}(?:\s*[-,]\s*\d{4})*|\[yyyy\])"
-    r"(?:[\s,.-][a-z0-9 .,'&-]*)?$"
+    rf"(?:,?\s+{_HOLDER_TOKEN}(?:\s+{_HOLDER_TOKEN}){{0,4}})?"
+    r"(?:,\s+(?:inc\.?|ltd\.?|llc|gmbh|corp\.?|co\.|pbc|and contributors|et al\.))?"
+    r"\.?$"
 )
-_SENTENCE_BREAK = re.compile(r"[.!?]\s+\S")
 _TERMS_WORDS = re.compile(
     r"\b(?:may|must|shall|should|not|no|only|prohibited|forbidden|commercial|without|except|"
     r"unless|provided|free|use|used|using|licen[sc]e[ds]?|permitted|permission|allowed|"
     r"restricted|terms|conditions|redistribut\w*|educational|personal|research)\b"
 )
-_MAX_COPYRIGHT_LINE = 80
-_MAX_TITLE_LINE = 40
 _HEADING_MARKERS = re.compile(r"^#+\s*")
 
 _MIT_BODY = (
@@ -237,6 +242,19 @@ def _with_titles(body: str, *titles: str) -> frozenset[str]:
     return frozenset({body, *(f"{title} {body}" for title in titles)})
 
 
+_TITLES = frozenset(
+    {
+        "mit license",
+        "the mit license",
+        "bsd 2-clause license",
+        "bsd-2-clause license",
+        "bsd 3-clause license",
+        "bsd-3-clause license",
+        "isc license",
+    }
+)
+
+
 _TEMPLATES: dict[str, frozenset[str]] = {
     "MIT": _with_titles(_MIT_BODY, "mit license", "the mit license"),
     "Apache-2.0": frozenset({_APACHE_FULL, _APACHE_TERMS_ONLY}),
@@ -254,10 +272,12 @@ _BY_TEXT = {text: spdx for spdx, texts in _TEMPLATES.items() for text in texts}
 
 _OTHER_LICENSE_MARKERS = re.compile(
     r"\b[la]?gpl(?:v?\d|\b)"
-    r"|general public license"
+    r"|general public licen"
+    r"|affero"
+    r"|share-?alike"
     r"|\bmpl(?:v?\d|\b)"
     r"|mozilla public license"
-    r"|\bsspl\b"
+    r"|\bsspl(?:v?\d|\b)"
     r"|server side public license"
     r"|creative commons"
     r"|\bcc[-\s]by\b"
@@ -303,21 +323,20 @@ def _removable_copyright(line: str) -> bool:
     """Whether ``line`` is a strictly shaped attribution that states no terms."""
 
     return (
-        len(line) <= _MAX_COPYRIGHT_LINE
-        and _COPYRIGHT_LINE.match(line) is not None
+        _COPYRIGHT_LINE.match(line) is not None
         and _TERMS_WORDS.search(line) is None
         and _OTHER_LICENSE_MARKERS.search(line) is None
         and "all rights reserved" not in line
-        and _SENTENCE_BREAK.search(line) is None
     )
 
 
 def normalize_license_text(text: str) -> str:
     """Case-fold, drop heading markers and leading copyright lines, collapse whitespace.
 
-    Only strictly shaped copyright lines in the leading block (before the first
-    long line of prose) are dropped; anywhere else they stay and break the
-    exact match.
+    Only strictly shaped copyright lines in the leading block (which ends at
+    the first non-blank line that is neither a license title nor such a
+    copyright line) are dropped; anywhere else they stay and break the exact
+    match.
     """
 
     kept: list[str] = []
@@ -326,10 +345,10 @@ def normalize_license_text(text: str) -> str:
         line = _HEADING_MARKERS.sub("", raw.strip())
         if line == _APACHE_APPENDIX_COPYRIGHT:
             continue
-        if leading:
+        if leading and line:
             if _removable_copyright(line):
                 continue
-            if len(line) > _MAX_TITLE_LINE:
+            if line not in _TITLES:
                 leading = False
         kept.append(line)
     return " ".join(" ".join(kept).split())
@@ -349,8 +368,10 @@ def classify_license_text(text: str) -> str:
 
 
 def notice_conflicts(text: str) -> bool:
-    """Whether an attribution notice names a license family, or reserves all rights."""
+    """Whether an attribution notice is suspect, names a license family, or reserves all rights."""
 
+    if _is_suspect(text):
+        return True
     normalized = " ".join(text.casefold().split())
     if _OTHER_LICENSE_MARKERS.search(normalized) is not None:
         return True

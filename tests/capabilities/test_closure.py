@@ -365,3 +365,41 @@ def test_directory_reader_rejects_an_unreviewed_asset_on_disk(tmp_path: Path) ->
 
     with pytest.raises(CapabilityAssetTypeError):
         build_closure_from_directory(package)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["LI\u200bCENSE.md", "LIC\u00adENSE.md", "dir/LICENSE\u2028.md", "a\u2029b.md"],
+)
+def test_format_and_separator_characters_in_a_path_are_rejected(name: str) -> None:
+    with pytest.raises(CapabilityPathError):
+        build_closure((*package_files("skill-a"), PackageFile(name, b"payload")))
+
+
+@pytest.mark.parametrize("name", ["L\u0406CENSE.md", "L\u0456cense", "\u0441opying"])
+def test_a_non_ascii_root_name_is_license_like_and_rejected(name: str) -> None:
+    assert is_license_like_name(name)
+    with pytest.raises(CapabilityAssetTypeError):
+        build_closure((*package_files("skill-a"), PackageFile(name, b"payload")))
+
+
+@pytest.mark.parametrize(
+    "name", ["notice.so", "copyright.bin", "license-helper.sh", "licensed.pth", "LICENSE.md.sh"]
+)
+def test_license_like_names_with_executable_or_binary_shapes_are_rejected(name: str) -> None:
+    with pytest.raises(CapabilityAssetTypeError):
+        build_closure((*package_files("skill-a"), PackageFile(name, b"text")))
+
+
+@pytest.mark.parametrize("name", ["LICENSE", "LICENSE.md", "NOTICE.txt", "COPYING.LESSER"])
+def test_license_like_files_must_be_utf8_text(name: str) -> None:
+    with pytest.raises(CapabilityAssetTypeError):
+        build_closure((*package_files("skill-a"), PackageFile(name, b"\xff\xfe\x00bad")))
+
+
+@pytest.mark.parametrize("name", ["EULA.md", "LEGAL.txt", "TERMS", "PATENTS.md"])
+def test_eula_legal_terms_and_patent_names_are_license_like(name: str) -> None:
+    assert is_license_like_name(name)
+    closure = build_closure((*package_files("skill-a"), PackageFile(name, b"terms")))
+
+    assert {record.path: record.kind for record in closure.files}[name] is AssetKind.METADATA

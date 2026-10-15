@@ -68,11 +68,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from enginery.adapters.armory_license import (
-    UNKNOWN_LICENSE,
-    classify_license_text,
-    notice_conflicts,
-)
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -95,6 +90,11 @@ from enginery.capabilities.errors import (
     CapabilityClosureLimitError,
     CapabilityIntegrityError,
     CapabilitySymlinkError,
+)
+from enginery.capabilities.license_text import (
+    UNKNOWN_LICENSE,
+    classify_license_text,
+    notice_conflicts,
 )
 from enginery.capabilities.manifest import (
     MANIFEST_FILE_NAME,

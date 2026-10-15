@@ -23,7 +23,12 @@ from enginery.application.delivery_ports import (
     CapabilitySourcePort,
     PackageFile,
 )
-from enginery.capabilities.closure import PackageClosure, build_closure
+from enginery.capabilities.closure import (
+    PackageClosure,
+    build_closure,
+    is_license_like_name,
+    is_notice_file_name,
+)
 from enginery.capabilities.errors import (
     CapabilityDependencyError,
     CapabilityDigestMismatchError,
@@ -31,6 +36,11 @@ from enginery.capabilities.errors import (
     CapabilityLockDriftError,
     CapabilityManifestError,
     CapabilityNotFoundError,
+)
+from enginery.capabilities.license_text import (
+    UNKNOWN_LICENSE,
+    classify_license_text,
+    notice_conflicts,
 )
 from enginery.capabilities.lock import (
     CapabilityLock,
@@ -44,6 +54,11 @@ from enginery.capabilities.lock import (
 # so the resolver stays free of any concrete signature algorithm; the
 # default rejects every capability as unsigned.
 SignatureVerifier = Callable[[CapabilityDescriptor], str | None]
+
+
+def _decode(item: PackageFile) -> str:
+    return item.content.decode("utf-8", errors="replace")
+
 
 MAX_DEPENDENCY_DEPTH = 8
 
@@ -161,9 +176,9 @@ class CapabilityResolver:
             self._enforce_license(request, existing[0].license)
             return existing[0]
         descriptor, source = self._discover(request)
-        files = source.fetch_closure(descriptor.name, descriptor.version)
+        files = tuple(source.fetch_closure(descriptor.name, descriptor.version))
         closure = self._verify_closure(descriptor, files)
-        license_id = self._effective_license(descriptor, closure)
+        license_id = self._effective_license(descriptor, closure, files)
         self._enforce_license(request, license_id)
         self._enforce_no_drift(request, descriptor, previous_lock=previous_lock)
         self._resolve_dependencies(
@@ -238,13 +253,19 @@ class CapabilityResolver:
         return closure
 
     def _effective_license(
-        self, descriptor: CapabilityDescriptor, closure: PackageClosure
+        self,
+        descriptor: CapabilityDescriptor,
+        closure: PackageClosure,
+        files: Sequence[PackageFile],
     ) -> str | None:
-        """The package's own declared license, else the source's declared metadata.
+        """The package's declared license, kept only while its shipped license files agree.
 
         The manifest is covered by the closure digest, so it is the
         authoritative declaration; a source may only fill a gap, never
-        contradict it.
+        contradict it. When the closure ships root license-like files, every
+        one must classify to that same SPDX id and no ``NOTICE`` may conflict;
+        otherwise the license is ``unknown``. A package without such files
+        keeps the declared license.
         """
 
         declared = closure.manifest.license
@@ -257,7 +278,18 @@ class CapabilityResolver:
                     "source_license": descriptor.license,
                 },
             )
-        return declared if declared is not None else descriptor.license
+        license_id = declared if declared is not None else descriptor.license
+        if license_id is None:
+            return None
+        shipped = [item for item in files if is_license_like_name(item.path)]
+        notices = [item for item in shipped if is_notice_file_name(item.path)]
+        if any(notice_conflicts(_decode(item)) for item in notices):
+            return UNKNOWN_LICENSE
+        deciding = [item for item in shipped if item not in notices]
+        if not deciding:
+            return license_id
+        found = {classify_license_text(_decode(item)) for item in deciding}
+        return license_id if found == {license_id} else UNKNOWN_LICENSE
 
     def _enforce_license(self, request: CapabilityRequest, license_id: str | None) -> None:
         if request.expected_license is None:

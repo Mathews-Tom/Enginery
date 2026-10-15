@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from enginery.adapters import armory_license
-from enginery.adapters.armory_license import (
+from enginery.capabilities import license_text
+from enginery.capabilities.license_text import (
     classify_license_text,
     normalize_license_text,
     notice_conflicts,
 )
 
-_APACHE = armory_license._APACHE_FULL
-_BSD_DISCLAIMER = armory_license._BSD_DISCLAIMER
+_APACHE = license_text._APACHE_FULL
+_BSD_DISCLAIMER = license_text._BSD_DISCLAIMER
 
 
 def test_apache_is_recognized_with_or_without_the_appendix_but_not_a_trailing_copyright() -> None:
-    terms_only = armory_license._APACHE_TERMS_ONLY
+    terms_only = license_text._APACHE_TERMS_ONLY
 
     assert classify_license_text(_APACHE) == "Apache-2.0"
     assert classify_license_text(terms_only) == "Apache-2.0"
@@ -31,36 +31,36 @@ def test_apache_with_inserted_or_appended_terms_is_unknown() -> None:
 
 
 def test_bsd_and_isc_templates_are_recognized_only_when_exact() -> None:
-    bsd2 = armory_license._BSD_PREAMBLE + _BSD_DISCLAIMER
-    bsd3 = armory_license._BSD_PREAMBLE + armory_license._BSD_3_CLAUSE + _BSD_DISCLAIMER
+    bsd2 = license_text._BSD_PREAMBLE + _BSD_DISCLAIMER
+    bsd3 = license_text._BSD_PREAMBLE + license_text._BSD_3_CLAUSE + _BSD_DISCLAIMER
 
     assert classify_license_text("Copyright (c) 2026 A\n\n" + bsd2) == "BSD-2-Clause"
     assert classify_license_text("BSD 3-Clause License\n\n" + bsd3) == "BSD-3-Clause"
-    assert classify_license_text(armory_license._ISC_BODY) == "ISC"
+    assert classify_license_text(license_text._ISC_BODY) == "ISC"
     assert classify_license_text(bsd3 + " and more") == "unknown"
     assert classify_license_text(bsd2.replace("1. ", "1. also ")) == "unknown"
 
 
 def test_normalization_drops_leading_copyright_lines_but_keeps_lines_that_state_terms() -> None:
-    assert normalize_license_text("# Title\nCopyright (c) 2026 Tom\n(c) 2025 X\nBody  text") == (
-        "title body text"
-    )
+    text = "# MIT License\nCopyright (c) 2026 Tom\n(c) 2025 X\nBody  text"
+
+    assert normalize_license_text(text) == "mit license body text"
     kept = normalize_license_text("Copyright (c) 2026 Tom. Free for personal use.")
 
     assert "personal use" in kept
 
 
 def test_a_normal_copyright_header_still_yields_mit() -> None:
-    text = "MIT License\n\nCopyright (c) 2024 Foo Bar\n\n" + armory_license._MIT_BODY
+    text = "MIT License\n\nCopyright (c) 2024 Foo Bar\n\n" + license_text._MIT_BODY
 
     assert classify_license_text(text) == "MIT"
-    assert classify_license_text("Copyright 2020-2024, Foo & Co.\n" + armory_license._MIT_BODY) == (
+    assert classify_license_text("Copyright 2020-2024, Foo & Co.\n" + license_text._MIT_BODY) == (
         "MIT"
     )
 
 
 def test_a_copyright_line_after_the_leading_block_is_not_dropped() -> None:
-    body = armory_license._MIT_BODY
+    body = license_text._MIT_BODY
 
     assert classify_license_text(body + "\n\nCopyright (c) 2024 Foo Bar\n") == "unknown"
     assert classify_license_text(body + "\n\nCopyright (c) 2024 Foo Bar\n\nMore.") == "unknown"
@@ -83,12 +83,25 @@ _SMUGGLED_LINES = [
     "Copyright 2024 Fo\u00f6",
     "Copyright 2024 " + "Foo " * 30,
     "Copyright 2024 Foo vendor is licensed under the GPL",
+    "Copyright 2024 Foo, selling copies needs a paid agreement with Foo",
+    "Copyright 2024 Foo.Selling copies needs a paid agreement",
+    "Copyright 2024 Foo, resale requires written consent of Foo",
+    "Copyright 2024 Foo - vendor code is gnu affero 3",
+    "Copyright 2024 Foo - resale requires a paid agreement",
+    "Copyright 2024 Foo, academic purposes exclusively",
+    "Copyright 2024 Foo, a fee of 100 usd per seat applies",
+    "Copyright 2024 Foo, this grant is revocable at any time",
+    "Copyright 2024 Foo, ai training on this package is barred",
+    "Copyright 2024 Foo, the vendor directory is apache 2.0",
+    "Copyright 2024 Foo, the vendor dir is gnu affero",
+    "Copyright 2024 Foo, vendor code is share-alike",
+    "Copyright 2024 Foo; vendor code is barred",
 ]
 
 
 @pytest.mark.parametrize("line", _SMUGGLED_LINES)
 def test_smuggled_terms_on_copyright_lines_are_unknown(line: str) -> None:
-    body = armory_license._MIT_BODY
+    body = license_text._MIT_BODY
 
     assert classify_license_text(line + "\n\n" + body) == "unknown"
     assert classify_license_text("MIT License\n\n" + line + "\n\n" + body) == "unknown"
@@ -97,16 +110,16 @@ def test_smuggled_terms_on_copyright_lines_are_unknown(line: str) -> None:
 
 @pytest.mark.parametrize("char", ["\u200b", "\u2028", "\u2029", "\ufeff", "\u00ad", "\u00e9"])
 def test_format_separator_and_non_ascii_characters_are_unknown(char: str) -> None:
-    assert classify_license_text(armory_license._MIT_BODY + char) == "unknown"
-    assert classify_license_text("a" + char + "\n" + armory_license._MIT_BODY) == "unknown"
+    assert classify_license_text(license_text._MIT_BODY + char) == "unknown"
+    assert classify_license_text("a" + char + "\n" + license_text._MIT_BODY) == "unknown"
 
 
 def test_html_comments_are_unknown() -> None:
-    assert classify_license_text("<!-- x -->\n" + armory_license._MIT_BODY) == "unknown"
+    assert classify_license_text("<!-- x -->\n" + license_text._MIT_BODY) == "unknown"
 
 
 def test_the_copyright_sign_is_allowed_in_a_leading_attribution() -> None:
-    assert classify_license_text("\u00a9 2024 Foo\n" + armory_license._MIT_BODY) == "MIT"
+    assert classify_license_text("\u00a9 2024 Foo\n" + license_text._MIT_BODY) == "MIT"
 
 
 @pytest.mark.parametrize(
@@ -140,3 +153,45 @@ def test_a_plain_attribution_notice_does_not_conflict() -> None:
 
 def test_a_reservation_on_a_copyright_line_of_a_notice_is_still_detected() -> None:
     assert notice_conflicts("Copyright (c) 2026 Tom. All rights reserved.")
+
+
+@pytest.mark.parametrize("text", ["G\u200bPLv3", "G\u0420Lv3", "GP\u00adL-3.0"])
+def test_a_notice_with_hidden_or_non_ascii_characters_conflicts(text: str) -> None:
+    assert notice_conflicts(f"Bundles vendor/ under {text}.")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["SSPLv1", "SSPL-1.0", "GNU Affero", "vendor code is share-alike", "General Public License"],
+)
+def test_more_notice_markers_are_detected(text: str) -> None:
+    assert notice_conflicts(text)
+
+
+_HOLDERS = [
+    "Tom",
+    "",
+    "Anno Yanzhe Chen",
+    "Caylent",
+    "shadcn",
+    "Matt Pocock",
+    "Agents365-ai",
+    "Foo, Inc.",
+    "Foo, and contributors",
+    "Foo & Bar, et al.",
+]
+
+
+@pytest.mark.parametrize("holder", _HOLDERS)
+def test_name_shaped_holders_are_still_removed(holder: str) -> None:
+    line = f"Copyright (c) 2024 {holder}".strip()
+
+    assert classify_license_text(f"{line}\n\n{license_text._MIT_BODY}") == "MIT"
+
+
+def test_the_leading_block_ends_at_the_first_line_that_is_not_title_or_copyright() -> None:
+    body = license_text._MIT_BODY.replace("the above", "x\nCopyright 2024 Foo\nthe above", 1)
+    wrapped = "MIT License\nSome other heading\nCopyright 2024 Foo\n" + license_text._MIT_BODY
+
+    assert classify_license_text(body) == "unknown"
+    assert classify_license_text(wrapped) == "unknown"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
+from enginery.capabilities import license_text
 from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
     CapabilityDependencyError,
@@ -378,3 +379,39 @@ def test_expected_license_is_enforced_for_a_name_a_dependency_already_resolved()
 
     with pytest.raises(CapabilityLicenseMismatchError):
         resolver.resolve([_request("skill-a"), _request("dep-a", expected_license="MIT")])
+
+
+def _license_source(manifest_license: str | None, text: bytes) -> FakeCapabilitySource:
+    files = package_files("skill-a", license_id=manifest_license, extra={"LICENSE": text})
+    return FakeCapabilitySource.of(files)
+
+
+def test_a_declared_mit_package_shipping_gpl_text_resolves_to_unknown() -> None:
+    gpl = b"GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\n"
+
+    entry = CapabilityResolver([_license_source("MIT", gpl)]).resolve([_request()]).entries[0]
+
+    assert entry.license == "unknown"
+
+
+def test_a_declared_mit_package_shipping_the_exact_mit_text_stays_mit() -> None:
+    text = f"MIT License\n\nCopyright (c) 2024 Foo\n\n{license_text._MIT_BODY}\n".encode()
+
+    entry = CapabilityResolver([_license_source("MIT", text)]).resolve([_request()]).entries[0]
+
+    assert entry.license == "MIT"
+
+
+def test_a_conflicting_notice_makes_the_declared_license_unknown() -> None:
+    files = package_files(
+        "skill-a",
+        license_id="MIT",
+        extra={
+            "LICENSE": license_text._MIT_BODY.encode(),
+            "NOTICE": b"vendor/ is licensed under the GPLv3",
+        },
+    )
+
+    entry = CapabilityResolver([FakeCapabilitySource.of(files)]).resolve([_request()]).entries[0]
+
+    assert entry.license == "unknown"

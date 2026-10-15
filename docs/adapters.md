@@ -245,32 +245,56 @@ field of its own. Four facts about this adapter matter operationally:
   by the license-like files it ships at its root when it has any, else by
   the repository `LICENSE` at the pinned revision — declared metadata only.
   After NFKC normalization and case-folding, a root file is license-like
-  when its name contains `licen`, `copying`, `notice`, `unlicense` or
-  `copyright`; each one is a metadata asset of the closure, never an
-  instruction. A license file is classified only by exact match with a
+  when its name contains `licen`, `copying`, `notice`, `unlicense`,
+  `copyright`, `eula`, `legal`, `terms` or `patent`, or is not ASCII; each
+  one is a metadata asset of the closure, never an instruction. A
+  license-like name is accepted only as one to three ASCII-letter words
+  joined by `.`, `-` or `_`, optionally followed by `.md`, `.txt` or `.rst`,
+  whose last word is at most ten letters and not an executable, script or
+  binary extension (`LICENSE`, `LICENSE.MIT`, `LICENSE-APACHE`,
+  `COPYING.LESSER`), and its content must decode as UTF-8; anything else
+  (`notice.so`, `license-helper.sh`, `licensed.pth`, a non-ASCII name) is an
+  unreviewed asset type and fails the closure. Any path containing a Unicode
+  format, line-separator or paragraph-separator character is rejected. A
+  license file is classified only by exact match with a
   canonical MIT, Apache-2.0 (with or without its appendix), BSD-2-Clause,
   BSD-3-Clause or ISC text after case-folding, heading-marker removal,
   removal of strictly shaped copyright lines in the leading block (and the
   Apache appendix's `Copyright [yyyy] [name of copyright owner]` line) and
   whitespace collapsing. A removable copyright line is `copyright`, `(c)`
   or `©`, a year, year range or list, or `[yyyy]`, and an optional holder of
-  letters, digits, spaces and `.,'&-`, at most 80 characters, with no
-  sentence break, terms word, `All rights reserved`, or other-license
-  marker; copyright lines anywhere else stay and break the match. A text
+  one to five name-like tokens (letters, digits, `.`, `'`, `-`, `&`,
+  `and`), optionally followed by `, ` and exactly one closed suffix (`Inc`,
+  `Ltd`, `LLC`, `GmbH`, `Corp`, `Co.`, `PBC`, `and contributors`, `et al.`)
+  and a final `.`; no other commas, dashes between words, colons or
+  semicolons, no terms word, `All rights reserved`, or other-license
+  marker. The leading block ends at the first non-blank line that is
+  neither the license title nor such a copyright line; copyright lines
+  anywhere else stay and break the match. A text
   with a Unicode format character, a line or paragraph separator, a control
   character, an HTML comment or any non-ASCII character other than `©` is
   `unknown`, as is any other text (inserted or appended terms, carve-outs,
   dual licensing, other licenses), including every license-like file whose
   name is not canonical (`license`, `licence`, `copying` or `notice` with no
   extension or `.md`, `.txt` or `.rst`) and whose text is not a template.
+  **Residual risk:** classification is a fail-closed screen, not
+  authentication. A short name-shaped phrase on a copyright line cannot be
+  told apart from a holder name, so it may be removed and the text still
+  classify as a template; every unauthenticated package therefore still
+  needs exact-digest human approval, where the approver reviews its license
+  files. The same declared-license check runs for every source in the
+  resolver: when a closure ships root license-like files, the declared
+  (manifest) license is kept only if every file classifies to that same
+  SPDX id and no `NOTICE` conflicts; otherwise the license is `unknown`.
   Every deciding file must classify to one SPDX id equal to the repository
   license, else the license is `unknown`, as is an unreachable repository
   license, and `unknown` holds redistribution. A canonical `NOTICE` file
   never decides the license, but one that names another license family
-  (GPL, LGPL, AGPL, MPL, SSPL, Creative Commons, non-commercial, Commons
-  Clause, BUSL, Business Source License, Elastic License, EPL, PolyForm,
+  (GPL, LGPL, AGPL, Affero, general public license, MPL, SSPL, Creative
+  Commons, share-alike, non-commercial, Commons Clause, BUSL, Business Source License, Elastic License, EPL, PolyForm,
   OSL, copyleft, proprietary, dual licensing, "at your option") or reserves
-  all rights without a permissive grant makes it `unknown`. Every
+  all rights without a permissive grant, or one with a hidden or non-ASCII
+  character, makes it `unknown`. Every
   fetched file, including the catalog `manifest.yaml` and the repository
   `LICENSE`, is verified against its git blob sha in the pinned tree: a
   mismatched or absent `LICENSE` is `unknown`, and a mismatched
