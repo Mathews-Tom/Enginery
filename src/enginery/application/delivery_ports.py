@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import enum
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,6 +216,28 @@ class CapabilityDescriptor:
             raise ValueError("capability signer_key_id, when present, must be non-blank")
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityListing:
+    """One cheap catalog row: what a source offers, before any closure is computed.
+
+    Listing a source never fetches or locks a package's files, so ``discover``
+    stays cheap and one unlockable package cannot hide the rest of a catalog.
+    A package's closure (and therefore its digest) is computed only when that
+    package is selected through ``resolve`` or ``fetch_closure``.
+    """
+
+    name: str
+    version: str
+    provenance: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not value.strip() for value in (self.name, self.version, self.provenance, self.revision)
+        ):
+            raise ValueError("capability listing fields must be non-blank")
+
+
 class CapabilitySourcePort(Protocol):
     """Discover and fetch complete package closures without runtime plugins.
 
@@ -223,16 +246,45 @@ class CapabilitySourcePort(Protocol):
 
     def probe(self) -> AdapterStatus: ...
 
-    def discover(self) -> tuple[CapabilityDescriptor, ...]: ...
+    def discover(self) -> tuple[CapabilityListing, ...]: ...
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None: ...
 
     def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]: ...
 
 
+class CommittedTreeCapabilitySource(abc.ABC):
+    """A capability source that serves only the committed tree of one pinned commit.
+
+    This is a nominal base class, not a structural port: only an adapter that
+    deliberately subclasses it can be registered as the reviewed ``project``
+    source, so a duck-typed object that merely claims a commit is never one.
+    Every revision it reports must equal :attr:`pinned_commit`.
+    """
+
+    @property
+    @abc.abstractmethod
+    def pinned_commit(self) -> str:
+        """The full commit sha every read is pinned to."""
+
+    @abc.abstractmethod
+    def probe(self) -> AdapterStatus: ...
+
+    @abc.abstractmethod
+    def discover(self) -> tuple[CapabilityListing, ...]: ...
+
+    @abc.abstractmethod
+    def resolve(self, name: str, version: str) -> CapabilityDescriptor | None: ...
+
+    @abc.abstractmethod
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]: ...
+
+
 __all__ = [
     "CapabilityDescriptor",
+    "CapabilityListing",
     "CapabilitySourcePort",
+    "CommittedTreeCapabilitySource",
     "DeploymentPort",
     "DeploymentReceipt",
     "DeploymentRequest",

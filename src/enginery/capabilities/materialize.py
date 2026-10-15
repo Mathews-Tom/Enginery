@@ -23,11 +23,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from enginery.application.delivery_ports import PackageFile
+from enginery.capabilities.atomic import require_no_link_chain
 from enginery.capabilities.closure import (
     AssetRecord,
     PackageClosure,
     build_closure,
-    build_closure_from_directory,
+    read_package_directory,
 )
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -35,7 +36,12 @@ from enginery.capabilities.errors import (
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
 )
-from enginery.capabilities.lock import CapabilityLock, LockedCapability
+from enginery.capabilities.lock import (
+    NO_APPROVALS,
+    ApprovedCapabilities,
+    CapabilityLock,
+    LockedCapability,
+)
 from enginery.domain.digests import Digest
 
 _MAX_REPORTED_DIFFERENCES = 10
@@ -95,13 +101,35 @@ def _require_matching_files(entry: LockedCapability, files: Sequence[PackageFile
 
 
 def verify_materialized(entry: LockedCapability, root: Path) -> Path:
-    """Re-verify a materialized closure against its lock entry and return its directory.
+    """Re-verify a materialized closure against its lock entry and return its directory."""
+
+    return load_verified_closure(entry, root)[0]
+
+
+def load_verified_closure(entry: LockedCapability, root: Path) -> tuple[Path, PackageClosure]:
+    """Re-verify a materialized closure and return its directory with the closure read from it.
 
     Rejects a missing directory, any extra, missing, or changed file, and
     any symlink or non-regular entry anywhere inside it. Call this
-    immediately before using materialized content.
+    immediately before using materialized content; the returned closure is
+    the one that was verified, so its manifest is trustworthy.
     """
 
+    directory, closure, _ = load_verified_package(entry, root)
+    return directory, closure
+
+
+def load_verified_package(
+    entry: LockedCapability, root: Path
+) -> tuple[Path, PackageClosure, tuple[PackageFile, ...]]:
+    """:func:`load_verified_closure` plus the exact bytes that were verified.
+
+    A caller that must run or copy package content uses these bytes, never the
+    directory again: the directory is writable by its owner, so a second read
+    could return something other than what was verified.
+    """
+
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=False)
     target = digest_path(root, entry.digest)
     if not os.path.lexists(target):
         raise CapabilityIntegrityError(
@@ -109,7 +137,8 @@ def verify_materialized(entry: LockedCapability, root: Path) -> Path:
             details={"name": entry.name, "version": entry.version},
         )
     try:
-        closure = build_closure_from_directory(target)
+        files = read_package_directory(target)
+        closure = build_closure(files)
     except CapabilityError as error:
         raise CapabilityIntegrityError(
             "materialized closure is no longer a valid package",
@@ -121,7 +150,7 @@ def verify_materialized(entry: LockedCapability, root: Path) -> Path:
             },
         ) from error
     _require_matching_closure(entry, closure, "materialized closure no longer matches")
-    return target
+    return target, closure, files
 
 
 def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
@@ -135,13 +164,30 @@ def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
             os.fchmod(handle.fileno(), 0o555 if item.executable else 0o444)
 
 
+def _require_unlinked_store_directories(root: Path, digest: Digest, *, with_tmp: bool) -> None:
+    """Refuse a planted link on the store's own directories that exist (always checked).
+
+    Covers ``<algorithm>``, ``<xx>`` and, when ``with_tmp``, ``.tmp``; a missing one is fine.
+    """
+
+    inner = digest_path(root, digest).parent
+    directories = [inner.parent, inner]
+    if with_tmp:
+        directories.append(root / ".tmp")
+    for directory in directories:
+        require_no_link_chain(directory, what="capability store directory")
+
+
 def _publish_closure(root: Path, entry: LockedCapability, files: Sequence[PackageFile]) -> Path:
+    require_no_link_chain(root, what="capabilities root")
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=True)
     target = digest_path(root, entry.digest)
     if os.path.lexists(target):
         return verify_materialized(entry, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = root / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    _require_unlinked_store_directories(root, entry.digest, with_tmp=True)
     staging = Path(tempfile.mkdtemp(dir=tmp_dir))
     try:
         _write_closure(staging, files)
@@ -176,21 +222,22 @@ def materialize_lock(
     files_by_name: Mapping[str, Sequence[PackageFile]],
     *,
     root: Path,
-    approved_names: frozenset[str] = frozenset(),
+    approvals: ApprovedCapabilities = NO_APPROVALS,
 ) -> Mapping[str, Path]:
     """Materialize every entry in ``lock`` and return ``name -> directory``.
 
     Every entry is checked before any file is written. An entry
     :meth:`LockedCapability.requires_human_approval` reports ``True`` for must
-    have its name in ``approved_names`` -- the caller's already-recorded,
-    digest-bound ``capability.materialize`` approval -- and an entry whose
-    license is held for redistribution is refused, rather than silently
+    be covered by ``approvals`` -- the caller's already-recorded ``capability.materialize``
+    approval, bound to this entry's closure digest *and* this lock's digest -- and
+    an entry whose license is held for redistribution is refused, rather than silently
     skipping or downgrading trust. Dependencies are lock entries of their own
     and are checked package by package.
     """
 
+    lock_digest = lock.digest()
     for entry in lock.entries:
-        if entry.requires_human_approval() and entry.name not in approved_names:
+        if not approvals.covers(entry, lock_digest):
             raise CapabilityApprovalRequiredError(
                 "capability requires interactive exact-digest human approval before it can execute",
                 details={"name": entry.name, "version": entry.version},
@@ -221,6 +268,7 @@ def materialize_lock(
 __all__ = [
     "closure_differences",
     "digest_path",
+    "load_verified_closure",
     "materialize_capability",
     "materialize_lock",
     "verify_materialized",

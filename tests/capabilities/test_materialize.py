@@ -13,6 +13,7 @@ from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
+    CapabilitySymlinkError,
 )
 from enginery.capabilities.manifest import CapabilityPermission, PackageKind
 from enginery.capabilities.materialize import (
@@ -22,6 +23,7 @@ from enginery.capabilities.materialize import (
     verify_materialized,
 )
 from tests.support.capabilities import (
+    approvals_for,
     lock_of,
     locked_entry,
     package_files,
@@ -183,6 +185,74 @@ def test_materialize_lock_writes_every_approved_entry(tmp_path: Path) -> None:
     assert (materialized["skill-a"] / "SKILL.md").read_bytes() == files[1].content
 
 
+def test_materialize_lock_refuses_a_store_reached_through_a_symlink_under_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _scripted()
+    trusted = locked_entry(files=files, introduced_by_run=False)
+    other = tmp_path / "other"
+    other.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "linked").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(workspace)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_lock(lock_of(trusted), {"skill-a": files}, root=Path("linked/store"))
+
+    assert list(other.iterdir()) == []
+
+
+def test_materialize_lock_refuses_a_store_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    files = _scripted()
+    trusted = locked_entry(files=files, introduced_by_run=False)
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "store").symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_lock(lock_of(trusted), {"skill-a": files}, root=tmp_path / "store")
+
+    assert list(other.iterdir()) == []
+
+
+@pytest.mark.parametrize("planted", ["algorithm", "prefix", "tmp"])
+def test_materialize_refuses_a_link_planted_on_the_stores_own_directories(
+    tmp_path: Path, planted: str
+) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files, introduced_by_run=False)
+    store = tmp_path / "store"
+    store.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = {
+        "algorithm": store / entry.digest.algorithm,
+        "prefix": store / entry.digest.algorithm / entry.digest.hex_value[:2],
+        "tmp": store / ".tmp",
+    }[planted]
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_capability(entry, files, root=store)
+
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_verification_refuses_a_store_directory_replaced_by_a_link(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files, introduced_by_run=False)
+    store = tmp_path / "store"
+    materialize_capability(entry, files, root=store)
+    moved = tmp_path / "moved"
+    (store / entry.digest.algorithm).rename(moved)
+    (store / entry.digest.algorithm).symlink_to(moved, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        verify_materialized(entry, store)
+
+
 def test_materialize_lock_refuses_unapproved_run_introduced_entry(tmp_path: Path) -> None:
     files = _scripted()
     pending = locked_entry(files=files, introduced_by_run=True)
@@ -197,11 +267,30 @@ def test_materialize_lock_allows_run_introduced_entry_once_approved(tmp_path: Pa
     files = _scripted()
     pending = locked_entry(files=files, introduced_by_run=True)
 
+    lock = lock_of(pending)
     materialized = materialize_lock(
-        lock_of(pending), {"skill-a": files}, root=tmp_path, approved_names=frozenset({"skill-a"})
+        lock,
+        {"skill-a": files},
+        root=tmp_path,
+        approvals=approvals_for(lock, ["skill-a"]),
     )
 
     assert (materialized["skill-a"] / "scripts" / "run.py").read_bytes() == b"print('ok')\n"
+
+
+def test_materialize_lock_refuses_an_approval_computed_for_a_different_lock(
+    tmp_path: Path,
+) -> None:
+    files = _scripted()
+    pending = locked_entry(files=files, introduced_by_run=True)
+    approved_lock = lock_of(pending)
+    drifted_lock = lock_of(pending, locked_entry("skill-b", introduced_by_run=False))
+    approvals = approvals_for(approved_lock, ["skill-a"])
+
+    with pytest.raises(CapabilityApprovalRequiredError):
+        materialize_lock(drifted_lock, {"skill-a": files}, root=tmp_path, approvals=approvals)
+
+    assert not digest_path(tmp_path, pending.digest).exists()
 
 
 @pytest.mark.parametrize("license_id", [None, "unknown", "GPL-3.0"])
@@ -211,12 +300,13 @@ def test_materialize_lock_holds_an_approved_entry_with_an_unreviewed_license(
     files = package_files("skill-a", license_id=license_id)
     pending = locked_entry(files=files, introduced_by_run=True, license_id=license_id)
 
+    lock = lock_of(pending)
     with pytest.raises(CapabilityLicenseHoldError):
         materialize_lock(
-            lock_of(pending),
+            lock,
             {"skill-a": files},
             root=tmp_path,
-            approved_names=frozenset({"skill-a"}),
+            approvals=approvals_for(lock, ["skill-a"]),
         )
 
     assert not digest_path(tmp_path, pending.digest).exists()
@@ -228,12 +318,13 @@ def test_materialize_lock_checks_every_entry_before_writing_any(tmp_path: Path) 
     ready = locked_entry(files=ready_files, introduced_by_run=False)
     held = locked_entry(files=held_files, introduced_by_run=True, license_id=None)
 
+    lock = lock_of(ready, held)
     with pytest.raises(CapabilityLicenseHoldError):
         materialize_lock(
-            lock_of(ready, held),
+            lock,
             {"skill-a": ready_files, "skill-b": held_files},
             root=tmp_path,
-            approved_names=frozenset({"skill-b"}),
+            approvals=approvals_for(lock, ["skill-b"]),
         )
 
     assert not digest_path(tmp_path, ready.digest).exists()

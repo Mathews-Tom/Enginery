@@ -9,7 +9,12 @@ already established rather than adding a second authority path.
 
 from __future__ import annotations
 
-from enginery.capabilities.lock import CapabilityLock, LockedCapability
+from enginery.capabilities.lock import (
+    ApprovedCapabilities,
+    CapabilityApproval,
+    CapabilityLock,
+    LockedCapability,
+)
 from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.policy.evaluator import PolicyEvaluator
 from enginery.policy.schemas import ApprovalSchema
@@ -39,31 +44,31 @@ def materialize_approval_schema(
     )
 
 
-def approved_capability_names(
+def approved_capabilities(
     lock: CapabilityLock, evaluator: PolicyEvaluator, *, requesting_principal_id: str
-) -> frozenset[str]:
-    """Names of every lock entry the current policy state currently allows.
+) -> ApprovedCapabilities:
+    """The digest-bound approvals the current policy state allows for ``lock``.
 
     A reviewed-base entry never needs a schema. A pending entry needs a
     current, digest-bound human approval already recorded on the
     evaluator's approval registry; this function only evaluates policy for
-    the already-locked digest -- it never records or requests an approval,
+    the already-locked digests -- it never records or requests an approval,
     so run-introduced capabilities cannot approve themselves through this
-    path.
+    path. Each result names the entry, its closure digest, and this lock's
+    digest, so it authorizes only this exact lock: a drifted lock needs
+    approvals computed for it.
     """
 
-    names: set[str] = set()
-    for entry in lock.entries:
-        if not entry.requires_human_approval():
-            names.add(entry.name)
-            continue
+    lock_digest = lock.digest()
+    approvals: set[CapabilityApproval] = set()
+    for entry in lock.pending_approval():
         schema = materialize_approval_schema(
             entry, lock, requesting_principal_id=requesting_principal_id
         )
         decision = evaluator.evaluate(schema)
         if decision.result is PolicyResult.ALLOW:
-            names.add(entry.name)
-    return frozenset(names)
+            approvals.add(CapabilityApproval(entry.name, entry.digest, lock_digest))
+    return ApprovedCapabilities(frozenset(approvals))
 
 
-__all__ = ["approved_capability_names", "materialize_approval_schema"]
+__all__ = ["approved_capabilities", "materialize_approval_schema"]

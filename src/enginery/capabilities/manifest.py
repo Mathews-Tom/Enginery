@@ -24,6 +24,12 @@ Schema (version 1)::
         "adapter_api_min": 1,
         "adapter_api_max": 1,
         "platforms": ["darwin", "linux"]
+      },
+      "command": {                      # required for command and hook packages
+        "argv": ["python3", "scripts/run.py"],
+        "input_schema": {"type": "object"},
+        "timeout_seconds": 10,
+        "max_output_bytes": 65536
       }
     }
 """
@@ -33,14 +39,29 @@ from __future__ import annotations
 import enum
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from enginery.capabilities.errors import CapabilityManifestError
+from enginery.capabilities.schema import check_schema
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 
 MANIFEST_FILE_NAME = "capability.json"
 MANIFEST_SCHEMA_VERSION = 1
+RUNNER_INTERPRETERS = ("python3", "sh", "bash", "node")
+SHELL_SHEBANGS = (
+    b"#!/bin/sh",
+    b"#!/bin/bash",
+    b"#!/usr/bin/env sh",
+    b"#!/usr/bin/env bash",
+)
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 10
+MAX_COMMAND_TIMEOUT_SECONDS = 300
+DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
+MAX_OUTPUT_BYTES_LIMIT = 1024 * 1024
+MAX_ARGV_ITEMS = 32
+MAX_ARGV_ITEM_LENGTH = 256
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
@@ -55,6 +76,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "dependencies",
         "permissions",
         "compatibility",
+        "command",
     }
 )
 
@@ -165,6 +187,94 @@ class PackageCompatibility:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandSpec:
+    """The one argument vector a command or hook package may run, with its bounds.
+
+    ``argv[0]`` is either a reviewed interpreter (``python3``, ``sh``,
+    ``bash``, ``node``) followed by a package script path, or the package
+    path of an executable ``.sh`` script. A ``.py``, ``.js``, ``.mjs`` or ``.ts``
+    script must be run through its interpreter, never directly, so the
+    interpreter's isolation flags always apply. It is never interpreted by a
+    shell. The input schema is stored as canonical JSON text so the spec stays
+    immutable and hashable.
+    """
+
+    argv: tuple[str, ...]
+    input_schema_json: str
+    timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+
+    def __post_init__(self) -> None:
+        if not self.argv or len(self.argv) > MAX_ARGV_ITEMS:
+            raise InvalidInputError(f"command argv must have 1 to {MAX_ARGV_ITEMS} items")
+        for part in self.argv:
+            if not part.strip() or "\x00" in part or len(part) > MAX_ARGV_ITEM_LENGTH:
+                raise InvalidInputError("command argv items must be short non-blank strings")
+        if not 1 <= self.timeout_seconds <= MAX_COMMAND_TIMEOUT_SECONDS:
+            raise InvalidInputError(
+                f"command timeout_seconds must be 1 to {MAX_COMMAND_TIMEOUT_SECONDS}"
+            )
+        if not 1 <= self.max_output_bytes <= MAX_OUTPUT_BYTES_LIMIT:
+            raise InvalidInputError(
+                f"command max_output_bytes must be 1 to {MAX_OUTPUT_BYTES_LIMIT}"
+            )
+        if self.interpreter is None and not self.argv[0].endswith(".sh"):
+            raise InvalidInputError(
+                "a command that names no interpreter may only run a .sh script; run a "
+                ".py, .js, .mjs or .ts script through its interpreter (python3 or node) so "
+                "the interpreter's isolation flags apply"
+            )
+        check_schema(self.input_schema)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        argv: tuple[str, ...],
+        input_schema: Mapping[str, object],
+        timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+    ) -> CommandSpec:
+        return cls(
+            argv=argv,
+            input_schema_json=json.dumps(input_schema, sort_keys=True, separators=(",", ":")),
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+
+    @property
+    def input_schema(self) -> dict[str, object]:
+        schema = json.loads(self.input_schema_json)
+        if not isinstance(schema, dict):
+            raise InvalidInputError("command input_schema must be an object")
+        return schema
+
+    @property
+    def interpreter(self) -> str | None:
+        """The reviewed interpreter ``argv[0]`` names, or ``None`` for a script path."""
+
+        return self.argv[0] if self.argv[0] in RUNNER_INTERPRETERS else None
+
+    @property
+    def script(self) -> str:
+        """The package-relative script this command runs."""
+
+        if self.interpreter is None:
+            return self.argv[0]
+        if len(self.argv) < 2:
+            raise InvalidInputError("an interpreter command must name a package script")
+        return self.argv[1]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "argv": list(self.argv),
+            "input_schema": self.input_schema,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PackageManifest:
     """The validated, canonical form of one package's ``capability.json``."""
 
@@ -175,6 +285,7 @@ class PackageManifest:
     dependencies: tuple[DependencyPin, ...] = ()
     permissions: tuple[CapabilityPermission, ...] = ()
     compatibility: PackageCompatibility = field(default_factory=PackageCompatibility)
+    command: CommandSpec | None = None
 
     def __post_init__(self) -> None:
         validate_name(self.name)
@@ -193,6 +304,14 @@ class PackageManifest:
             self, "dependencies", tuple(sorted(self.dependencies, key=lambda pin: pin.name))
         )
         object.__setattr__(self, "permissions", tuple(sorted(set(self.permissions))))
+        runnable = self.kind in (PackageKind.COMMAND, PackageKind.HOOK)
+        if runnable and self.command is None:
+            raise InvalidInputError("a command or hook package must declare a command")
+        if not runnable and self.command is not None:
+            raise InvalidInputError("only a command or hook package may declare a command")
+        has_command = self.command is not None
+        if has_command and CapabilityPermission.PROCESS_EXECUTE not in self.permissions:
+            raise InvalidInputError("a command package must request process.execute")
 
     def to_json(self) -> dict[str, object]:
         document: dict[str, object] = {
@@ -206,6 +325,8 @@ class PackageManifest:
         }
         if self.license is not None:
             document["license"] = self.license
+        if self.command is not None:
+            document["command"] = self.command.to_json()
         return document
 
 
@@ -229,7 +350,7 @@ def parse_manifest(raw: bytes) -> PackageManifest:
 
     try:
         document = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise CapabilityManifestError(
             "package manifest is not valid UTF-8 JSON", details={"reason": str(error)}
         ) from error
@@ -237,7 +358,7 @@ def parse_manifest(raw: bytes) -> PackageManifest:
         raise CapabilityManifestError("package manifest root must be a JSON object")
     try:
         return _manifest_from_document(document)
-    except (InvalidInputError, ValueError) as error:
+    except (InvalidInputError, ValueError, RecursionError) as error:
         raise CapabilityManifestError(
             "package manifest is invalid", details={"reason": str(error)}
         ) from error
@@ -271,6 +392,32 @@ def _manifest_from_document(document: dict[str, object]) -> PackageManifest:
             if "compatibility" in document
             else PackageCompatibility()
         ),
+        command=_command(document["command"]) if "command" in document else None,
+    )
+
+
+def _command(item: object) -> CommandSpec:
+    if not isinstance(item, dict):
+        raise InvalidInputError("package manifest command must be a JSON object")
+    unknown = set(item) - {"argv", "input_schema", "timeout_seconds", "max_output_bytes"}
+    if unknown:
+        raise InvalidInputError(
+            "package manifest command contains unknown keys", details={"keys": sorted(unknown)}
+        )
+    argv = item.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
+        raise InvalidInputError("package manifest command argv must be a list of strings")
+    schema = item.get("input_schema")
+    if not isinstance(schema, dict):
+        raise InvalidInputError("package manifest command input_schema must be an object")
+    timeout = item.get("timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    limit = item.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES)
+    if not isinstance(timeout, int) or isinstance(timeout, bool):
+        raise InvalidInputError("package manifest command timeout_seconds must be an integer")
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise InvalidInputError("package manifest command max_output_bytes must be an integer")
+    return CommandSpec.create(
+        argv=tuple(argv), input_schema=schema, timeout_seconds=timeout, max_output_bytes=limit
     )
 
 
@@ -316,10 +463,29 @@ def _pin(item: object) -> DependencyPin:
     )
 
 
+def require_shell_shebang(content: bytes, *, script: str) -> None:
+    """Refuse a directly executed script whose first line is not a reviewed shell shebang.
+
+    The kernel runs a directly executed file with the interpreter its shebang names,
+    bypassing the isolation flags the runner adds for Python and Node, so only a
+    shell is allowed.
+    """
+
+    first = content.split(b"\n", 1)[0]
+    if first not in SHELL_SHEBANGS:
+        raise CapabilityManifestError(
+            "a directly executed script must start with exactly one of: "
+            + ", ".join(item.decode("ascii") for item in SHELL_SHEBANGS),
+            details={"script": script},
+        )
+
+
 __all__ = [
     "MANIFEST_FILE_NAME",
     "MANIFEST_SCHEMA_VERSION",
+    "SHELL_SHEBANGS",
     "CapabilityPermission",
+    "CommandSpec",
     "DependencyPin",
     "PackageCompatibility",
     "PackageKind",
@@ -327,6 +493,7 @@ __all__ = [
     "digest_from_text",
     "parse_manifest",
     "render_manifest",
+    "require_shell_shebang",
     "validate_name",
     "validate_version",
 ]

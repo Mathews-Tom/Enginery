@@ -11,9 +11,12 @@ from __future__ import annotations
 
 from enginery.domain.errors import (
     EngineryError,
+    ExternalConflictError,
     HumanActionRequiredError,
     MissingPrerequisiteError,
+    OperationTimeoutError,
     ValidationFailureError,
+    WorkerFailureError,
 )
 
 
@@ -97,13 +100,58 @@ class CapabilityLegacyLockError(CapabilityError, ValidationFailureError):
     required; it must be re-resolved, never silently upgraded."""
 
 
+class CapabilityInputSchemaError(CapabilityError, ValidationFailureError):
+    """Raised when a command's input violates its declared input schema."""
+
+
+class CapabilityCommandNotRunnableError(CapabilityError, ValidationFailureError):
+    """Raised when a package cannot be run through the command boundary:
+    it is not a command or hook package, or declares no command."""
+
+
+class CapabilityCommandTimeoutError(CapabilityError, OperationTimeoutError):
+    """Raised when a package command exceeds its declared timeout."""
+
+
+class CapabilityCommandFailedError(CapabilityError, WorkerFailureError):
+    """Raised when a package command exits non-zero; stderr is the diagnostic."""
+
+
+class CapabilityCommandOutputError(CapabilityError, ValidationFailureError):
+    """Raised when a package command's stdout exceeds the output limit or is
+    not a single valid JSON document."""
+
+
+class CapabilityNotInstalledError(CapabilityError, MissingPrerequisiteError):
+    """Raised when an operation needs an active install record that does not exist."""
+
+
+class CapabilityInstallConflictError(CapabilityError, ExternalConflictError):
+    """Raised when an install would overwrite or collide with files it does not own."""
+
+
+class CapabilityIncompatibleError(CapabilityError, ValidationFailureError):
+    """Raised when a package's recorded compatibility receipt is incompatible with the host."""
+
+
+class CapabilitySourceError(CapabilityError, MissingPrerequisiteError):
+    """Raised when a capability source cannot be read at its recorded revision."""
+
+
 __all__ = [
     "CapabilityApprovalRequiredError",
     "CapabilityAssetTypeError",
     "CapabilityClosureLimitError",
+    "CapabilityCommandFailedError",
+    "CapabilityCommandNotRunnableError",
+    "CapabilityCommandOutputError",
+    "CapabilityCommandTimeoutError",
     "CapabilityDependencyError",
     "CapabilityDigestMismatchError",
     "CapabilityError",
+    "CapabilityIncompatibleError",
+    "CapabilityInputSchemaError",
+    "CapabilityInstallConflictError",
     "CapabilityIntegrityError",
     "CapabilityLegacyLockError",
     "CapabilityLicenseHoldError",
@@ -111,6 +159,8 @@ __all__ = [
     "CapabilityLockDriftError",
     "CapabilityManifestError",
     "CapabilityNotFoundError",
+    "CapabilityNotInstalledError",
     "CapabilityPathError",
+    "CapabilitySourceError",
     "CapabilitySymlinkError",
 ]

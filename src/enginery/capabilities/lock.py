@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from enginery.capabilities.closure import AssetRecord, closure_digest
+from enginery.capabilities.compatibility import CompatibilityReceipt
+from enginery.capabilities.errors import CapabilityLockDriftError
 from enginery.capabilities.license import LicenseDisposition, classify_license
 from enginery.capabilities.manifest import (
     CapabilityPermission,
@@ -88,6 +90,7 @@ class LockedCapability:
     license: str | None
     introduced_by_run: bool
     files: tuple[AssetRecord, ...]
+    receipt: CompatibilityReceipt
     dependencies: tuple[DependencyPin, ...] = ()
     permissions: tuple[CapabilityPermission, ...] = ()
     compatibility: PackageCompatibility = field(default_factory=PackageCompatibility)
@@ -150,9 +153,18 @@ class LockedCapability:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityLock:
-    """An immutable set of locked capabilities bound to one run."""
+    """An immutable set of locked capabilities bound to one run.
+
+    ``retained_pins`` are the pins of capabilities an earlier lockfile held that
+    this lock no longer carries as entries. They exist only so a later
+    resolution cannot silently move a name to another version or closure: they
+    are consulted for drift and are never an entry, never installed, and not
+    part of :meth:`digest`, so the lock that is installed and approved is
+    exactly the lock whose digest is bound everywhere.
+    """
 
     entries: tuple[LockedCapability, ...]
+    retained_pins: tuple[DependencyPin, ...] = ()
 
     def __post_init__(self) -> None:
         names = [entry.name for entry in self.entries]
@@ -160,6 +172,14 @@ class CapabilityLock:
             raise InvalidInputError("capability lock entries must have unique names")
         ordered = tuple(sorted(self.entries, key=lambda entry: entry.name))
         object.__setattr__(self, "entries", ordered)
+        retained_names = [pin.name for pin in self.retained_pins]
+        if len(retained_names) != len(set(retained_names)):
+            raise InvalidInputError("capability lock retained pins must have unique names")
+        if set(retained_names) & set(names):
+            raise InvalidInputError("a retained pin must not repeat a locked entry's name")
+        object.__setattr__(
+            self, "retained_pins", tuple(sorted(self.retained_pins, key=lambda pin: pin.name))
+        )
         by_name = {entry.name: entry for entry in ordered}
         for entry in ordered:
             for pin in entry.dependencies:
@@ -173,6 +193,14 @@ class CapabilityLock:
     def get(self, name: str) -> LockedCapability | None:
         return next((entry for entry in self.entries if entry.name == name), None)
 
+    def pin_for(self, name: str) -> DependencyPin | None:
+        """The pin this lock holds for ``name``: an active entry's, else a retained one."""
+
+        entry = self.get(name)
+        if entry is not None:
+            return entry.pin()
+        return next((pin for pin in self.retained_pins if pin.name == name), None)
+
     def digest(self) -> Digest:
         """A canonical digest over every locked entry's trust-relevant fields.
 
@@ -180,6 +208,8 @@ class CapabilityLock:
         classification, kind, permissions, compatibility, and dependency
         pins. ``verified_at`` is a timestamp, not trust evidence, and is
         excluded so re-resolving an unchanged package reproduces the digest.
+        ``retained_pins`` are drift bookkeeping, not locked content, and are
+        excluded too.
         """
 
         return Digest.of_json(
@@ -197,6 +227,7 @@ class CapabilityLock:
                     "introduced_by_run": entry.introduced_by_run,
                     "permissions": [permission.value for permission in entry.permissions],
                     "compatibility": entry.compatibility.to_json(),
+                    "compatibility_receipt": entry.receipt.to_json(),
                     "dependencies": [pin.to_json() for pin in entry.dependencies],
                 }
                 for entry in self.entries
@@ -207,9 +238,105 @@ class CapabilityLock:
         return tuple(entry for entry in self.entries if entry.requires_human_approval())
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityApproval:
+    """One approval bound to the exact closure and whole-lock digests it was given for."""
+
+    name: str
+    closure_digest: Digest
+    lock_digest: Digest
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedCapabilities:
+    """The digest-bound approvals a caller holds; a bare name authorizes nothing.
+
+    An entry is covered only by an approval naming it with *its* closure digest
+    and the digest of the lock being installed, materialized, or run, so an
+    approval computed for one lock never carries over to a drifted lock.
+    """
+
+    approvals: frozenset[CapabilityApproval] = frozenset()
+
+    def covers(self, entry: LockedCapability, lock_digest: Digest) -> bool:
+        """Whether this entry may proceed under ``lock_digest``: reviewed, or approved exactly."""
+
+        if not entry.requires_human_approval():
+            return True
+        return CapabilityApproval(entry.name, entry.digest, lock_digest) in self.approvals
+
+    def names(self) -> frozenset[str]:
+        return frozenset(approval.name for approval in self.approvals)
+
+
+NO_APPROVALS = ApprovedCapabilities()
+
+
+def check_pins(previous: CapabilityLock | None, resolved: CapabilityLock) -> None:
+    """Refuse a resolution that moves an earlier pin to another version or closure.
+
+    ``previous`` pins are its active entries and its retained pins. A name
+    pinned at one version may not resolve at another, and the same version may
+    not resolve to a different closure digest; either is drift, never a silent
+    update.
+    """
+
+    if previous is None:
+        return
+    for entry in resolved.entries:
+        earlier = previous.pin_for(entry.name)
+        if earlier is None:
+            continue
+        if earlier.version != entry.version:
+            raise CapabilityLockDriftError(
+                "the lockfile already pins this capability at a different version; "
+                "remove the lockfile deliberately to change a pinned version",
+                details={
+                    "name": entry.name,
+                    "locked_version": earlier.version,
+                    "requested_version": entry.version,
+                },
+            )
+        if earlier.closure_digest != entry.digest:
+            raise CapabilityLockDriftError(
+                "the lockfile already pins this capability at a different closure digest",
+                details={
+                    "name": entry.name,
+                    "version": entry.version,
+                    "locked_digest": str(earlier.closure_digest),
+                    "resolved_digest": str(entry.digest),
+                },
+            )
+
+
+def carry_pins(previous: CapabilityLock | None, resolved: CapabilityLock) -> CapabilityLock:
+    """``resolved`` with every earlier pin it does not replace kept as a retained pin.
+
+    The entries are exactly ``resolved``'s, so the result has the same digest;
+    earlier capabilities survive only as drift-only pins (see
+    :class:`CapabilityLock`). The pins are checked first (:func:`check_pins`).
+    """
+
+    check_pins(previous, resolved)
+    if previous is None:
+        return resolved
+    names = {entry.name for entry in resolved.entries}
+    earlier = [
+        *(entry.pin() for entry in previous.entries),
+        *previous.retained_pins,
+    ]
+    kept = tuple(pin for pin in earlier if pin.name not in names)
+    return CapabilityLock(entries=resolved.entries, retained_pins=kept)
+
+
 __all__ = [
+    "NO_APPROVALS",
+    "ApprovedCapabilities",
+    "CapabilityApproval",
     "CapabilityLock",
     "LockedCapability",
     "ProvenanceRecord",
     "ProvenanceStatus",
+    "carry_pins",
+    "check_pins",
 ]

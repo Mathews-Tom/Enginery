@@ -25,7 +25,7 @@ import posixpath
 import re
 import stat
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +43,7 @@ from enginery.capabilities.manifest import (
     PackageManifest,
     digest_from_text,
     parse_manifest,
+    require_shell_shebang,
 )
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -391,10 +392,33 @@ def build_closure(files: Iterable[PackageFile]) -> PackageClosure:
         raise CapabilityManifestError(
             "package has no manifest", details={"expected": MANIFEST_FILE_NAME}
         )
-    return PackageClosure(
-        manifest=parse_manifest(manifest_bytes),
-        files=tuple(sorted(records, key=lambda record: record.path)),
-    )
+    manifest = parse_manifest(manifest_bytes)
+    ordered = tuple(sorted(records, key=lambda record: record.path))
+    _require_command_assets(manifest, ordered, {item.path: item.content for item in supplied})
+    return PackageClosure(manifest=manifest, files=ordered)
+
+
+def _require_command_assets(
+    manifest: PackageManifest, records: Sequence[AssetRecord], contents: Mapping[str, bytes]
+) -> None:
+    """A declared command must run a script that is part of the closure."""
+
+    command = manifest.command
+    if command is None:
+        return
+    script = next((record for record in records if record.path == command.script), None)
+    if script is None or script.kind is not AssetKind.SCRIPT:
+        raise CapabilityManifestError(
+            "package command must run a script asset of the package",
+            details={"script": command.script},
+        )
+    if command.interpreter is None:
+        if not script.executable:
+            raise CapabilityManifestError(
+                "a directly executed command script must carry the executable bit",
+                details={"script": command.script},
+            )
+        require_shell_shebang(contents[command.script], script=command.script)
 
 
 def _reject_file_directory_conflicts(collision_keys: dict[str, str]) -> None:

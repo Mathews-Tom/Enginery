@@ -221,10 +221,10 @@ field of its own. Four facts about this adapter matter operationally:
   `armory` extra (`uv sync --all-extras` installs it). `probe()` reports
   `AdapterAvailability.UNAVAILABLE` when the extra is absent — the engine
   keeps working with Armory disabled, exactly like an absent OMP or Claude
-  Code CLI. **No shipped CLI command constructs or calls this adapter in
-  this release** — using it today means writing Python against
-  `CapabilitySourcePort` directly, the same way `tests/adapters/armory`
-  exercises it.
+  Code CLI. `enginery capability inspect|preview|install --armory` is the
+  shipped way to use it (see
+  [Capability packages](operations.md#capability-packages)); the same
+  adapter is available to Python callers through `CapabilitySourcePort`.
 - **Every read is bound to one immutable commit.** The adapter resolves its
   configured ref (default `main`) to a commit sha once, or takes an explicit
   40-character `revision`, and reads the catalog, the recursive file
@@ -378,16 +378,121 @@ files do not hash to the claimed digest.
   directory, under its closure-digest path and never overwritten; every
   later use re-verifies the directory (no missing, changed, or extra file,
   no symlink) against the lock entry.
-- **Lock schema.** The lock file declares `schema_version: 2`. A lock
+- **Lock schema.** The lock file declares `schema_version: 2` and, beside
+  `entries`, `retained_pins` (name, version, closure digest of capabilities
+  an earlier install held that the lock no longer carries). Retained pins are
+  drift bookkeeping outside `CapabilityLock.digest()`: the entries are exactly
+  the installed and approved lock. A lock
   without a `schema_version` is the previous single-blob schema: it decodes
   read-only as legacy entries that carry no closure, cannot be
   materialized or approved, and must be re-resolved —
   `enginery capability lock --check` reports each such entry as needing
-  re-resolution and consumers of the lock refuse it.
+  re-resolution and consumers of the lock refuse it. The explicit way
+  forward is `enginery capability install ... --replace-legacy-lock`
+  (`inspect` and `preview` accept the flag too): resolution starts fresh and
+  `install` replaces the legacy file; without the flag the file is never
+  touched.
 
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an
 enforced acceptance property, not an aspiration.
+
+## Typed sources, precedence, and the command boundary
+
+Every capability reaches the resolver through one `CapabilitySourcePort`
+and is registered with a source kind (`CapabilitySource` in
+`src/enginery/capabilities/sources.py`). The kind decides *trust*; the
+package's manifest decides *permissions*, so every source gets the same
+permission typing.
+
+| Kind | Adapter | Trust |
+|---|---|---|
+| `project` | `GitCapabilitySource` over a **local** reviewed repository at the run's bound base commit (`--project-source REPOSITORY@COMMIT`, optional `--project-subdir`; a URL is refused); the commit sha is the locked revision and the lock records `project:<canonical absolute repository path>` as the source label, so the lock digest binds the repository. Binding that commit to the run's reviewed base is the operator's assertion | `local_trusted`, not run-introduced; no approval |
+| `user` | `DirectoryCapabilitySource` over a user-local directory (the only directory-backed kind) | run-introduced, `unauthenticated` |
+| `git` | `GitCapabilitySource`: repository path or URL plus a full 40-hex commit sha | run-introduced, `unauthenticated` |
+| `armory` | `ArmoryCapabilitySource` | run-introduced, `unauthenticated` |
+
+Precedence is `project`, `user`, `git`, `armory`; within a kind, the order
+sources were registered in. The first source offering `name@version` is
+selected and every lower-precedence source that also offers it is reported
+as *shadowed* (a shadowed source that cannot lock its package is reported
+with its problem, never dropped). A signature changes `unauthenticated` to
+`authenticated` only when it verifies against a pinned publisher key, and
+is accepted for `user` and `git` sources only through the adapter's
+`signatures` constructor parameter; even an authenticated run-introduced
+package still needs exact-digest human approval.
+
+- **Directory sources** read `<root>/<name>/capability.json` and the files
+  beside it, never following a link. A directory has no immutable revision
+  of its own, so the locked revision is the closure digest. A subdirectory
+  without a `capability.json` is not a package. A directory is mutable, so it
+  backs only the `user` kind; `CapabilitySource` refuses to register one as
+  the `project` source.
+- **Git sources** read the *tracked tree* of one commit with
+  `git ls-tree -r -z -l` and `git cat-file` — never the working tree, index,
+  or untracked files. Tree entries with mode `120000` (symlink) or `160000`
+  (submodule) make the package unlockable and fail with the offending path,
+  and a package whose tree sizes already exceed the package-wide byte limit is
+  refused before any blob is read. The sha must resolve to exactly that commit.
+  Git never runs inside a repository it did not create: every port call
+  creates a fresh bare mirror in an owner-only temporary directory, fetches
+  exactly the pinned commit into it (a local path as a `file://` URL), reads
+  only from the mirror, and deletes it afterwards, so the fetching side never
+  reads the source repository's configuration. The source's own
+  `git-upload-pack` does read that configuration by design (a promisor
+  remote's `uploadpack` command could run when a missing object is fetched
+  lazily), so the protection is a patched git plus `GIT_NO_LAZY_FETCH=1`.
+  **Minimum git version.** The adapter runs `git --version` once per adapter
+  instance and refuses to read a source (an explicit missing-prerequisite
+  error; `probe()` reports `misconfigured`) unless git is 2.45.1 or newer, or
+  one of the maintenance releases 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 or
+  2.44.1 (or a later patch of those lines). Anything older, including Apple
+  Git 2.39.3, and any output that cannot be parsed is refused.
+  Every git subprocess uses an argument vector, a timeout, `--no-replace-objects`
+  (with `GIT_NO_REPLACE_OBJECTS=1`, so `git replace` cannot swap a pinned
+  commit's content), `-c core.fsmonitor=false`, and an environment built from an
+  allowlist (`PATH`, `HOME`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`) plus
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_NO_LAZY_FETCH=1` and `GIT_LITERAL_PATHSPECS=1`. `GIT_ALLOW_PROTOCOL` names
+  only the transport the fetch needs and, for every other command, no
+  transport at all. The adapter never writes git configuration and never keeps
+  a cache, so `inspect` and `preview` read the network (for a URL) but write
+  nothing to the workspace.
+- **Armory** `discover()` lists catalog rows cheaply and never fetches or
+  locks a package; a package's closure is computed only when it is selected
+  (`resolve` or `fetch_closure`), and a selected package that cannot be
+  locked fails with an error naming the offending path.
+
+Each locked entry also carries a **compatibility receipt** computed at
+resolve time: the host's adapter API version and platform compared with the
+range and platforms the manifest declares. The receipt is bound into the
+lock digest, and an incompatible package can be locked and inspected but
+not installed.
+
+**Command boundary.** A `command` or `hook` package declares one `command`
+in its manifest: an argument vector (a reviewed interpreter — `python3`,
+`sh`, `bash`, `node` — then a package script, or a directly executable
+`.sh` package script; a `.py`, `.js`, `.mjs` or `.ts` script must name its
+interpreter so the interpreter's isolation flags apply), an `input_schema`, a
+`timeout_seconds` (1-300) and a `max_output_bytes` (1 B-1 MiB).
+`run_package_command` (`src/enginery/capabilities/command.py`) runs it only
+while an active owned install record covers exactly the locked closure,
+re-verifies the materialized closure immediately before the process starts
+(drift is rejected, not run) and runs from a fresh owner-only copy of the
+bytes it just verified, removed afterwards, so a change to the store after
+verification cannot change the code that runs. It validates the JSON input
+against the schema before spawning anything, never uses a shell, gives the
+process a minimal environment and its own process group, and returns the
+stdout JSON document in canonical form with stderr captured as diagnostics.
+Failures are distinct error classes: `CapabilityInputSchemaError` (schema
+violation), `CapabilityCommandTimeoutError`, `CapabilityCommandFailedError`
+(non-zero exit), `CapabilityCommandOutputError` (not one JSON document, or
+over the output limit), and `CapabilityIntegrityError` (drift). The input
+schema is a bounded subset of JSON Schema: `type`, `enum`, `const`,
+`properties`, `required`, boolean `additionalProperties`, `items`,
+`minimum`/`maximum`, `minLength`/`maxLength`, and `minItems`/`maxItems`;
+`$ref`, `pattern`, `format`, and combinators are rejected when the manifest
+is read.
 
 ## The incident-to-hotfix-and-rollback surface
 

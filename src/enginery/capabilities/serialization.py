@@ -7,6 +7,10 @@ only each package's closure records (path, kind, digest, size, executable
 bit), dependency pins, origin, provenance evidence, and license a
 resolution already computed.
 
+A lockfile also records ``retained_pins``: the name, version, and closure digest of
+capabilities an earlier install held that the current lock no longer carries. They are
+drift bookkeeping only and are not part of the lock's digest.
+
 The current schema is version 2 and is identified by an explicit
 ``schema_version``. A document without one is the previous single-blob
 schema: :func:`lock_from_json` refuses it with
@@ -18,10 +22,14 @@ lock is never upgraded in place; it must be re-resolved.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import datetime
 from pathlib import Path
 
+from enginery.capabilities.atomic import require_no_link_chain, write_atomically
 from enginery.capabilities.closure import AssetRecord
+from enginery.capabilities.compatibility import CompatibilityReceipt
 from enginery.capabilities.errors import CapabilityLegacyLockError
 from enginery.capabilities.legacy_lock import LegacyCapabilityLock, LegacyLockedCapability
 from enginery.capabilities.lock import (
@@ -65,9 +73,11 @@ def lock_to_json(lock: CapabilityLock) -> dict[str, object]:
                 "dependencies": [pin.to_json() for pin in entry.dependencies],
                 "permissions": [permission.value for permission in entry.permissions],
                 "compatibility": entry.compatibility.to_json(),
+                "compatibility_receipt": entry.receipt.to_json(),
             }
             for entry in lock.entries
         ],
+        "retained_pins": [pin.to_json() for pin in lock.retained_pins],
     }
 
 
@@ -85,7 +95,13 @@ def lock_from_json(data: object) -> CapabilityLock:
             "unsupported capability lock schema_version",
             details={"schema_version": str(data["schema_version"])},
         )
-    return CapabilityLock(entries=tuple(_entry_from_json(item) for item in entries))
+    retained = data.get("retained_pins")
+    if not isinstance(retained, list):
+        raise InvalidInputError("capability lock must contain a 'retained_pins' list")
+    return CapabilityLock(
+        entries=tuple(_entry_from_json(item) for item in entries),
+        retained_pins=tuple(_pin(item) for item in retained),
+    )
 
 
 def legacy_lock_from_json(data: object) -> LegacyCapabilityLock:
@@ -163,6 +179,7 @@ def _entry_from_json(item: object) -> LockedCapability:
                 CapabilityPermission(_item_str(value)) for value in _list(item, "permissions")
             ),
             compatibility=PackageCompatibility.from_json(item.get("compatibility")),
+            receipt=CompatibilityReceipt.from_json(item.get("compatibility_receipt")),
         )
     except ValueError as error:
         raise InvalidInputError(f"capability lock entry is invalid: {error}") from error
@@ -203,22 +220,38 @@ def _digest(data: dict[str, object], key: str) -> Digest:
 
 
 def write_lock(lock: CapabilityLock, path: Path) -> None:
+    """Write ``lock`` atomically; a link at ``path`` is replaced, never written through.
+
+    A symbolic link on the directory chain leading to ``path`` is refused.
+    """
+
+    require_no_link_chain(path.parent, what="lockfile directory", check_named_root=False)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(lock_to_json(lock), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    payload = (json.dumps(lock_to_json(lock), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    write_atomically(path, payload, prefix=".enginery-lock-")
 
 
 def read_lock_document(path: Path) -> object:
-    """Read and JSON-decode a lockfile without interpreting its schema."""
+    """Read and JSON-decode a lockfile without interpreting its schema.
+
+    A symlink is refused rather than followed, so a link planted at the lockfile
+    path cannot redirect what is read.
+    """
 
     try:
-        raw = path.read_text(encoding="utf-8")
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise InvalidInputError(f"capability lock at {path} is a symlink; not following it")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise InvalidInputError(f"capability lock at {path} is not a regular file")
+            raw = handle.read()
     except OSError as error:
         raise InvalidInputError(f"unable to read capability lock at {path}") from error
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as error:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError as error:
         raise InvalidInputError(f"capability lock at {path} is not valid JSON") from error
 
 

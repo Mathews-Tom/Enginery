@@ -17,8 +17,10 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from enginery.adapters.git_capability import GitCapabilitySource
 from enginery.application.adapter_types import AdapterStatus
-from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
+from enginery.application.delivery_ports import CapabilityDescriptor, CapabilityListing, PackageFile
+from enginery.capabilities.approval import approved_capabilities, materialize_approval_schema
 from enginery.capabilities.closure import build_closure
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -26,11 +28,15 @@ from enginery.capabilities.errors import (
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
 )
-from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
+from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock, ProvenanceStatus
 from enginery.capabilities.manifest import PackageKind, PackageManifest, render_manifest
 from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.signature import PinnedKeyring, PinnedPublisherKey, descriptor_verifier
+from enginery.capabilities.sources import CapabilitySource, SourceKind
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.evaluator import PolicyEvaluator
 
 
 def _token(rng: random.Random) -> str:
@@ -71,29 +77,59 @@ def _descriptor(
     license_id: str | None = None,
     signature: bytes | None = None,
     signer_key_id: str | None = None,
+    revision: str = "adversarial-revision",
 ) -> CapabilityDescriptor:
     return CapabilityDescriptor(
         name=name,
         version="1",
         digest=build_closure(files).digest,
         provenance=provenance,
-        revision="adversarial-revision",
+        revision=revision,
         license=license_id,
         signature=signature,
         signer_key_id=signer_key_id,
     )
 
 
-class _FakeSource:
+_PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_OPERATOR = AuthorityPrincipal(
+    id="gate-operator",
+    principal_type=PrincipalType.HUMAN,
+    role="operator",
+    authorization_source="cli",
+)
+_RUN = AuthorityPrincipal(
+    id="gate-run",
+    principal_type=PrincipalType.AGENT,
+    role="run",
+    authorization_source="coordinator",
+)
+
+
+class _FakeSource(GitCapabilitySource):
+    """An in-memory stand-in for any source kind, answering the port from memory.
+
+    The resolver accepts only a Git source as the project source, so this is one; no
+    repository is ever read.
+    """
+
     def __init__(self, descriptor: CapabilityDescriptor, files: tuple[PackageFile, ...]) -> None:
+        super().__init__(repository=tempfile.gettempdir(), revision=_PINNED_COMMIT)
         self._descriptor = descriptor
         self._files = files
 
     def probe(self) -> AdapterStatus:  # pragma: no cover - unused by the resolver
         raise NotImplementedError
 
-    def discover(self) -> tuple[CapabilityDescriptor, ...]:  # pragma: no cover - unused
-        return (self._descriptor,)
+    def discover(self) -> tuple[CapabilityListing, ...]:  # pragma: no cover - unused
+        return (
+            CapabilityListing(
+                name=self._descriptor.name,
+                version=self._descriptor.version,
+                provenance=self._descriptor.provenance,
+                revision=self._descriptor.revision,
+            ),
+        )
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
         if (name, version) == (self._descriptor.name, self._descriptor.version):
@@ -105,10 +141,19 @@ class _FakeSource:
         return self._files
 
 
+def _source(
+    descriptor: CapabilityDescriptor,
+    files: tuple[PackageFile, ...],
+    kind: SourceKind = SourceKind.USER,
+) -> CapabilitySource:
+    port = _FakeSource(descriptor, files)
+    return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=port)
+
+
 def _case_unsigned_external_asset(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
     files = _package(name, _token(rng).encode())
-    resolver = CapabilityResolver([_FakeSource(_descriptor(name, files), files)])
+    resolver = CapabilityResolver([_source(_descriptor(name, files), files)])
 
     lock = resolver.resolve([CapabilityRequest(name=name, version="1")])
 
@@ -141,7 +186,7 @@ def _case_wrong_signer(rng: random.Random) -> None:
     )
     keyring = PinnedKeyring([PinnedPublisherKey("claimed-signer", claimed_signer_key.public_key())])
     resolver = CapabilityResolver(
-        [_FakeSource(descriptor, files)], signature_verifier=descriptor_verifier(keyring)
+        [_source(descriptor, files)], signature_verifier=descriptor_verifier(keyring)
     )
 
     lock = resolver.resolve([CapabilityRequest(name=name, version="1")])
@@ -158,7 +203,7 @@ def _case_digest_swap(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
     declared_files = _package(name, _token(rng).encode())
     swapped_files = _package(name, _token(rng).encode())
-    resolver = CapabilityResolver([_FakeSource(_descriptor(name, declared_files), swapped_files)])
+    resolver = CapabilityResolver([_source(_descriptor(name, declared_files), swapped_files)])
 
     _expect(
         CapabilityDigestMismatchError,
@@ -170,7 +215,7 @@ def _case_license_mismatch(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
     files = _package(name, _token(rng).encode(), license_id=None)
     descriptor = _descriptor(name, files, license_id="GPL-3.0")
-    resolver = CapabilityResolver([_FakeSource(descriptor, files)])
+    resolver = CapabilityResolver([_source(descriptor, files)])
 
     _expect(
         CapabilityLicenseMismatchError,
@@ -183,7 +228,7 @@ def _case_license_mismatch(rng: random.Random) -> None:
 def _case_run_introduced_capability_blocks_without_approval(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
     files = _package(name, _token(rng).encode())
-    resolver = CapabilityResolver([_FakeSource(_descriptor(name, files), files)])
+    resolver = CapabilityResolver([_source(_descriptor(name, files), files)])
 
     lock = resolver.resolve([CapabilityRequest(name=name, version="1")])
     entry = lock.get(name)
@@ -198,26 +243,28 @@ def _case_run_introduced_capability_blocks_without_approval(rng: random.Random) 
         lambda: materialize_lock(lock, {name: files}, root=_scratch_root()),
     )
     materialized = materialize_lock(
-        lock, {name: files}, root=_scratch_root(), approved_names=frozenset({name})
+        lock,
+        {name: files},
+        root=_scratch_root(),
+        approvals=_approve(lock, [name]),
     )
     _assert(name in materialized, "an approved run-introduced capability must materialize")
 
 
 def _case_active_run_mutation(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
-    reviewed_base = frozenset({(name, "1")})
     original_files = _package(name, _token(rng).encode())
     mutated_files = _package(name, _token(rng).encode())
-    original = _descriptor(name, original_files, provenance="repository-local")
-    mutated = _descriptor(name, mutated_files, provenance="repository-local")
-    resolver = CapabilityResolver(
-        [_FakeSource(original, original_files)], reviewed_base=reviewed_base
+    original = _descriptor(
+        name, original_files, provenance="repository-local", revision=_PINNED_COMMIT
     )
+    mutated = _descriptor(
+        name, mutated_files, provenance="repository-local", revision=_PINNED_COMMIT
+    )
+    resolver = CapabilityResolver([_source(original, original_files, SourceKind.PROJECT)])
     previous_lock: CapabilityLock = resolver.resolve([CapabilityRequest(name=name, version="1")])
 
-    mutated_resolver = CapabilityResolver(
-        [_FakeSource(mutated, mutated_files)], reviewed_base=reviewed_base
-    )
+    mutated_resolver = CapabilityResolver([_source(mutated, mutated_files, SourceKind.PROJECT)])
 
     _expect(
         CapabilityLockDriftError,
@@ -225,6 +272,18 @@ def _case_active_run_mutation(rng: random.Random) -> None:
             [CapabilityRequest(name=name, version="1")], previous_lock=previous_lock
         ),
     )
+
+
+def _approve(lock: CapabilityLock, names: list[str]) -> ApprovedCapabilities:
+    """Approvals through the real path: a registered human records the exact schema."""
+
+    registry = ApprovalRegistry([_OPERATOR])
+    evaluator = PolicyEvaluator("policy-gate", approval_registry=registry)
+    for entry in lock.pending_approval():
+        if entry.name in names:
+            schema = materialize_approval_schema(entry, lock, requesting_principal_id=_RUN.id)
+            registry.record_approval(schema, [_OPERATOR])
+    return approved_capabilities(lock, evaluator, requesting_principal_id=_RUN.id)
 
 
 def _scratch_root() -> Path:
