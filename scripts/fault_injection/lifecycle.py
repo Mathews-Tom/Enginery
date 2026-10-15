@@ -18,6 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.domain.errors import ExternalConflictError, HumanActionRequiredError
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.leases import FencedNodeLeases
@@ -105,7 +106,12 @@ _STALE_SCRIPT = textwrap.dedent(
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        text=True,
+        capture_output=True,
+        check=True,
     ).stdout.strip()
 
 

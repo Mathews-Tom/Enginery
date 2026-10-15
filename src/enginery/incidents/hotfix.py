@@ -30,6 +30,7 @@ from enginery.application.delivery_ports import (
     ValidationResult,
     ValidationStatus,
 )
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.application.work_ports import PullRequestRequest
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
 from enginery.domain.ids import OperationId, RunId
@@ -173,7 +174,14 @@ def _regression_operation_id(run_id: RunId, revision: str) -> OperationId:
 
 
 def _run_git(cwd: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if result.returncode != 0:
         raise ExternalConflictError(
             f"git {' '.join(args)} failed", details={"stderr": result.stderr}

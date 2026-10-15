@@ -49,6 +49,7 @@ from enginery.adapters.local_service import (
     build_local_service_artifact,
 )
 from enginery.application.delivery_ports import DeploymentRequest
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.domain.errors import EngineryError
 from enginery.domain.ids import OperationId, RunId
 from enginery.domain.incident import (
@@ -102,7 +103,12 @@ class Stage3GateReport:
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 

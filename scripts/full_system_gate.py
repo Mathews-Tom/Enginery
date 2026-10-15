@@ -113,6 +113,7 @@ from enginery.adapters.local_service import (
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
 from enginery.application.delivery_ports import DeploymentRequest
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -1007,7 +1008,12 @@ def _run_stage2_leg(
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 
