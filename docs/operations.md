@@ -1801,8 +1801,8 @@ run created is still removed before it exits; a SIGTERM or SIGHUP that arrives d
 cleanup is held until it is done). An assertion that cannot run fails or
 holds the run; none is skipped. At the end the run lists the engine's containers (the
 per-attempt store containers included), volumes and networks and fails if any it
-created remains, if it had to remove a store, a volume or an attempt network that the
-launcher should have removed itself, or if the engine could not be listed
+created remains, if it had to remove a store, a volume, an attempt network or a validation
+container that the launcher should have removed itself, or if the engine could not be listed
 (`z-cleanup-no-stray-containers`). A run killed with SIGKILL cannot clean up: remove
 its `enginery-gate-<id>-*` networks and `enginery-*` containers and volumes by hand.
 

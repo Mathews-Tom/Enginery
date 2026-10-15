@@ -292,6 +292,7 @@ class Gate:
     _containers: list[str] = field(default_factory=list)
     _networks: list[str] = field(default_factory=list)
     _attempt_networks: set[str] = field(default_factory=set)
+    _validation_containers: set[str] = field(default_factory=set)
     _cleanups: list[Callable[[], None]] = field(default_factory=list)
     _preexisting_containers: set[str] = field(default_factory=set)
     cleanup_report: dict[str, Any] = field(default_factory=dict)
@@ -367,8 +368,11 @@ class Gate:
         """
         for path in sorted(receipts.glob("*.validation-receipt.json")):
             receipt, _document = read_receipt(path)
-            if receipt is not None and receipt.container_name not in self._containers:
+            if receipt is None:
+                continue
+            if receipt.container_name not in self._containers:
                 self.track_container(receipt.container_name)
+            self._validation_containers.add(receipt.container_name)
 
     def on_cleanup(self, action: Callable[[], None]) -> None:
         self._cleanups.append(action)
@@ -614,7 +618,12 @@ class Gate:
         holders, volumes = self.store_objects()
         # What the product launcher removes itself on every path; finding any of it here is a leak
         # of the launcher's (or of a probe's own store), however quietly the gate removes it.
-        launcher_owned = {*holders, *volumes, *self._attempt_networks}
+        launcher_owned = {
+            *holders,
+            *volumes,
+            *self._attempt_networks,
+            *self._validation_containers,
+        }
         self._remove_present(
             report,
             "container",

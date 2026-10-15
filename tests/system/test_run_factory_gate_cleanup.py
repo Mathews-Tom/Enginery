@@ -225,3 +225,8 @@ def test_a_validation_container_the_product_launched_is_tracked_from_its_receipt
     gate.cleanup()
     assert not fake.containers
     assert not fake.volumes
+    # The launcher removes a validation container itself on every path; one it left is a defect
+    # the gate reports even though it removes it.
+    assert f"container {validation} was left behind by the launcher" in "\n".join(
+        gate.cleanup_report["errors"]
+    )
