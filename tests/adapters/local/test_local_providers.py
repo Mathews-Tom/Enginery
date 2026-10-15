@@ -20,6 +20,7 @@ from enginery.adapters.local import (
 )
 from enginery.application.adapter_types import AdapterEventKind, NormalizedAdapterEvent
 from enginery.application.delivery_ports import (
+    CapabilityListing,
     DeploymentRequest,
     PublicationRequest,
     ReleaseArtifact,
@@ -233,7 +234,14 @@ def test_local_capability_source_has_no_runtime_discovery() -> None:
     capability = descriptor_for(files)
     source = LocalCapabilitySource(capabilities=(capability,))
 
-    assert source.discover() == (capability,)
+    assert source.discover() == (
+        CapabilityListing(
+            name=capability.name,
+            version=capability.version,
+            provenance=capability.provenance,
+            revision=capability.revision,
+        ),
+    )
     assert source.resolve("repository-read", "1") == capability
     assert source.resolve("missing", "1") is None
 

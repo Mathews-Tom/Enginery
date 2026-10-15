@@ -1,0 +1,492 @@
+"""The Git capability source reads the tracked tree of one pinned commit, never the worktree."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+from tests.support.capabilities import HOST, package_files
+
+from enginery.adapters.git_capability import GitCapabilitySource, git_environment
+from enginery.application.adapter_types import AdapterAvailability
+from enginery.application.delivery_ports import PackageFile
+from enginery.application.git_environment import repository_isolated_environment
+from enginery.capabilities.closure import build_closure
+from enginery.capabilities.errors import (
+    CapabilityAssetTypeError,
+    CapabilityManifestError,
+    CapabilitySourceError,
+    CapabilitySymlinkError,
+)
+from enginery.capabilities.lock import ProvenanceStatus
+from enginery.capabilities.manifest import CommandSpec, PackageKind
+from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
+from enginery.capabilities.sources import CapabilitySource, SourceKind
+from enginery.domain.errors import InvalidInputError
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+
+_UNKNOWN_SHA = "1" * 40
+
+
+def _env() -> dict[str, str]:
+    environment = repository_isolated_environment()
+    environment.update(
+        {
+            "GIT_AUTHOR_NAME": "Tester",
+            "GIT_AUTHOR_EMAIL": "tester@example.invalid",
+            "GIT_COMMITTER_NAME": "Tester",
+            "GIT_COMMITTER_EMAIL": "tester@example.invalid",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+    )
+    return environment
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        check=True,
+        cwd=repo,
+        env=_env(),
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q", "-b", "main")
+    return path
+
+
+def _write_package(base: Path, directory: str, files: Sequence[PackageFile]) -> Path:
+    package = base / directory
+    for item in files:
+        target = package / item.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(item.content)
+        target.chmod(0o755 if item.executable else 0o644)
+    return package
+
+
+def _commit(repo: Path, message: str = "commit") -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _as_set(files: Sequence[PackageFile]) -> set[tuple[str, bytes, bool]]:
+    return {(item.path, item.content, item.executable) for item in files}
+
+
+def _packaged_repo(
+    tmp_path: Path,
+    files: Sequence[PackageFile] | None = None,
+    *,
+    directory: str = "packages/skill-a",
+) -> tuple[Path, str, tuple[PackageFile, ...]]:
+    repo = _init_repo(tmp_path / "repo")
+    committed = tuple(files) if files is not None else package_files("skill-a")
+    _write_package(repo, directory, committed)
+    return repo, _commit(repo), committed
+
+
+def _source(repo: Path, sha: str, *, root: str = "packages") -> GitCapabilitySource:
+    return GitCapabilitySource(repository=str(repo), revision=sha, package_root=root)
+
+
+def test_discover_resolve_and_fetch_read_a_package_under_a_subdirectory(tmp_path: Path) -> None:
+    repo, sha, files = _packaged_repo(tmp_path)
+    source = _source(repo, sha)
+
+    listings = source.discover()
+    descriptor = source.resolve("skill-a", "1")
+    fetched = source.fetch_closure("skill-a", "1")
+
+    assert [(item.name, item.version, item.revision) for item in listings] == [
+        ("skill-a", "1", sha)
+    ]
+    assert descriptor is not None
+    assert descriptor.revision == sha
+    assert descriptor.digest == build_closure(files).digest
+    assert _as_set(fetched) == _as_set(files)
+
+
+def test_a_repository_root_layout_needs_no_package_root(tmp_path: Path) -> None:
+    repo, sha, files = _packaged_repo(tmp_path, directory="skill-a")
+    source = GitCapabilitySource(repository=str(repo), revision=sha)
+
+    descriptor = source.resolve("skill-a", "1")
+
+    assert [item.name for item in source.discover()] == ["skill-a"]
+    assert descriptor is not None
+    assert descriptor.digest == build_closure(files).digest
+
+
+def test_resolve_returns_none_for_unknown_name_or_version(tmp_path: Path) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+    source = _source(repo, sha)
+
+    assert source.resolve("ghost", "1") is None
+    assert source.resolve("skill-a", "2") is None
+    with pytest.raises(CapabilitySourceError):
+        source.fetch_closure("skill-a", "2")
+
+
+def test_untracked_and_uncommitted_worktree_content_is_not_part_of_the_closure(
+    tmp_path: Path,
+) -> None:
+    repo, sha, files = _packaged_repo(tmp_path)
+    package = repo / "packages" / "skill-a"
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "x.pyc").write_bytes(b"\x00compiled")
+    (package / "SKILL.md").write_bytes(b"uncommitted edit\n")
+    (package / "references" / "extra.md").write_bytes(b"untracked file\n")
+    source = _source(repo, sha)
+
+    descriptor = source.resolve("skill-a", "1")
+
+    assert descriptor is not None
+    assert descriptor.digest == build_closure(files).digest
+    assert _as_set(source.fetch_closure("skill-a", "1")) == _as_set(files)
+
+
+def test_a_later_commit_does_not_change_what_the_older_sha_resolves_to(tmp_path: Path) -> None:
+    repo, first, files = _packaged_repo(tmp_path)
+    (repo / "packages" / "skill-a" / "SKILL.md").write_bytes(b"second revision\n")
+    second = _commit(repo, "second")
+
+    older = _source(repo, first).resolve("skill-a", "1")
+    newer = _source(repo, second).resolve("skill-a", "1")
+
+    assert older is not None
+    assert newer is not None
+    assert older.digest == build_closure(files).digest
+    assert older.revision == first
+    assert newer.revision == second
+    assert newer.digest != older.digest
+
+
+@pytest.mark.parametrize("revision", ["abc1234", "main", "HEAD", "A" * 40, "a" * 39, "a" * 41])
+def test_only_a_full_lowercase_sha_is_accepted(tmp_path: Path, revision: str) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+
+    with pytest.raises(InvalidInputError):
+        GitCapabilitySource(repository=str(repo), revision=revision)
+    with pytest.raises(InvalidInputError):
+        GitCapabilitySource(repository=str(repo), revision=sha.upper())
+
+
+def test_an_unknown_but_well_formed_sha_fails_on_first_use(tmp_path: Path) -> None:
+    repo, _, _ = _packaged_repo(tmp_path)
+    source = _source(repo, _UNKNOWN_SHA)
+
+    with pytest.raises(CapabilitySourceError):
+        source.discover()
+    with pytest.raises(CapabilitySourceError):
+        source.resolve("skill-a", "1")
+
+
+def test_a_symlink_entry_in_a_package_is_refused_with_its_path(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    package = _write_package(repo, "packages/skill-a", package_files("skill-a"))
+    os.symlink("../SKILL.md", package / "references" / "link.md")
+    sha = _commit(repo)
+    source = _source(repo, sha)
+
+    with pytest.raises(CapabilitySymlinkError) as resolved:
+        source.resolve("skill-a", "1")
+    with pytest.raises(CapabilitySymlinkError):
+        source.fetch_closure("skill-a", "1")
+
+    assert resolved.value.details["path"] == "packages/skill-a/references/link.md"
+    assert resolved.value.details["mode"] == "120000"
+
+
+def test_a_submodule_entry_in_a_package_is_refused(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    _write_package(repo, "packages/skill-a", package_files("skill-a"))
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{_UNKNOWN_SHA},packages/skill-a/vendor",
+    )
+    _git(repo, "commit", "-q", "-m", "submodule")
+    sha = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(CapabilitySymlinkError) as caught:
+        _source(repo, sha).resolve("skill-a", "1")
+
+    assert caught.value.details["path"] == "packages/skill-a/vendor"
+    assert caught.value.details["mode"] == "160000"
+
+
+def test_a_package_path_that_is_itself_a_symlink_is_refused(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    _write_package(repo, "packages/real-package", package_files("skill-a"))
+    os.symlink("real-package", repo / "packages" / "skill-a")
+    sha = _commit(repo)
+    source = _source(repo, sha)
+
+    with pytest.raises(CapabilitySymlinkError) as caught:
+        source.resolve("skill-a", "1")
+    with pytest.raises(CapabilitySymlinkError):
+        source.fetch_closure("skill-a", "1")
+
+    assert caught.value.details["path"] == "packages/skill-a"
+
+
+def test_an_unreviewed_asset_type_tracked_in_the_tree_is_refused_on_resolve(
+    tmp_path: Path,
+) -> None:
+    repo, sha, _ = _packaged_repo(
+        tmp_path, package_files("skill-a", extra={"payload.bin": b"\x00\x01"})
+    )
+    source = _source(repo, sha)
+
+    assert [item.name for item in source.discover()] == ["skill-a"]
+    with pytest.raises(CapabilityAssetTypeError):
+        source.resolve("skill-a", "1")
+
+
+def test_the_executable_bit_of_a_tracked_script_is_preserved(tmp_path: Path) -> None:
+    files = package_files(
+        "tool-a",
+        kind=PackageKind.COMMAND,
+        command=CommandSpec.create(argv=("scripts/run.py",), input_schema={"type": "object"}),
+    )
+    assert any(item.executable for item in files)
+    repo, sha, _ = _packaged_repo(tmp_path, files, directory="packages/tool-a")
+    source = _source(repo, sha)
+
+    fetched = source.fetch_closure("tool-a", "1")
+    descriptor = source.resolve("tool-a", "1")
+
+    assert _as_set(fetched) == _as_set(files)
+    assert descriptor is not None
+    assert descriptor.digest == build_closure(files).digest
+
+
+def test_a_manifest_named_differently_from_its_directory_is_refused(tmp_path: Path) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path, package_files("other-name"))
+    source = _source(repo, sha)
+
+    with pytest.raises(CapabilityManifestError):
+        source.discover()
+    with pytest.raises(CapabilityManifestError):
+        source.resolve("skill-a", "1")
+
+
+def test_a_directory_without_a_manifest_is_not_listed(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    _write_package(repo, "packages/skill-a", package_files("skill-a"))
+    (repo / "packages" / "notes").mkdir()
+    (repo / "packages" / "notes" / "readme.txt").write_bytes(b"not a package")
+    sha = _commit(repo)
+
+    assert [item.name for item in _source(repo, sha).discover()] == ["skill-a"]
+
+
+def test_git_environment_drops_redirecting_and_config_variables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hostile = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+    ]
+    for key in hostile:
+        monkeypatch.setenv(key, str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "global-config"))
+    monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+
+    environment = git_environment()
+
+    assert not [key for key in hostile if key in environment]
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CEILING_DIRECTORIES" not in environment
+    assert git_environment(ceiling=tmp_path)["GIT_CEILING_DIRECTORIES"] == str(tmp_path)
+
+
+def test_an_inherited_git_dir_cannot_redirect_the_source_to_another_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, sha, files = _packaged_repo(tmp_path)
+    decoy = _init_repo(tmp_path / "decoy")
+    _write_package(decoy, "packages/decoy-pkg", package_files("decoy-pkg"))
+    _commit(decoy)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+    source = _source(repo, sha)
+
+    descriptor = source.resolve("skill-a", "1")
+
+    assert [item.name for item in source.discover()] == ["skill-a"]
+    assert source.resolve("decoy-pkg", "1") is None
+    assert descriptor is not None
+    assert descriptor.digest == build_closure(files).digest
+
+
+def test_hostile_repository_configuration_does_not_execute_code(tmp_path: Path) -> None:
+    repo, sha, files = _packaged_repo(tmp_path)
+    marker = tmp_path / "marker"
+    command = f"touch {marker}"
+    config = repo / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"[core]\n\tfsmonitor = {command}\n\tpager = {command}\n\tsshCommand = {command}\n"
+        + f"[alias]\n\tls-tree = !{command}\n"
+        + f"[diff]\n\texternal = {command}\n",
+        encoding="utf-8",
+    )
+    source = _source(repo, sha)
+
+    descriptor = source.resolve("skill-a", "1")
+    source.discover()
+    fetched = source.fetch_closure("skill-a", "1")
+    source.probe()
+
+    assert descriptor is not None
+    assert _as_set(fetched) == _as_set(files)
+    assert not marker.exists()
+
+
+def _snapshot(directory: Path) -> dict[str, tuple[int, int]]:
+    result: dict[str, tuple[int, int]] = {}
+    for path in sorted(directory.rglob("*")):
+        info = path.lstat()
+        result[str(path.relative_to(directory))] = (info.st_size, info.st_mtime_ns)
+    return result
+
+
+def test_the_source_never_writes_into_the_repository_it_reads(tmp_path: Path) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+    (repo / "packages" / "skill-a" / "SKILL.md").write_bytes(b"dirty worktree\n")
+    status_before = _git(repo, "status", "--porcelain")
+    before = _snapshot(repo / ".git")
+    source = _source(repo, sha)
+
+    source.probe()
+    source.discover()
+    source.resolve("skill-a", "1")
+    source.fetch_closure("skill-a", "1")
+
+    assert _snapshot(repo / ".git") == before
+    assert not (repo / ".git" / "index.lock").exists()
+    assert _git(repo, "status", "--porcelain") == status_before
+
+
+def test_a_url_source_fetches_into_a_bare_mirror_and_matches_the_local_descriptor(
+    tmp_path: Path,
+) -> None:
+    repo, sha, files = _packaged_repo(tmp_path)
+    cache = tmp_path / "cache"
+    remote = GitCapabilitySource(
+        repository=f"file://{repo}",
+        revision=sha,
+        package_root="packages",
+        cache_directory=cache,
+    )
+
+    descriptor = remote.resolve("skill-a", "1")
+
+    assert descriptor == _source(repo, sha).resolve("skill-a", "1")
+    assert descriptor is not None
+    assert descriptor.digest == build_closure(files).digest
+    assert _as_set(remote.fetch_closure("skill-a", "1")) == _as_set(files)
+    assert cache.is_dir()
+    assert not (repo / ".git" / "index.lock").exists()
+
+
+def test_a_url_source_needs_a_cache_directory() -> None:
+    with pytest.raises(InvalidInputError):
+        GitCapabilitySource(repository="https://example.invalid/repo.git", revision=_UNKNOWN_SHA)
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "--upload-pack=x",
+        "ext::sh -c x",
+        "-c",
+        "ftp://example.invalid/repo.git",
+        "relative/missing",
+    ],
+)
+def test_a_repository_that_is_neither_a_directory_nor_an_allowed_url_is_rejected(
+    tmp_path: Path, repository: str
+) -> None:
+    with pytest.raises(InvalidInputError):
+        GitCapabilitySource(
+            repository=repository, revision=_UNKNOWN_SHA, cache_directory=tmp_path / "cache"
+        )
+
+
+def test_probe_reports_available_for_a_good_source_and_misconfigured_for_an_unknown_commit(
+    tmp_path: Path,
+) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+
+    good = _source(repo, sha).probe()
+    bad = _source(repo, _UNKNOWN_SHA).probe()
+
+    assert good.availability is AdapterAvailability.AVAILABLE
+    assert bad.availability is AdapterAvailability.MISCONFIGURED
+
+
+def test_a_signature_claim_is_carried_into_the_descriptor(tmp_path: Path) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+    source = GitCapabilitySource(
+        repository=str(repo),
+        revision=sha,
+        package_root="packages",
+        signatures={("skill-a", "1"): (b"sig", "key-1")},
+    )
+
+    descriptor = source.resolve("skill-a", "1")
+
+    assert descriptor is not None
+    assert descriptor.signature == b"sig"
+    assert descriptor.signer_key_id == "key-1"
+
+
+def test_a_git_registered_package_is_unauthenticated_run_introduced_and_needs_approval(
+    tmp_path: Path,
+) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+    resolver = CapabilityResolver(
+        [CapabilitySource(SourceKind.GIT, "git", _source(repo, sha))], host=HOST
+    )
+
+    lock = resolver.resolve([CapabilityRequest(name="skill-a", version="1")])
+
+    entry = lock.entries[0]
+    assert entry.revision == sha
+    assert entry.provenance.status is ProvenanceStatus.UNAUTHENTICATED
+    assert entry.introduced_by_run is True
+    assert entry.requires_human_approval()

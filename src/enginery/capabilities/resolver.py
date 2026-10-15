@@ -1,14 +1,17 @@
 """Resolve requested capability names into an immutable, classified lock.
 
-The resolver never trusts a source's own claim about itself. It fetches
-every file of a package, rebuilds the package closure from those files
-(rejecting unsafe paths, symlinks, unreviewed asset types, and limit
-breaches), recomputes the closure digest and verifies it against the
-source's declared digest (defeating a digest-swap source), resolves each
-declared transitive dependency and checks it against its pinned closure
-digest, classifies provenance from evidence the caller supplies rather than
-the source's self-report, and rejects a resolution that would silently move
-an already-locked capability to a new closure (mutable-reference drift).
+The resolver never trusts a source's own claim about itself. It selects the
+highest-precedence typed source offering a package (see
+``enginery.capabilities.sources``), fetches every file of the package,
+rebuilds the package closure from those files (rejecting unsafe paths,
+symlinks, unreviewed asset types, and limit breaches), recomputes the closure
+digest and verifies it against the source's declared digest (defeating a
+digest-swap source), resolves each declared transitive dependency and checks
+it against its pinned closure digest, classifies provenance from the
+source's kind and the evidence the caller supplies rather than the source's
+self-report, records a host/API compatibility receipt, and rejects a
+resolution that would silently move an already-locked capability to a new
+closure (mutable-reference drift).
 """
 
 from __future__ import annotations
@@ -18,20 +21,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from enginery.application.delivery_ports import (
-    CapabilityDescriptor,
-    CapabilitySourcePort,
-    PackageFile,
-)
+from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
 from enginery.capabilities.closure import (
     PackageClosure,
     build_closure,
     is_license_like_name,
     is_notice_file_name,
 )
+from enginery.capabilities.compatibility import HostProfile, current_host, evaluate_compatibility
 from enginery.capabilities.errors import (
     CapabilityDependencyError,
     CapabilityDigestMismatchError,
+    CapabilityError,
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
     CapabilityManifestError,
@@ -47,6 +48,12 @@ from enginery.capabilities.lock import (
     LockedCapability,
     ProvenanceRecord,
     ProvenanceStatus,
+)
+from enginery.capabilities.sources import (
+    CapabilitySource,
+    SourceCandidate,
+    SourceSelection,
+    order_sources,
 )
 
 # Given a resolved descriptor, return the signer key ID that verified the
@@ -84,45 +91,54 @@ class CapabilityRequest:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedCapabilities:
-    """A resolved lock plus the verified files each entry was locked from.
+    """A resolved lock plus the verified files and source selection of each entry.
 
     ``files_by_name`` is what :func:`enginery.capabilities.materialize.materialize_lock`
     needs; it is exactly the file set whose rebuilt closure matched each
-    entry's digest.
+    entry's digest. ``selections`` records, per package, which source was
+    selected and (when requested) every shadowed lower-precedence alternative.
     """
 
     lock: CapabilityLock
     files_by_name: Mapping[str, tuple[PackageFile, ...]]
+    selections: Mapping[str, SourceSelection]
+
+
+@dataclass(frozen=True, slots=True)
+class _Resolved:
+    entry: LockedCapability
+    files: tuple[PackageFile, ...]
+    selection: SourceSelection
 
 
 class CapabilityResolver:
-    """Resolve requested capabilities against ordered sources into a lock.
+    """Resolve requested capabilities against typed sources into a lock.
 
-    ``reviewed_base`` names the exact ``(name, version)`` pairs already
-    present in the run's bound, reviewed base revision: those resolve
-    without a signature and never require interactive approval, matching
-    "existing reviewed local capabilities can resolve by policy." Every
-    other resolved entry -- including every transitive dependency not in the
-    reviewed base -- is ``introduced_by_run`` and reaches ``AUTHENTICATED``
-    provenance only when ``signature_verifier`` reports a verified signer;
-    otherwise it is ``UNAUTHENTICATED`` and must be gated by
-    ``capability.materialize`` human approval before it can execute.
+    Only the ``project`` source (packages in the run's bound, reviewed base
+    revision) resolves without a signature and never requires interactive
+    approval, matching "existing reviewed local capabilities can resolve by
+    policy." Every other resolved entry -- including every transitive
+    dependency that is not served by the project source -- is
+    ``introduced_by_run`` and reaches ``AUTHENTICATED`` provenance only when
+    ``signature_verifier`` reports a verified signer; otherwise it is
+    ``UNAUTHENTICATED`` and must be gated by ``capability.materialize``
+    human approval before it can execute.
     """
 
     def __init__(
         self,
-        sources: Sequence[CapabilitySourcePort],
+        sources: Sequence[CapabilitySource],
         *,
-        reviewed_base: frozenset[tuple[str, str]] = frozenset(),
         signature_verifier: SignatureVerifier = _no_signatures,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        host: HostProfile | None = None,
     ) -> None:
         if not sources:
             raise ValueError("at least one capability source is required")
-        self._sources = tuple(sources)
-        self._reviewed_base = reviewed_base
+        self._sources = order_sources(sources)
         self._signature_verifier = signature_verifier
         self._clock = clock
+        self._host = host or current_host()
 
     def resolve(
         self,
@@ -137,21 +153,34 @@ class CapabilityResolver:
         requested: Iterable[CapabilityRequest],
         *,
         previous_lock: CapabilityLock | None = None,
+        report_shadowed: bool = False,
     ) -> ResolvedCapabilities:
-        resolved: dict[str, tuple[LockedCapability, tuple[PackageFile, ...]]] = {}
+        """Resolve ``requested``; ``report_shadowed`` also queries every lower-precedence source."""
+
+        resolved: dict[str, _Resolved] = {}
         for request in requested:
-            self._resolve_one(request, previous_lock=previous_lock, resolved=resolved, stack=())
-        lock = CapabilityLock(entries=tuple(entry for entry, _ in resolved.values()))
-        files = {name: package_files for name, (_, package_files) in resolved.items()}
-        return ResolvedCapabilities(lock=lock, files_by_name=MappingProxyType(files))
+            self._resolve_one(
+                request,
+                previous_lock=previous_lock,
+                resolved=resolved,
+                stack=(),
+                report_shadowed=report_shadowed,
+            )
+        lock = CapabilityLock(entries=tuple(item.entry for item in resolved.values()))
+        return ResolvedCapabilities(
+            lock=lock,
+            files_by_name=MappingProxyType({name: item.files for name, item in resolved.items()}),
+            selections=MappingProxyType({name: item.selection for name, item in resolved.items()}),
+        )
 
     def _resolve_one(
         self,
         request: CapabilityRequest,
         *,
         previous_lock: CapabilityLock | None,
-        resolved: dict[str, tuple[LockedCapability, tuple[PackageFile, ...]]],
+        resolved: dict[str, _Resolved],
         stack: tuple[str, ...],
+        report_shadowed: bool,
     ) -> LockedCapability:
         if request.name in stack:
             raise CapabilityDependencyError(
@@ -165,18 +194,18 @@ class CapabilityResolver:
             )
         existing = resolved.get(request.name)
         if existing is not None:
-            if existing[0].version != request.version:
+            if existing.entry.version != request.version:
                 raise CapabilityDependencyError(
                     "two requests resolve the same capability to different versions",
                     details={
                         "name": request.name,
-                        "versions": sorted({existing[0].version, request.version}),
+                        "versions": sorted({existing.entry.version, request.version}),
                     },
                 )
-            self._enforce_license(request, existing[0].license)
-            return existing[0]
-        descriptor, source = self._discover(request)
-        files = tuple(source.fetch_closure(descriptor.name, descriptor.version))
+            self._enforce_license(request, existing.entry.license)
+            return existing.entry
+        source, descriptor, selection = self._select(request, report_shadowed=report_shadowed)
+        files = tuple(source.port.fetch_closure(descriptor.name, descriptor.version))
         closure = self._verify_closure(descriptor, files)
         license_id = self._effective_license(descriptor, closure, files)
         self._enforce_license(request, license_id)
@@ -186,8 +215,9 @@ class CapabilityResolver:
             previous_lock=previous_lock,
             resolved=resolved,
             stack=(*stack, request.name),
+            report_shadowed=report_shadowed,
         )
-        introduced_by_run = (request.name, request.version) not in self._reviewed_base
+        introduced_by_run = not source.reviewed_base
         entry = LockedCapability(
             name=descriptor.name,
             version=descriptor.version,
@@ -198,11 +228,12 @@ class CapabilityResolver:
             license=license_id,
             introduced_by_run=introduced_by_run,
             files=closure.files,
+            receipt=evaluate_compatibility(closure.manifest.compatibility, self._host),
             dependencies=closure.manifest.dependencies,
             permissions=closure.manifest.permissions,
             compatibility=closure.manifest.compatibility,
         )
-        resolved[entry.name] = (entry, tuple(files))
+        resolved[entry.name] = _Resolved(entry=entry, files=tuple(files), selection=selection)
         return entry
 
     def _resolve_dependencies(
@@ -210,8 +241,9 @@ class CapabilityResolver:
         closure: PackageClosure,
         *,
         previous_lock: CapabilityLock | None,
-        resolved: dict[str, tuple[LockedCapability, tuple[PackageFile, ...]]],
+        resolved: dict[str, _Resolved],
         stack: tuple[str, ...],
+        report_shadowed: bool,
     ) -> None:
         for pin in closure.manifest.dependencies:
             dependency = self._resolve_one(
@@ -219,6 +251,7 @@ class CapabilityResolver:
                 previous_lock=previous_lock,
                 resolved=resolved,
                 stack=stack,
+                report_shadowed=report_shadowed,
             )
             if dependency.digest != pin.closure_digest:
                 raise CapabilityDependencyError(
@@ -231,6 +264,50 @@ class CapabilityResolver:
                         "resolved": str(dependency.digest),
                     },
                 )
+
+    def _select(
+        self, request: CapabilityRequest, *, report_shadowed: bool
+    ) -> tuple[CapabilitySource, CapabilityDescriptor, SourceSelection]:
+        """The highest-precedence source offering the package, and any shadowed offers.
+
+        A selected source that cannot lock its package fails loudly. A shadowed
+        source that cannot is reported with its problem instead of hiding.
+        """
+
+        chosen: CapabilitySource | None = None
+        selected: SourceCandidate | None = None
+        chosen_descriptor: CapabilityDescriptor | None = None
+        shadowed: list[SourceCandidate] = []
+        for source in self._sources:
+            if chosen is not None and not report_shadowed:
+                break
+            if chosen is None:
+                descriptor = source.port.resolve(request.name, request.version)
+                if descriptor is None:
+                    continue
+                chosen, chosen_descriptor = source, descriptor
+                selected = SourceCandidate(
+                    kind=source.kind, label=source.label, descriptor=descriptor
+                )
+                continue
+            try:
+                alternative = source.port.resolve(request.name, request.version)
+            except CapabilityError as error:
+                shadowed.append(
+                    SourceCandidate(kind=source.kind, label=source.label, problem=str(error))
+                )
+                continue
+            if alternative is not None:
+                shadowed.append(
+                    SourceCandidate(kind=source.kind, label=source.label, descriptor=alternative)
+                )
+        if chosen is None or selected is None or chosen_descriptor is None:
+            raise CapabilityNotFoundError(
+                "capability was not found in any configured source",
+                details={"name": request.name, "version": request.version},
+            )
+        selection = SourceSelection(selected=selected, shadowed=tuple(shadowed))
+        return chosen, chosen_descriptor, selection
 
     def _verify_closure(
         self, descriptor: CapabilityDescriptor, files: Sequence[PackageFile]
@@ -304,18 +381,6 @@ class CapabilityResolver:
                     "actual_license": license_id,
                 },
             )
-
-    def _discover(
-        self, request: CapabilityRequest
-    ) -> tuple[CapabilityDescriptor, CapabilitySourcePort]:
-        for source in self._sources:
-            descriptor = source.resolve(request.name, request.version)
-            if descriptor is not None:
-                return descriptor, source
-        raise CapabilityNotFoundError(
-            "capability was not found in any configured source",
-            details={"name": request.name, "version": request.version},
-        )
 
     def _enforce_no_drift(
         self,

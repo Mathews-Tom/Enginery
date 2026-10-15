@@ -19,6 +19,7 @@ from enginery.application.adapter_types import (
 )
 from enginery.application.delivery_ports import (
     CapabilityDescriptor,
+    CapabilityListing,
     DeploymentReceipt,
     DeploymentRequest,
     PackageFile,
@@ -400,8 +401,16 @@ class LocalCapabilitySource:
             ProviderKind.CAPABILITY_SOURCE, "local-capability-source", ("discover", "resolve")
         )
 
-    def discover(self) -> tuple[CapabilityDescriptor, ...]:
-        return self.capabilities
+    def discover(self) -> tuple[CapabilityListing, ...]:
+        return tuple(
+            CapabilityListing(
+                name=item.name,
+                version=item.version,
+                provenance=item.provenance,
+                revision=item.revision,
+            )
+            for item in self.capabilities
+        )
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
         return next(

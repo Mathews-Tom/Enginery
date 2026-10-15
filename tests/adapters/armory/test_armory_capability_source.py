@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import pytest
 import yaml
-from tests.support.capabilities import descriptor_for, package_files
+from tests.support.capabilities import descriptor_for, package_files, wrap_source
 
 from enginery.adapters.armory import ArmoryCapabilitySource
 from enginery.adapters.local import LocalCapabilitySource
@@ -18,6 +18,7 @@ from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
     CapabilityAssetTypeError,
     CapabilityClosureLimitError,
+    CapabilityError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
     CapabilityPathError,
@@ -26,6 +27,7 @@ from enginery.capabilities.errors import (
 from enginery.capabilities.lock import ProvenanceStatus
 from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
+from enginery.capabilities.sources import CapabilitySource, SourceKind
 from enginery.domain.errors import (
     InvalidInputError,
     MissingPrerequisiteError,
@@ -333,10 +335,31 @@ def test_fetch_closure_raises_for_an_unknown_capability() -> None:
         source.fetch_closure("does-not-exist", "1.0.0")
 
 
-def test_discover_returns_every_resolvable_entry() -> None:
-    source, _ = _source()
+def test_discover_lists_every_catalog_row_without_fetching_any_package() -> None:
+    source, fetcher = _source()
 
-    assert [d.name for d in source.discover()] == ["adr-writer"]
+    listings = source.discover()
+
+    assert [(item.name, item.version) for item in listings] == [("adr-writer", "1.1.1")]
+    assert all(item.provenance == "armory" and item.revision == _SHA for item in listings)
+    assert _TREE_URL not in fetcher.urls
+    assert not any(url.startswith(_raw(f"{_PACKAGE}/")) for url in fetcher.urls)
+    assert not any(url.startswith(_raw("skills/")) for url in fetcher.urls)
+
+
+def test_an_unlockable_package_does_not_break_discover_but_fails_loudly_on_resolve() -> None:
+    bad_path = f"{_PACKAGE}/scripts/__pycache__/check.cpython-312.pyc"
+    source, _ = _source(_routes({**_FILES, bad_path: b"\x00bytecode"}))
+
+    assert [item.name for item in source.discover()] == ["adr-writer"]
+    with pytest.raises(CapabilityAssetTypeError) as resolve_failure:
+        source.resolve("adr-writer", "1.1.1")
+    with pytest.raises(CapabilityAssetTypeError) as fetch_failure:
+        source.fetch_closure("adr-writer", "1.1.1")
+
+    for failure in (resolve_failure, fetch_failure):
+        assert isinstance(failure.value, CapabilityError)
+        assert "check.cpython-312.pyc" in str(failure.value.details["path"])
 
 
 def test_a_traversing_catalog_path_is_rejected() -> None:
@@ -424,13 +447,17 @@ def test_an_unreachable_license_is_reported_as_unknown() -> None:
     assert descriptor.license == "unknown"
 
 
+def _armory(source: ArmoryCapabilitySource) -> CapabilitySource:
+    return wrap_source(source, SourceKind.ARMORY)
+
+
 def test_armory_sourced_capability_is_always_unauthenticated_when_run_introduced() -> None:
     """No per-package signature exists today; every Armory capability a run
     introduces must stay unauthenticated regardless of a clean digest fetch."""
 
     source, _ = _source()
 
-    lock = CapabilityResolver([source]).resolve(
+    lock = CapabilityResolver([_armory(source)]).resolve(
         [CapabilityRequest(name="adr-writer", version="1.1.1")]
     )
 
@@ -444,7 +471,7 @@ def test_armory_sourced_capability_is_always_unauthenticated_when_run_introduced
 
 def test_approved_armory_package_materializes_its_complete_closure(tmp_path: Path) -> None:
     source, _ = _source()
-    resolved = CapabilityResolver([source]).resolve_with_files(
+    resolved = CapabilityResolver([_armory(source)]).resolve_with_files(
         [CapabilityRequest(name="adr-writer", version="1.1.1")]
     )
 
@@ -466,7 +493,7 @@ def test_approved_armory_package_materializes_its_complete_closure(tmp_path: Pat
 
 def test_armory_package_with_an_unknown_license_is_held_even_when_approved(tmp_path: Path) -> None:
     source, _ = _source(_routes(license_text=b"Some bespoke terms\n"))
-    resolved = CapabilityResolver([source]).resolve_with_files(
+    resolved = CapabilityResolver([_armory(source)]).resolve_with_files(
         [CapabilityRequest(name="adr-writer", version="1.1.1")]
     )
 
@@ -756,9 +783,7 @@ def test_engine_resolves_capabilities_without_armory_installed() -> None:
     local_source = LocalCapabilitySource(
         capabilities=(descriptor,), packages={("repository-read", "1"): files}
     )
-    resolver = CapabilityResolver(
-        [local_source], reviewed_base=frozenset({("repository-read", "1")})
-    )
+    resolver = CapabilityResolver([wrap_source(local_source, SourceKind.PROJECT)])
 
     lock = resolver.resolve([CapabilityRequest(name="repository-read", version="1")])
 

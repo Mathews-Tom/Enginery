@@ -87,7 +87,11 @@ from enginery.application.adapter_types import (
     AdapterStatus,
     ProviderKind,
 )
-from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
+from enginery.application.delivery_ports import (
+    CapabilityDescriptor,
+    CapabilityListing,
+    PackageFile,
+)
 from enginery.capabilities.closure import (
     MAX_FILE_BYTES,
     MAX_FILE_COUNT,
@@ -269,10 +273,24 @@ class ArmoryCapabilitySource:
             detail=f"armory catalog reachable at {self._repository}@{self._pinned_revision()}",
         )
 
-    def discover(self) -> tuple[CapabilityDescriptor, ...]:
-        """Every catalog row's descriptor; fails loudly on a package that cannot be locked."""
+    def discover(self) -> tuple[CapabilityListing, ...]:
+        """The catalog rows at the pinned revision; no package closure is fetched or locked.
 
-        return tuple(self._package(entry)[0] for entry in self._entries())
+        A package's closure is computed only when it is selected through
+        ``resolve`` or ``fetch_closure``, where an unlockable package fails
+        loudly with the offending path.
+        """
+
+        revision = self._pinned_revision()
+        return tuple(
+            CapabilityListing(
+                name=entry.name,
+                version=entry.version,
+                provenance=_PROVENANCE_LABEL,
+                revision=revision,
+            )
+            for entry in self._entries()
+        )
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
         entry = self._find(name, version)
