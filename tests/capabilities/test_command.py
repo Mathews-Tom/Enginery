@@ -17,6 +17,7 @@ import pytest
 
 from enginery.application.delivery_ports import PackageFile
 from enginery.capabilities import command as command_module
+from enginery.capabilities.closure import build_closure
 from enginery.capabilities.command import CommandResult, run_package_command
 from enginery.capabilities.compatibility import CompatibilityReceipt, CompatibilityStatus
 from enginery.capabilities.errors import (
@@ -29,6 +30,7 @@ from enginery.capabilities.errors import (
     CapabilityInputSchemaError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
+    CapabilityManifestError,
     CapabilityNotFoundError,
     CapabilityNotInstalledError,
 )
@@ -841,3 +843,98 @@ def test_the_group_is_killed_before_the_leader_is_reaped_where_waitid_exists(
     command_module._end_group(_FakeProcess(events))  # type: ignore[arg-type]
 
     assert events == (["waitid", "killpg", "wait"] if has_waitid else ["wait", "killpg"])
+
+
+def _direct_shell_package(script: bytes) -> tuple[PackageFile, ...]:
+    spec = CommandSpec.create(argv=("scripts/run.sh",), input_schema={"type": "object"})
+    return package_files(NAME, kind=PackageKind.COMMAND, command=spec, script=script)
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        b"#!/usr/bin/env python3",
+        b"#!/usr/bin/python3",
+        b"#!/usr/bin/env node",
+        b"#!/bin/sh -x",
+        b"#! /bin/sh",
+        b"#!/bin/sh\r",
+        b"#!/usr/bin/env -S sh",
+        b"# no shebang",
+        b"",
+    ],
+)
+def test_a_directly_executed_script_needs_an_exact_shell_shebang(first_line: bytes) -> None:
+    files = _direct_shell_package(first_line + b"\nprint('x')\n")
+
+    with pytest.raises(CapabilityManifestError, match=r"start with"):
+        build_closure(files)
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [b"#!/bin/sh", b"#!/bin/bash", b"#!/usr/bin/env sh", b"#!/usr/bin/env bash"],
+)
+def test_a_directly_executed_script_with_a_shell_shebang_is_accepted(first_line: bytes) -> None:
+    build_closure(_direct_shell_package(first_line + b"\ncat > /dev/null\n"))
+
+
+def test_the_shebang_is_checked_again_on_the_verified_bytes_before_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _install(
+        tmp_path, _direct_shell_package(b"#!/bin/sh\ncat > /dev/null\nprintf '{}'\n")
+    )
+    real = command_module.load_verified_package
+
+    def swapped(*arguments: Any, **keywords: Any) -> Any:
+        located, closure, verified = real(*arguments, **keywords)
+        replaced = [
+            dataclasses.replace(item, content=b"#!/usr/bin/env python3\nprint('{}')\n")
+            if item.path == "scripts/run.sh"
+            else item
+            for item in verified
+        ]
+        return located, closure, replaced
+
+    monkeypatch.setattr(command_module, "load_verified_package", swapped)
+
+    with pytest.raises(CapabilityManifestError):
+        installed.run({})
+
+
+def test_the_command_environment_restricts_child_pythons(tmp_path: Path) -> None:
+    script = (
+        b"#!/bin/sh\ncat > /dev/null\n"
+        b'printf \'{"user_site": "%s", "safe_path": "%s"}\' '
+        b'"$PYTHONNOUSERSITE" "$PYTHONSAFEPATH"\n'
+    )
+    installed = _install(tmp_path, _direct_shell_package(script))
+
+    result = installed.run({})
+
+    assert result.output == {"user_site": "1", "safe_path": "1"}
+
+
+def test_no_second_killpg_follows_the_group_being_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script(
+        "import subprocess, sys",
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(2)'],",
+        "                 start_new_session=True)",
+        "print('{}')",
+    )
+    installed = _install(tmp_path, _command_package(script))
+    calls: list[int] = []
+    real_killpg = os.killpg
+
+    def killpg(pid: int, signal_number: int) -> None:
+        calls.append(pid)
+        real_killpg(pid, signal_number)
+
+    monkeypatch.setattr(command_module.os, "killpg", killpg)
+
+    installed.run({})
+
+    assert len(calls) == 1

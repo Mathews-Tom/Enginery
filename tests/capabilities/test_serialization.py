@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from enginery.capabilities.compatibility import HostProfile, evaluate_compatibility
-from enginery.capabilities.errors import CapabilityLegacyLockError, CapabilityPathError
+from enginery.capabilities.errors import (
+    CapabilityLegacyLockError,
+    CapabilityPathError,
+    CapabilitySymlinkError,
+)
 from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
 from enginery.capabilities.manifest import CapabilityPermission, PackageCompatibility
 from enginery.capabilities.serialization import (
@@ -352,6 +356,28 @@ def test_write_lock_replaces_a_planted_symlink_instead_of_writing_through_it(
     assert target.exists() is target_exists
     if target_exists:
         assert target.read_text(encoding="utf-8") == "untouched"
+
+
+@pytest.mark.parametrize("absolute", [True, False])
+def test_write_lock_refuses_a_symlinked_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, absolute: bool
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".enginery").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(workspace)
+    path = (
+        workspace / ".enginery" / "capabilities.lock.json"
+        if absolute
+        else Path(".enginery/capabilities.lock.json")
+    )
+
+    with pytest.raises(CapabilitySymlinkError):
+        write_lock(_lock(), path)
+
+    assert list(other.iterdir()) == []
 
 
 def test_write_lock_leaves_the_old_file_and_no_temporary_when_the_replace_fails(

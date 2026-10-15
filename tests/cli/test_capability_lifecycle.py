@@ -690,6 +690,45 @@ def test_a_symlink_planted_at_the_lockfile_path_is_never_followed(
     assert not paths.installed.exists()
 
 
+def test_a_symlinked_state_directory_refuses_install_and_uninstall(
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    relative = {
+        str(paths.lockfile): "state/capabilities.lock.json",
+        str(paths.store): "state/capabilities",
+        str(paths.installed): "state/installed",
+    }
+    flags = [relative.get(item, item) for item in _project_flags(paths, sha)]
+    state_flags = [relative.get(item, item) for item in paths.flags()]
+    monkeypatch.chdir(tmp_path)
+    other = tmp_path / "other-project-state"
+    other.mkdir()
+    state = paths.lockfile.parent
+    state.symlink_to(other, target_is_directory=True)
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *flags)
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert "symbolic link" in output
+    assert list(other.iterdir()) == []
+
+    state.unlink()
+    assert _run(capsys, "install", "skill-a@1", *flags)[0] == 0
+    state.rename(other / "moved")
+    state.symlink_to(other / "moved", target_is_directory=True)
+    before = sorted(str(item.relative_to(other)) for item in other.rglob("*"))
+
+    code, _, output = _run(capsys, "uninstall", *state_flags, "--json")
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert sorted(str(item.relative_to(other)) for item in other.rglob("*")) == before
+    assert (other / "moved" / "installed" / ".enginery-install.json").is_file()
+
+
 # --------------------------------------------------------------------------- project binding
 
 

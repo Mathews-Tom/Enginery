@@ -214,7 +214,19 @@ version* of a name the lockfile pins (in either form) is refused as a drift
 blocker by `install` (exit `3`, before anything is written) and reported by
 `preview` as a blocker with the same exit `3` — the lockfile pins one version
 per name. The lockfile is written atomically and a symlink at its path is
-refused on read (exit `2`) and replaced, never followed, on write. An install
+refused on read (exit `2`) and replaced, never followed, on write. A symlink
+planted where a write would be redirected is refused on write (exit `12`)
+before anything is written, so a planted
+`.enginery -> /other/project/.enginery` cannot redirect an install, uninstall
+or lock write. The exact rule: the anchor is the current directory (the
+directory relative paths resolve against). For the lockfile's directory, the
+install root, the owned manifest and the capabilities root inside the anchor
+(relative, or absolute under it), every existing component strictly below the
+anchor must not be a symlink. A path outside the anchor is operator-chosen:
+its ancestors are never checked (so `/tmp` or `$TMPDIR` on macOS work), only
+the install root and capabilities root themselves must not be symlinks, and
+what the tool owns beneath them is guarded by the install code.
+An install
 of a different lock than the one recorded under the install root is refused
 until the active install is uninstalled.
 
@@ -230,9 +242,14 @@ nothing to the workspace. Every Git source, for every command, is read
 through a private bare mirror that the adapter creates in an owner-only
 temporary directory, fills with a fetch of exactly the pinned commit (a local
 path as a `file://` URL), reads only from, and deletes afterwards: git never
-runs inside a repository it did not create, so the source repository's own
-configuration (a promisor remote, `core.sshCommand`, hooks) is never used,
-and no missing object is lazily fetched. A URL Git source or the Armory
+runs inside a repository it did not create, so the fetching side never reads
+the source repository's configuration, and no missing object is lazily
+fetched. The source's own `git-upload-pack` does read its configuration by
+design, so the protection against a hostile source is a patched git: the
+adapter checks `git --version` once and refuses (a missing-prerequisite
+error) anything older than 2.45.1 or the maintenance releases 2.39.4, 2.40.2,
+2.41.1, 2.42.2, 2.43.4 and 2.44.1, including Apple Git 2.39.3 and any
+unparseable version. A URL Git source or the Armory
 catalog is read over the network, so these commands perform network reads; a
 local-directory Git source performs none.
 
@@ -251,13 +268,23 @@ does not outlive the run. This is not containment: a descendant that calls
 still use everything the operator's account can (trusted-local is not
 isolation). A `.py`, `.js`, `.mjs` or `.ts` script must be run through its
 interpreter (`python3` or `node`), never executed directly, so the
-interpreter flags always apply; only a `.sh` script may run directly. Python
+interpreter flags always apply; only a `.sh` script may run directly, and its
+first line must be exactly `#!/bin/sh`, `#!/bin/bash`, `#!/usr/bin/env sh` or
+`#!/usr/bin/env bash` (checked when the closure is built and again on the
+verified bytes before exec), because the kernel would otherwise start
+whatever interpreter the shebang names without the flags. Python
 commands run with `-B -s -E` (no bytecode, no user site-packages, no
-`PYTHON*` variables). Node commands run under Node's permission model,
+`PYTHON*` variables); the command environment also sets `PYTHONNOUSERSITE=1`
+and `PYTHONSAFEPATH=1` so a Python started by a shell script skips user
+site-packages and the script directory. Node commands run under Node's
+permission model,
 allowed to read only the copied closure directory (Node 20 or newer; an
 older Node is refused), so a bare `require()` cannot reach an ancestor
-`node_modules`; residual risk: any other interpreter (`sh`, `bash`) and
-anything the closure itself ships runs with the operator's account.
+`node_modules`; that restriction applies only when Node is the top-level
+process, which therefore cannot start child processes. Residual risk: any
+other interpreter (`sh`, `bash`) and
+anything the closure itself ships, including a child interpreter a shell
+script starts, runs with the operator's account.
 `run_package_command` also refuses to run when the lock's compatibility
 receipt was recorded for a different host than the one it runs on.
 

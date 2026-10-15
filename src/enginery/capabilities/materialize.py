@@ -23,6 +23,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from enginery.application.delivery_ports import PackageFile
+from enginery.capabilities.atomic import require_no_link_chain
 from enginery.capabilities.closure import (
     AssetRecord,
     PackageClosure,
@@ -163,6 +164,7 @@ def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
 
 
 def _publish_closure(root: Path, entry: LockedCapability, files: Sequence[PackageFile]) -> Path:
+    require_no_link_chain(root, what="capabilities root")
     target = digest_path(root, entry.digest)
     if os.path.lexists(target):
         return verify_materialized(entry, root)

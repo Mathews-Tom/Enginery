@@ -5,13 +5,64 @@ A write goes to a fresh, exclusively created file in the destination directory
 planted file or symlink is never written through), is synced, and is renamed
 over the destination, which replaces a link at the destination rather than
 following it. The directory is synced afterwards.
+
+:func:`require_no_link_chain` refuses a symlink planted where a write would be
+redirected, so ``.enginery -> /elsewhere`` cannot move a lockfile, install root,
+owned manifest or store into another tree. The rule: the anchor is the current
+directory (``os.getcwd()``, which the operating system reports without links),
+the directory the command line resolves relative paths against. A path inside
+the anchor, relative or absolute, has every existing component strictly below
+the anchor checked with ``lstat``. A path outside the anchor is operator-chosen:
+its ancestors are never checked (system links such as macOS ``/tmp`` and
+``/var`` are legitimate), only the named root itself, and only when the caller
+asks for it; what the tool owns beneath that root is guarded by the install
+and lockfile code. The check precedes the write, so it narrows rather than
+eliminates a race with a process that can already write the workspace.
 """
 
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
+
+from enginery.capabilities.errors import CapabilitySymlinkError
+
+
+def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = True) -> None:
+    """Refuse ``path`` when a symbolic link redirects it, by the rule in the module docstring.
+
+    ``check_named_root`` is ``False`` for a directory that is not itself owned by the tool
+    (the directory holding a lockfile), so only the part below the anchor is checked.
+    """
+
+    anchor = Path(os.path.realpath(os.getcwd()))
+    absolute = Path(os.path.abspath(path))
+    if not absolute.is_relative_to(anchor):
+        if check_named_root:
+            _refuse_link(absolute, path, what)
+        return
+    current = anchor
+    for part in absolute.relative_to(anchor).parts:
+        current = current / part
+        if not _refuse_link(current, path, what):
+            return
+
+
+def _refuse_link(candidate: Path, path: Path, what: str) -> bool:
+    """Raise if ``candidate`` is a link; ``False`` once the chain stops existing."""
+
+    try:
+        info = os.lstat(candidate)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        raise CapabilitySymlinkError(
+            f"{what} is reached through a symbolic link",
+            details={"path": str(path), "link": str(candidate)},
+        )
+    return True
 
 
 def fsync_directory(directory: Path) -> None:
@@ -52,4 +103,4 @@ def write_atomically(path: Path, payload: bytes, *, prefix: str) -> None:
     fsync_directory(path.parent)
 
 
-__all__ = ["fsync_directory", "write_atomically", "write_temporary"]
+__all__ = ["fsync_directory", "require_no_link_chain", "write_atomically", "write_temporary"]

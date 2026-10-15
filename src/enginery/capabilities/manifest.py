@@ -50,6 +50,12 @@ from enginery.domain.errors import InvalidInputError
 MANIFEST_FILE_NAME = "capability.json"
 MANIFEST_SCHEMA_VERSION = 1
 RUNNER_INTERPRETERS = ("python3", "sh", "bash", "node")
+SHELL_SHEBANGS = (
+    b"#!/bin/sh",
+    b"#!/bin/bash",
+    b"#!/usr/bin/env sh",
+    b"#!/usr/bin/env bash",
+)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 10
 MAX_COMMAND_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
@@ -457,9 +463,27 @@ def _pin(item: object) -> DependencyPin:
     )
 
 
+def require_shell_shebang(content: bytes, *, script: str) -> None:
+    """Refuse a directly executed script whose first line is not a reviewed shell shebang.
+
+    The kernel runs a directly executed file with the interpreter its shebang names,
+    bypassing the isolation flags the runner adds for Python and Node, so only a
+    shell is allowed.
+    """
+
+    first = content.split(b"\n", 1)[0]
+    if first not in SHELL_SHEBANGS:
+        raise CapabilityManifestError(
+            "a directly executed script must start with exactly one of: "
+            + ", ".join(item.decode("ascii") for item in SHELL_SHEBANGS),
+            details={"script": script},
+        )
+
+
 __all__ = [
     "MANIFEST_FILE_NAME",
     "MANIFEST_SCHEMA_VERSION",
+    "SHELL_SHEBANGS",
     "CapabilityPermission",
     "CommandSpec",
     "DependencyPin",
@@ -469,6 +493,7 @@ __all__ = [
     "digest_from_text",
     "parse_manifest",
     "render_manifest",
+    "require_shell_shebang",
     "validate_name",
     "validate_version",
 ]

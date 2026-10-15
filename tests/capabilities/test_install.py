@@ -19,6 +19,7 @@ from enginery.capabilities.errors import (
     CapabilityLicenseHoldError,
     CapabilityLockDriftError,
     CapabilityNotInstalledError,
+    CapabilitySymlinkError,
 )
 from enginery.capabilities.install import (
     OWNED_MANIFEST_NAME,
@@ -73,6 +74,18 @@ def _install(resolved: ResolvedCapabilities, tmp_path: Path, approved: Iterable[
         approvals=approvals_for(resolved.lock, approved),
     )
     return tmp_path / "installed"
+
+
+def _linked_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """A workspace whose ``.enginery`` is a link to another project's directory."""
+
+    other = tmp_path / "other" / ".enginery"
+    (other / "installed").mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".enginery").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(workspace)
+    return workspace, other
 
 
 # --------------------------------------------------------------------------- preview
@@ -270,6 +283,104 @@ def test_install_refuses_to_overwrite_a_file_it_does_not_own(tmp_path: Path) -> 
 
     assert foreign.read_bytes() == b"not ours\n"
     assert not (root / OWNED_MANIFEST_NAME).exists()
+
+
+def test_install_refuses_a_symlinked_parent_of_the_install_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    _, other = _linked_workspace(tmp_path, monkeypatch)
+
+    with pytest.raises(CapabilitySymlinkError):
+        install_lock(
+            resolved,
+            install_root=Path(".enginery/installed"),
+            capabilities_root=tmp_path / "store",
+            approvals=approvals_for(resolved.lock, ()),
+        )
+
+    assert _tree(other) == {"installed"}
+    assert not (tmp_path / "store").exists()
+
+
+def test_install_refuses_a_capabilities_root_behind_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    _, other = _linked_workspace(tmp_path, monkeypatch)
+
+    with pytest.raises(CapabilitySymlinkError):
+        install_lock(
+            resolved,
+            install_root=tmp_path / "installed",
+            capabilities_root=Path(".enginery/capabilities"),
+            approvals=approvals_for(resolved.lock, ()),
+        )
+
+    assert _tree(other) == {"installed"}
+    assert not (tmp_path / "installed").exists()
+
+
+def test_uninstall_refuses_a_symlinked_parent_of_the_install_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    _, other = _linked_workspace(tmp_path, monkeypatch)
+    real_root = other / "installed"
+    install_lock(
+        resolved,
+        install_root=real_root,
+        capabilities_root=tmp_path / "store",
+        approvals=approvals_for(resolved.lock, ()),
+    )
+    before = _tree(other)
+
+    with pytest.raises(CapabilitySymlinkError):
+        uninstall_install(Path(".enginery/installed"))
+
+    assert _tree(other) == before
+    assert load_owned_manifest(real_root) is not None
+
+
+def test_an_absolute_install_root_below_an_operator_symlinked_ancestor_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    install_lock(
+        resolved,
+        install_root=tmp_path / "alias" / "installed",
+        capabilities_root=tmp_path / "alias" / "store",
+        approvals=approvals_for(resolved.lock, ()),
+    )
+
+    assert (real / "installed" / OWNED_MANIFEST_NAME).is_file()
+
+
+def test_install_refuses_an_install_root_that_is_itself_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "installed").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(tmp_path / "other")
+
+    with pytest.raises(CapabilitySymlinkError):
+        install_lock(
+            resolved,
+            install_root=tmp_path / "installed",
+            capabilities_root=tmp_path / "store",
+            approvals=approvals_for(resolved.lock, ()),
+        )
+
+    assert list(other.iterdir()) == []
 
 
 def test_install_refuses_a_symlinked_destination_directory(tmp_path: Path) -> None:

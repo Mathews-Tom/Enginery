@@ -13,6 +13,7 @@ from enginery.capabilities.errors import (
     CapabilityAssetTypeError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
+    CapabilitySymlinkError,
 )
 from enginery.capabilities.manifest import CapabilityPermission, PackageKind
 from enginery.capabilities.materialize import (
@@ -182,6 +183,37 @@ def test_materialize_lock_writes_every_approved_entry(tmp_path: Path) -> None:
     materialized = materialize_lock(lock_of(trusted), {"skill-a": files}, root=tmp_path)
 
     assert (materialized["skill-a"] / "SKILL.md").read_bytes() == files[1].content
+
+
+def test_materialize_lock_refuses_a_store_reached_through_a_symlink_under_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = _scripted()
+    trusted = locked_entry(files=files, introduced_by_run=False)
+    other = tmp_path / "other"
+    other.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "linked").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(workspace)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_lock(lock_of(trusted), {"skill-a": files}, root=Path("linked/store"))
+
+    assert list(other.iterdir()) == []
+
+
+def test_materialize_lock_refuses_a_store_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    files = _scripted()
+    trusted = locked_entry(files=files, introduced_by_run=False)
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "store").symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(CapabilitySymlinkError):
+        materialize_lock(lock_of(trusted), {"skill-a": files}, root=tmp_path / "store")
+
+    assert list(other.iterdir()) == []
 
 
 def test_materialize_lock_refuses_unapproved_run_introduced_entry(tmp_path: Path) -> None:

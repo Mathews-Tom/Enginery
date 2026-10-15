@@ -18,9 +18,12 @@ a minimal environment, its own session, and bounded stdout and stderr; its
 whole process group is killed once the command exits, however it exits, so a
 background child does not outlive the run (a descendant that calls ``setsid``
 leaves the group and is outside this boundary: trusted-local is not
-containment). Python runs with ``-B -s -E`` and Node under its permission model
-limited to reading the closure directory. Stdout must be exactly one JSON
-document and is returned in canonical form; stderr is captured as
+containment). Python runs with ``-B -s -E`` (and ``PYTHONNOUSERSITE``/``PYTHONSAFEPATH``
+are set so a Python started by a shell script is restricted too) and Node under its
+permission model limited to reading the closure directory; that restriction applies only
+when Node is the top-level process, which therefore cannot start child processes. A
+directly executed ``.sh`` script must start with a reviewed shell shebang. Stdout must be
+exactly one JSON document and is returned in canonical form; stderr is captured as
 diagnostics. Each failure mode has its own error class: schema violation,
 timeout, non-zero exit, and invalid or oversized output.
 
@@ -61,7 +64,7 @@ from enginery.capabilities.errors import (
 )
 from enginery.capabilities.install import load_owned_manifest
 from enginery.capabilities.lock import NO_APPROVALS, ApprovedCapabilities, CapabilityLock
-from enginery.capabilities.manifest import PackageKind
+from enginery.capabilities.manifest import PackageKind, require_shell_shebang
 from enginery.capabilities.materialize import load_verified_package
 from enginery.capabilities.schema import MAX_INSTANCE_DEPTH, exceeds_depth, validate_instance
 from enginery.domain.digests import Digest
@@ -352,6 +355,11 @@ def run_package_command(
     command = closure.manifest.command
     if command is None:
         raise _not_runnable(name, entry.kind)
+    if command.interpreter is None:
+        script_file = next((item for item in verified if item.path == command.script), None)
+        if script_file is None:
+            raise _not_runnable(name, entry.kind)
+        require_shell_shebang(script_file.content, script=command.script)
     validate_instance(command.input_schema, payload)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
@@ -395,6 +403,8 @@ def _execute(
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
     }
     started = time.monotonic()
     process = subprocess.Popen(
@@ -428,8 +438,8 @@ def _execute(
     for reader in (stdout, stderr):
         reader.join(timeout=1)
         if reader.alive:
-            # A surviving descendant still holds the pipe open: end the whole group.
-            _kill_group(process)
+            # A surviving descendant that left the group still holds the pipe; the group was
+            # already ended while its leader was unreaped, so only wait for the reader.
             reader.join(timeout=5)
     writer.join(timeout=1)
     for stream in (process.stdin, process.stdout, process.stderr):

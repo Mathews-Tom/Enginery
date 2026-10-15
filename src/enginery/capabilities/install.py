@@ -30,7 +30,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from enginery.capabilities.atomic import fsync_directory, write_atomically, write_temporary
+from enginery.capabilities.atomic import (
+    fsync_directory,
+    require_no_link_chain,
+    write_atomically,
+    write_temporary,
+)
 from enginery.capabilities.closure import (
     AssetKind,
     AssetRecord,
@@ -649,8 +654,14 @@ def install_lock(
     approvals: ApprovedCapabilities = NO_APPROVALS,
     previous: CapabilityLock | None = None,
 ) -> InstallReport:
-    """Install every package of ``resolved`` into ``install_root`` and record ownership."""
+    """Install every package of ``resolved`` into ``install_root`` and record ownership.
 
+    A symbolic link anywhere on the path to the install root or the capabilities root is
+    refused before anything is written.
+    """
+
+    require_no_link_chain(install_root, what="install root")
+    require_no_link_chain(capabilities_root, what="capabilities root")
     plan = build_install_plan(
         resolved, install_root=install_root, approvals=approvals, previous=previous
     )
@@ -781,8 +792,13 @@ def _owned_manifest(lock: CapabilityLock, approvals: ApprovedCapabilities) -> Ow
 
 
 def uninstall_install(install_root: Path) -> UninstallReport:
-    """Remove the owned, unmodified files of the active install and revoke its record."""
+    """Remove the owned, unmodified files of the active install and revoke its record.
 
+    A symbolic link anywhere on the path to the install root is refused before anything
+    is read or removed.
+    """
+
+    require_no_link_chain(install_root, what="install root")
     manifest = load_owned_manifest(install_root)
     if manifest is None:
         raise CapabilityNotInstalledError(

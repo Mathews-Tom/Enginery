@@ -437,8 +437,17 @@ package still needs exact-digest human approval.
   Git never runs inside a repository it did not create: every port call
   creates a fresh bare mirror in an owner-only temporary directory, fetches
   exactly the pinned commit into it (a local path as a `file://` URL), reads
-  only from the mirror, and deletes it afterwards, so the source repository's
-  own configuration (a promisor remote, `core.sshCommand`) is never used.
+  only from the mirror, and deletes it afterwards, so the fetching side never
+  reads the source repository's configuration. The source's own
+  `git-upload-pack` does read that configuration by design (a promisor
+  remote's `uploadpack` command could run when a missing object is fetched
+  lazily), so the protection is a patched git plus `GIT_NO_LAZY_FETCH=1`.
+  **Minimum git version.** The adapter runs `git --version` once per adapter
+  instance and refuses to read a source (an explicit missing-prerequisite
+  error; `probe()` reports `misconfigured`) unless git is 2.45.1 or newer, or
+  one of the maintenance releases 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 or
+  2.44.1 (or a later patch of those lines). Anything older, including Apple
+  Git 2.39.3, and any output that cannot be parsed is refused.
   Every git subprocess uses an argument vector, a timeout, `--no-replace-objects`
   (with `GIT_NO_REPLACE_OBJECTS=1`, so `git replace` cannot swap a pinned
   commit's content), `-c core.fsmonitor=false`, and an environment built from an

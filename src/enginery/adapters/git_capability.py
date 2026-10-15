@@ -26,9 +26,12 @@ replace`` cannot change what a pinned commit contains), no lazy fetch of a
 missing object (``GIT_NO_LAZY_FETCH``), literal pathspecs, ``core.fsmonitor``
 off, and no terminal prompt. Only the fetch may use a transport (the one its
 URL needs); every other command runs with ``GIT_ALLOW_PROTOCOL`` set so no
-transport is allowed. The adapter never writes git configuration and never
-reads or writes a repository it did not create. A package whose tree sizes
-already exceed the package-wide byte limit is refused before any blob is read.
+transport is allowed. The adapter never writes git configuration and runs git
+only in a mirror it created; the source is only fetched from, and its own
+``git-upload-pack`` reads the source's configuration by design, so a git older
+than the patched floor (``MINIMUM_GIT_VERSION``) is refused. A package whose
+tree sizes already exceed the package-wide byte limit is refused before any
+blob is read.
 
 A Git source's packages are unauthenticated unless a pinned signature over the
 closure digest verifies; ``signatures`` is the only way to supply one. The
@@ -95,6 +98,45 @@ _PROVENANCE_LABEL = "git"
 # transport has, so nothing is allowed (an unset variable would allow the defaults).
 _NO_TRANSPORT = "enginery-no-transport"
 _INHERITED_VARIABLES = frozenset({"PATH", "HOME", "LANG", "SSH_AUTH_SOCK"})
+_VERSION_PATTERN = re.compile(r"^git version (\d+)\.(\d+)(?:\.(\d+))?")
+# The oldest patched release of every maintained line: (major, minor) -> first safe patch.
+# Any line newer than the newest entry is accepted; any other older line is refused.
+_PATCHED_FLOORS: dict[tuple[int, int], int] = {
+    (2, 39): 4,
+    (2, 40): 2,
+    (2, 41): 1,
+    (2, 42): 2,
+    (2, 43): 4,
+    (2, 44): 1,
+    (2, 45): 1,
+}
+MINIMUM_GIT_VERSION = (
+    "2.45.1 (or the maintenance releases 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1)"
+)
+
+
+def require_patched_git(version_output: str) -> None:
+    """Raise unless ``git --version`` output names a release with the 2024 security fixes."""
+
+    match = _VERSION_PATTERN.match(version_output.strip())
+    if match is None:
+        raise CapabilitySourceError(
+            "the git version could not be determined; "
+            f"a patched git is required: {MINIMUM_GIT_VERSION}",
+            details={"version": version_output.strip()[:200]},
+        )
+    major, minor = int(match.group(1)), int(match.group(2))
+    patch = int(match.group(3) or 0)
+    newest = max(_PATCHED_FLOORS)
+    if (major, minor) > newest:
+        return
+    floor = _PATCHED_FLOORS.get((major, minor))
+    if floor is None or patch < floor:
+        raise CapabilitySourceError(
+            f"this git is too old to fetch from an untrusted repository safely; "
+            f"a patched git is required: {MINIMUM_GIT_VERSION}",
+            details={"version": version_output.strip()[:200]},
+        )
 
 
 def git_environment(*, protocols: str | None = None) -> dict[str, str]:
@@ -190,6 +232,7 @@ class GitCapabilitySource(CommittedTreeCapabilitySource):
         self._signatures = dict(signatures or {})
         self._timeout_seconds = timeout_seconds
         self._mirror: Path | None = None
+        self._git_checked = False
 
     @property
     def pinned_commit(self) -> str:
@@ -453,20 +496,34 @@ class GitCapabilitySource(CommittedTreeCapabilitySource):
                 "git could not be started", details={"error": str(error)}
             ) from error
 
+    def _check_git_version(self) -> None:
+        if self._git_checked:
+            return
+        completed = self._invoke(["--version"], cwd=Path(tempfile.gettempdir()))
+        if completed.returncode != 0:
+            raise CapabilitySourceError("git --version failed")
+        require_patched_git(completed.stdout.decode("utf-8", errors="replace"))
+        self._git_checked = True
+
     @contextlib.contextmanager
     def _session(self) -> Iterator[None]:
         """A fresh private mirror of the pinned commit, deleted when the session ends.
 
         The mirror is created by this adapter in an owner-only temporary
         directory, so git never runs inside a repository the adapter did not
-        create and never reads another repository's configuration. The source
-        (a local path as a ``file://`` URL, or a remote URL) is only fetched
-        from. A session already open is reused by nested calls.
+        create and the fetching side reads no configuration of the source. The
+        source's own ``git-upload-pack`` still reads the source repository's
+        configuration by design; the protection against a hostile source is a
+        patched git (see :data:`MINIMUM_GIT_VERSION`, checked once per adapter)
+        together with ``GIT_NO_LAZY_FETCH``. The source (a local path as a
+        ``file://`` URL, or a remote URL) is only fetched from. A session
+        already open is reused by nested calls.
         """
 
         if self._mirror is not None:
             yield
             return
+        self._check_git_version()
         mirror = Path(tempfile.mkdtemp(prefix="enginery-git-"))
         try:
             self._populate(mirror)
@@ -538,4 +595,11 @@ class GitCapabilitySource(CommittedTreeCapabilitySource):
             )
 
 
-__all__ = ["SUBMODULE_MODE", "SYMLINK_MODE", "GitCapabilitySource", "git_environment"]
+__all__ = [
+    "MINIMUM_GIT_VERSION",
+    "SUBMODULE_MODE",
+    "SYMLINK_MODE",
+    "GitCapabilitySource",
+    "git_environment",
+    "require_patched_git",
+]

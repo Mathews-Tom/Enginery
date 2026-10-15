@@ -13,7 +13,11 @@ from typing import Any
 import pytest
 from tests.support.capabilities import HOST, FakeCapabilitySource, package_files
 
-from enginery.adapters.git_capability import GitCapabilitySource, git_environment
+from enginery.adapters.git_capability import (
+    GitCapabilitySource,
+    git_environment,
+    require_patched_git,
+)
 from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.delivery_ports import PackageFile
 from enginery.application.git_environment import repository_isolated_environment
@@ -267,6 +271,7 @@ def test_the_executable_bit_of_a_tracked_script_is_preserved(tmp_path: Path) -> 
         "tool-a",
         kind=PackageKind.COMMAND,
         command=CommandSpec.create(argv=("scripts/run.sh",), input_schema={"type": "object"}),
+        script=b"#!/bin/sh\necho '{}'\n",
     )
     assert any(item.executable for item in files)
     repo, sha, _ = _packaged_repo(tmp_path, files, directory="packages/tool-a")
@@ -476,7 +481,9 @@ def _git_stdin(repo: Path, data: str, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
-def _partial_clone_repo(tmp_path: Path, sentinel: Path) -> tuple[Path, str]:
+def _partial_clone_repo(
+    tmp_path: Path, sentinel: Path, *, local_promisor: bool = False
+) -> tuple[Path, str]:
     """A repository whose pinned tree names a blob that is not in its object store.
 
     Its configuration declares a promisor remote and an ssh command that touches
@@ -501,9 +508,16 @@ def _partial_clone_repo(tmp_path: Path, sentinel: Path) -> tuple[Path, str]:
     config = repo / ".git" / "config"
     config.write_text(
         config.read_text(encoding="utf-8")
-        + f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = touch {sentinel}; false\n"
+        + "[core]\n\trepositoryformatversion = 1\n"
+        + ("" if local_promisor else f"\tsshCommand = touch {sentinel}; false\n")
         + "[extensions]\n\tpartialClone = origin\n"
-        + '[remote "origin"]\n\turl = ssh://promisor.invalid/repo\n\tpromisor = true\n',
+        + '[remote "origin"]\n'
+        + (
+            f"\turl = {tmp_path / 'anywhere'}\n\tuploadpack = touch {sentinel}; false\n"
+            if local_promisor
+            else "\turl = ssh://promisor.invalid/repo\n"
+        )
+        + "\tpromisor = true\n",
         encoding="utf-8",
     )
     return repo, commit
@@ -525,6 +539,85 @@ def test_a_partial_clone_source_cannot_lazily_fetch_and_run_its_configured_comma
     assert source.probe().availability is AdapterAvailability.MISCONFIGURED
 
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("local_promisor", [False, True])
+def test_a_promisor_remote_command_never_runs(tmp_path: Path, local_promisor: bool) -> None:
+    sentinel = tmp_path / "sentinel"
+    repo, commit = _partial_clone_repo(tmp_path, sentinel, local_promisor=local_promisor)
+    source = _source(repo, commit)
+
+    with pytest.raises(CapabilitySourceError):
+        source.fetch_closure("skill-a", "1")
+
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "git version 2.45.1",
+        "git version 2.46.0",
+        "git version 2.50.1 (Apple Git-155)",
+        "git version 3.0.0",
+        "git version 2.44.1",
+        "git version 2.43.4",
+        "git version 2.42.2",
+        "git version 2.41.1",
+        "git version 2.40.2",
+        "git version 2.39.4",
+        "git version 2.39.5",
+    ],
+)
+def test_patched_git_versions_are_accepted(output: str) -> None:
+    require_patched_git(output)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "git version 2.39.3 (Apple Git-146)",
+        "git version 2.45.0",
+        "git version 2.44.0",
+        "git version 2.43.3",
+        "git version 2.42.1",
+        "git version 2.41.0",
+        "git version 2.40.1",
+        "git version 2.38.5",
+        "git version 2.30.2",
+        "git version 1.9.9",
+        "git version",
+        "something else",
+        "",
+    ],
+)
+def test_unpatched_or_unparseable_git_versions_are_refused(output: str) -> None:
+    with pytest.raises(CapabilitySourceError):
+        require_patched_git(output)
+
+
+def test_an_unpatched_git_refuses_the_session_before_any_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, commit, _ = _packaged_repo(tmp_path)
+    source = _source(repo, commit)
+    real_invoke = source._invoke
+    calls: list[str] = []
+
+    def invoke(arguments: Sequence[str], **kwargs: Any) -> Any:
+        calls.append(arguments[0])
+        if arguments[0] == "--version":
+            return subprocess.CompletedProcess(
+                arguments, 0, b"git version 2.39.3 (Apple Git-146)\n", b""
+            )
+        return real_invoke(arguments, **kwargs)
+
+    monkeypatch.setattr(source, "_invoke", invoke)
+
+    with pytest.raises(CapabilitySourceError):
+        source.fetch_closure("skill-a", "1")
+    assert source.probe().availability is AdapterAvailability.MISCONFIGURED
+    assert calls == ["--version", "--version"]
 
 
 @pytest.mark.parametrize(

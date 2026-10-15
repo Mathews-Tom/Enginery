@@ -27,7 +27,7 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
-from enginery.capabilities.atomic import write_atomically
+from enginery.capabilities.atomic import require_no_link_chain, write_atomically
 from enginery.capabilities.closure import AssetRecord
 from enginery.capabilities.compatibility import CompatibilityReceipt
 from enginery.capabilities.errors import CapabilityLegacyLockError
@@ -220,8 +220,12 @@ def _digest(data: dict[str, object], key: str) -> Digest:
 
 
 def write_lock(lock: CapabilityLock, path: Path) -> None:
-    """Write ``lock`` atomically; a link at ``path`` is replaced, never written through."""
+    """Write ``lock`` atomically; a link at ``path`` is replaced, never written through.
 
+    A symbolic link on the directory chain leading to ``path`` is refused.
+    """
+
+    require_no_link_chain(path.parent, what="lockfile directory", check_named_root=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(lock_to_json(lock), indent=2, sort_keys=True) + "\n").encode("utf-8")
     write_atomically(path, payload, prefix=".enginery-lock-")
