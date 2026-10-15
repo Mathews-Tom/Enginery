@@ -415,3 +415,38 @@ def test_a_conflicting_notice_makes_the_declared_license_unknown() -> None:
     entry = CapabilityResolver([FakeCapabilitySource.of(files)]).resolve([_request()]).entries[0]
 
     assert entry.license == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("license_id", "body"),
+    [
+        ("Unlicense", license_text._UNLICENSE_BODY),
+        ("0BSD", license_text._ZERO_BSD_BODY),
+        ("Zlib", license_text._ZLIB_BODY),
+        ("CC0-1.0", license_text._CC0_BODY),
+    ],
+)
+def test_declared_unlicense_zero_bsd_zlib_and_cc0_survive_their_own_shipped_text(
+    license_id: str, body: str
+) -> None:
+    source = _license_source(license_id, body.encode())
+
+    entry = CapabilityResolver([source]).resolve([_request()]).entries[0]
+
+    assert entry.license == license_id
+
+
+def test_a_declared_license_without_a_template_is_unknown_when_its_text_ships() -> None:
+    source = _license_source("MPL-2.0", b"Mozilla Public License Version 2.0\n")
+
+    entry = CapabilityResolver([source]).resolve([_request()]).entries[0]
+
+    assert entry.license == "unknown"
+
+
+def test_a_declared_unlicense_with_a_mismatching_text_is_unknown() -> None:
+    source = _license_source("Unlicense", license_text._MIT_BODY.encode())
+
+    entry = CapabilityResolver([source]).resolve([_request()]).entries[0]
+
+    assert entry.license == "unknown"

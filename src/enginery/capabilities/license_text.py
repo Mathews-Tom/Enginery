@@ -4,15 +4,25 @@ A license file is classified only by equality with a canonical license text
 after normalization: case-folded, markdown heading markers removed, strictly
 shaped copyright lines in the leading block (and the Apache appendix's
 ``Copyright [yyyy] [name of copyright owner]`` line) removed, whitespace collapsed.
-A removable copyright line is ``copyright``, ``(c)`` or ``©`` (optionally
-followed by ``(c)``/``©``), a year, year range or list, or ``[yyyy]``, and an
-optional holder of one to five name-like tokens (letters, digits, ``.``, ``'``,
-``-``, ``&``, ``and``), optionally followed by ``, `` and exactly one of a
-closed list of suffixes (``inc``, ``ltd``, ``llc``, ``gmbh``, ``corp``, ``co.``,
-``pbc``, ``and contributors``, ``et al.``) and a final ``.``; no other
-commas, dashes between words, colons or semicolons. The leading block ends at
+A removable copyright line is at most 80 characters: ``copyright``, ``(c)`` or
+``©`` (optionally followed by ``(c)``/``©``), a year, year range or list, or
+``[yyyy]``, and an optional holder of one to five tokens. A token is letters
+and digits with at most one internal ``.``, ``'`` or ``-`` and an optional
+trailing ``.`` (for an initial or abbreviation), or ``&``; ``and`` is an
+ordinary token. The holder may be followed by ``, `` and exactly one of a
+closed list of suffixes (``inc``, ``ltd``, ``llc``, ``gmbh``, ``corp``,
+``co.``, ``pbc``, ``and contributors``, ``et al.``) and a final ``.``. A full
+stop (or ``!``/``?``) may only end the line or close an initial or suffix: one
+followed by whitespace and more text makes the line non-removable, as do other
+commas, dashes between words, colons and semicolons. The leading block ends at
 the first non-blank line that is neither a license title nor such a copyright
-line. Copyright lines anywhere else stay and break the match.
+line, and at most three copyright lines in it are removed (a fourth makes the
+text ``unknown``). Copyright lines anywhere else stay and break the match.
+Residual risk: a short name-shaped phrase on a copyright line (for example
+``Copyright 2024 Foo resale needs consent``) is still treated as a holder name.
+The templates are MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Zlib,
+Unlicense and CC0-1.0; a package that declares any other license id and ships
+license text is held as ``unknown``.
 Text with Unicode format characters, line or paragraph separators, control
 characters, HTML comments or any non-ASCII character other than ``©`` is
 ``unknown``, as are inserted terms, appended terms, carve-outs, dual
@@ -31,10 +41,14 @@ import re
 UNKNOWN_LICENSE = "unknown"
 
 _APACHE_APPENDIX_COPYRIGHT = "copyright [yyyy] [name of copyright owner]"
-# A removable copyright line is a bare attribution: a prefix, a year (range or list) or
-# ``[yyyy]``, then an optional holder of one to five name-like tokens (letters, digits,
-# ``.``, ``'``, ``-``, ``&``, ``and``), then optionally ``, `` and one closed suffix.
-_HOLDER_TOKEN = r"(?:[a-z0-9][a-z0-9.'-]*|&)"
+# A removable copyright line is a bare attribution of at most 80 characters: a prefix, a
+# year (range or list) or ``[yyyy]``, then an optional holder of one to five tokens (letters
+# and digits, at most one internal ``.``, ``'`` or ``-``, an optional trailing ``.``, or
+# ``&``), then optionally ``, `` and one closed suffix. A sentence break never matches.
+_HOLDER_TOKEN = r"(?:[a-z0-9]+(?:[.'-][a-z0-9]+)?\.?|&)"
+_MAX_COPYRIGHT_LINE = 80
+_MAX_COPYRIGHT_LINES = 3
+_SENTENCE_BREAK = re.compile(r"[.!?]\s+\S")
 _COPYRIGHT_LINE = re.compile(
     r"^(?:copyright(?:\s*(?:\(c\)|\u00a9))?|\(c\)|\u00a9)\s+"
     r"(?:\d{4}(?:\s*[-,]\s*\d{4})*|\[yyyy\])"
@@ -99,6 +113,140 @@ _ISC_BODY = (
     "damages or any damages whatsoever resulting from loss of use, data or profits, whether in "
     "an action of contract, negligence or other tortious action, arising out of or in "
     "connection with the use or performance of this software."
+)
+_UNLICENSE_BODY = (
+    "this is free and unencumbered software released into the public domain. anyone "
+    "is free to copy, modify, publish, use, compile, sell, or distribute this "
+    "software, either in source code form or as a compiled binary, for any purpose, "
+    "commercial or non-commercial, and by any means. in jurisdictions that recognize "
+    "copyright laws, the author or authors of this software dedicate any and all "
+    "copyright interest in the software to the public domain. we make this dedication"
+    " for the benefit of the public at large and to the detriment of our heirs and "
+    "successors. we intend this dedication to be an overt act of relinquishment in "
+    "perpetuity of all present and future rights to this software under copyright "
+    'law. the software is provided "as is", without warranty of any kind, express or '
+    "implied, including but not limited to the warranties of merchantability, fitness"
+    " for a particular purpose and noninfringement. in no event shall the authors be "
+    "liable for any claim, damages or other liability, whether in an action of "
+    "contract, tort or otherwise, arising from, out of or in connection with the "
+    "software or the use or other dealings in the software."
+)
+_UNLICENSE_REFERENCES = tuple(
+    f" for more information, please refer to <{scheme}://unlicense.org{slash}>"
+    for scheme in ("http", "https")
+    for slash in ("", "/")
+)
+_ZERO_BSD_BODY = (
+    "permission to use, copy, modify, and/or distribute this software for any purpose"
+    ' with or without fee is hereby granted. the software is provided "as is" and the'
+    " author disclaims all warranties with regard to this software including all "
+    "implied warranties of merchantability and fitness. in no event shall the author "
+    "be liable for any special, direct, indirect, or consequential damages or any "
+    "damages whatsoever resulting from loss of use, data or profits, whether in an "
+    "action of contract, negligence or other tortious action, arising out of or in "
+    "connection with the use or performance of this software."
+)
+_ZLIB_BODY = (
+    "this software is provided 'as-is', without any express or implied warranty. in "
+    "no event will the authors be held liable for any damages arising from the use of"
+    " this software. permission is granted to anyone to use this software for any "
+    "purpose, including commercial applications, and to alter it and redistribute it "
+    "freely, subject to the following restrictions: 1. the origin of this software "
+    "must not be misrepresented; you must not claim that you wrote the original "
+    "software. if you use this software in a product, an acknowledgment in the "
+    "product documentation would be appreciated but is not required. 2. altered "
+    "source versions must be plainly marked as such, and must not be misrepresented "
+    "as being the original software. 3. this notice may not be removed or altered "
+    "from any source distribution."
+)
+_CC0_BODY = (
+    "cc0 1.0 universal statement of purpose the laws of most jurisdictions throughout"
+    " the world automatically confer exclusive copyright and related rights (defined "
+    'below) upon the creator and subsequent owner(s) (each and all, an "owner") of an'
+    ' original work of authorship and/or a database (each, a "work"). certain owners '
+    "wish to permanently relinquish those rights to a work for the purpose of "
+    'contributing to a commons of creative, cultural and scientific works ("commons")'
+    " that the public can reliably and without fear of later claims of infringement "
+    "build upon, modify, incorporate in other works, reuse and redistribute as freely"
+    " as possible in any form whatsoever and for any purposes, including without "
+    "limitation commercial purposes. these owners may contribute to the commons to "
+    "promote the ideal of a free culture and the further production of creative, "
+    "cultural and scientific works, or to gain reputation or greater distribution for"
+    " their work in part through the use and efforts of others. for these and/or "
+    "other purposes and motivations, and without any expectation of additional "
+    "consideration or compensation, the person associating cc0 with a work (the "
+    '"affirmer"), to the extent that he or she is an owner of copyright and related '
+    "rights in the work, voluntarily elects to apply cc0 to the work and publicly "
+    "distribute the work under its terms, with knowledge of his or her copyright and "
+    "related rights in the work and the meaning and intended legal effect of cc0 on "
+    "those rights. 1. copyright and related rights. a work made available under cc0 "
+    'may be protected by copyright and related or neighboring rights ("copyright and '
+    'related rights"). copyright and related rights include, but are not limited to, '
+    "the following: i. the right to reproduce, adapt, distribute, perform, display, "
+    "communicate, and translate a work; ii. moral rights retained by the original "
+    "author(s) and/or performer(s); iii. publicity and privacy rights pertaining to a"
+    " person's image or likeness depicted in a work; iv. rights protecting against "
+    "unfair competition in regards to a work, subject to the limitations in paragraph"
+    " 4(a), below; v. rights protecting the extraction, dissemination, use and reuse "
+    "of data in a work; vi. database rights (such as those arising under directive "
+    "96/9/ec of the european parliament and of the council of 11 march 1996 on the "
+    "legal protection of databases, and under any national implementation thereof, "
+    "including any amended or successor version of such directive); and vii. other "
+    "similar, equivalent or corresponding rights throughout the world based on "
+    "applicable law or treaty, and any national implementations thereof. 2. waiver. "
+    "to the greatest extent permitted by, but not in contravention of, applicable "
+    "law, affirmer hereby overtly, fully, permanently, irrevocably and "
+    "unconditionally waives, abandons, and surrenders all of affirmer's copyright and"
+    " related rights and associated claims and causes of action, whether now known or"
+    " unknown (including existing as well as future claims and causes of action), in "
+    "the work (i) in all territories worldwide, (ii) for the maximum duration "
+    "provided by applicable law or treaty (including future time extensions), (iii) "
+    "in any current or future medium and for any number of copies, and (iv) for any "
+    "purpose whatsoever, including without limitation commercial, advertising or "
+    'promotional purposes (the "waiver"). affirmer makes the waiver for the benefit '
+    "of each member of the public at large and to the detriment of affirmer's heirs "
+    "and successors, fully intending that such waiver shall not be subject to "
+    "revocation, rescission, cancellation, termination, or any other legal or "
+    "equitable action to disrupt the quiet enjoyment of the work by the public as "
+    "contemplated by affirmer's express statement of purpose. 3. public license "
+    "fallback. should any part of the waiver for any reason be judged legally invalid"
+    " or ineffective under applicable law, then the waiver shall be preserved to the "
+    "maximum extent permitted taking into account affirmer's express statement of "
+    "purpose. in addition, to the extent the waiver is so judged affirmer hereby "
+    "grants to each affected person a royalty-free, non transferable, non "
+    "sublicensable, non exclusive, irrevocable and unconditional license to exercise "
+    "affirmer's copyright and related rights in the work (i) in all territories "
+    "worldwide, (ii) for the maximum duration provided by applicable law or treaty "
+    "(including future time extensions), (iii) in any current or future medium and "
+    "for any number of copies, and (iv) for any purpose whatsoever, including without"
+    ' limitation commercial, advertising or promotional purposes (the "license"). the'
+    " license shall be deemed effective as of the date cc0 was applied by affirmer to"
+    " the work. should any part of the license for any reason be judged legally "
+    "invalid or ineffective under applicable law, such partial invalidity or "
+    "ineffectiveness shall not invalidate the remainder of the license, and in such "
+    "case affirmer hereby affirms that he or she will not (i) exercise any of his or "
+    "her remaining copyright and related rights in the work or (ii) assert any "
+    "associated claims and causes of action with respect to the work, in either case "
+    "contrary to affirmer's express statement of purpose. 4. limitations and "
+    "disclaimers. a. no trademark or patent rights held by affirmer are waived, "
+    "abandoned, surrendered, licensed or otherwise affected by this document. b. "
+    "affirmer offers the work as-is and makes no representations or warranties of any"
+    " kind concerning the work, express, implied, statutory or otherwise, including "
+    "without limitation warranties of title, merchantability, fitness for a "
+    "particular purpose, non infringement, or the absence of latent or other defects,"
+    " accuracy, or the present or absence of errors, whether or not discoverable, all"
+    " to the greatest extent permissible under applicable law. c. affirmer disclaims "
+    "responsibility for clearing rights of other persons that may apply to the work "
+    "or any use thereof, including without limitation any person's copyright and "
+    "related rights in the work. further, affirmer disclaims responsibility for "
+    "obtaining any necessary consents, permissions or other rights required for any "
+    "use of the work. d. affirmer understands and acknowledges that creative commons "
+    "is not a party to this document and has no duty or obligation with respect to "
+    "this cc0 or use of the work."
+)
+_CC0_REFERENCES = (
+    " for more information, please see <http://creativecommons.org/publicdomain/zero/1.0/>",
+    " for more information, please see <https://creativecommons.org/publicdomain/zero/1.0/>",
 )
 _APACHE_FULL = (
     "apache license version 2.0, january 2004 http://www.apache.org/licenses/ terms "
@@ -251,6 +399,9 @@ _TITLES = frozenset(
         "bsd 3-clause license",
         "bsd-3-clause license",
         "isc license",
+        "0bsd license",
+        "zero-clause bsd license",
+        "zlib license",
     }
 )
 
@@ -267,6 +418,12 @@ _TEMPLATES: dict[str, frozenset[str]] = {
         "bsd-3-clause license",
     ),
     "ISC": _with_titles(_ISC_BODY, "isc license"),
+    "0BSD": _with_titles(_ZERO_BSD_BODY, "0bsd license", "zero-clause bsd license"),
+    "Zlib": _with_titles(_ZLIB_BODY, "zlib license"),
+    "Unlicense": frozenset(
+        {_UNLICENSE_BODY, *(_UNLICENSE_BODY + reference for reference in _UNLICENSE_REFERENCES)}
+    ),
+    "CC0-1.0": frozenset({_CC0_BODY, *(_CC0_BODY + reference for reference in _CC0_REFERENCES)}),
 }
 _BY_TEXT = {text: spdx for spdx, texts in _TEMPLATES.items() for text in texts}
 
@@ -323,7 +480,9 @@ def _removable_copyright(line: str) -> bool:
     """Whether ``line`` is a strictly shaped attribution that states no terms."""
 
     return (
-        _COPYRIGHT_LINE.match(line) is not None
+        len(line) <= _MAX_COPYRIGHT_LINE
+        and _COPYRIGHT_LINE.match(line) is not None
+        and _SENTENCE_BREAK.search(line) is None
         and _TERMS_WORDS.search(line) is None
         and _OTHER_LICENSE_MARKERS.search(line) is None
         and "all rights reserved" not in line
@@ -341,12 +500,14 @@ def normalize_license_text(text: str) -> str:
 
     kept: list[str] = []
     leading = True
+    removed = 0
     for raw in text.casefold().splitlines():
         line = _HEADING_MARKERS.sub("", raw.strip())
         if line == _APACHE_APPENDIX_COPYRIGHT:
             continue
         if leading and line:
-            if _removable_copyright(line):
+            if _removable_copyright(line) and removed < _MAX_COPYRIGHT_LINES:
+                removed += 1
                 continue
             if line not in _TITLES:
                 leading = False

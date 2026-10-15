@@ -70,11 +70,10 @@ _LICENSE_WORDS = (
 _TEXT_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
 _LICENSE_EXTENSIONS = frozenset({"", *_TEXT_EXTENSIONS})
 _FORBIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
-_NON_TEXT_SUFFIXES = frozenset(
+_LICENSE_SUFFIX_WORDS = frozenset(
     {
-        *("sh", "bash", "zsh", "py", "pth", "pyc", "js", "mjs", "cjs", "ts", "rb", "pl", "php"),
-        *("bat", "cmd", "exe", "dll", "so", "dylib", "bin", "jar", "class", "wasm", "lib", "o"),
-        *("a", "ps", "com", "scr", "app", "dat"),
+        *("mit", "apache", "apache2", "bsd", "isc", "lesser", "gpl", "lgpl", "agpl", "mpl"),
+        *("third", "party", "notices", "thirdparty"),
     }
 )
 _SCRIPT_EXTENSIONS = frozenset({".py", ".sh", ".js", ".mjs", ".ts"})
@@ -237,9 +236,11 @@ def _license_name_shape_ok(name: str) -> bool:
     """Whether a license-like root name is plain text shaped.
 
     After NFKC normalization and case folding and after dropping one ``.md``,
-    ``.txt`` or ``.rst`` extension, the name is ASCII letters in one to three
-    words joined by ``.``, ``-`` or ``_``; a final word after a separator is at
-    most ten letters and not an executable, binary or script extension.
+    ``.txt`` or ``.rst`` extension, the name is one ASCII-letter word (the
+    license word, with no extension) or that word followed by one or two
+    words, each from a closed list of license-family words, joined by ``.``,
+    ``-`` or ``_`` (``LICENSE-MIT``, ``COPYING.LESSER``,
+    ``THIRD_PARTY_NOTICES.md``). Anything else is refused.
     """
 
     folded = _folded(name)
@@ -247,9 +248,9 @@ def _license_name_shape_ok(name: str) -> bool:
     if dot and f".{ext}" in _TEXT_EXTENSIONS:
         folded = core
     words = re.split(r"[.\-_]", folded)
-    if not 1 <= len(words) <= 3 or not all(re.fullmatch(r"[a-z]+", word) for word in words):
+    if not 1 <= len(words) <= 3 or not re.fullmatch(r"[a-z]+", words[0]):
         return False
-    return len(words) == 1 or (len(words[-1]) <= 10 and words[-1] not in _NON_TEXT_SUFFIXES)
+    return all(word in _LICENSE_SUFFIX_WORDS for word in words[1:])
 
 
 @dataclass(frozen=True, slots=True)

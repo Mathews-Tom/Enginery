@@ -590,7 +590,6 @@ def test_license_files_with_other_casing_and_extensions_are_classified(name: str
         "COPYING.LESSER.md",
         "THIRD_PARTY_NOTICES.md",
         "LICENSE_GPL.md",
-        "LICENSE.md.md",
         "UNLICENSE.md",
         "LICENSES.md",
         "\uff2c\uff29\uff23\uff25\uff2e\uff33\uff25.md",

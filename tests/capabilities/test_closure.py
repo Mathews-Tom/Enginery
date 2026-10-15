@@ -93,7 +93,9 @@ _LICENSE_LIKE_NAMES = [
     "COPYING.LESSER.md",
     "THIRD_PARTY_NOTICES.md",
     "LICENSE_GPL.md",
-    "LICENSE.md.md",
+    "LICENSE.APACHE2",
+    "LICENSE-BSD.txt",
+    "NOTICE-THIRDPARTY.rst",
     "UNLICENSE.md",
     "LICENSES.md",
     "\uff2c\uff29\uff23\uff25\uff2e\uff33\uff25.md",
@@ -389,6 +391,31 @@ def test_a_non_ascii_root_name_is_license_like_and_rejected(name: str) -> None:
 def test_license_like_names_with_executable_or_binary_shapes_are_rejected(name: str) -> None:
     with pytest.raises(CapabilityAssetTypeError):
         build_closure((*package_files("skill-a"), PackageFile(name, b"text")))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        *(f"license{ext}" for ext in (".pyw", ".ksh", ".command", ".lua", ".vbs", ".html")),
+        *(f"license{ext}" for ext in (".svg", ".jsx", ".desktop", ".fish", ".csh", ".tcl")),
+        "LICENSE.md.md",
+        "LICENSE-MIT-extra.md",
+        "LICENSE.mit.apache.bsd",
+        "LICENSE-2.0.txt",
+    ],
+)
+def test_license_like_names_outside_the_closed_word_list_are_rejected(name: str) -> None:
+    with pytest.raises(CapabilityAssetTypeError):
+        build_closure((*package_files("skill-a"), PackageFile(name, b"text")))
+
+
+@pytest.mark.parametrize(
+    "name", ["LICENSE-MIT", "COPYING.LESSER", "THIRD_PARTY_NOTICES.md", "LICENSE.APACHE2"]
+)
+def test_license_like_names_from_the_closed_word_list_are_metadata(name: str) -> None:
+    closure = build_closure((*package_files("skill-a"), PackageFile(name, b"text")))
+
+    assert {record.path: record.kind for record in closure.files}[name] is AssetKind.METADATA
 
 
 @pytest.mark.parametrize("name", ["LICENSE", "LICENSE.md", "NOTICE.txt", "COPYING.LESSER"])

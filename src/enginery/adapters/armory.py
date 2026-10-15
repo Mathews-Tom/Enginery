@@ -24,24 +24,33 @@ dependencies, no license) and includes it in the closure; it grants no
 authority and declares no command, so an Armory package is installed as
 inert files. Armory content is unauthenticated: it is never executed on
 discovery and never without exact-digest human approval. A package's
-license is decided by the license files it ships at its root (a name whose
-stem is ``license``, ``licence`` or ``copying``, in any case, with no
-extension or ``.md``/``.txt``/``.rst``) when it carries any, else by the
-repository ``LICENSE`` at the pinned revision. A license file is classified
-only by exact match with a canonical MIT, Apache-2.0, BSD-2-Clause,
-BSD-3-Clause or ISC text after case-folding, heading-marker removal,
-copyright-line removal and whitespace collapsing; any other text (inserted
-or appended terms, carve-outs, dual licensing, other licenses) is
-``unknown``. Every shipped file must classify to one SPDX id that equals
-the repository license, else the package license is ``unknown``. A
-``NOTICE`` file never decides the license but makes it ``unknown`` when it
-names another license family (GPL/LGPL/AGPL, MPL, SSPL, Creative Commons,
-non-commercial, Commons Clause, proprietary, dual licensing, "at your
-option") or reserves all rights without a permissive grant. The repository
-``LICENSE`` and the catalog ``manifest.yaml`` are verified against the git
-blob sha in the pinned tree, as is every package file (a mismatched
-``LICENSE`` is ``unknown``; a mismatched manifest is an integrity failure).
-All licenses are declared metadata only.
+license is decided by the license-like files it ships at its root (after
+NFKC normalization and case-folding, a name containing ``licen``,
+``copying``, ``notice``, ``unlicense``, ``copyright``, ``eula``, ``legal``,
+``terms`` or ``patent``, or not ASCII) when it carries any, else by the
+repository ``LICENSE`` at the pinned revision. Such a name is accepted only
+as one letters-only word, or that word followed by one or two words from a
+closed list (``mit``, ``apache``, ``apache2``, ``bsd``, ``isc``, ``lesser``,
+``gpl``, ``lgpl``, ``agpl``, ``mpl``, ``third``, ``party``, ``notices``,
+``thirdparty``) joined by ``.``, ``-`` or ``_``, optionally followed by
+``.md``/``.txt``/``.rst``; a name that is still non-ASCII after
+normalization or any other shape fails the closure. A license file is
+classified only by exact match with a canonical MIT, Apache-2.0,
+BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Zlib, Unlicense or CC0-1.0 text after
+case-folding, heading-marker removal, copyright-line removal and whitespace
+collapsing; any other text (inserted or appended terms, carve-outs, dual
+licensing, other licenses) is ``unknown``. Every shipped file must classify
+to one SPDX id that equals the repository license, else the package license
+is ``unknown``. A ``NOTICE`` file never decides the license but makes it
+``unknown`` when it names another license family or marker (GPL/LGPL/AGPL,
+Affero, MPL, SSPL, Creative Commons, share-alike, non-commercial, Commons
+Clause, EUPL, CDDL, Eclipse, BUSL, Elastic, EPL, PolyForm, OSL, copyleft,
+proprietary, dual licensing, "at your option", "choose either"), reserves
+all rights without a permissive grant, or carries hidden or non-ASCII
+characters. The repository ``LICENSE`` and the catalog ``manifest.yaml`` are
+verified against the git blob sha in the pinned tree, as is every package
+file (a mismatched ``LICENSE`` is ``unknown``; a mismatched manifest is an
+integrity failure). All licenses are declared metadata only.
 
 Armory is never a runtime dependency of the engine: importing this module
 needs only the standard library, and every method that reaches the

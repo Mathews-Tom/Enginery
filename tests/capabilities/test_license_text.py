@@ -96,6 +96,20 @@ _SMUGGLED_LINES = [
     "Copyright 2024 Foo, the vendor dir is gnu affero",
     "Copyright 2024 Foo, vendor code is share-alike",
     "Copyright 2024 Foo; vendor code is barred",
+    "Copyright 2024 Foo resale-requires-written-consent-of-Foo",
+    "Copyright 2024 Foo.Selling.copies.needs.a.paid.agreement.with.Foo",
+    "Copyright 2024 Foo ai-training-on-this-package-is-barred",
+    "Copyright 2024 Foo the-vendor-directory-is-apache-2.0",
+    "Copyright 2024 Foo's-resale-requires-Foo's-written-consent",
+    "Copyright 2024 " + "-".join(["resale"] * 60),
+    "Copyright 2024 selling-copies-requires-a-paid-agreement-with-foo, Inc.",
+    "Copyright 2024 Foo. Resale requires paid agreement.",
+    "Copyright 2024 Foo. All resale requires approval.",
+    "Copyright 2024 Foo Corp. Resale requires agreement.",
+    "Copyright 2024 Foo, Inc. Resale requires agreement.",
+    "Copyright 2024 Foo.. Resale requires agreement",
+    "Copyright 2024 Foo! Resale requires agreement",
+    "Copyright 2024 " + " ".join(["Abcdefghijklmnop"] * 5),
 ]
 
 
@@ -176,6 +190,7 @@ _HOLDERS = [
     "shadcn",
     "Matt Pocock",
     "Agents365-ai",
+    "Foo Inc.",
     "Foo, Inc.",
     "Foo, and contributors",
     "Foo & Bar, et al.",
@@ -195,3 +210,56 @@ def test_the_leading_block_ends_at_the_first_line_that_is_not_title_or_copyright
 
     assert classify_license_text(body) == "unknown"
     assert classify_license_text(wrapped) == "unknown"
+
+
+def test_more_than_three_leading_copyright_lines_are_unknown() -> None:
+    lines = [f"Copyright 2024 Holder{n}" for n in range(4)]
+    body = license_text._MIT_BODY
+
+    assert classify_license_text("\n".join(lines[:3]) + "\n\n" + body) == "MIT"
+    assert classify_license_text("\n".join(lines) + "\n\n" + body) == "unknown"
+
+
+def test_a_copyright_line_longer_than_eighty_characters_is_unknown() -> None:
+    holder = " ".join(["Alpha"] * 4)
+    short = f"Copyright 2024 {holder}"
+    long_line = "Copyright 2024 " + " ".join(["Abcdefghijklmnop"] * 5)
+
+    assert len(short) <= 80 < len(long_line)
+    assert classify_license_text(f"{short}\n\n{license_text._MIT_BODY}") == "MIT"
+    assert classify_license_text(f"{long_line}\n\n{license_text._MIT_BODY}") == "unknown"
+
+
+_SPDX_TEXTS = {
+    "Unlicense": license_text._UNLICENSE_BODY,
+    "0BSD": license_text._ZERO_BSD_BODY,
+    "Zlib": license_text._ZLIB_BODY,
+    "CC0-1.0": license_text._CC0_BODY,
+}
+
+
+@pytest.mark.parametrize(("spdx", "body"), sorted(_SPDX_TEXTS.items()))
+def test_unlicense_zero_bsd_zlib_and_cc0_templates_are_recognized_when_exact(
+    spdx: str, body: str
+) -> None:
+    assert classify_license_text(body) == spdx
+    assert classify_license_text(body.upper()) == spdx
+    assert classify_license_text(body + " Resale needs a paid agreement.") == "unknown"
+    assert classify_license_text(body[:40] + "x" + body[40:]) == "unknown"
+
+
+def test_template_variants_and_headers_are_recognized() -> None:
+    reference = "\n\nFor more information, please refer to <https://unlicense.org>"
+    zero_bsd = license_text._ZERO_BSD_BODY
+    zlib = license_text._ZLIB_BODY
+
+    assert classify_license_text(license_text._UNLICENSE_BODY + reference) == "Unlicense"
+    assert classify_license_text("Copyright (c) 2024 Foo\n\n" + zero_bsd) == "0BSD"
+    assert classify_license_text("zlib License\n\n(c) 2024 Foo\n" + zlib) == "Zlib"
+    assert classify_license_text("Copyright (C) 1995-2024 Jean-loup Gailly\n" + zlib) == "Zlib"
+
+
+def test_every_template_text_classifies_to_its_own_id() -> None:
+    for spdx, texts in license_text._TEMPLATES.items():
+        for text in texts:
+            assert classify_license_text(text) == spdx
