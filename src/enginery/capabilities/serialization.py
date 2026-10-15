@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from enginery.capabilities.closure import AssetRecord
+from enginery.capabilities.compatibility import CompatibilityReceipt
 from enginery.capabilities.errors import CapabilityLegacyLockError
 from enginery.capabilities.legacy_lock import LegacyCapabilityLock, LegacyLockedCapability
 from enginery.capabilities.lock import (
@@ -65,6 +66,7 @@ def lock_to_json(lock: CapabilityLock) -> dict[str, object]:
                 "dependencies": [pin.to_json() for pin in entry.dependencies],
                 "permissions": [permission.value for permission in entry.permissions],
                 "compatibility": entry.compatibility.to_json(),
+                "compatibility_receipt": entry.receipt.to_json(),
             }
             for entry in lock.entries
         ],
@@ -163,6 +165,7 @@ def _entry_from_json(item: object) -> LockedCapability:
                 CapabilityPermission(_item_str(value)) for value in _list(item, "permissions")
             ),
             compatibility=PackageCompatibility.from_json(item.get("compatibility")),
+            receipt=CompatibilityReceipt.from_json(item.get("compatibility_receipt")),
         )
     except ValueError as error:
         raise InvalidInputError(f"capability lock entry is invalid: {error}") from error

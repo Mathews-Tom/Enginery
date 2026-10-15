@@ -391,10 +391,29 @@ def build_closure(files: Iterable[PackageFile]) -> PackageClosure:
         raise CapabilityManifestError(
             "package has no manifest", details={"expected": MANIFEST_FILE_NAME}
         )
-    return PackageClosure(
-        manifest=parse_manifest(manifest_bytes),
-        files=tuple(sorted(records, key=lambda record: record.path)),
-    )
+    manifest = parse_manifest(manifest_bytes)
+    ordered = tuple(sorted(records, key=lambda record: record.path))
+    _require_command_assets(manifest, ordered)
+    return PackageClosure(manifest=manifest, files=ordered)
+
+
+def _require_command_assets(manifest: PackageManifest, records: Sequence[AssetRecord]) -> None:
+    """A declared command must run a script that is part of the closure."""
+
+    command = manifest.command
+    if command is None:
+        return
+    script = next((record for record in records if record.path == command.script), None)
+    if script is None or script.kind is not AssetKind.SCRIPT:
+        raise CapabilityManifestError(
+            "package command must run a script asset of the package",
+            details={"script": command.script},
+        )
+    if command.interpreter is None and not script.executable:
+        raise CapabilityManifestError(
+            "a directly executed command script must carry the executable bit",
+            details={"script": command.script},
+        )
 
 
 def _reject_file_directory_conflicts(collision_keys: dict[str, str]) -> None:

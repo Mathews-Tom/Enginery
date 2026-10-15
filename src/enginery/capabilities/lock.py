@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from enginery.capabilities.closure import AssetRecord, closure_digest
+from enginery.capabilities.compatibility import CompatibilityReceipt
 from enginery.capabilities.license import LicenseDisposition, classify_license
 from enginery.capabilities.manifest import (
     CapabilityPermission,
@@ -88,6 +89,7 @@ class LockedCapability:
     license: str | None
     introduced_by_run: bool
     files: tuple[AssetRecord, ...]
+    receipt: CompatibilityReceipt
     dependencies: tuple[DependencyPin, ...] = ()
     permissions: tuple[CapabilityPermission, ...] = ()
     compatibility: PackageCompatibility = field(default_factory=PackageCompatibility)
@@ -197,6 +199,7 @@ class CapabilityLock:
                     "introduced_by_run": entry.introduced_by_run,
                     "permissions": [permission.value for permission in entry.permissions],
                     "compatibility": entry.compatibility.to_json(),
+                    "compatibility_receipt": entry.receipt.to_json(),
                     "dependencies": [pin.to_json() for pin in entry.dependencies],
                 }
                 for entry in self.entries

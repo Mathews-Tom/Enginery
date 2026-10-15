@@ -242,6 +242,7 @@ def test_locked_capability_requires_a_non_blank_revision() -> None:
             license=entry.license,
             introduced_by_run=entry.introduced_by_run,
             files=entry.files,
+            receipt=entry.receipt,
         )
 
 
