@@ -25,6 +25,7 @@ from pathlib import Path
 from enginery.application.delivery_ports import PackageFile
 from enginery.capabilities.closure import (
     AssetRecord,
+    PackageClosure,
     build_closure,
     build_closure_from_directory,
 )
@@ -71,13 +72,26 @@ def _mismatch_details(entry: LockedCapability, actual: Sequence[AssetRecord]) ->
     }
 
 
-def _require_matching_files(entry: LockedCapability, files: Sequence[PackageFile]) -> None:
-    closure = build_closure(files)
-    if closure.digest != entry.digest or closure.files != entry.files:
+def _require_matching_closure(
+    entry: LockedCapability, closure: PackageClosure, message: str
+) -> None:
+    manifest = closure.manifest
+    if (
+        closure.digest != entry.digest
+        or closure.files != entry.files
+        or manifest.kind is not entry.kind
+        or tuple(sorted(set(manifest.permissions))) != entry.permissions
+        or manifest.compatibility != entry.compatibility
+        or tuple(sorted(manifest.dependencies, key=lambda pin: pin.name)) != entry.dependencies
+    ):
         raise CapabilityIntegrityError(
-            "supplied package files do not match the locked closure",
+            f"{message} the locked closure",
             details=_mismatch_details(entry, closure.files),
         )
+
+
+def _require_matching_files(entry: LockedCapability, files: Sequence[PackageFile]) -> None:
+    _require_matching_closure(entry, build_closure(files), "supplied package files do not match")
 
 
 def verify_materialized(entry: LockedCapability, root: Path) -> Path:
@@ -106,11 +120,7 @@ def verify_materialized(entry: LockedCapability, root: Path) -> Path:
                 "reason_details": dict(error.details),
             },
         ) from error
-    if closure.digest != entry.digest or closure.files != entry.files:
-        raise CapabilityIntegrityError(
-            "materialized closure no longer matches the locked closure",
-            details=_mismatch_details(entry, closure.files),
-        )
+    _require_matching_closure(entry, closure, "materialized closure no longer matches")
     return target
 
 
@@ -122,7 +132,7 @@ def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
             handle.write(item.content)
             handle.flush()
             os.fsync(handle.fileno())
-        destination.chmod(0o555 if item.executable else 0o444)
+            os.fchmod(handle.fileno(), 0o555 if item.executable else 0o444)
 
 
 def _publish_closure(root: Path, entry: LockedCapability, files: Sequence[PackageFile]) -> Path:

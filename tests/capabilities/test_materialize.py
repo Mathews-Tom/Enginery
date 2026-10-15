@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import os
 import stat
 from pathlib import Path
@@ -13,6 +14,7 @@ from enginery.capabilities.errors import (
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
 )
+from enginery.capabilities.manifest import CapabilityPermission, PackageKind
 from enginery.capabilities.materialize import (
     digest_path,
     materialize_capability,
@@ -242,3 +244,33 @@ def test_materialize_lock_rejects_missing_files_for_a_locked_entry(tmp_path: Pat
 
     with pytest.raises(CapabilityIntegrityError, match="no files were supplied"):
         materialize_lock(lock_of(trusted), {}, root=tmp_path)
+
+
+def test_materialization_rejects_a_lock_entry_with_a_tampered_kind(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    tampered = dataclasses.replace(entry, kind=PackageKind.COMMAND)
+
+    with pytest.raises(CapabilityIntegrityError):
+        materialize_capability(tampered, files, root=tmp_path)
+
+
+def test_materialization_rejects_a_lock_entry_with_tampered_permissions(tmp_path: Path) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    tampered = dataclasses.replace(entry, permissions=(CapabilityPermission.NETWORK_ACCESS,))
+
+    with pytest.raises(CapabilityIntegrityError):
+        materialize_capability(tampered, files, root=tmp_path)
+
+
+def test_verify_materialized_rejects_a_lock_entry_that_disagrees_with_the_manifest(
+    tmp_path: Path,
+) -> None:
+    files = _scripted()
+    entry = locked_entry(files=files)
+    materialize_capability(entry, files, root=tmp_path)
+    tampered = dataclasses.replace(entry, permissions=(CapabilityPermission.PROCESS_EXECUTE,))
+
+    with pytest.raises(CapabilityIntegrityError):
+        verify_materialized(tampered, tmp_path)
