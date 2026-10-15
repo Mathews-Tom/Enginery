@@ -369,3 +369,12 @@ def test_two_requests_for_different_versions_of_one_name_conflict() -> None:
 def test_no_sources_is_rejected_at_construction() -> None:
     with pytest.raises(ValueError, match="at least one"):
         CapabilityResolver([])
+
+
+def test_expected_license_is_enforced_for_a_name_a_dependency_already_resolved() -> None:
+    dependency = package_files("dep-a", license_id="GPL-3.0")
+    parent = package_files("skill-a", dependencies=[pin_for("dep-a", dependency)])
+    resolver = CapabilityResolver([FakeCapabilitySource.of(parent, dependency)])
+
+    with pytest.raises(CapabilityLicenseMismatchError):
+        resolver.resolve([_request("skill-a"), _request("dep-a", expected_license="MIT")])

@@ -158,6 +158,7 @@ class CapabilityResolver:
                         "versions": sorted({existing[0].version, request.version}),
                     },
                 )
+            self._enforce_license(request, existing[0].license)
             return existing[0]
         descriptor, source = self._discover(request)
         files = source.fetch_closure(descriptor.name, descriptor.version)
