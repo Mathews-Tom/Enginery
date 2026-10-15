@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from tests.support.capabilities import descriptor_for, package_files
 from tests.support.execution import selection_for
 
 from enginery.adapters.local import (
@@ -19,7 +20,6 @@ from enginery.adapters.local import (
 )
 from enginery.application.adapter_types import AdapterEventKind, NormalizedAdapterEvent
 from enginery.application.delivery_ports import (
-    CapabilityDescriptor,
     DeploymentRequest,
     PublicationRequest,
     ReleaseArtifact,
@@ -28,6 +28,7 @@ from enginery.application.delivery_ports import (
 )
 from enginery.application.work_ports import HarnessTask, WorkspaceHandle, WorkspaceRequest
 from enginery.domain.digests import Digest
+from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
 
@@ -228,14 +229,22 @@ def test_deployment_fixture_rolls_back_known_receipt() -> None:
 
 
 def test_local_capability_source_has_no_runtime_discovery() -> None:
-    capability = CapabilityDescriptor(
-        name="repository-read",
-        version="1",
-        digest=Digest.of_bytes(b"repository-read"),
-        provenance="repository-local",
-    )
+    files = package_files("repository-read")
+    capability = descriptor_for(files)
     source = LocalCapabilitySource(capabilities=(capability,))
 
     assert source.discover() == (capability,)
     assert source.resolve("repository-read", "1") == capability
     assert source.resolve("missing", "1") is None
+
+
+def test_local_capability_source_fetches_the_registered_package_closure() -> None:
+    files = package_files("repository-read", extra={"scripts/run.py": b"print(1)\n"})
+    capability = descriptor_for(files)
+    source = LocalCapabilitySource(
+        capabilities=(capability,), packages={("repository-read", "1"): files}
+    )
+
+    assert source.fetch_closure("repository-read", "1") == files
+    with pytest.raises(MissingPrerequisiteError):
+        source.fetch_closure("repository-read", "2")

@@ -160,8 +160,30 @@ class DeploymentPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PackageFile:
+    """One untrusted file a capability source reports for a package.
+
+    ``path`` is whatever the source claimed; it is validated (relative POSIX,
+    no traversal, no collisions) by the closure builder in
+    ``enginery.capabilities.closure`` before any byte reaches a lock or disk.
+    """
+
+    path: str
+    content: bytes
+    executable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityDescriptor:
-    """A content-addressed capability exposed by a configured source.
+    """A package closure exposed by a configured source.
+
+    ``digest`` is the source's claim of the package's canonical closure
+    digest (every file, kind, size, executable bit, and declared dependency
+    pin); the resolver recomputes it from the fetched files and rejects a
+    source whose files do not hash to it. ``provenance`` is the source label
+    and ``revision`` the immutable revision the files were read at (a commit
+    sha for Git-backed sources). ``license`` is the source's declared
+    license metadata for the package, never a verified fact.
 
     ``signature`` and ``signer_key_id`` carry a source's own claimed
     detached signature over ``digest``, when it supplies one. They are
@@ -175,13 +197,16 @@ class CapabilityDescriptor:
     version: str
     digest: Digest
     provenance: str
+    revision: str
     license: str | None = None
     signature: bytes | None = None
     signer_key_id: str | None = None
 
     def __post_init__(self) -> None:
-        if any(not value.strip() for value in (self.name, self.version, self.provenance)):
-            raise ValueError("capability name, version, and provenance must be non-blank")
+        if any(
+            not value.strip() for value in (self.name, self.version, self.provenance, self.revision)
+        ):
+            raise ValueError("capability name, version, provenance, and revision must be non-blank")
         if self.license is not None and not self.license.strip():
             raise ValueError("capability license, when present, must be non-blank")
         if (self.signature is None) != (self.signer_key_id is None):
@@ -191,7 +216,10 @@ class CapabilityDescriptor:
 
 
 class CapabilitySourcePort(Protocol):
-    """Discover repository-local capability metadata without runtime plugins."""
+    """Discover and fetch complete package closures without runtime plugins.
+
+    A source only reports files; it never executes or imports them.
+    """
 
     def probe(self) -> AdapterStatus: ...
 
@@ -199,7 +227,7 @@ class CapabilitySourcePort(Protocol):
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None: ...
 
-    def fetch(self, name: str, version: str) -> bytes: ...
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]: ...
 
 
 __all__ = [
@@ -208,6 +236,7 @@ __all__ = [
     "DeploymentPort",
     "DeploymentReceipt",
     "DeploymentRequest",
+    "PackageFile",
     "PublicationReceipt",
     "PublicationRequest",
     "ReleaseArtifact",

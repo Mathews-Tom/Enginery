@@ -21,6 +21,7 @@ from enginery.application.delivery_ports import (
     CapabilityDescriptor,
     DeploymentReceipt,
     DeploymentRequest,
+    PackageFile,
     PublicationReceipt,
     PublicationRequest,
     ValidationRequest,
@@ -392,7 +393,7 @@ class LocalCapabilitySource:
     """An explicit repository-local capability inventory; no runtime discovery mechanism."""
 
     capabilities: tuple[CapabilityDescriptor, ...]
-    content_by_key: Mapping[tuple[str, str], bytes] = field(default_factory=dict)
+    packages: Mapping[tuple[str, str], tuple[PackageFile, ...]] = field(default_factory=dict)
 
     def probe(self) -> AdapterStatus:
         return _status(
@@ -408,14 +409,14 @@ class LocalCapabilitySource:
             None,
         )
 
-    def fetch(self, name: str, version: str) -> bytes:
-        content = self.content_by_key.get((name, version))
-        if content is None:
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]:
+        files = self.packages.get((name, version))
+        if files is None:
             raise MissingPrerequisiteError(
-                "no local content registered for this capability",
+                "no local package registered for this capability",
                 details={"name": name, "version": version},
             )
-        return content
+        return files
 
 
 def local_provider_statuses() -> tuple[AdapterStatus, ...]:

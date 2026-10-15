@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,12 +9,6 @@ import pytest
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import DeclaredWorkClassification
-from enginery.capabilities.lock import (
-    CapabilityLock,
-    LockedCapability,
-    ProvenanceRecord,
-    ProvenanceStatus,
-)
 from enginery.capabilities.serialization import write_lock
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
@@ -28,6 +21,7 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_catalog import SupportTier
 from enginery.workflows.stage1 import stage1_request_from_state
+from tests.support.capabilities import lock_of, locked_entry
 from tests.support.github import (
     CANONICAL_LABELS,
     ISSUE_BODY,
@@ -198,23 +192,7 @@ def test_build_request_defaults_match_documented_example(tmp_path: Path) -> None
 def test_build_request_derives_capability_lock_digest_from_real_lockfile(tmp_path: Path) -> None:
     repository, base_revision = _repository(tmp_path)
     lockfile = tmp_path / "capabilities.lock.json"
-    lock = CapabilityLock(
-        entries=(
-            LockedCapability(
-                name="git",
-                version="1.0.0",
-                digest=Digest.of_bytes(b"capability-bytes"),
-                provenance=ProvenanceRecord(
-                    status=ProvenanceStatus.LOCAL_TRUSTED,
-                    source_label="local",
-                    signer_key_id=None,
-                    verified_at=datetime(2026, 1, 1, tzinfo=UTC),
-                ),
-                license=None,
-                introduced_by_run=False,
-            ),
-        )
-    )
+    lock = lock_of(locked_entry("git", version="1.0.0", license_id=None))
     write_lock(lock, lockfile)
     output = tmp_path / "request.json"
 
@@ -232,6 +210,50 @@ def test_build_request_derives_capability_lock_digest_from_real_lockfile(tmp_pat
     request = stage1_request_from_state(raw)
     assert request.run.capability_lock_digest == lock.digest()
     assert request.run.capability_lock_digest != _NO_CAPABILITY_LOCK_DIGEST
+
+
+def test_build_request_refuses_a_legacy_single_blob_capability_lockfile(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base_revision = _repository(tmp_path)
+    lockfile = tmp_path / "capabilities.lock.json"
+    lockfile.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "name": "git",
+                        "version": "1.0.0",
+                        "digest": str(Digest.of_bytes(b"capability-bytes")),
+                        "license": None,
+                        "introduced_by_run": False,
+                        "provenance": {
+                            "status": "local_trusted",
+                            "source_label": "local",
+                            "signer_key_id": None,
+                            "verified_at": "2026-01-01T00:00:00+00:00",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "request.json"
+
+    exit_code = main(
+        [
+            *_minimal_argv(
+                tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
+            ),
+            "--capability-lockfile",
+            str(lockfile),
+        ]
+    )
+
+    assert exit_code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert "re-resolved" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_build_request_accepts_explicit_digest_override(tmp_path: Path) -> None:

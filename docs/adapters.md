@@ -47,7 +47,7 @@ uv run python scripts/check_import_boundaries.py <layer>
 | `ValidationPort` | `application/delivery_ports.py` | `LocalValidation` (`local-validation`) | `probe`, `validate`, `reconcile` |
 | `ReleasePort` | `application/delivery_ports.py` | `LocalPublication`, `GitHubReleaseAdapter`, `PyPiAdapter` | `probe`, `publish`, `verify`, `reconcile` |
 | `DeploymentPort` | `application/delivery_ports.py` | `LocalDeploymentFixture`, `LocalServiceDeploymentAdapter` | `probe`, `deploy`, `rollback`, `reconcile` |
-| `CapabilitySourcePort` | `application/delivery_ports.py` | `LocalCapabilitySource`, `ArmoryCapabilitySource` | `probe`, `discover`, `resolve`, `fetch` |
+| `CapabilitySourcePort` | `application/delivery_ports.py` | `LocalCapabilitySource`, `ArmoryCapabilitySource` | `probe`, `discover`, `resolve`, `fetch_closure` |
 
 Every port shares the same identity/reconciliation shape, described next.
 
@@ -211,10 +211,10 @@ Repositories and delivery systems receive verified outcomes.
 ```
 
 `ArmoryCapabilitySource` (`src/enginery/adapters/armory.py`) implements
-`CapabilitySourcePort` against Armory's real, current interface: a single
-`manifest.yaml` fetched over HTTPS, with no MCP server, no per-package
-signature, and no checksum field of its own. Two facts about this adapter
-matter operationally:
+`CapabilitySourcePort` against Armory's real, current interface: a
+`manifest.yaml` catalog of package directories on GitHub, with no MCP
+server, no per-package signature, and no checksum, license, or dependency
+field of its own. Four facts about this adapter matter operationally:
 
 - **It is not a runtime dependency.** Importing the module needs only the
   standard library; every network-reaching method requires the optional
@@ -225,6 +225,99 @@ matter operationally:
   this release** — using it today means writing Python against
   `CapabilitySourcePort` directly, the same way `tests/adapters/armory`
   exercises it.
+- **Every read is bound to one immutable commit.** The adapter resolves its
+  configured ref (default `main`) to a commit sha once, or takes an explicit
+  40-character `revision`, and reads the catalog, the recursive file
+  listing, every package file, and the repository `LICENSE` at that sha
+  through the injected fetcher. The descriptor's `revision` is that sha. It
+  never executes or imports fetched content.
+- **A package is its complete closure.** The closure is every file under the
+  catalog `path`. A symlink, submodule, or other non-regular tree entry
+  rejects the package; the closure builder additionally rejects unsafe
+  paths and unreviewed asset types (see "Package closures and the lock"
+  below), so a package that ships a `.pyc`, database, or image is
+  unlockable rather than silently hashed. Armory packages carry no
+  Enginery manifest, so the adapter synthesizes a minimal one (identity
+  from the catalog row, kind `instruction`, no permissions, no
+  dependencies) and includes it in the closure; it grants no authority and
+  declares no command, so an Armory package is installed as inert files and
+  is never run by Enginery without approval. A package's license is decided
+  by the license-like files it ships at its root when it has any, else by
+  the repository `LICENSE` at the pinned revision — declared metadata only.
+  After NFKC normalization and case-folding, a root file is license-like
+  when its name contains `licen`, `copying`, `notice`, `unlicense`,
+  `copyright`, `eula`, `legal`, `terms` or `patent`, contains `gpl`, `lgpl`,
+  `agpl`, `mpl` as a whole word (optionally with a version) or `copyleft`,
+  or is not ASCII; each
+  one is a metadata asset of the closure, never an instruction. A
+  license-like name is accepted only as one ASCII-letter word, or that word
+  followed by one or two words from a closed list (`mit`, `apache`,
+  `apache2`, `bsd`, `isc`, `lesser`, `gpl`, `lgpl`, `agpl`, `mpl`, `third`,
+  `party`, `notices`, `thirdparty`) joined by `.`, `-` or `_`, optionally
+  followed by `.md`, `.txt` or `.rst` (`LICENSE`, `LICENSE.MIT`,
+  `LICENSE-APACHE2`, `COPYING.LESSER`, `THIRD_PARTY_NOTICES.md`), and its
+  content must decode as UTF-8; anything else (`notice.so`,
+  `license-helper.sh`, `licensed.pth`, `license.lua`, `license.html`, a
+  name that is still non-ASCII after normalization) is an unreviewed asset
+  type and fails the closure. A full-width name such as `ＬＩＣＥＮＳＥ.md`
+  becomes ASCII under NFKC and is accepted. Any path containing a Unicode
+  format, line-separator or paragraph-separator character is rejected. A
+  license file is classified only by exact match with a canonical MIT,
+  Apache-2.0 (with or without its appendix), BSD-2-Clause, BSD-3-Clause,
+  ISC, 0BSD, Zlib, Unlicense or CC0-1.0 text after case-folding,
+  heading-marker removal, removal of strictly shaped copyright lines in the
+  leading block (and the Apache appendix's
+  `Copyright [yyyy] [name of copyright owner]` line) and whitespace
+  collapsing. A package that declares any other license id and ships its
+  license text is held as `unknown`. A removable copyright line is at most
+  80 characters: `copyright`, `(c)` or `©`, a year, year range or list, or
+  `[yyyy]`, and an optional holder of one to five tokens. A token is
+  letters and digits with at most one internal `.`, `'` or `-` and an
+  optional trailing `.` (an initial or abbreviation), or `&`; `and` is an
+  ordinary token. The holder may be followed by `, ` and exactly one closed
+  suffix (`Inc`, `Ltd`, `LLC`, `GmbH`, `Corp`, `Co.`, `PBC`,
+  `and contributors`, `et al.`) and a final `.`. A full stop may only end
+  the line or follow a trailing initial or corporate suffix; a stop
+  followed by whitespace and more text makes the line non-removable, as
+  do `!`, `?`, other
+  commas, dashes between words, colons, semicolons, a terms word,
+  `All rights reserved`, or an other-license marker. The leading block ends
+  at the first non-blank line that is neither the license title nor such a
+  copyright line, and at most three copyright lines in it are removed (a
+  fourth makes the text `unknown`); copyright lines anywhere else stay and
+  break the match. A text
+  with a Unicode format character, a line or paragraph separator, a control
+  character, an HTML comment or any non-ASCII character other than `©` is
+  `unknown`, as is any other text (inserted or appended terms, carve-outs,
+  dual licensing, other licenses), including every license-like file whose
+  name is not canonical (`license`, `licence`, `copying` or `notice` with no
+  extension or `.md`, `.txt` or `.rst`) and whose text is not a template.
+  **Residual risk:** classification is a fail-closed screen, not
+  authentication. A short name-shaped phrase of at most five tokens on a
+  copyright line (for example `Copyright 2024 Foo resale needs consent`,
+  at most three such lines) cannot be told apart from a holder name, so it
+  may be removed and the text still classify as a template; every
+  unauthenticated package therefore still
+  needs exact-digest human approval, where the approver reviews its license
+  files. The same declared-license check runs for every source in the
+  resolver: when a closure ships root license-like files, the declared
+  (manifest) license is kept only if every file classifies to that same
+  SPDX id and no `NOTICE` conflicts; otherwise the license is `unknown`.
+  Every deciding file must classify to one SPDX id equal to the repository
+  license, else the license is `unknown`, as is an unreachable repository
+  license, and `unknown` holds redistribution. A canonical `NOTICE` file
+  never decides the license, but one that names another license family or
+  marker (GPL, LGPL, AGPL, Affero, general public license, MPL, SSPL,
+  Creative Commons, `CC-BY`, share-alike, non-commercial, Commons Clause,
+  EUPL, CDDL, Eclipse Public License, BUSL, Business Source License,
+  Elastic License, EPL, PolyForm, OSL, copyleft, proprietary, dual
+  licensing, "at your option", "choose either") or reserves
+  all rights without a permissive grant, or one with a hidden or non-ASCII
+  character, makes it `unknown`. Every
+  fetched file, including the catalog `manifest.yaml` and the repository
+  `LICENSE`, is verified against its git blob sha in the pinned tree: a
+  mismatched or absent `LICENSE` is `unknown`, and a mismatched
+  `manifest.yaml` or package file is an integrity failure.
 - **Every capability it returns is `provenance="armory"`, which
   `CapabilityResolver` classifies as `unauthenticated`.** Content
   addressing (Enginery's own fetch-and-hash step) is not the same as
@@ -235,6 +328,62 @@ matter operationally:
   repository-local capability added or changed by the active run. There is
   no "authenticated-by-TLS" fast path; TLS or transport identity alone is
   explicitly insufficient.
+
+## Package closures and the lock
+
+A capability is a package directory, not a single file. Every
+`CapabilitySourcePort` returns the package's complete file list
+(`fetch_closure`) and a `CapabilityDescriptor` whose `digest` is the
+source's claim of the package's canonical **closure digest**. The resolver
+rebuilds the closure from the fetched files and rejects a source whose
+files do not hash to the claimed digest.
+
+- **Manifest.** Each package ships `capability.json` at its root: a strict,
+  versioned JSON document declaring `name`, `version`, `kind`
+  (`instruction`, `command`, `hook`, or `adapter`), an optional SPDX
+  `license`, transitive `dependencies` pinned to `name`, `version`, and
+  `closure_digest`, `permissions` from a closed vocabulary, and
+  `compatibility` (adapter API range and platforms). Unknown and duplicate
+  keys are rejected. The manifest is itself an asset of the closure, so
+  every field it declares is covered by the digest.
+- **Closure.** Every file is recorded as a normalized relative POSIX path,
+  an asset kind (`instruction`, `reference`, `script`, `data`, `metadata`),
+  a SHA-256, a size, and an executable bit. The closure digest covers all
+  of those and every dependency pin in a fixed order, so a changed sibling
+  script, reference, data file, executable bit, or dependency pin changes
+  the digest.
+- **Rejected content.** Symlinks, hardlinked or non-regular files,
+  absolute, `..`, backslash, and non-NFC paths, duplicate or case-colliding
+  paths, executable bits on non-scripts, and any file outside the reviewed
+  layout (root `*.md`, `instructions/*.md`, `references/` docs,
+  `scripts/` `.py` `.sh` `.js` `.mjs` `.ts`, and `data/`, `schemas/`,
+  `evals/` data files) fail with an explicit `CapabilityError` subclass,
+  as do packages beyond 512 files, 2 MiB per file, or 16 MiB in total.
+- **Lock.** A lock entry binds the closure digest to the origin (source
+  label and immutable revision), license, kind, permissions, compatibility,
+  dependency pins, and the trust classification. All of these are bound
+  into `CapabilityLock.digest()`, so changing any of them supersedes an
+  approval recorded against the old digest. A digest never proves
+  publisher authenticity: only a signature that verifies against a pinned
+  publisher key yields `authenticated`, and even then a run-introduced
+  capability still needs exact-digest human approval. Each transitive
+  dependency is a lock entry of its own, checked against its pin and
+  approved and license-checked package by package.
+- **License.** Only SPDX identifiers on the reviewed permissive list
+  (`0BSD`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `CC0-1.0`, `ISC`,
+  `MIT`, `Unlicense`, `Zlib`) are redistributable. An absent, `unknown`, or
+  unreviewed license holds redistribution for every package the run
+  introduces, and materialization refuses it even with an approval.
+- **Materialization.** A verified closure is written once, as a whole
+  directory, under its closure-digest path and never overwritten; every
+  later use re-verifies the directory (no missing, changed, or extra file,
+  no symlink) against the lock entry.
+- **Lock schema.** The lock file declares `schema_version: 2`. A lock
+  without a `schema_version` is the previous single-blob schema: it decodes
+  read-only as legacy entries that carry no closure, cannot be
+  materialized or approved, and must be re-resolved —
+  `enginery capability lock --check` reports each such entry as needing
+  re-resolution and consumers of the lock refuse it.
 
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an
