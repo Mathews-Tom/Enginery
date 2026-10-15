@@ -221,10 +221,10 @@ field of its own. Four facts about this adapter matter operationally:
   `armory` extra (`uv sync --all-extras` installs it). `probe()` reports
   `AdapterAvailability.UNAVAILABLE` when the extra is absent — the engine
   keeps working with Armory disabled, exactly like an absent OMP or Claude
-  Code CLI. **No shipped CLI command constructs or calls this adapter in
-  this release** — using it today means writing Python against
-  `CapabilitySourcePort` directly, the same way `tests/adapters/armory`
-  exercises it.
+  Code CLI. `enginery capability inspect|preview|install --armory` is the
+  shipped way to use it (see
+  [Capability packages](operations.md#capability-packages)); the same
+  adapter is available to Python callers through `CapabilitySourcePort`.
 - **Every read is bound to one immutable commit.** The adapter resolves its
   configured ref (default `main`) to a commit sha once, or takes an explicit
   40-character `revision`, and reads the catalog, the recursive file
@@ -388,6 +388,77 @@ files do not hash to the claimed digest.
 Repository-local capabilities (`LocalCapabilitySource`) remain valid
 without any registry — "the engine works with Armory disabled" is an
 enforced acceptance property, not an aspiration.
+
+## Typed sources, precedence, and the command boundary
+
+Every capability reaches the resolver through one `CapabilitySourcePort`
+and is registered with a source kind (`CapabilitySource` in
+`src/enginery/capabilities/sources.py`). The kind decides *trust*; the
+package's manifest decides *permissions*, so every source gets the same
+permission typing.
+
+| Kind | Adapter | Trust |
+|---|---|---|
+| `project` | `DirectoryCapabilitySource` over the reviewed repository base revision | `local_trusted`, not run-introduced; no approval |
+| `user` | `DirectoryCapabilitySource` over a user-local directory | run-introduced, `unauthenticated` |
+| `git` | `GitCapabilitySource`: repository path or URL plus a full 40-hex commit sha | run-introduced, `unauthenticated` |
+| `armory` | `ArmoryCapabilitySource` | run-introduced, `unauthenticated` |
+
+Precedence is `project`, `user`, `git`, `armory`; within a kind, the order
+sources were registered in. The first source offering `name@version` is
+selected and every lower-precedence source that also offers it is reported
+as *shadowed* (a shadowed source that cannot lock its package is reported
+with its problem, never dropped). A signature changes `unauthenticated` to
+`authenticated` only when it verifies against a pinned publisher key, and
+is accepted for `user` and `git` sources only through the adapter's
+`signatures` constructor parameter; even an authenticated run-introduced
+package still needs exact-digest human approval.
+
+- **Directory sources** read `<root>/<name>/capability.json` and the files
+  beside it, never following a link. A directory has no immutable revision
+  of its own, so the locked revision is the closure digest. A subdirectory
+  without a `capability.json` is not a package.
+- **Git sources** read the *tracked tree* of one commit with
+  `git ls-tree -r -z -l` and `git cat-file` — never the working tree, index,
+  or untracked files. Tree entries with mode `120000` (symlink) or `160000`
+  (submodule) make the package unlockable and fail with the offending path.
+  The sha must resolve to exactly that commit. Every git subprocess uses an
+  argument vector, a timeout, and a scrubbed environment (no `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, or `GIT_CONFIG*`,
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`); it never writes
+  git configuration. A URL is fetched only into a private bare cache.
+- **Armory** `discover()` lists catalog rows cheaply and never fetches or
+  locks a package; a package's closure is computed only when it is selected
+  (`resolve` or `fetch_closure`), and a selected package that cannot be
+  locked fails with an error naming the offending path.
+
+Each locked entry also carries a **compatibility receipt** computed at
+resolve time: the host's adapter API version and platform compared with the
+range and platforms the manifest declares. The receipt is bound into the
+lock digest, and an incompatible package can be locked and inspected but
+not installed.
+
+**Command boundary.** A `command` or `hook` package declares one `command`
+in its manifest: an argument vector (a reviewed interpreter — `python3`,
+`sh`, `bash`, `node` — then a package script, or a directly executable
+package script), an `input_schema`, a `timeout_seconds` (1-300) and a
+`max_output_bytes` (1 B-1 MiB). `run_package_command`
+(`src/enginery/capabilities/command.py`) runs it only while an active
+owned install record covers exactly the locked closure, re-verifies the
+materialized closure immediately before the process starts (drift is
+rejected, not run), validates the JSON input against the schema before
+spawning anything, never uses a shell, gives the process a minimal
+environment and its own process group, and returns the stdout JSON
+document in canonical form with stderr captured as diagnostics. Failures
+are distinct error classes: `CapabilityInputSchemaError` (schema
+violation), `CapabilityCommandTimeoutError`, `CapabilityCommandFailedError`
+(non-zero exit), `CapabilityCommandOutputError` (not one JSON document, or
+over the output limit), and `CapabilityIntegrityError` (drift). The input
+schema is a bounded subset of JSON Schema: `type`, `enum`, `const`,
+`properties`, `required`, boolean `additionalProperties`, `items`,
+`minimum`/`maximum`, `minLength`/`maxLength`, and `minItems`/`maxItems`;
+`$ref`, `pattern`, `format`, and combinators are rejected when the manifest
+is read.
 
 ## The incident-to-hotfix-and-rollback surface
 

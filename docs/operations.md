@@ -125,7 +125,7 @@ positional arguments:
     outcome             Inspect raw outcome observations and completeness.
     gate                Report readiness against a decision gate.
     workspace           Inspect and release run-scoped workspace reservations.
-    capability          Capability lock commands.
+    capability          Capability lock and scoped install commands.
 ```
 
 This is materially narrower than the full command-family list in the system
@@ -151,7 +151,65 @@ script against a command that is not listed above.
 | `enginery gate record-g4-deficiency-evidence --database PATH --finding-id ID --correlation-id ID --github-repository OWNER/REPO --github-credential-reference REF [--github-executable PATH] [--floor-config PATH] [--json]` | Verify one merged GitHub evidence PR and record its immutable two-human authority evidence. |
 | `enginery workspace inspect --database PATH --owner OWNER [--json]` | List every repository's current workspace reservation. |
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
-| `enginery capability lock [--check] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Inspect or verify a capability lock. |
+| `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
+
+### Capability packages
+
+A capability is a package directory (a `capability.json` manifest plus
+instruction, reference, script, and data files; see
+[Package closures and the lock](adapters.md#package-closures-and-the-lock)),
+not a single file. The `enginery capability` group resolves `NAME@VERSION`
+requests against typed sources and manages a task-local install:
+
+| Command | Effect |
+|---|---|
+| `enginery capability lock --check [--lockfile PATH] [--capabilities-root PATH] [--json]` | Verify the content-addressed store against the lockfile. Exit `12` on drift. |
+| `enginery capability inspect NAME@VERSION... SOURCE-FLAGS [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Report each package's closure digest, trust, license, permissions, compatibility, approval requirement, and the selected source with every shadowed alternative. Reads sources only: nothing is materialized, written, or executed. |
+| `enginery capability preview NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | The same resolution plus the exact install plan: files to write (task-local destination, kind, size, digest), blockers, and approvals still required. No side effects. Exit `0` when ready; otherwise the blocker's code (`12` license hold or incompatible, `9` conflict, `5` approval required). |
+| `enginery capability install NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | Materialize the verified closures and copy them into the install root, then record the owned-install manifest and the lockfile. Refuses license holds, incompatible packages, and destinations it does not own. |
+| `enginery capability uninstall [--install-root PATH] [--lockfile PATH] [--capabilities-root PATH] [--json]` | Remove only the owned, unmodified install files and revoke the install record. |
+
+Source flags (at least one is required; precedence is project, user, git,
+Armory — the first source offering `name@version` is selected and the rest
+are reported as shadowed):
+
+| Flag | Source |
+|---|---|
+| `--project-source DIR` | Reviewed project packages (`DIR/<name>/capability.json`). The only source that resolves `local_trusted` and installs without approval. |
+| `--user-source DIR` (repeatable) | User-local package directory; run-introduced and `unauthenticated`. |
+| `--git-source REPOSITORY@COMMIT` (repeatable), `--git-subdir DIR`, `--git-cache DIR` | A Git repository (existing directory, or `https://`, `ssh://`, `file://`, `git@host:` URL) pinned to a full 40-hex commit sha; packages are read from `DIR` inside that commit's tracked tree. |
+| `--armory`, `--armory-revision SHA` | The Armory catalog at one commit (network; needs the `armory` extra). |
+
+Path flags default to `.enginery/capabilities.lock.json` (`--lockfile`),
+`.enginery/capabilities` (`--capabilities-root`, the content-addressed
+store), `.enginery/installed` (`--install-root`), and `.enginery/git-cache`
+(`--git-cache`).
+
+**Approval is never recorded by this CLI.** An entry that needs
+exact-digest human approval (anything not served by the project source) is
+*held*: `install` exits `5`, writes nothing, and prints the exact name,
+version, closure digest, and lock digest that would have to be approved
+through the existing `capability.materialize` policy action. Programmatic
+callers pass the names approved by their `PolicyEvaluator` to
+`install_lock`. Any change to a sibling script, reference, dependency pin,
+license, origin revision, or trust classification changes the lock digest
+and supersedes an earlier approval.
+
+**Drift.** When the lockfile already records `name@version`, a source that
+now serves a different closure for it is rejected (exit `3`) rather than
+silently re-locked; publish a new version, or remove the lockfile
+deliberately, to accept changed content. An install of a different lock
+than the one recorded under the install root is refused until the active
+install is uninstalled.
+
+**Uninstall retention.** `uninstall` removes only files listed in the owned
+manifest whose digest still matches, never anything outside the install
+root, and replaces the manifest with `.enginery-install-revoked.json`
+(the revocation record; a revoked install has no authority to run a package
+command). It never deletes the content-addressed store, the lockfile, the
+ledger, or any evidence or raw artifact, and it reports what it removed and
+what it retained (modified files, the store, and the lockfile are listed as
+retained).
 
 ### Gate G4 operational evidence
 

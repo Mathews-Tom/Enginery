@@ -117,6 +117,10 @@ uv run enginery gate status --gate G4 --database ledger.db --json
 uv run enginery gate record-g4-deficiency --help
 uv run enginery gate record-g4-deficiency-evidence --help
 uv run enginery capability lock --check
+uv run enginery capability inspect skill-a@1 --project-source ./capabilities --json
+uv run enginery capability preview skill-a@1 --project-source ./capabilities
+uv run enginery capability install skill-a@1 --project-source ./capabilities
+uv run enginery capability uninstall
 ```
 
 See [`docs/operations.md`](docs/operations.md) for the full command
