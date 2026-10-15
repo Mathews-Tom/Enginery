@@ -3,12 +3,20 @@
 Validation executes candidate-authored code (tests, conftest, hooks). Run host-side it would
 execute with the operator's identity and environment, outside the worker boundary. This runner
 gives it exactly the worker's restrictions: the hardened container, the task-local workspace as
-its only writable tree, no credentials, and no route to anything but the internal runner network.
+its only writable tree, no credentials, and no network at all (``--network none``): it shares
+no network with the relay or with any other container, so candidate code cannot spend the
+operator's model subscription or reach another attempt.
+
+The launcher writes a receipt for every validation container. The runner reads it back, verifies
+that it describes this run (operation, image, profile, no network, no profile violation), retains
+it in the artifact store and returns it with the command's result, so the validation result
+names the receipt it ran under.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import uuid
@@ -21,18 +29,27 @@ from enginery.adapters.runner_launch import (
     LAUNCHER_MODULE,
     MAX_RESULT_BYTES,
     bind_result_to_attempt,
+    publish_receipt,
     read_bounded_text,
     read_launch_outcome,
+    read_runner_receipt,
     require_exited,
     worker_environment,
 )
+from enginery.application.runner_ports import AttestedProcess
+from enginery.application.worker_environment import LAUNCHER_KEYS, build_worker_environment
 from enginery.domain.errors import WorkerFailureError
 from enginery.domain.runner import (
+    NO_NETWORK,
     LaunchSpec,
     PermissionMapping,
     RunnerContext,
+    RunnerReceipt,
+    TrustMode,
+    profile_violations,
 )
 from enginery.engine.task_repository import out_path_for
+from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
 
 _HARNESS = "validation"
@@ -44,6 +61,11 @@ LauncherProcess = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
 def _run_launcher(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run the launcher with only what it needs to reach the engine, not the ambient environment.
+
+    The container's own environment is the spec's explicit one; the launcher process itself holds
+    no source-host, factory, broker or cloud credential either.
+    """
     return subprocess.run(
         list(argv),
         check=False,
@@ -51,6 +73,7 @@ def _run_launcher(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         stdin=subprocess.DEVNULL,
+        env=build_worker_environment(os.environ, LAUNCHER_KEYS),
     )
 
 
@@ -68,17 +91,43 @@ def _validation_permissions() -> PermissionMapping:
     )
 
 
+def validation_receipt_mismatches(
+    receipt: RunnerReceipt, runner: RunnerContext, operation_id: str
+) -> tuple[str, ...]:
+    """Every way ``receipt`` does not describe this validation container under the profile.
+
+    The container must belong to this operation, run the pinned image under the admitted
+    profile with the validation permission mapping, have been attached to no network at all, and
+    satisfy every profile check (non-root, no capabilities, read-only root, limits, only the
+    two admitted mounts, no environment outside the allowlist).
+    """
+    checks: tuple[tuple[str, bool], ...] = (
+        ("operation", receipt.operation_id == operation_id),
+        ("trust_mode", receipt.trust_mode is TrustMode.ISOLATED_OCI),
+        ("profile", receipt.profile_digest == runner.profile.digest),
+        ("image", receipt.image.image_id == runner.selection.image),
+        ("container", receipt.container_name == container_name_for(operation_id)),
+        ("permissions", receipt.permissions == _validation_permissions()),
+    )
+    problems = [name for name, ok in checks if not ok]
+    problems += [
+        f"effective: {violation}"
+        for violation in profile_violations(runner.profile, receipt.effective, network=NO_NETWORK)
+    ]
+    return tuple(problems)
+
+
 @dataclass(frozen=True, slots=True)
 class OciValidationRunner:
-    """A ``(command, workspace) -> CompletedProcess`` that runs the command in the runner."""
+    """A ``(command, workspace) -> AttestedProcess`` that runs the command in the runner."""
 
     runner: RunnerContext
+    artifact_root: Path
+    """The artifact store the verified validation receipts are retained in."""
     time_budget_seconds: int = _DEFAULT_TIME_BUDGET_SECONDS
     launcher: LauncherProcess = field(default=_run_launcher)
 
-    def __call__(
-        self, command: tuple[str, ...], workspace_path: Path
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], workspace_path: Path) -> AttestedProcess:
         image = self.runner.selection.image
         if image is None:  # a RunnerContext always pins one; keep the type honest
             raise WorkerFailureError("an isolated validation needs a pinned runner image")
@@ -86,6 +135,7 @@ class OciValidationRunner:
         operation_id = f"validate:{attempt}"
         out_path = out_path_for(workspace_path) / f"validation-{attempt}"
         out_path.mkdir(parents=True, exist_ok=False)
+        # No ``relay_container``: the launcher runs the container with ``--network none``.
         spec = LaunchSpec(
             operation_id=operation_id,
             container_name=container_name_for(operation_id),
@@ -126,12 +176,21 @@ class OciValidationRunner:
                 str(failure),
                 details={**failure.details, "stderr": completed.stderr.strip()[-2000:]},
             ) from failure
+        receipt = read_runner_receipt(Path(receipt_path), what="isolated validation receipt")
+        mismatches = validation_receipt_mismatches(receipt, self.runner, operation_id)
+        if mismatches:
+            raise WorkerFailureError(
+                "the isolated validation receipt does not describe this run under the profile",
+                details={"mismatches": "; ".join(mismatches)[-2000:]},
+            )
+        reference = publish_receipt(receipt, ArtifactStore(self.artifact_root))
         output = _worker_output(out_path / _RESULT_NAME, nonce=outcome.nonce)
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=exit_code,
-            stdout=redact_credential_shaped_text(output),
-            stderr="",
+        return AttestedProcess(
+            command,
+            exit_code,
+            redact_credential_shaped_text(output),
+            "",
+            runner_receipt=reference,
         )
 
 

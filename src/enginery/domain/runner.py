@@ -13,6 +13,7 @@ images, and launching containers belong to the OCI adapter.
 from __future__ import annotations
 
 import enum
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -38,7 +39,27 @@ WORKER_TMP = "/tmp"
 ISOLATED_PROFILE_NAME = "enginery-isolated-oci-v1"
 TRUSTED_LOCAL_PROFILE_NAME = "enginery-trusted-local-v1"
 
+MODEL_ACCESS_NONE = "none"
+MODEL_ACCESS_RELAY = "relay"
+MODEL_ACCESS_MODES: tuple[str, ...] = (MODEL_ACCESS_NONE, MODEL_ACCESS_RELAY)
+"""How an isolated worker reaches a model: not at all, or only through the operator's relay."""
+
+RELAY_HOSTNAME = "enginery-relay"
+"""The relay's network alias on each attempt's own network (also its container name)."""
+
+RELAY_PORT = 8080
+RELAY_DUMMY_CREDENTIAL = "enginery-relay"
+"""The only credential a worker holds: a fixed, non-secret placeholder the relay never honors."""
+
+NO_NETWORK = "none"
+"""The engine network mode of a container that has a loopback interface and nothing else."""
+
+_ATTEMPT_NETWORK_DIGEST_CHARS = 24
+
+_RELAY_URL_PATTERN = re.compile(r"^http://[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$")
+
 _IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CONTAINER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class TrustMode(enum.Enum):
@@ -251,6 +272,12 @@ class RunnerProfile:
     security_options: tuple[str, ...] = ("no-new-privileges",)
     read_only_rootfs: bool = True
     network: str = "enginery-runner-internal"
+    """The name prefix of the per-attempt internal networks (see ``attempt_network_name``).
+
+    No container is ever attached to a network of exactly this name: a model-access worker joins
+    ``<network>-<24 hex of its operation id>`` (internal, created for that one attempt, shared
+    only with the relay) and every other container runs with no network at all.
+    """
     env_allowlist: tuple[str, ...] = DEFAULT_ENV_ALLOWLIST
 
     def __post_init__(self) -> None:
@@ -307,6 +334,27 @@ class RunnerProfile:
         return Digest.of_json(self.to_state())
 
 
+def attempt_network_name(profile: RunnerProfile, operation_id: str) -> str:
+    """The deterministic name of the internal network created for one operation's attempt.
+
+    Derived from the operation id, so a relaunch of the same operation finds (and replaces) the
+    network a crashed attempt left behind, and two operations can never share one.
+    """
+    _require_text(operation_id, "operation id")
+    digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    return f"{profile.network}-{digest[:_ATTEMPT_NETWORK_DIGEST_CHARS]}"
+
+
+def expected_network(profile: RunnerProfile, operation_id: str, *, relay: bool) -> str:
+    """The one network an attempt's container may be attached to.
+
+    A worker with model access joins its own per-attempt internal network (shared only with the
+    relay for the attempt's lifetime); every other container, including every validation
+    container and every worker without model access, has no network.
+    """
+    return attempt_network_name(profile, operation_id) if relay else NO_NETWORK
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerSelection:
     """The trust mode a run is bound to, persisted in the run request.
@@ -323,6 +371,7 @@ class RunnerSelection:
     image: str | None = None
     docker_context: str | None = None
     legacy: bool = False
+    model_access: str = MODEL_ACCESS_NONE
 
     def __post_init__(self) -> None:
         _require_text(self.profile_name, "runner selection profile")
@@ -339,6 +388,13 @@ class RunnerSelection:
             raise InvalidInputError("a trusted-local selection carries no image, profile or engine")
         if self.docker_context is not None and not self.docker_context.strip():
             raise InvalidInputError("docker context must be null or non-blank")
+        if self.model_access not in MODEL_ACCESS_MODES:
+            raise InvalidInputError(
+                "runner selection model access is unknown",
+                details={"model_access": self.model_access},
+            )
+        if self.model_access != MODEL_ACCESS_NONE and self.trust_mode is not TrustMode.ISOLATED_OCI:
+            raise InvalidInputError("model access through the relay applies only to isolated runs")
 
     @classmethod
     def trusted_local(cls, *, legacy: bool = False) -> RunnerSelection:
@@ -350,7 +406,12 @@ class RunnerSelection:
 
     @classmethod
     def isolated(
-        cls, *, image: str, profile: RunnerProfile, docker_context: str | None = None
+        cls,
+        *,
+        image: str,
+        profile: RunnerProfile,
+        docker_context: str | None = None,
+        model_access: str = MODEL_ACCESS_NONE,
     ) -> RunnerSelection:
         return cls(
             trust_mode=TrustMode.ISOLATED_OCI,
@@ -358,6 +419,7 @@ class RunnerSelection:
             profile_digest=profile.digest,
             image=image,
             docker_context=docker_context,
+            model_access=model_access,
         )
 
     @property
@@ -365,7 +427,7 @@ class RunnerSelection:
         return self.trust_mode is TrustMode.ISOLATED_OCI
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "schema_version": RUNNER_SELECTION_SCHEMA_VERSION,
             "trust_mode": self.trust_mode.value,
             "profile": self.profile_name,
@@ -373,6 +435,10 @@ class RunnerSelection:
             "image": self.image,
             "docker_context": self.docker_context,
         }
+        if self.model_access != MODEL_ACCESS_NONE:
+            # Absent means no model access, so a selection without it keeps its persisted shape.
+            state["model_access"] = self.model_access
+        return state
 
     @classmethod
     def from_state(cls, state: object) -> RunnerSelection:
@@ -395,6 +461,8 @@ class RunnerSelection:
             profile_digest=digest,
             image=_optional_text(data, "image", "runner selection"),
             docker_context=_optional_text(data, "docker_context", "runner selection"),
+            model_access=_optional_text(data, "model_access", "runner selection")
+            or MODEL_ACCESS_NONE,
         )
 
 
@@ -578,15 +646,19 @@ class EffectiveContainer:
         )
 
 
-def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) -> tuple[str, ...]:
+def profile_violations(
+    profile: RunnerProfile, effective: EffectiveContainer, *, network: str
+) -> tuple[str, ...]:
     """Return every way the observed container is weaker than the profile; empty means exact.
 
     A launch with any violation is refused and the container removed. The checks are the
     acceptance criteria for an isolated worker that ``EffectiveContainer`` can express:
     non-root, no capabilities, no privilege escalation, no security option beyond the profile's
     (so no ``seccomp=unconfined``, ``apparmor=unconfined``, ``label=disable`` or
-    ``systempaths=unconfined``), read-only rootfs, enforced memory/swap/cpu/pids limits, only the
-    internal network, no devices, no unadmitted mount, and no environment outside the allowlist.
+    ``systempaths=unconfined``), read-only rootfs, enforced memory/swap/cpu/pids limits, exactly
+    the one ``network`` it was launched for (``expected_network``: the attempt's own internal
+    network or ``none``; never the default bridge, another attempt's network or a shared one),
+    no devices, no unadmitted mount, and no environment outside the allowlist.
     The facts the engine reports outside ``EffectiveContainer`` (namespaces, masked paths,
     sysctls, runtime, tmpfs sizes, log and ulimit bounds) are checked by the launcher's
     ``launch_violations``.
@@ -618,8 +690,8 @@ def profile_violations(profile: RunnerProfile, effective: EffectiveContainer) ->
         problems.append("cpu limit is not the profile limit")
     if effective.pids_limit != limits.pids:
         problems.append("pids limit is not the profile limit")
-    if effective.network_mode != profile.network or effective.networks != (profile.network,):
-        problems.append("container is not attached only to the internal runner network")
+    if effective.network_mode != network or effective.networks != (network,):
+        problems.append(f"container is not attached only to the network {network!r}")
     if effective.devices:
         problems.append("container has host devices")
     allowed_mounts = {
@@ -894,6 +966,12 @@ class LaunchSpec:
     """The in-image harness version the adapter probed; the launcher records it."""
     harness_protocol: str | None = None
     """The in-image harness protocol fingerprint the adapter probed; the launcher records it."""
+    relay_container: str | None = None
+    """The relay container to attach to this attempt's own network, for a worker with model access.
+
+    ``None`` (every validation container and every worker without model access) means the
+    container runs with no network at all.
+    """
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -924,6 +1002,17 @@ class LaunchSpec:
                 "launch spec environment keys are outside the profile allowlist",
                 details={"keys": ",".join(stray)},
             )
+        if self.relay_container is not None and not _CONTAINER_NAME_PATTERN.fullmatch(
+            self.relay_container
+        ):
+            raise InvalidInputError("launch spec relay container must be a plain container name")
+
+    @property
+    def attempt_network(self) -> str:
+        """The one network this attempt's container joins: its own internal one, or ``none``."""
+        return expected_network(
+            self.profile, self.operation_id, relay=self.relay_container is not None
+        )
 
     def to_state(self) -> dict[str, object]:
         state: dict[str, object] = {
@@ -949,6 +1038,8 @@ class LaunchSpec:
             state["harness_version"] = self.harness_version
         if self.harness_protocol is not None:
             state["harness_protocol"] = self.harness_protocol
+        if self.relay_container is not None:
+            state["relay_container"] = self.relay_container
         return state
 
     @classmethod
@@ -989,7 +1080,30 @@ class LaunchSpec:
             docker_context=_optional_text(data, "docker_context", "launch spec"),
             harness_version=_optional_text(data, "harness_version", "launch spec"),
             harness_protocol=_optional_text(data, "harness_protocol", "launch spec"),
+            relay_container=_optional_text(data, "relay_container", "launch spec"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RelayEndpoint:
+    """Where an isolated worker reaches the operator's model-access relay, and what it holds.
+
+    The credential is a fixed placeholder that identifies nothing: the relay discards every
+    inbound credential and injects the gateway bearer itself, so a worker never holds a secret.
+    """
+
+    url: str = f"http://{RELAY_HOSTNAME}:{RELAY_PORT}"
+    dummy_credential: str = RELAY_DUMMY_CREDENTIAL
+
+    def __post_init__(self) -> None:
+        if not _RELAY_URL_PATTERN.fullmatch(self.url):
+            raise InvalidInputError(
+                "relay url must be http://host:port without path or credentials"
+            )
+        if not self.dummy_credential or not self.dummy_credential.isascii():
+            raise InvalidInputError("relay dummy credential must be non-empty ASCII")
+        if self.dummy_credential != RELAY_DUMMY_CREDENTIAL:
+            raise InvalidInputError("a worker is only ever given the fixed relay placeholder")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1000,6 +1114,8 @@ class RunnerContext:
     profile: RunnerProfile
     receipt_root: str
     """Absolute host directory the launcher writes receipts into (outside every worker mount)."""
+    relay: RelayEndpoint | None = None
+    """Set exactly when the selection grants model access through the relay."""
 
     def __post_init__(self) -> None:
         if not self.selection.isolated_mode:
@@ -1008,6 +1124,11 @@ class RunnerContext:
             raise InvalidInputError("runner context profile does not match its selection")
         if not self.receipt_root.startswith("/"):
             raise InvalidInputError("runner context receipt root must be absolute")
+        if (self.relay is not None) != (self.selection.model_access == MODEL_ACCESS_RELAY):
+            raise InvalidInputError(
+                "a runner context carries a relay endpoint exactly when its selection grants "
+                "model access through the relay"
+            )
 
 
 def isolated_permission_mapping(harness: str) -> PermissionMapping:

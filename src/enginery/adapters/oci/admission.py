@@ -12,8 +12,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from enginery.adapters.oci.engine import OciEngine
-from enginery.adapters.oci.image import verify_image
+from enginery.adapters.oci.image import verify_image, verify_relay_image
 from enginery.adapters.oci.launch import engine_memory_shortfall
+from enginery.adapters.oci.relay import RelayManager, RelayStatus
 from enginery.application.runner_ports import RunnerAdmissionDecision
 from enginery.domain.errors import (
     MissingPrerequisiteError,
@@ -21,11 +22,20 @@ from enginery.domain.errors import (
     StaleEvidenceError,
 )
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
-from enginery.domain.runner import ImageIdentity, RunnerProfile, RunnerSelection
+from enginery.domain.runner import (
+    MODEL_ACCESS_RELAY,
+    ImageIdentity,
+    RunnerProfile,
+    RunnerSelection,
+)
 
 
 def _default_engine(context: str | None) -> OciEngine:
     return OciEngine(context=context)
+
+
+def _default_relay_status(engine: OciEngine, profile: RunnerProfile) -> RelayStatus:
+    return RelayManager(engine, profile=profile).status()
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +45,8 @@ class OciRunnerAdmission:
     engine_factory: Callable[[str | None], OciEngine] = _default_engine
     verify: Callable[[OciEngine, str], ImageIdentity] = verify_image
     profile: RunnerProfile = field(default_factory=RunnerProfile)
+    relay_status: Callable[[OciEngine, RunnerProfile], RelayStatus] = _default_relay_status
+    verify_relay: Callable[[OciEngine, str], ImageIdentity] = verify_relay_image
 
     def admit(self, selection: RunnerSelection) -> RunnerAdmissionDecision:
         if not selection.isolated_mode:
@@ -70,7 +82,30 @@ class OciRunnerAdmission:
             )
         except MissingPrerequisiteError as error:
             return _unqualified(f"the pinned worker image is not usable on this engine: {error}")
+        if selection.model_access == MODEL_ACCESS_RELAY:
+            relay_hold = self._relay_hold(engine)
+            if relay_hold is not None:
+                return relay_hold
         return RunnerAdmissionDecision(hold=None, engine=identity, image=image)
+
+    def _relay_hold(self, engine: OciEngine) -> RunnerAdmissionDecision | None:
+        """A hold unless the model access relay is present, hardened, current and healthy."""
+        try:
+            relay = self.relay_status(engine, self.profile)
+            if not relay.healthy:
+                return _unqualified(f"the model access relay is not available: {relay.detail}")
+            if relay.image_id is None:
+                return _unqualified("the model access relay reports no image")
+            self.verify_relay(engine, relay.image_id)
+        except StaleEvidenceError as error:
+            return _drift(
+                "the model access relay was not built from the current relay recipe; the run is "
+                "held, not run without model access",
+                **{key: str(value) for key, value in error.details.items()},
+            )
+        except (MissingPrerequisiteError, OperationTimeoutError) as error:
+            return _unqualified(f"the model access relay is not usable: {error}")
+        return None
 
 
 def _unqualified(message: str) -> RunnerAdmissionDecision:

@@ -10,7 +10,6 @@ before an adapter uses it.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
@@ -18,12 +17,14 @@ import stat
 import sys
 from pathlib import Path
 
+from enginery.adapters.oci.launch import container_name_for
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError, WorkerFailureError
 from enginery.domain.execution_catalog import HostCapability, InstalledHost
 from enginery.domain.execution_receipt import RunnerReceiptRef
 from enginery.domain.runner import (
+    RELAY_HOSTNAME,
     WORKER_HOME,
     WORKER_TMP,
     LaunchOutcome,
@@ -33,7 +34,9 @@ from enginery.domain.runner import (
     RunnerContext,
     RunnerReceipt,
     TrustMode,
+    expected_network,
     outcome_path_for,
+    profile_violations,
 )
 from enginery.ledger.artifact_store import ArtifactStore
 
@@ -51,11 +54,6 @@ _READ_CHUNK = 1024 * 1024
 
 _WORKER_IDENTITY = ("Enginery Worker", "worker@enginery.invalid")
 _WORKER_PATH = "/usr/local/bin:/usr/bin:/bin"
-
-
-def runner_container_name(operation_id: str) -> str:
-    """The deterministic container name for one operation (stable across resumes)."""
-    return "enginery-" + hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:24]
 
 
 def worker_environment(
@@ -86,6 +84,47 @@ def worker_environment(
     )
 
 
+OMP_MODELS_PATH = f"{WORKER_HOME}/.omp/agent/models.yml"
+"""Where omp reads its provider overrides; the agent directory is task-local tmpfs."""
+
+_OMP_RELAY_PROVIDERS = ("anthropic", "openai-codex")
+
+
+def relay_claude_environment(runner: RunnerContext) -> tuple[tuple[str, str], ...]:
+    """Claude Code's model endpoint and placeholder credential, or nothing without a relay.
+
+    The harness-level switches that keep it from phoning home (telemetry, updater, nonessential
+    traffic) are part of the harness environment itself. ``ANTHROPIC_API_KEY`` is never set.
+    """
+    relay = runner.relay
+    if relay is None:
+        return ()
+    return (
+        ("ANTHROPIC_AUTH_TOKEN", relay.dummy_credential),
+        ("ANTHROPIC_BASE_URL", relay.url),
+    )
+
+
+def relay_omp_seed_files(runner: RunnerContext) -> tuple[tuple[str, str], ...]:
+    """The task-local ``models.yml`` that points omp's providers at the relay, or nothing.
+
+    Each provider uses the pi-native transport, so omp posts ``/v1/pi/stream`` to the relay with
+    ``modelId: <provider>/<model>``. The ``apiKey`` is the placeholder credential.
+    """
+    relay = runner.relay
+    if relay is None:
+        return ()
+    lines = ["providers:"]
+    for provider in _OMP_RELAY_PROVIDERS:
+        lines += [
+            f"  {provider}:",
+            f"    baseUrl: {relay.url}",
+            f"    apiKey: {relay.dummy_credential}",
+            "    transport: pi-native",
+        ]
+    return ((OMP_MODELS_PATH, "\n".join(lines) + "\n"),)
+
+
 def require_isolated_permissions(permissions: PermissionMapping) -> None:
     """Refuse an isolated launch that would run with permission checks off."""
     if permissions.unconditional_bypass:
@@ -110,6 +149,7 @@ def isolated_command(
     environment: tuple[tuple[str, str], ...],
     inner_command: tuple[str, ...],
     image_host: InstalledHost | None = None,
+    seed_files: tuple[tuple[str, str], ...] = (),
 ) -> tuple[str, ...]:
     """The supervised host command: the launcher, its spec, ``--``, then the in-container argv.
 
@@ -125,7 +165,7 @@ def isolated_command(
     bundle = task.head_branch is not None and task.base_revision is not None
     spec = LaunchSpec(
         operation_id=operation_id,
-        container_name=runner_container_name(operation_id),
+        container_name=container_name_for(operation_id),
         image=image,
         profile=runner.profile,
         harness=harness,
@@ -136,11 +176,13 @@ def isolated_command(
         time_budget_seconds=task.time_budget_seconds,
         permissions=permissions,
         env=environment,
+        seed_files=seed_files,
         bundle_branch=task.head_branch if bundle else None,
         bundle_base=task.base_revision if bundle else None,
         docker_context=runner.selection.docker_context,
         harness_version=None if image_host is None else image_host.executable_version,
         harness_protocol=None if image_host is None else image_host.protocol_fingerprint,
+        relay_container=RELAY_HOSTNAME if runner.relay is not None else None,
     )
     encoded = json.dumps(spec.to_state(), sort_keys=True, separators=(",", ":"))
     return (sys.executable, "-m", LAUNCHER_MODULE, "--spec", encoded, "--", *inner_command)
@@ -321,32 +363,21 @@ def verified_image_host(host: HostCapability, installed: InstalledHost | None) -
     )
 
 
-def publish_runner_receipt(
-    runner: RunnerContext,
-    task: HarnessTask,
-    artifact_store: ArtifactStore,
-    *,
-    expected_host: InstalledHost,
-) -> RunnerReceiptRef:
-    """Validate the launcher's runner receipt, publish it, and return the reference to it.
+def read_runner_receipt(path: Path, *, what: str = "runner receipt") -> RunnerReceipt:
+    """Read and decode the launcher's receipt file (a host-only file the worker cannot reach).
 
-    A missing, malformed or mismatching receipt is a worker failure: an isolated attempt
+    A missing, oversized, non-regular or malformed receipt is a worker failure: an attempt
     without proof of what it ran under is never accepted, and no receipt is ever invented.
-    The receipt must also record the in-image harness identity the adapter verified.
     """
-    operation_id = str(task.operation_id)
-    path = Path(runner_receipt_path(runner, operation_id))
-    text = read_bounded_text(path, limit=MAX_RECEIPT_BYTES, what="runner receipt")
+    text = read_bounded_text(path, limit=MAX_RECEIPT_BYTES, what=what)
     try:
-        receipt = RunnerReceipt.from_state(json.loads(text))
+        return RunnerReceipt.from_state(json.loads(text))
     except (json.JSONDecodeError, InvalidInputError) as error:
-        raise WorkerFailureError("runner receipt is malformed") from error
-    mismatches = _receipt_mismatches(receipt, runner, operation_id, expected_host)
-    if mismatches:
-        raise WorkerFailureError(
-            "runner receipt does not match the admitted run",
-            details={"mismatches": ",".join(mismatches)},
-        )
+        raise WorkerFailureError(f"{what} is malformed") from error
+
+
+def publish_receipt(receipt: RunnerReceipt, artifact_store: ArtifactStore) -> RunnerReceiptRef:
+    """Publish one verified receipt (its canonical form) and return the reference to it."""
     canonical = json.dumps(receipt.to_state(), sort_keys=True, separators=(",", ":"))
     digest = artifact_store.publish_bytes(canonical.encode("utf-8"), media_type="application/json")
     if digest != receipt.digest:  # the published bytes are exactly the receipt's canonical form
@@ -359,6 +390,45 @@ def publish_runner_receipt(
     )
 
 
+def publish_runner_receipt(
+    runner: RunnerContext,
+    task: HarnessTask,
+    artifact_store: ArtifactStore,
+    *,
+    expected_host: InstalledHost,
+) -> RunnerReceiptRef:
+    """Validate the launcher's runner receipt, publish it, and return the reference to it.
+
+    A missing, malformed or mismatching receipt is a worker failure: an isolated attempt
+    without proof of what it ran under is never accepted, and no receipt is ever invented.
+    The receipt must also record the in-image harness identity the adapter verified, and the
+    container it describes must have been attached to exactly the network its run was granted
+    (its own attempt network with model access, none without) and satisfy the profile.
+    """
+    operation_id = str(task.operation_id)
+    receipt = read_runner_receipt(Path(runner_receipt_path(runner, operation_id)))
+    mismatches = _receipt_mismatches(receipt, runner, operation_id, expected_host)
+    if mismatches:
+        raise WorkerFailureError(
+            "runner receipt does not match the admitted run",
+            details={"mismatches": ",".join(mismatches)},
+        )
+    violations = profile_violations(
+        runner.profile, receipt.effective, network=granted_network(runner, operation_id)
+    )
+    if violations:
+        raise WorkerFailureError(
+            "runner receipt records a container weaker than the admitted profile",
+            details={"violations": "; ".join(violations)[-2000:]},
+        )
+    return publish_receipt(receipt, artifact_store)
+
+
+def granted_network(runner: RunnerContext, operation_id: str) -> str:
+    """The one network the run's selection permits ``operation_id``'s container to join."""
+    return expected_network(runner.profile, operation_id, relay=runner.relay is not None)
+
+
 def _receipt_mismatches(
     receipt: RunnerReceipt, runner: RunnerContext, operation_id: str, expected_host: InstalledHost
 ) -> tuple[str, ...]:
@@ -368,7 +438,7 @@ def _receipt_mismatches(
         ("trust_mode", receipt.trust_mode is TrustMode.ISOLATED_OCI),
         ("profile", receipt.profile_digest == expected_profile),
         ("image", receipt.image.image_id == runner.selection.image),
-        ("container", receipt.container_name == runner_container_name(operation_id)),
+        ("container", receipt.container_name == container_name_for(operation_id)),
         ("harness_version", receipt.harness_version == expected_host.executable_version),
         ("harness_protocol", receipt.harness_protocol == expected_host.protocol_fingerprint),
     )

@@ -31,6 +31,7 @@ Issues = "https://github.com/Mathews-Tom/Enginery/issues"
 
 [project.scripts]
 enginery = "enginery.cli.main:main"
+enginery-operator = "enginery.cli.operator:main"
 
 [tool.enginery]
 product_name = "Enginery"

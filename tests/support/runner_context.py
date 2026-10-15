@@ -6,12 +6,16 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from enginery.adapters.oci.launch import container_name_for
 from enginery.adapters.oci.launcher import write_outcome
-from enginery.adapters.runner_launch import runner_container_name, runner_receipt_path
+from enginery.adapters.runner_launch import runner_receipt_path
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import HarnessTask
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.runner import (
+    MODEL_ACCESS_NONE,
+    MODEL_ACCESS_RELAY,
+    NO_NETWORK,
     OUT_MOUNT,
     WORKER_HOME,
     WORKER_TMP,
@@ -22,11 +26,13 @@ from enginery.domain.runner import (
     LaunchOutcome,
     OutcomeState,
     PermissionMapping,
+    RelayEndpoint,
     RunnerContext,
     RunnerProfile,
     RunnerReceipt,
     RunnerSelection,
     TrustMode,
+    expected_network,
     isolated_permission_mapping,
     outcome_path_for,
 )
@@ -36,15 +42,21 @@ IMAGE_ID = "sha256:" + "a" * 64
 LAUNCH_NONCE = "launch-nonce-0123456789"
 
 
-def isolated_context(receipt_root: Path, *, docker_context: str | None = None) -> RunnerContext:
+def isolated_context(
+    receipt_root: Path, *, docker_context: str | None = None, relay: bool = False
+) -> RunnerContext:
     """An isolated runner context pinned to a placeholder image id."""
     profile = RunnerProfile()
     return RunnerContext(
         selection=RunnerSelection.isolated(
-            image=IMAGE_ID, profile=profile, docker_context=docker_context
+            image=IMAGE_ID,
+            profile=profile,
+            docker_context=docker_context,
+            model_access=MODEL_ACCESS_RELAY if relay else MODEL_ACCESS_NONE,
         ),
         profile=profile,
         receipt_root=str(receipt_root),
+        relay=RelayEndpoint() if relay else None,
     )
 
 
@@ -76,7 +88,9 @@ def harness_task(
     )
 
 
-def clean_effective_container(profile: RunnerProfile) -> EffectiveContainer:
+def clean_effective_container(
+    profile: RunnerProfile, *, network: str = NO_NETWORK
+) -> EffectiveContainer:
     """What an engine reports for a container that satisfies the profile exactly."""
     limits = profile.resources
     return EffectiveContainer(
@@ -90,8 +104,8 @@ def clean_effective_container(profile: RunnerProfile) -> EffectiveContainer:
         memory_swap_bytes=limits.memory_bytes,
         nano_cpus=limits.nano_cpus,
         pids_limit=limits.pids,
-        network_mode=profile.network,
-        networks=(profile.network,),
+        network_mode=network,
+        networks=(network,),
         mounts=(
             ("volume", WORKSPACE_MOUNT, True),
             ("volume", OUT_MOUNT, True),
@@ -123,9 +137,14 @@ def runner_receipt(
             rootless=True,
         ),
         image=ImageIdentity(image_id=context.selection.image, recipe_digest="sha256:" + "b" * 64),
-        container_name=runner_container_name(operation_id),
+        container_name=container_name_for(operation_id),
         host={"os": "linux"},
-        effective=clean_effective_container(context.profile),
+        effective=clean_effective_container(
+            context.profile,
+            network=expected_network(
+                context.profile, operation_id, relay=context.relay is not None
+            ),
+        ),
         permissions=permissions,
         harness_version=host.tested_executable_version,
         harness_protocol=host.protocol_fingerprint,

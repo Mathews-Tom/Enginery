@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -10,6 +11,12 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
+from enginery.application.branch_publication import (
+    BranchPublicationPort,
+    BranchPublicationRequest,
+    ProtectedPathPolicy,
+    PublishedBranch,
+)
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.runner_ports import (
     IsolatedCommandRunner,
@@ -25,6 +32,7 @@ from enginery.application.work_ports import (
     WorkLedgerPort,
     WorkLedgerSnapshot,
 )
+from enginery.application.worker_environment import LAUNCHER_KEYS, TRUSTED_LOCAL_WORKER_KEYS
 from enginery.domain.digests import Digest
 from enginery.domain.errors import (
     ExternalConflictError,
@@ -60,6 +68,8 @@ from enginery.domain.workflow.manifest import CHECK_BINDING_SCHEMA_VERSION, Work
 from enginery.domain.workflow.shell_guard import reject_shell_invocation
 from enginery.engine.recovery import GONE, WorkerLiveness, assess_worker
 from enginery.engine.runtime import (
+    BRANCH_PUBLICATION_OPERATOR,
+    BRANCH_PUBLICATION_WORKER,
     RUN_AGGREGATE_TYPE,
     RUNTIME_NODE_AGGREGATE_TYPE,
     CoordinatorRuntime,
@@ -69,7 +79,7 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
-from enginery.engine.task_repository import out_path_for, resolve_commit
+from enginery.engine.task_repository import out_path_for, resolve_commit, verified_head_checkout
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
@@ -83,11 +93,13 @@ from enginery.workflows.pull_request import (
 )
 from enginery.workflows.review import ReviewOutcome, ReviewReport
 from enginery.workflows.stage1_runtime import (
+    MissingToolProbingRunner,
     Stage1QualificationExecutor,
     Stage1ReviewExecutor,
     Stage1ReviewResult,
     Stage1ValidationExecutor,
     Stage1ValidationResult,
+    run_sanitized_validation_command,
 )
 from enginery.workflows.verification import (
     Stage1VerificationExecutor,
@@ -116,6 +128,7 @@ class Stage1RunRequest:
     execution_configuration: Stage1ExecutionConfiguration
     execution_selection: ExecutionSelection
     runner: RunnerSelection = LEGACY_RUNNER_SELECTION
+    protected_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -154,6 +167,7 @@ class Stage1RunRequest:
             raise InvalidInputError("Stage 1 requires non-blank exact-head checks")
         if self.repair_limit < 0:
             raise InvalidInputError("Stage 1 repair_limit cannot be negative")
+        ProtectedPathPolicy(self.protected_paths)
         if self.execution_selection.harness != self.execution_configuration.harness_provider:
             raise InvalidInputError(
                 "Stage 1 execution selection harness must match the configured harness provider",
@@ -226,6 +240,11 @@ class Stage1RunRequest:
             # A run persisted before trust modes existed has no runner key, so its state, and
             # therefore its request digest, is exactly what it was.
             state["runner"] = self.runner.to_state()
+        if self.protected_paths:
+            # Extra protected-path patterns only widen the default set. A request without any has
+            # no key, so every earlier run keeps the state and request digest it was persisted
+            # with.
+            state["protected_paths"] = list(self.protected_paths)
         return state
 
 
@@ -305,12 +324,22 @@ class Stage1ProgressionAction(StrEnum):
     COLLECT_IMPLEMENTATION = "collect_implementation"
     VALIDATE = "validate"
     AWAIT_HUMAN_REVIEW = "await_human_review"
+    BLOCKED = "blocked"
     OPEN_PR = "open_pr"
     WAIT_FOR_CI = "wait_for_ci"
     VERIFY = "verify"
     REGISTER_OUTCOME_OBSERVATION = "register_outcome_observation"
     WAIT = "wait"
     HOLD = "hold"
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenPrBinding:
+    """The attempt id the ``open_pr`` node runs under and the approval it is bound to, if any."""
+
+    attempt_id: str
+    approval: dict[str, object] | None
+    approval_round: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +393,7 @@ class Stage1RunService:
     host_probe: Callable[[], InstalledHost | None] | None = None
     runner_admission: RunnerAdmissionPort | None = None
     isolated_command_runner: IsolatedCommandRunner | None = None
+    branch_publisher: BranchPublicationPort | None = None
 
     def start(
         self,
@@ -390,6 +420,8 @@ class Stage1RunService:
             _require_current_check_contracts(request)
             _require_bound_selection(request)
             _require_bound_runner(request)
+            _require_no_opaque_budget(request)
+            require_explicit_isolated_validation(request)
             runner_hold = self._runner_hold(request)
             if runner_hold is not None:
                 raise HumanActionRequiredError(
@@ -431,6 +463,7 @@ class Stage1RunService:
         if progression.action in {
             Stage1ProgressionAction.WAIT,
             Stage1ProgressionAction.AWAIT_HUMAN_REVIEW,
+            Stage1ProgressionAction.BLOCKED,
         }:
             return replace(progression, hold=hold)
         return replace(progression, action=Stage1ProgressionAction.HOLD, hold=hold)
@@ -661,7 +694,14 @@ class Stage1RunService:
             or _generation(_string(validate_state, "attempt_id")) != generation
         ):
             return Stage1Progression(Stage1ProgressionAction.VALIDATE, run)
-        if validate_state.get("status") != "passed":
+        if validate_state.get("status") == "blocked":
+            # A hold such as a missing validation tool is not a verdict a human can approve.
+            return Stage1Progression(Stage1ProgressionAction.BLOCKED, run)
+        if validate_state.get("status") != "passed" or (
+            not run.request.runner.legacy and "validation_artifact_digest" not in validate_state
+        ):
+            # A validation a human approved without it ever running is not a pass: it carries
+            # no artifact, so it never reaches review or publication.
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
         review_state = self._node_state_optional(run_id, "review")
@@ -674,6 +714,14 @@ class Stage1RunService:
         if open_pr_state is None or _generation(_string(open_pr_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
         if open_pr_state.get("status") == "queued":
+            return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
+        if (
+            open_pr_state.get("status") == "passed"
+            and open_pr_state.get("operator_decision") == "approved"
+            and "pull_request_number" not in open_pr_state
+        ):
+            # The operator approved a held publication: the branch is not published and no pull
+            # request exists yet, so the step is performed now, never skipped.
             return Stage1Progression(Stage1ProgressionAction.OPEN_PR, run)
         if open_pr_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
@@ -698,7 +746,8 @@ class Stage1RunService:
             # this run's own implementation.
             action = (
                 Stage1ProgressionAction.IMPLEMENT
-                if generation < run.request.repair_limit
+                if generation - _generation(run.request.implementation.attempt_id)
+                < run.request.repair_limit
                 else Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
             )
             return Stage1Progression(action, run)
@@ -834,6 +883,7 @@ class Stage1RunService:
     ) -> Stage1ImplementationDispatch:
         """Launch one OMP attempt only after durable successful qualification."""
         self._require_executable(request)
+        _require_no_opaque_budget(request)
         self._require_passed_node(request.run.id, "qualify")
         existing = self._node_state_optional(request.run.id, "implement")
         if existing is None:
@@ -854,7 +904,7 @@ class Stage1RunService:
                     "Stage 1 implementation repair requires a blocked CI observation"
                 )
             generation = _generation(_string(existing, "attempt_id")) + 1
-            if generation > request.repair_limit:
+            if generation - _generation(request.implementation.attempt_id) > request.repair_limit:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
                 )
@@ -1105,7 +1155,15 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> Stage1ValidationResult:
-        """Run configured focused validation after the OMP result is durable."""
+        """Run configured focused validation after the OMP result is durable.
+
+        An isolated run validates inside the isolated runner against a fresh checkout of the
+        verified head, made from the host-owned intake repository rather than from the worker's
+        live workspace, so nothing the worker left uncommitted or untracked can influence the
+        verdict. A new trusted-local run validates on the host with an explicit environment
+        instead of the ambient one; a run persisted before environment allowlists keeps its
+        original host-side validation.
+        """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "implement")
         generation = self._implement_generation(request.run.id)
@@ -1113,28 +1171,47 @@ class Stage1RunService:
             runtime=self.runtime,
             artifact_store=self._require_harness().artifact_store,
         )
-        if request.runner.isolated_mode:
-            executor = replace(executor, command_runner=self._require_isolated_runner())
-        return executor.validate(
-            dispatch=WorkflowNodeDispatch(
-                _fixture_dispatch(
-                    request,
-                    node_id="validate",
-                    attempt_id=f"validate-{generation}",
-                    operation_id=str(
-                        OperationId.derive(
-                            run_id=request.run.id,
-                            node_id=NodeId("validate"),
-                            side_effect_kind="validation",
-                            target_scope=request.repository_id,
-                            ordinal=generation,
-                        )
-                    ),
-                    command=request.validation_commands[0],
-                    dependencies=((str(request.run.id), "implement"),),
+        dispatch = WorkflowNodeDispatch(
+            _fixture_dispatch(
+                request,
+                node_id="validate",
+                attempt_id=f"validate-{generation}",
+                operation_id=str(
+                    OperationId.derive(
+                        run_id=request.run.id,
+                        node_id=NodeId("validate"),
+                        side_effect_kind="validation",
+                        target_scope=request.repository_id,
+                        ordinal=generation,
+                    )
                 ),
-                request.manifest,
+                command=request.validation_commands[0],
+                dependencies=((str(request.run.id), "implement"),),
             ),
+            request.manifest,
+        )
+        if request.runner.isolated_mode:
+            isolated_runner = self._require_isolated_runner()
+            head_revision = self._verified_head_revision(
+                attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
+            )
+            with verified_head_checkout(
+                workspace_path=request.workspace_path, head_revision=head_revision
+            ) as checkout:
+                return replace(
+                    executor, command_runner=MissingToolProbingRunner(isolated_runner)
+                ).validate(
+                    dispatch=dispatch,
+                    commands=request.validation_commands,
+                    now=now,
+                    heartbeat_window=heartbeat_window,
+                    working_directory=checkout,
+                    validated_revision=head_revision,
+                )
+        if not request.runner.legacy:
+            executor = replace(executor, command_runner=run_sanitized_validation_command)
+        return executor.validate(
+            dispatch=dispatch,
             commands=request.validation_commands,
             now=now,
             heartbeat_window=heartbeat_window,
@@ -1149,15 +1226,27 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> Stage1ReviewResult:
-        """Record an independent review only after passed validation."""
+        """Record an independent review only after passed validation.
+
+        ``repair_attempt`` is the repair index of the implementation being reviewed (0 for the
+        first attempt); the review node carries the implementation's own generation, so a run
+        whose first attempt id ends in another number is reviewed under the same one.
+        """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "validate")
+        self._require_validation_artifact(request)
+        generation = _generation(request.implementation.attempt_id) + repair_attempt
+        if generation != self._implement_generation(request.run.id):
+            raise InvalidInputError(
+                "the review's repair attempt is not the implementation's repair index",
+                details={"repair_attempt": repair_attempt, "run_id": str(request.run.id)},
+            )
         return Stage1ReviewExecutor(self.runtime).review(
             dispatch=WorkflowNodeDispatch(
                 _fixture_dispatch(
                     request,
                     node_id="review",
-                    attempt_id=f"review-{repair_attempt}",
+                    attempt_id=f"review-{generation}",
                     operation_id=str(
                         OperationId.derive(
                             run_id=request.run.id,
@@ -1187,11 +1276,24 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
     ) -> None:
-        """Persist a PR intent, then create or reconcile exactly one source-host PR."""
+        """Publish the verified branch, persist a PR intent, then create or reconcile one PR.
+
+        A new run's worker only commits locally and holds no remote or credential: the operator
+        side publishes the verified branch here, before the pull request, constrained to the
+        remote head it expects. A run persisted before operator publication keeps the contract
+        its worker was launched under, which pushed the branch itself, and publishes nothing.
+
+        A branch that changes a protected path (CI configuration, code ownership, evaluator or
+        holdout material) is held before anything is pushed: the node waits for the operator's
+        ``stage1 approve``/``stage1 reject`` decision, and only a recorded approval of exactly
+        that matched set lets the next call publish it.
+        """
         self._require_executable(request)
         self._require_passed_node(request.run.id, "review")
+        self._require_validation_artifact(request)
         if self._review_outcome(request.run.id) is not ReviewOutcome.APPROVED:
             raise MissingPrerequisiteError("Stage 1 requires an approved independent review")
+        publisher = None if request.runner.legacy else self._require_branch_publisher()
         generation = self._implement_generation(request.run.id)
         # The pull-request operation id is one logical side effect for the whole run:
         # it stays constant across repair generations so a repaired implementation
@@ -1203,11 +1305,17 @@ class Stage1RunService:
             target_scope=request.repository_id,
             ordinal=0,
         )
+        binding = (
+            _OpenPrBinding(attempt_id=f"open-pr-{generation}", approval=None, approval_round=0)
+            if publisher is None
+            else self._open_pr_binding(request, generation=generation)
+        )
+        approval = binding.approval
         dispatch = WorkflowNodeDispatch(
             _fixture_dispatch(
                 request,
                 node_id="open_pr",
-                attempt_id=f"open-pr-{generation}",
+                attempt_id=binding.attempt_id,
                 operation_id=str(operation_id),
                 command=("open_pr",),
                 dependencies=((str(request.run.id), "review"),),
@@ -1215,8 +1323,34 @@ class Stage1RunService:
             request.manifest,
         )
         epoch = self.runtime.register_node(
-            dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+            dispatch=dispatch,
+            now=now,
+            heartbeat_window=heartbeat_window,
+            # The approved digest and reason travel with the re-registered node, so a retry or a
+            # crash after the approval still compares against exactly what was approved.
+            extra=(
+                None
+                if approval is None
+                else {
+                    "publication_approval": dict(approval),
+                    "approval_round": binding.approval_round,
+                }
+            ),
         )
+        publication: dict[str, object] = {}
+        if publisher is not None:
+            publication["protected_publication"] = self._require_protected_publication_decision(
+                request,
+                publisher,
+                generation=generation,
+                approval=approval,
+                epoch=epoch.epoch,
+                now=now,
+            )
+            if approval is not None:
+                publication["publication_approval"] = dict(approval)
+            published = self._publish_verified_branch(request, publisher, generation=generation)
+            publication["published_revision"] = published.revision
         pull_request = self._require_pull_requests().create_or_update(
             PullRequestRequest(
                 head_branch=request.head_branch,
@@ -1239,6 +1373,226 @@ class Stage1RunService:
                 "pull_request_number": pull_request.number,
                 "head_revision": pull_request.head_revision,
                 "base_revision": pull_request.base_revision,
+                **publication,
+            },
+        )
+
+    def _publish_verified_branch(
+        self,
+        request: Stage1RunRequest,
+        publisher: BranchPublicationPort,
+        *,
+        generation: int,
+    ) -> PublishedBranch:
+        """Publish the verified head of the current attempt, expecting the previous publication.
+
+        The first publication of the run, whatever the trailing number of its first attempt's id,
+        expects the remote branch to be absent. A repair generation expects it at exactly the head
+        the previous generation's verified attempt published; that attempt is mapped back to the
+        id it was really dispatched under and its head read from the ledger-recorded verified
+        result, which survives the open-pull-request node being re-registered. A remote branch
+        at any other revision is an external conflict, never overwritten.
+        """
+        head_revision = self._verified_head_revision(
+            attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
+        )
+        expected_remote_revision = (
+            None
+            if generation == _generation(request.implementation.attempt_id)
+            else self._verified_head_revision(
+                attempt_id=_implementation_attempt_for(request, generation - 1)
+            )
+        )
+        published = publisher.publish(
+            BranchPublicationRequest(
+                repository_id=request.repository_id,
+                branch=request.head_branch,
+                head_revision=head_revision,
+                expected_remote_revision=expected_remote_revision,
+                operation_id=OperationId.derive(
+                    run_id=request.run.id,
+                    node_id=NodeId("open_pr"),
+                    side_effect_kind="branch_publication",
+                    target_scope=request.repository_id,
+                    ordinal=generation,
+                ),
+            )
+        )
+        if published.branch != request.head_branch or published.revision != head_revision:
+            raise ExternalConflictError(
+                "the branch publisher did not report the verified branch and revision",
+                details={
+                    "branch": request.head_branch,
+                    "head_revision": head_revision,
+                    "published_revision": published.revision,
+                },
+            )
+        return published
+
+    def _verified_head_revision(self, *, attempt_id: str) -> str:
+        """Return the head revision the host verified when it collected one attempt."""
+        projection = self.ledger.read_projection(
+            aggregate_type="node_attempt", aggregate_id=attempt_id
+        )
+        result = None if projection is None else projection.state.get("result")
+        head_revision = result.get("head_revision") if isinstance(result, Mapping) else None
+        if not isinstance(head_revision, str) or not head_revision.strip():
+            raise MissingPrerequisiteError(
+                "Stage 1 requires the verified head revision of the implementation attempt",
+                details={"attempt_id": attempt_id},
+            )
+        return head_revision
+
+    def _open_pr_binding(self, request: Stage1RunRequest, *, generation: int) -> _OpenPrBinding:
+        """Return the attempt id and the operator's approval the ``open_pr`` node runs under.
+
+        The only approval is the typed ``stage1 approve`` decision on the held ``open_pr`` node,
+        read back from its durable state: a node that is passed by a decision, carries the held
+        record and has not created a pull request. Consuming it re-registers the node under an
+        attempt id that names the approval and carries the approved digest and reason in its
+        own state, so a retry or a crash after the approval is still bound to exactly the set
+        that was approved and is compared again every time. A node that is still waiting, or
+        queued without an approval, keeps its attempt id. A recorded rejection is final and is
+        never overridden.
+        """
+        default = _OpenPrBinding(
+            attempt_id=f"open-pr-{generation}", approval=None, approval_round=0
+        )
+        state = self._node_state_optional(request.run.id, "open_pr")
+        if state is None:
+            return default
+        attempt_id = _string(state, "attempt_id")
+        if _generation(attempt_id) != generation:
+            return default
+        status = state.get("status")
+        decision = state.get("operator_decision")
+        if status == "failed" and decision == "rejected":
+            raise ExternalConflictError(
+                "the operator rejected publishing this branch, which changes protected paths",
+                details={"run_id": str(request.run.id), "reason": str(state.get("reason"))},
+            )
+        approved_attempt = attempt_id.startswith("open-pr-approved-")
+        previous_round = _approval_round(state) if approved_attempt else 0
+        held = state.get("protected_publication")
+        if (
+            status == "passed"
+            and decision == "approved"
+            and isinstance(held, Mapping)
+            and "pull_request_number" not in state
+        ):
+            # A decision on a node that was held again after an approval stopped matching is a
+            # new approval: it is consumed under a fresh attempt id, never the spent one.
+            approval_round = previous_round + 1
+            return _OpenPrBinding(
+                attempt_id=(
+                    f"open-pr-approved-{generation}"
+                    if approval_round == 1
+                    else f"open-pr-approved-r{approval_round}-{generation}"
+                ),
+                approval={
+                    "operator_decision": "approved",
+                    "reason": str(state.get("reason")),
+                    "approved_protected_publication_digest": str(held.get("digest")),
+                },
+                approval_round=approval_round,
+            )
+        if status == "queued" and approved_attempt:
+            carried = state.get("publication_approval")
+            if isinstance(carried, Mapping):
+                return _OpenPrBinding(
+                    attempt_id=attempt_id,
+                    approval=dict(carried),
+                    approval_round=previous_round,
+                )
+        if status in {"queued", "awaiting_human"}:
+            return _OpenPrBinding(attempt_id=attempt_id, approval=None, approval_round=0)
+        return default
+
+    def _require_protected_publication_decision(
+        self,
+        request: Stage1RunRequest,
+        publisher: BranchPublicationPort,
+        *,
+        generation: int,
+        approval: Mapping[str, object] | None,
+        epoch: int,
+        now: datetime,
+    ) -> dict[str, object]:
+        """Return the protected-path record of the verified branch, holding it unless approved.
+
+        The changed paths are read by the host from its own verified repository, never from a
+        worker claim, and matched against the protected set. A match with no recorded approval,
+        or whose approved digest differs from the current one, puts the ``open_pr`` node into a
+        durable human wait and raises: nothing is pushed.
+        """
+        head_revision = self._verified_head_revision(
+            attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
+        )
+        reservation = self.runtime.read_workspace_reservation(request.repository_id)
+        base_revision = (
+            reservation.resolved_base_revision
+            if reservation is not None and reservation.run_id == str(request.run.id)
+            else request.run.base_revision
+        )
+        policy = ProtectedPathPolicy(request.protected_paths)
+        changed = publisher.changed_paths(base_revision=base_revision, head_revision=head_revision)
+        matched = policy.matched(changed)
+        record: dict[str, object] = {
+            "patterns": list(policy.patterns),
+            "base_revision": base_revision,
+            "head_revision": head_revision,
+            "changed_path_count": len(changed),
+            "matched_path_count": len(matched),
+            "matched_paths": list(matched[:_MAX_RECORDED_PROTECTED_PATHS]),
+            "digest": str(
+                Digest.of_json(
+                    {
+                        "patterns": list(policy.patterns),
+                        "base_revision": base_revision,
+                        "head_revision": head_revision,
+                        "matched_paths": list(matched),
+                    }
+                )
+            ),
+        }
+        if not matched:
+            return record
+        lapsed = ""
+        if approval is not None:
+            # The digest is compared on every call, never only on the first one after the
+            # decision: a retry or a crash resumes under exactly what was approved.
+            if approval.get("approved_protected_publication_digest") == record["digest"]:
+                return record
+            lapsed = (
+                "the approved protected-path publication no longer matches the verified branch "
+                "or the protected set, so the approval is void; "
+            )
+        approve = _decision_command("approve", request)
+        reject = _decision_command("reject", request)
+        shown = ", ".join(matched[:5]) + (
+            f" and {len(matched) - 5} more" if len(matched) > 5 else ""
+        )
+        reason = (
+            f"{lapsed}the verified branch changes protected paths ({shown}); it is held and "
+            f"nothing is published. Review the change, then publish it with `{approve}` or "
+            f"refuse it with `{reject}`"
+        )
+        if self._node_status(request.run.id, "open_pr") == "queued":
+            self.runtime.await_human_node(
+                run_id=str(request.run.id),
+                node_id="open_pr",
+                epoch=epoch,
+                now=now,
+                reason=reason,
+                extra={"protected_publication": record, "generation": generation},
+            )
+        raise HumanActionRequiredError(
+            reason,
+            details={
+                "node_id": "open_pr",
+                "matched_paths": list(matched[:_MAX_RECORDED_PROTECTED_PATHS]),
+                "approve_command": approve,
+                "reject_command": reject,
             },
         )
 
@@ -1481,6 +1835,20 @@ class Stage1RunService:
                 details={"run_id": str(run_id), "review_outcome": value},
             ) from error
 
+    def _require_validation_artifact(self, request: Stage1RunRequest) -> None:
+        """Refuse a passed validation that recorded no artifact: it never actually ran.
+
+        A run persisted while a missing-tool hold could be approved carries such a node. The
+        approval marks it passed, but only a validation that ran records its artifact digest.
+        """
+        if request.runner.legacy:
+            return
+        if "validation_artifact_digest" not in self._node_state(request.run.id, "validate"):
+            raise MissingPrerequisiteError(
+                "Stage 1 requires a recorded validation result, not an approved hold",
+                details={"run_id": str(request.run.id), "node_id": "validate"},
+            )
+
     def _require_passed_node(self, run_id: RunId, node_id: str) -> None:
         projection = self.ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
@@ -1535,6 +1903,14 @@ class Stage1RunService:
             raise MissingPrerequisiteError("Stage 1 harness is not configured")
         return self.harness
 
+    def _require_branch_publisher(self) -> BranchPublicationPort:
+        if self.branch_publisher is None:
+            raise MissingPrerequisiteError(
+                "Stage 1 branch publisher is not configured; the worker does not push, so the "
+                "verified branch cannot be published"
+            )
+        return self.branch_publisher
+
 
 def _implementation_task(
     request: Stage1RunRequest,
@@ -1546,14 +1922,23 @@ def _implementation_task(
 ) -> HarnessTask:
     execution = request.implementation
     isolated = request.runner.isolated_mode
+    # A run bound to a trust mode never lets its worker publish: the worker commits locally and
+    # the operator side publishes the verified branch. Only a run persisted before trust modes
+    # existed keeps the worker-pushes contract it was launched under.
+    operator_publishes = not request.runner.legacy
     if repair_context is None:
         branch_constraint = (
             f"Create and work only on branch {request.head_branch!r} from "
             f"{base_revision!r}; "
             + (
-                "commit the completed change locally. You hold no remote and no credentials: "
-                "do not push; the operator publishes the verified branch."
-                if isolated
+                (
+                    "commit the completed change locally. You are given no remote access and "
+                    "no credentials: do not push; the operator publishes the verified branch."
+                    if isolated
+                    else "commit the completed change locally and do not push: the operator "
+                    "publishes the verified branch."
+                )
+                if operator_publishes
                 else "commit and push the completed change to origin."
             )
         )
@@ -1563,7 +1948,7 @@ def _implementation_task(
             f"a new branch. {repair_context} "
             + (
                 "Commit the corrected change locally; do not push, the operator publishes it."
-                if isolated
+                if operator_publishes
                 else "Commit and push the corrected change to origin."
             )
         )
@@ -1603,6 +1988,51 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
     return attempt_id
 
 
+def first_attempt_generation(attempt_id: str) -> int:
+    """Return the generation a run's first implementation attempt id carries, or refuse the id.
+
+    A run's generations are the trailing numbers of its implementation attempt ids: the first
+    attempt's explicit id sets the starting one and every repair adds one. An id without a
+    trailing number cannot start a run.
+    """
+    suffix = attempt_id.rsplit("-", 1)[-1]
+    if not suffix.isdigit():
+        raise InvalidInputError(
+            "an implementation attempt id must end in -<number>",
+            details={"attempt_id": attempt_id},
+        )
+    return int(suffix)
+
+
+def _implementation_attempt_for(request: Stage1RunRequest, generation: int) -> str:
+    """Return the attempt id the implementation of one generation was really dispatched under.
+
+    The first generation is the run's own first attempt id, whatever number it ends in; every
+    later generation is the derived repair id. A generation before the first one never existed.
+    """
+    first = _generation(request.implementation.attempt_id)
+    if generation == first:
+        return request.implementation.attempt_id
+    if generation < first:
+        raise InternalInvariantViolationError(
+            "Stage 1 has no implementation attempt before its first generation",
+            details={"run_id": str(request.run.id), "generation": generation},
+        )
+    return implementation_attempt_id(str(request.run.id), generation)
+
+
+_MAX_RECORDED_PROTECTED_PATHS = 200
+
+
+def _decision_command(decision: str, request: Stage1RunRequest) -> str:
+    """Name the exact operator command that records ``decision`` on the held publication."""
+    return (
+        f"enginery stage1 {decision} --database <ledger> --owner <operator> "
+        f"--run-id {shlex.quote(str(request.run.id))} --node-id open_pr "
+        '--reason "<why>"'
+    )
+
+
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
     name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     if request.runner.isolated_mode:
@@ -1634,6 +2064,12 @@ def _scheduled_implementation(
             details={"run_id": str(run_id), "operation_id": str(operation_id)},
         )
     return matching[0] if matching else None
+
+
+def _approval_round(state: Mapping[str, object]) -> int:
+    """How many protected-path approvals the ``open_pr`` node has consumed; one when unrecorded."""
+    recorded = state.get("approval_round")
+    return recorded if isinstance(recorded, int) and not isinstance(recorded, bool) else 1
 
 
 def _generation(attempt_id: str) -> int:
@@ -1687,6 +2123,10 @@ def _fixture_dispatch(
     dependencies: tuple[tuple[str, str], ...] = (),
     base_revision: str | None = None,
 ) -> FixtureDispatch:
+    # Only the implement node launches a worker process; a new run launches it with an explicit
+    # environment and publishes its branch from the operator side. A run persisted before trust
+    # modes keeps the ambient launch and worker-pushes contract it was bound under.
+    launches_worker = node_id == "implement" and not request.runner.legacy
     return FixtureDispatch(
         run_id=str(request.run.id),
         node_id=node_id,
@@ -1710,6 +2150,14 @@ def _fixture_dispatch(
             WORKSPACE_MODE_TASK_LOCAL_CLONE
             if request.runner.isolated_mode
             else WORKSPACE_MODE_GIT_WORKTREE
+        ),
+        environment_keys=(
+            None
+            if not launches_worker
+            else (LAUNCHER_KEYS if request.runner.isolated_mode else TRUSTED_LOCAL_WORKER_KEYS)
+        ),
+        branch_publication=(
+            BRANCH_PUBLICATION_OPERATOR if launches_worker else BRANCH_PUBLICATION_WORKER
         ),
     )
 
@@ -1740,6 +2188,48 @@ def _require_bound_runner(request: Stage1RunRequest) -> None:
             "rebuild the request with the current `enginery stage1 build-request`",
             details={"run_id": str(request.run.id)},
         )
+
+
+DEFAULT_VALIDATION_COMMAND: tuple[str, ...] = ("uv", "run", "pytest", "-q")
+"""The validation command a trusted-local request gets when it names none."""
+
+
+def require_explicit_isolated_validation(request: Stage1RunRequest) -> None:
+    """Refuse an isolated request that validates with the host default instead of naming commands.
+
+    Isolated validation runs offline inside the pinned runner image, which carries python3, node,
+    git and uv but none of a project's own test dependencies, so the host default
+    (``uv run pytest -q``, which needs to resolve pytest) cannot run there. An isolated run must
+    name validation commands that run with what the image has, never inherit one that cannot.
+    """
+    if request.runner.isolated_mode and request.validation_commands == (
+        DEFAULT_VALIDATION_COMMAND,
+    ):
+        raise InvalidInputError(
+            "an isolated run must name its validation commands (--validation-command): isolated "
+            "validation runs offline in the pinned runner image, which has python3, node, git "
+            "and uv but not the project's test dependencies, so the host default "
+            f"`{' '.join(DEFAULT_VALIDATION_COMMAND)}` cannot run there",
+            details={"run_id": str(request.run.id)},
+        )
+
+
+def _require_no_opaque_budget(request: Stage1RunRequest) -> None:
+    """Refuse a hard-dollar budget that no supported harness enforces.
+
+    A budget that nothing enforces is not a limit, and carrying the number would read as one.
+    A run persisted before this rule keeps decoding and running with the value it recorded.
+    """
+    if request.runner.legacy or request.implementation.cost_budget is None:
+        return
+    raise InvalidInputError(
+        "no supported harness enforces a hard-dollar budget; none can be bound "
+        "(the time budget is enforced)",
+        details={
+            "run_id": str(request.run.id),
+            "cost_budget": str(request.implementation.cost_budget),
+        },
+    )
 
 
 def _runner_from_state(state: Mapping[str, object]) -> RunnerSelection:
@@ -1833,6 +2323,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,
         runner=_runner_from_state(state),
+        protected_paths=_protected_paths_from_state(state),
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")
@@ -1841,6 +2332,15 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
     if state.get("request_digest") != str(request.digest):
         raise InvalidInputError("Stage 1 run projection has a mismatched request digest")
     return Stage1Run(request=request, status=status, aggregate_version=aggregate_version)
+
+
+def _protected_paths_from_state(state: Mapping[str, object]) -> tuple[str, ...]:
+    raw = state.get("protected_paths")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(pattern, str) for pattern in raw):
+        raise InvalidInputError("Stage 1 protected_paths must be a list of strings")
+    return tuple(raw)
 
 
 def _classification_from_state(

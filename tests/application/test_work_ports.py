@@ -103,7 +103,6 @@ def test_workspace_request_binds_exact_repository_revision_and_operation() -> No
         repository_path=Path("/tmp/repository"),
         base_revision="deadbeef",
         operation_id=OperationId("op-workspace-1"),
-        permitted_environment_keys=("PATH",),
     )
 
     assert request.base_revision == "deadbeef"
@@ -145,19 +144,17 @@ def test_lifecycle_projection_rejects_blank_identity() -> None:
 
 
 @pytest.mark.parametrize(
-    ("repository_id", "repository_path", "base_revision", "environment_keys"),
+    ("repository_id", "repository_path", "base_revision"),
     [
-        (" ", Path("/tmp/repository"), "deadbeef", ("PATH",)),
-        ("org/repo", Path("repository"), "deadbeef", ("PATH",)),
-        ("org/repo", Path("/tmp/repository"), " ", ("PATH",)),
-        ("org/repo", Path("/tmp/repository"), "deadbeef", (" ",)),
+        (" ", Path("/tmp/repository"), "deadbeef"),
+        ("org/repo", Path("repository"), "deadbeef"),
+        ("org/repo", Path("/tmp/repository"), " "),
     ],
 )
 def test_workspace_request_rejects_invalid_identity(
     repository_id: str,
     repository_path: Path,
     base_revision: str,
-    environment_keys: tuple[str, ...],
 ) -> None:
     with pytest.raises(ValueError):
         WorkspaceRequest(
@@ -166,7 +163,6 @@ def test_workspace_request_rejects_invalid_identity(
             repository_path=repository_path,
             base_revision=base_revision,
             operation_id=OperationId("op-workspace-1"),
-            permitted_environment_keys=environment_keys,
         )
 
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +118,7 @@ def _stage1_request(
             attempt_id=f"implement-{run_id}",
             operation_id=OperationId(f"implement:{run_id}"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),

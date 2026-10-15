@@ -18,6 +18,7 @@ from enginery.adapters.runner_launch import (
     isolated_command,
     publish_runner_receipt,
     read_attempt_result,
+    relay_omp_seed_files,
     require_isolated_permissions,
     verified_image_host,
     worker_environment,
@@ -358,6 +359,7 @@ class OmpHarness:
                 environment=self.container_environment(task),
                 inner_command=self.command_for(task),
                 image_host=image_host,
+                seed_files=relay_omp_seed_files(self.runner),
             )
         if not result_path.is_absolute():
             raise InvalidInputError("OMP worker result path must be absolute")

@@ -1,0 +1,35 @@
+# Model-access relay image.
+#
+# The relay is the only container that holds the model gateway bearer. It carries nothing but the
+# stdlib-only relay.py on a pinned python base (multi-arch index digest). There is no package
+# install, no shell tooling added, and no credential baked in: the token file is mounted at
+# runtime. It runs with a read-only root filesystem, no capabilities and uid/gid 65532.
+#
+# The image is built from a context containing exactly this file and relay.py.
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+ARG PYTHON_BASE_DIGEST=sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+FROM ${PYTHON_BASE_IMAGE}@${PYTHON_BASE_DIGEST}
+
+ARG RELAY_UID=65532
+ARG RELAY_GID=65532
+
+USER root
+
+# Root-owned and read-only to the relay process: it cannot rewrite its own code.
+RUN set -eu; \
+    install -d -m 0755 /opt/enginery /run/relay
+COPY relay.py /opt/enginery/relay.py
+RUN chown root:root /opt/enginery/relay.py; chmod 0444 /opt/enginery/relay.py
+
+ENV HOME=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+LABEL dev.enginery.relay-image="1"
+
+USER ${RELAY_UID}:${RELAY_GID}
+WORKDIR /tmp
+
+ENTRYPOINT ["python3", "/opt/enginery/relay.py"]
+CMD []

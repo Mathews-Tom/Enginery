@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -80,3 +83,66 @@ def test_cancellation_terminates_supervised_process_group(
     supervisor.cancel(lease=lease, identity=identity, now=now + timedelta(seconds=1))
 
     assert probe_process(identity.pid) is None
+
+
+_DUMP_ENVIRONMENT = (
+    "import json, os, sys; open(sys.argv[1], 'w').write(json.dumps(dict(os.environ)))"
+)
+
+
+def _run_worker_and_read_environment(
+    ledger_service: LedgerService, tmp_path: Path, *, environment: dict[str, str] | None
+) -> dict[str, str]:
+    now = datetime(2026, 10, 13, 15, 0, tzinfo=UTC)
+    coordinator, lease = _lease(ledger_service, now=now)
+    dump = tmp_path / "environment.json"
+    identity = WorkerSupervisor(ledger_service, coordinator).start(
+        lease=lease,
+        command=(sys.executable, "-c", _DUMP_ENVIRONMENT, str(dump)),
+        cwd=tmp_path,
+        now=now,
+        environment=environment,
+    )
+    # A later Popen in this process may already have reaped the exited child.
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(identity.pid, 0)
+    loaded = json.loads(dump.read_text(encoding="utf-8"))
+    return {str(key): str(value) for key, value in loaded.items()}
+
+
+def test_a_worker_started_with_an_environment_receives_exactly_that_environment(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ambient-secret")
+    monkeypatch.setenv("ENGINERY_AMBIENT_MARKER", "ambient")
+
+    received = _run_worker_and_read_environment(
+        ledger_service, tmp_path, environment={"PATH": os.environ["PATH"], "PURPOSE": "explicit"}
+    )
+
+    assert received["PURPOSE"] == "explicit"
+    assert received["PATH"] == os.environ["PATH"]
+    assert "GH_TOKEN" not in received
+    assert "ENGINERY_AMBIENT_MARKER" not in received
+    assert set(received) <= {"PATH", "PURPOSE", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+
+
+def test_a_worker_started_without_an_environment_inherits_the_ambient_one_the_legacy_path(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENGINERY_AMBIENT_MARKER", "ambient")
+
+    received = _run_worker_and_read_environment(ledger_service, tmp_path, environment=None)
+
+    assert received["ENGINERY_AMBIENT_MARKER"] == "ambient"
+
+
+def test_an_empty_environment_is_an_empty_environment_not_the_ambient_one(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENGINERY_AMBIENT_MARKER", "ambient")
+
+    received = _run_worker_and_read_environment(ledger_service, tmp_path, environment={})
+
+    assert "ENGINERY_AMBIENT_MARKER" not in received
+    assert set(received) <= {"LC_CTYPE", "__CF_USER_TEXT_ENCODING"}

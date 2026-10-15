@@ -46,6 +46,15 @@ uv run enginery stage1 build-request --runner trusted-local \
   --artifact-root <absolute path to an artifact directory>
 ```
 
+A trusted-local run validates with `uv run pytest -q` unless you pass
+`--validation-command`. An `--runner isolated-oci` run must pass its own
+`--validation-command` values: its validation runs offline in the pinned runner
+image (`python3`, `node`, `git`, `uv`, `sh`), so a tool the image lacks, such as
+`pytest`, holds the run with a reason naming it. An explicit
+`--implementation-attempt-id` must end in `-<number>` (that number is the run's
+first generation), and `--protected-path GLOB` (repeatable) adds paths whose change
+holds the branch for `stage1 approve` / `stage1 reject` before it is published.
+
 `build-request` reads the issue through the GitHub adapter (the work item,
 source revision, and declared `enginery/work-kind/*` and `enginery/risk/*`
 classification come from the issue, not from flags) — see
@@ -62,7 +71,6 @@ adapts for a migrated ticket.
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from pathlib import Path
 
 from enginery.application.execution_catalog import load_execution_catalog
@@ -140,7 +148,7 @@ request = Stage1RunRequest(
         attempt_id=f"{run_id}-implement-0",
         operation_id=f"implement:{run_id}",
         time_budget_seconds=1800,
-        cost_budget=Decimal("5.0"),
+        cost_budget=None,  # no supported harness enforces a dollar budget; the time budget does
         permitted_capabilities=("git",),
         evidence_requirements=("redacted harness transcript",),
     ),

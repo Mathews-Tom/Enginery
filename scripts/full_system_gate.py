@@ -94,7 +94,6 @@ import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -111,6 +110,11 @@ from enginery.adapters.local_service import (
     build_local_service_artifact,
 )
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
+from enginery.application.branch_publication import (
+    BranchPublicationPort,
+    BranchPublicationRequest,
+    PublishedBranch,
+)
 from enginery.application.delivery_ports import DeploymentRequest
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.git_environment import repository_isolated_environment
@@ -210,6 +214,22 @@ _STAGE3_HUMAN = AuthorityPrincipal(
     authorization_source="full-system-gate",
 )
 _STAGE3_REQUESTING_PRINCIPAL_ID = "full-system-gate-incident-workflow"
+
+
+class _FixturePublisher:
+    """A deterministic branch-publication fixture: the verified revision is reported published."""
+
+    def probe(self) -> object:
+        raise AssertionError("not used by this gate")
+
+    def changed_paths(self, *, base_revision: str, head_revision: str) -> tuple[str, ...]:
+        return ()
+
+    def publish(self, request: BranchPublicationRequest) -> PublishedBranch:
+        return PublishedBranch(branch=request.branch, revision=request.head_revision)
+
+    def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
+        return ReconciliationResult.FOUND_MATCHING
 
 
 class _TerminalPullRequests:
@@ -358,7 +378,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
             attempt_id="implement-0",
             operation_id=OperationId(f"implement:{run_id}"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -402,6 +422,7 @@ def _service(
         ledger=ledger,
         work_ledger=work_ledger,
         pull_requests=pull_requests,
+        branch_publisher=cast(BranchPublicationPort, _FixturePublisher()),
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
     )
     return ledger, service
@@ -465,7 +486,10 @@ def _complete_bypassed_nodes(service: Stage1RunService, fixture: _RunFixture) ->
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    payload={
+                        "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                        "result": {"head_revision": "1" * 40},
+                    },
                 ),
             ),
         )

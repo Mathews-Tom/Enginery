@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters.oci.engine import OciEngine
-from enginery.domain.runner import ResourceLimits, RunnerProfile
+from enginery.domain.errors import EngineryError
+from enginery.domain.runner import LaunchSpec, ResourceLimits, RunnerProfile
 
 from .real_engine import build_standin_image, remove_attempt, require_real_engine
 from .support import FakeDocker
@@ -69,7 +70,27 @@ def real_profile(real_engine: OciEngine) -> Iterator[RunnerProfile]:
     try:
         yield profile
     finally:
-        real_engine.run_cli(("network", "rm", network))
+        # Every attempt network of this profile is named ``<network>-<hash>``; remove any left.
+        with contextlib.suppress(EngineryError):
+            for name in real_engine.list_attempt_networks():
+                if name.startswith(f"{network}-"):
+                    real_engine.remove_attempt_network(name)
+
+
+@pytest.fixture
+def real_attempt_network(real_engine: OciEngine) -> Iterator[Callable[[LaunchSpec], str]]:
+    """Create the attempt network a spec with model access would join; removed afterwards."""
+    created: list[str] = []
+
+    def create(spec: LaunchSpec) -> str:
+        real_engine.create_attempt_network(spec.attempt_network, operation_id=spec.operation_id)
+        created.append(spec.attempt_network)
+        return spec.attempt_network
+
+    yield create
+    for name in created:
+        with contextlib.suppress(EngineryError):
+            real_engine.remove_attempt_network(name)
 
 
 @pytest.fixture

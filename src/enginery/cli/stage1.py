@@ -11,6 +11,7 @@ from pathlib import Path
 
 from enginery.adapters.claude_code import ClaudeCodeAdapterConfig, ClaudeCodeHarness
 from enginery.adapters.claude_code import probe_installed_host as probe_installed_claude
+from enginery.adapters.git_publication import GitBranchPublisher
 from enginery.adapters.github import (
     GitHubAdapterConfig,
     GitHubPullRequests,
@@ -32,6 +33,7 @@ from enginery.domain.ids import RunId
 from enginery.engine.recovery import assess_worker
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.task_repository import intake_path_for
 from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
@@ -151,6 +153,7 @@ def _watch(args: argparse.Namespace) -> None:
                     hold=progression.hold,
                     observed_at_resume=progression.observed_host_version,
                 ),
+                "cost_budget": _cost_budget_report(run.request),
             }
         )
     finally:
@@ -263,7 +266,32 @@ def _advancing_service(
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
         runner_admission=None if wiring is None else wiring.admission,
         isolated_command_runner=isolated_validation,
+        branch_publisher=_branch_publisher(request),
     )
+
+
+def _branch_publisher(request: Stage1RunRequest) -> GitBranchPublisher | None:
+    """Return the host-side publisher of a new run's verified branch.
+
+    A new run's worker commits locally and holds no remote or credential. Its verified branch is
+    pushed from a repository the worker cannot write to (the host-owned intake repository of a
+    task-local workspace; the workspace of a trusted-local run) to the host repository's own
+    ``origin``. A run persisted before trust modes has its worker push, so it has no publisher.
+    """
+    if request.runner.legacy:
+        return None
+    source = (
+        intake_path_for(request.workspace_path)
+        if request.runner.isolated_mode
+        else request.workspace_path
+    )
+    return GitBranchPublisher(repository_path=request.repository_path, source_path=source)
+
+
+def _cost_budget_report(request: Stage1RunRequest) -> dict[str, object]:
+    """Report a carried hard-dollar number as unenforced, so it is never read as a limit."""
+    value = request.implementation.cost_budget
+    return {"value": None if value is None else str(value), "enforced": False}
 
 
 def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:

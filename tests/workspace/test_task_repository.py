@@ -23,6 +23,8 @@ from enginery.engine.task_repository import (
     resolve_commit,
     staging_path_for,
     staging_trees_for,
+    validation_path_for,
+    verified_head_checkout,
     verify_intake_branch,
 )
 
@@ -1064,6 +1066,27 @@ def test_a_branch_tree_over_the_total_size_is_refused(
             base_revision=base,
             max_tree_bytes=9_999,
         )
+
+
+def test_the_verified_head_checkout_applies_the_tree_bounds_before_cloning(
+    repository: Path, base: str, materialized: Path
+) -> None:
+    """A head that bypassed verification (or a lowered bound) never expands into a checkout."""
+    _bundle_branch_with_tree(materialized, base, _flat_tree(materialized, files=150, size=1))
+    _intake(repository, materialized, base)
+    head = _git("rev-parse", "refs/heads/feature", cwd=intake_path_for(materialized))
+
+    for bound in ({"max_tree_entries": 100}, {"max_tree_bytes": 100}):
+        with (
+            pytest.raises(ExternalConflictError, match="entry-count or size limit"),
+            verified_head_checkout(workspace_path=materialized, head_revision=head, **bound),
+        ):
+            pytest.fail("the checkout must be refused before it is made")
+        assert not validation_path_for(materialized).exists()
+
+    with verified_head_checkout(workspace_path=materialized, head_revision=head) as checkout:
+        assert _git("rev-parse", "HEAD", cwd=checkout) == head
+    assert not validation_path_for(materialized).exists()
 
 
 def test_a_tree_that_expands_to_millions_of_entries_from_a_few_objects_is_stopped(

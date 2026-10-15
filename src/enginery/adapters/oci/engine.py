@@ -38,6 +38,9 @@ OPERATION_LABEL = "dev.enginery.operation"
 LAUNCHER_LABEL = "dev.enginery.launcher"
 """Label carrying the pid, start identity and host of the launcher process that owns a worker."""
 
+ATTEMPT_NETWORK_LABEL = "dev.enginery.attempt-network"
+"""Label carrying the operation id an attempt's own internal network was created for."""
+
 ENGINE_ENVIRONMENT_KEYS: tuple[str, ...] = (
     "PATH",
     "HOME",
@@ -77,6 +80,17 @@ class EngineCommandError(MissingPrerequisiteError):
 
 class ObjectNotFoundError(EngineCommandError):
     """A container, image or network the runner asked about does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkInfo:
+    """One network as the engine reports it."""
+
+    name: str
+    internal: bool
+    labels: Mapping[str, str]
+    containers: tuple[str, ...]
+    """Names of the containers currently attached (running containers only, as the engine lists)."""
 
 
 class EngineRunner(Protocol):
@@ -440,9 +454,13 @@ class OciEngine:
         return identity
 
     # --- networks -------------------------------------------------------------------
+    #
+    # No container ever joins a shared worker network. A worker with model access gets an
+    # internal network created for its one attempt (``create_attempt_network``) that only the
+    # relay is connected to, for the attempt's lifetime; every other container has no network.
 
-    def _network_internal(self, name: str) -> bool | None:
-        """True/False when the network exists, None when it does not."""
+    def network_info(self, name: str) -> NetworkInfo | None:
+        """What the engine reports about network ``name``; ``None`` when it does not exist."""
         completed = self.run_cli(("network", "inspect", name), timeout=_COMMAND_TIMEOUT_SECONDS)
         if completed.returncode != 0:
             failure = self._failure(("network", "inspect", name), completed)
@@ -454,35 +472,115 @@ class OciEngine:
         except ValueError as error:
             raise EngineCommandError("container engine reported unreadable network data") from error
         for network in networks if isinstance(networks, list) else ():
-            if _mapping(network).get("Name") == name:
-                return _mapping(network).get("Internal") is True
+            document = _mapping(network)
+            if document.get("Name") != name:
+                continue
+            labels = _mapping(document.get("Labels"))
+            attached = _mapping(document.get("Containers"))
+            return NetworkInfo(
+                name=name,
+                internal=document.get("Internal") is True,
+                labels={key: value for key, value in labels.items() if isinstance(value, str)},
+                containers=tuple(
+                    sorted(
+                        entry
+                        for entry in (_mapping(item).get("Name") for item in attached.values())
+                        if isinstance(entry, str)
+                    )
+                ),
+            )
         return None
 
-    def ensure_internal_network(self, name: str) -> None:
-        """Create ``name`` as an ``--internal`` network, or verify that it already is one.
+    def create_attempt_network(
+        self, name: str, *, operation_id: str, launcher: str | None = None
+    ) -> NetworkInfo:
+        """Create ``name`` as a fresh ``--internal`` network for one attempt of ``operation_id``.
 
-        Idempotent and tolerant of a concurrent creator. A same-named network that is not
-        internal is refused: it would give the worker a route out.
+        The name is derived from the operation, so a network left by an earlier attempt of the
+        same operation (a launcher that was killed) is removed first and never reused: every
+        attempt gets a network no earlier endpoint, address or DNS entry survives in. A same-named
+        network that is not an attempt network is refused untouched. ``launcher`` is the label
+        that names the creating launcher process, so a later reconcile can tell a live attempt
+        from an orphan.
         """
-        state = self._network_internal(name)
-        if state is None:
-            created = self.run_cli(
-                ("network", "create", "--internal", "--label", f"{RUNNER_LABEL}=1", name),
-                timeout=_COMMAND_TIMEOUT_SECONDS,
-            )
-            if created.returncode != 0:
-                state = self._network_internal(name)
-                if state is None:
-                    raise self._failure(("network", "create"), created)
-            else:
-                state = self._network_internal(name)
-        if state is None:
-            raise EngineCommandError(f"runner network {name!r} is absent right after creation")
-        if not state:
+        if self.network_info(name) is not None:
+            self.remove_attempt_network(name)
+        labels = [f"{RUNNER_LABEL}=1", f"{ATTEMPT_NETWORK_LABEL}={operation_id}"]
+        if launcher is not None:
+            labels.append(f"{LAUNCHER_LABEL}={launcher}")
+        arguments = ["network", "create", "--internal"]
+        for label in labels:
+            arguments += ["--label", label]
+        self._checked((*arguments, name))
+        info = self.network_info(name)
+        if info is None:
+            raise EngineCommandError(f"attempt network {name!r} is absent right after creation")
+        if not info.internal:
             raise MissingPrerequisiteError(
-                f"runner network {name!r} exists but is not internal; refusing to attach a worker",
+                f"attempt network {name!r} is not internal; refusing to attach a worker",
                 details={"network": name},
             )
+        return info
+
+    def remove_attempt_network(self, name: str) -> None:
+        """Disconnect whatever is still attached to attempt network ``name`` and remove it.
+
+        Idempotent: an absent network is not an error. Only a network that carries the attempt
+        label is touched; any other network of that name is refused.
+        """
+        info = self.network_info(name)
+        if info is None:
+            return
+        if ATTEMPT_NETWORK_LABEL not in info.labels:
+            raise MissingPrerequisiteError(
+                f"a network named {name!r} exists but is not an attempt network; refusing to "
+                "remove it",
+                details={"network": name},
+            )
+        for container in info.containers:
+            self.disconnect_network(name, container, force=True)
+        self.remove_network(name)
+
+    def remove_network(self, name: str) -> None:
+        """Remove network ``name`` (no attached container may remain); an absent one is fine."""
+        completed = self.run_cli(("network", "rm", name), timeout=_COMMAND_TIMEOUT_SECONDS)
+        if completed.returncode != 0:
+            failure = self._failure(("network", "rm", name), completed)
+            if not isinstance(failure, ObjectNotFoundError):
+                raise failure
+
+    def list_attempt_networks(self) -> tuple[str, ...]:
+        """Names of every attempt network the runner created (whatever its attempt's state)."""
+        completed = self._checked(
+            (
+                "network",
+                "ls",
+                "--filter",
+                f"label={ATTEMPT_NETWORK_LABEL}",
+                "--format",
+                "{{.Name}}",
+            )
+        )
+        return tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+
+    def connect_network(self, network: str, container: str, *, alias: str | None = None) -> None:
+        """Attach ``container`` to ``network`` (optionally under a DNS alias)."""
+        arguments = ["network", "connect"]
+        if alias is not None:
+            arguments += ["--alias", alias]
+        self._checked((*arguments, network, container))
+
+    def disconnect_network(self, network: str, container: str, *, force: bool = False) -> None:
+        """Detach ``container`` from ``network``; one that is not attached (or gone) is fine."""
+        arguments = ["network", "disconnect", *(("--force",) if force else ())]
+        completed = self.run_cli((*arguments, network, container), timeout=_COMMAND_TIMEOUT_SECONDS)
+        if completed.returncode == 0:
+            return
+        failure = self._failure(arguments, completed)
+        stderr = completed.stderr.lower()
+        if isinstance(failure, ObjectNotFoundError) or "is not connected" in stderr:
+            return
+        raise failure
 
     # --- images and containers ------------------------------------------------------
 

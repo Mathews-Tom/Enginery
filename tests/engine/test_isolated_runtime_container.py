@@ -23,9 +23,9 @@ import pytest
 
 from enginery.adapters.oci.engine import EngineCommandError, OciEngine
 from enginery.adapters.oci.image import verify_image
+from enginery.adapters.oci.launch import container_name_for
 from enginery.adapters.runner_launch import (
     isolated_command,
-    runner_container_name,
     runner_receipt_path,
     worker_environment,
 )
@@ -113,7 +113,7 @@ def test_a_container_commits_on_a_branch_and_the_host_verifies_and_cleans_it(
         receipt_root=str(receipts),
     )
     operation_id = f"test-{uuid.uuid4().hex[:12]}"
-    container = runner_container_name(operation_id)
+    container = container_name_for(operation_id)
     workspace = root / "workspaces" / "run-1"
     task = harness_task(
         workspace,
@@ -177,7 +177,8 @@ def test_a_container_commits_on_a_branch_and_the_host_verifies_and_cleans_it(
         assert receipt.container_name == container
         assert receipt.image.image_id == image_id
         assert receipt.profile_digest == profile.digest
-        assert profile_violations(profile, receipt.effective) == ()
+        assert profile_violations(profile, receipt.effective, network="none") == ()
+        assert receipt.effective.networks == ("none",)
         # The worker's own result and its bundle are in the out directory, not the workspace.
         result = json.loads((out_path_for(workspace) / "result.json").read_text(encoding="utf-8"))
         assert result["terminal_status"] == "succeeded"

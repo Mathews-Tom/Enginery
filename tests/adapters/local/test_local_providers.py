@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from tests.support.execution import selection_for
 
 from enginery.adapters.local import (
@@ -11,6 +14,7 @@ from enginery.adapters.local import (
     LocalGit,
     LocalPublication,
     LocalValidation,
+    LocalWorkspace,
     ScriptedHarness,
 )
 from enginery.application.adapter_types import AdapterEventKind, NormalizedAdapterEvent
@@ -22,7 +26,7 @@ from enginery.application.delivery_ports import (
     ValidationRequest,
     ValidationStatus,
 )
-from enginery.application.work_ports import HarnessTask
+from enginery.application.work_ports import HarnessTask, WorkspaceHandle, WorkspaceRequest
 from enginery.domain.digests import Digest
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
@@ -146,6 +150,60 @@ def test_local_publication_requires_destination_verification(tmp_path: Path) -> 
         publisher.reconcile(operation_id=request.operation_id)
         is ReconciliationResult.FOUND_MATCHING
     )
+
+
+def _repository(path: Path) -> tuple[Path, str]:
+    path.mkdir()
+    env = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=path, env=env, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    (path / "README").write_text("fixture\n", encoding="utf-8")
+    git("add", "README")
+    git("commit", "-q", "-m", "fixture")
+    return path, git("rev-parse", "HEAD")
+
+
+def test_a_local_workspace_carries_no_environment_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, base = _repository(tmp_path / "repository")
+    monkeypatch.setenv("GH_TOKEN", "must-never-be-copied")
+    workspaces = LocalWorkspace(tmp_path / "workspaces")
+
+    handle = workspaces.create(
+        WorkspaceRequest(
+            run_id=RunId("run-1"),
+            repository_id="org/repo",
+            repository_path=repository,
+            base_revision=base,
+            operation_id=OperationId("op-workspace-env"),
+        )
+    )
+
+    assert handle.path.is_dir()
+    assert "GH_TOKEN" not in repr(handle)
+    workspaces.cleanup(handle, operation_id=OperationId("op-workspace-env-cleanup"))
+
+
+def test_the_launch_environment_has_one_allowlist_and_a_workspace_request_has_no_second_one() -> (
+    None
+):
+    request_fields = {field.name for field in dataclasses.fields(WorkspaceRequest)}
+    handle_fields = {field.name for field in dataclasses.fields(WorkspaceHandle)}
+
+    assert "permitted_environment_keys" not in request_fields
+    assert "environment" not in handle_fields
 
 
 def test_deployment_fixture_rolls_back_known_receipt() -> None:

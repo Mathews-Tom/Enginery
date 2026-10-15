@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from enginery.application.worker_environment import build_worker_environment
 from enginery.domain.errors import (
     ExternalConflictError,
     InternalInvariantViolationError,
@@ -17,6 +19,7 @@ from enginery.domain.workflow.manifest import WorkflowManifest
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.coordinator import CommandConsumption, Coordinator, CoordinatorEpoch
 from enginery.engine.leases import FencedNodeLease, FencedNodeLeases
+from enginery.engine.operator_control import require_dispatch_allowed
 from enginery.engine.recovery import GONE, RecoveryCoordinator, WorkerLiveness, assess_worker
 from enginery.engine.results import WorkerResultEnvelope
 from enginery.engine.scheduler import (
@@ -40,10 +43,22 @@ from enginery.ledger.service import LedgerService
 RUNTIME_NODE_AGGREGATE_TYPE = "runtime_node"
 RUN_AGGREGATE_TYPE = "run"
 
+BRANCH_PUBLICATION_WORKER = "worker"
+BRANCH_PUBLICATION_OPERATOR = "operator"
+BRANCH_PUBLICATIONS = frozenset({BRANCH_PUBLICATION_WORKER, BRANCH_PUBLICATION_OPERATOR})
+"""Who publishes the implemented branch: the worker pushes it (the contract a run persisted
+before operator publication keeps) or the operator publishes the verified branch."""
+
 
 @dataclass(frozen=True, slots=True)
 class FixtureDispatch:
-    """One durable, provider-neutral fixture-node execution request."""
+    """One durable, provider-neutral fixture-node execution request.
+
+    ``environment_keys`` is the allowlist of host variables the launched worker process receives
+    (``None``: the legacy path, which inherits the coordinator's ambient environment).
+    ``branch_publication`` says who pushes the implemented branch, which decides whether
+    verifying it requires the branch on the remote.
+    """
 
     run_id: str
     node_id: str
@@ -60,6 +75,8 @@ class FixtureDispatch:
     retain_workspace: bool = False
     log_directory: Path | None = None
     workspace_mode: str = WORKSPACE_MODE_GIT_WORKTREE
+    environment_keys: tuple[str, ...] | None = None
+    branch_publication: str = BRANCH_PUBLICATION_WORKER
 
     def __post_init__(self) -> None:
         if not all(
@@ -84,6 +101,10 @@ class FixtureDispatch:
             raise InvalidInputError("workflow definition id must be non-blank when present")
         if self.workspace_mode not in WORKSPACE_MODES:
             raise InvalidInputError("fixture dispatch workspace mode is not supported")
+        if self.environment_keys is not None:
+            build_worker_environment({}, self.environment_keys)
+        if self.branch_publication not in BRANCH_PUBLICATIONS:
+            raise InvalidInputError("fixture dispatch branch publication is not supported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +175,7 @@ class FixtureRuntime:
         fault_hook: Callable[[str], None] | None = None,
     ) -> None:
         self._fault_hook = fault_hook
+        self._ledger = ledger
         self._leases = FencedNodeLeases(ledger, coordinator)
         self._supervisor = WorkerSupervisor(ledger, coordinator, fault_hook=fault_hook)
         self._workspaces = GitWorktreeBackend(ledger, coordinator, fault_hook=fault_hook)
@@ -166,6 +188,7 @@ class FixtureRuntime:
         now: datetime,
         lease_window: timedelta,
     ) -> DispatchedFixture:
+        require_dispatch_allowed(self._ledger)
         reservation = self._workspaces.reserve(
             repository_id=request.repository_id,
             run_id=request.run_id,
@@ -191,6 +214,11 @@ class FixtureRuntime:
             operation_id=request.operation_id,
         )
         self._fault("lease_granted")
+        environment = (
+            None
+            if request.environment_keys is None
+            else build_worker_environment(os.environ, request.environment_keys)
+        )
         identity = self._supervisor.start(
             lease=lease,
             command=request.command,
@@ -202,6 +230,7 @@ class FixtureRuntime:
                 else request.log_directory
                 / f"{request.run_id}-{request.node_id}-{request.attempt_id}.stderr.log"
             ),
+            environment=environment,
         )
         return DispatchedFixture(lease=lease, identity=identity, workspace=reservation)
 
@@ -339,7 +368,14 @@ class CoordinatorRuntime:
         dispatch: WorkflowNodeDispatch,
         now: datetime,
         heartbeat_window: timedelta,
+        extra: Mapping[str, object] | None = None,
     ) -> CoordinatorEpoch:
+        """Register a node, or replace a terminal one, carrying ``extra`` on the fresh state.
+
+        ``extra`` is written in the same event that queues the node, so a crash can never leave
+        a node queued without what the caller meant it to carry. It has no effect when the node
+        is already registered with this exact request.
+        """
         self._require_completed_dependencies(dispatch.request)
         epoch = self._acquire_or_renew(now=now, heartbeat_window=heartbeat_window)
         self._register(
@@ -347,6 +383,7 @@ class CoordinatorRuntime:
             actor_type=dispatch.actor_type,
             epoch=epoch.epoch,
             now=now,
+            extra=extra,
         )
         return epoch
 
@@ -641,10 +678,19 @@ class CoordinatorRuntime:
             self._workspaces.cleanup(reservation, epoch=epoch.epoch, now=now)
 
     def verify_implementation_branch(self, *, run_id: str, head_branch: str) -> str:
-        """Verify the retained implementation workspace is ready for its configured PR branch."""
+        """Verify the retained implementation workspace is ready for its configured PR branch.
+
+        A run whose worker pushes its own branch must find it on the remote. A run whose
+        operator publishes the verified branch has no remote branch yet: that is the point,
+        and the remote is not consulted.
+        """
         request = self._request_for(run_id, "implement")
         reservation = self._require_workspace(request)
-        return self._workspaces.verify_implementation_branch(reservation, head_branch=head_branch)
+        return self._workspaces.verify_implementation_branch(
+            reservation,
+            head_branch=head_branch,
+            require_remote=request.branch_publication == BRANCH_PUBLICATION_WORKER,
+        )
 
     def release_workspace(
         self,
@@ -1018,6 +1064,7 @@ class CoordinatorRuntime:
         actor_type: ActorType,
         epoch: int,
         now: datetime,
+        extra: Mapping[str, object] | None = None,
     ) -> None:
         projection = self._ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
@@ -1067,12 +1114,18 @@ class CoordinatorRuntime:
                 ):
                     self._workspaces.resume(reservation, epoch=epoch, now=now)
             self._replace_request(
-                request=request, epoch=epoch, now=now, event_type="runtime_node.retried"
+                request=request,
+                epoch=epoch,
+                now=now,
+                event_type="runtime_node.retried",
+                extra=extra,
             )
             self._fault("node_retried")
             return
         state = _request_state(request, status="queued", actor_type=actor_type)
         state["queued_at"] = now.isoformat()
+        if extra is not None:
+            state.update(extra)
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"runtime-node-register:{_node_id(request)}",
@@ -1155,7 +1208,13 @@ class CoordinatorRuntime:
         )
 
     def _replace_request(
-        self, *, request: FixtureDispatch, epoch: int, now: datetime, event_type: str
+        self,
+        *,
+        request: FixtureDispatch,
+        epoch: int,
+        now: datetime,
+        event_type: str,
+        extra: Mapping[str, object] | None = None,
     ) -> None:
         projection = self._ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=_node_id(request)
@@ -1168,6 +1227,8 @@ class CoordinatorRuntime:
             actor_type=_actor_type_from_state(projection.state),
         )
         state["queued_at"] = now.isoformat()
+        if extra is not None:
+            state.update(extra)
         self._ledger.append(
             AppendCommand(
                 correlation_id=f"{event_type}:{_node_id(request)}:{request.attempt_id}",
@@ -1327,6 +1388,13 @@ def _request_state(
         # A request persisted before workspace modes existed has no key and decodes as a
         # git worktree, so its stored state is exactly what it was.
         state["workspace_mode"] = request.workspace_mode
+    if request.environment_keys is not None:
+        # A request persisted before environment allowlists existed has no key and decodes as
+        # the legacy ambient-inheritance launch, so its stored state is exactly what it was.
+        state["environment_keys"] = list(request.environment_keys)
+    if request.branch_publication != BRANCH_PUBLICATION_WORKER:
+        # Likewise a request persisted before operator publication decodes as worker-pushes.
+        state["branch_publication"] = request.branch_publication
     return state
 
 
@@ -1353,6 +1421,17 @@ def _request_from_state(state: object) -> FixtureDispatch:
     workspace_mode = state.get("workspace_mode", WORKSPACE_MODE_GIT_WORKTREE)
     if not isinstance(workspace_mode, str) or workspace_mode not in WORKSPACE_MODES:
         raise InternalInvariantViolationError("runtime node state has invalid workspace mode")
+    raw_environment_keys = state.get("environment_keys")
+    environment_keys: tuple[str, ...] | None = None
+    if raw_environment_keys is not None:
+        if not isinstance(raw_environment_keys, list) or not all(
+            isinstance(key, str) for key in raw_environment_keys
+        ):
+            raise InternalInvariantViolationError("runtime node state has invalid environment keys")
+        environment_keys = tuple(raw_environment_keys)
+    branch_publication = state.get("branch_publication", BRANCH_PUBLICATION_WORKER)
+    if not isinstance(branch_publication, str) or branch_publication not in BRANCH_PUBLICATIONS:
+        raise InternalInvariantViolationError("runtime node state has invalid branch publication")
     workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
@@ -1394,6 +1473,8 @@ def _request_from_state(state: object) -> FixtureDispatch:
         retain_workspace=retain_workspace,
         log_directory=Path(log_directory) if log_directory is not None else None,
         workspace_mode=workspace_mode,
+        environment_keys=environment_keys,
+        branch_publication=branch_publication,
     )
 
 

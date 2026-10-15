@@ -700,7 +700,7 @@ def _runner_legacy(request: Stage1RunRequest) -> Stage1RunRequest:
 
 def _isolated(request: Stage1RunRequest) -> Stage1RunRequest:
     selection = RunnerSelection.isolated(image="sha256:" + "a" * 64, profile=RunnerProfile())
-    return replace(request, runner=selection)
+    return replace(request, runner=selection, validation_commands=(("python3", "-m", "unittest"),))
 
 
 def test_a_request_state_without_a_runner_decodes_as_legacy_and_keeps_its_digest(

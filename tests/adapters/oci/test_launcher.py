@@ -39,7 +39,9 @@ from enginery.adapters.oci.launcher import (
 from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.runner import (
     ImageIdentity,
+    LaunchOutcome,
     LaunchSpec,
+    OutcomeState,
     ResourceLimits,
     RunnerProfile,
     RunnerReceipt,
@@ -56,6 +58,7 @@ from .support import (
     PERMISSIONS,
     PERMISSIONS_WITHOUT_ARGUMENTS,
     FakeDocker,
+    FakeNetwork,
     host_probe,
     image_identity,
     make_spec,
@@ -108,15 +111,13 @@ def test_a_successful_run_qualifies_creates_checks_records_starts_waits_and_remo
     assert fake_docker.verbs == [
         "info",
         "info",
-        "network inspect",
-        "network create",
-        "network inspect",
         "container inspect",
         "container inspect",
         "volume rm",
         "volume rm",
         "ps",
         "volume ls",
+        "network ls",
         "create",
         "volume inspect",
         "volume inspect",
@@ -137,7 +138,333 @@ def test_a_successful_run_qualifies_creates_checks_records_starts_waits_and_remo
         "volume rm",
     ]
     assert fake_docker.containers == {}
-    assert fake_docker.networks == {spec.profile.network: True}
+    # No relay was asked for: the worker ran with no network, and no network was ever created.
+    assert fake_docker.networks == {}
+    assert fake_docker.calls_of("network create") == []
+    assert fake_docker.calls_of("network connect") == []
+
+
+def _attempt_launch(
+    tmp_path: Path, fake: FakeDocker, *, operation_id: str = "op-1", **kwargs: Any
+) -> tuple[LaunchSpec, int, str]:
+    spec = make_spec(tmp_path, operation_id=operation_id, relay_container="enginery-relay")
+    code, stderr = _launch(spec, fake, **kwargs)
+    return spec, code, stderr
+
+
+def _relay_networks(fake: FakeDocker) -> list[str]:
+    document = fake.containers["enginery-relay"].inspect
+    return sorted(document["NetworkSettings"]["Networks"])
+
+
+def _started(fake: FakeDocker) -> list[str]:
+    """Names of the containers the launcher started, in order (the store one first, to seed)."""
+    return [call[1] for call in fake.calls_of("start")]
+
+
+def test_a_worker_with_model_access_gets_its_own_network_with_only_the_relay_attached(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    spec = make_spec(tmp_path, relay_container="enginery-relay")
+    network = spec.attempt_network
+    seen: dict[str, Any] = {}
+
+    def at_start(args: tuple[str, ...]) -> None:
+        if args[-1] != spec.container_name:  # the store container starts first, for seeding
+            return
+        seen["members"] = fake_docker.network_members(network)
+        seen["labels"] = dict(fake_docker.networks[network].labels)
+        seen["internal"] = fake_docker.networks[network].internal
+        seen["relay_networks"] = _relay_networks(fake_docker)
+        endpoints = fake_docker.containers["enginery-relay"].inspect["NetworkSettings"]
+        seen["relay_aliases"] = endpoints["Networks"][network]["Aliases"]
+        seen["receipt_present"] = os.path.exists(spec.receipt_path)
+
+    fake_docker.hooks["start"] = at_start
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == 0, stderr
+    assert network.startswith(f"{spec.profile.network}-")
+    # When the worker is started: its own internal network, labelled for this operation and
+    # this launcher, with the relay (reachable as ``enginery-relay``) as its only member.
+    assert seen["internal"] is True
+    assert seen["labels"]["dev.enginery.attempt-network"] == "op-1"
+    assert "dev.enginery.launcher" in seen["labels"]
+    assert seen["members"] == ["enginery-relay"]
+    assert seen["relay_networks"] == sorted(["enginery-runner-egress", network])
+    assert seen["relay_aliases"][0] == "enginery-relay"
+    # The receipt, written before the start, records exactly that network.
+    assert seen["receipt_present"] is True
+    receipt = _receipt(spec)
+    assert receipt.effective.network_mode == network
+    assert receipt.effective.networks == (network,)
+    assert profile_violations(spec.profile, receipt.effective, network=network) == ()
+    # At the end the relay left the network, the network is gone and the relay is untouched.
+    assert fake_docker.networks == {}
+    assert _relay_networks(fake_docker) == ["enginery-runner-egress"]
+    assert fake_docker.containers["enginery-relay"].state == "running"
+
+
+def test_a_worker_with_model_access_is_launched_in_the_order_network_connect_start_release(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+
+    _, code, stderr = _attempt_launch(tmp_path, fake_docker)
+
+    assert code == 0, stderr
+    assert fake_docker.verbs == [
+        "info",
+        "info",
+        "container inspect",
+        "container inspect",
+        "volume rm",
+        "volume rm",
+        "ps",
+        "volume ls",
+        "network ls",
+        "network inspect",
+        "network create",
+        "network inspect",
+        "create",
+        "volume inspect",
+        "volume inspect",
+        "container inspect",
+        "image inspect",
+        "start",
+        "cp",
+        "create",
+        "container inspect",
+        "image inspect",
+        "container inspect",
+        "network connect",
+        "network inspect",
+        "start",
+        "wait",
+        "cp",
+        "cp",
+        "rm",
+        "network disconnect",
+        "network inspect",
+        "network rm",
+        "rm",
+        "volume rm",
+        "volume rm",
+    ]
+    (connect,) = fake_docker.calls_of("network connect")
+    assert connect[:3] == ("network", "connect", "--alias")
+    assert connect[3] == "enginery-relay"
+    assert connect[-1] == "enginery-relay"
+
+
+def test_a_worker_without_model_access_never_meets_the_relay(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    spec = make_spec(tmp_path)
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == 0, stderr
+    assert fake_docker.calls_of("network create") == []
+    assert fake_docker.calls_of("network connect") == []
+    store, worker = fake_docker.calls_of("create")
+    assert store[store.index("--network") + 1] == "none"
+    assert worker[worker.index("--network") + 1] == "none"
+    assert _relay_networks(fake_docker) == ["enginery-runner-egress"]
+
+
+def test_two_concurrent_attempts_get_two_networks_and_the_relay_is_on_both(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    fake_docker.hold_running = True
+    roots = (tmp_path / "a", tmp_path / "b")
+    for root in roots:
+        root.mkdir(mode=0o700)
+    first = make_spec(roots[0], operation_id="op-a", relay_container="enginery-relay")
+    second = make_spec(roots[1], operation_id="op-b", relay_container="enginery-relay")
+    stops = (StopSignal(), StopSignal())
+    results: dict[str, tuple[int, str]] = {}
+
+    def run(spec: LaunchSpec, stop: StopSignal) -> None:
+        results[spec.operation_id] = _launch(spec, fake_docker, stop=stop)
+
+    threads = [
+        threading.Thread(target=run, args=(spec, stop))
+        for spec, stop in zip((first, second), stops, strict=True)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not all(
+            spec.container_name in fake_docker.containers
+            and fake_docker.containers[spec.container_name].state == "running"
+            for spec in (first, second)
+        ):
+            time.sleep(0.01)
+        assert first.attempt_network != second.attempt_network
+        assert set(fake_docker.networks) == {first.attempt_network, second.attempt_network}
+        # Each network holds exactly its own worker and the relay, never the other worker.
+        assert fake_docker.network_members(first.attempt_network) == sorted(
+            [first.container_name, "enginery-relay"]
+        )
+        assert fake_docker.network_members(second.attempt_network) == sorted(
+            [second.container_name, "enginery-relay"]
+        )
+    finally:
+        for stop in stops:
+            stop.request(15)
+        for thread in threads:
+            thread.join(timeout=15)
+
+    assert {code for code, _ in results.values()} == {128 + 15}
+    assert fake_docker.networks == {}
+    assert _relay_networks(fake_docker) == ["enginery-runner-egress"]
+
+
+@pytest.mark.parametrize(
+    ("relay", "message"),
+    [
+        (None, "does not exist"),
+        ({"running": False}, "not running"),
+        ({"restarting": True}, "not running"),
+    ],
+)
+def test_a_relay_that_cannot_be_attached_refuses_the_launch_and_cleans_up(
+    fake_docker: FakeDocker, tmp_path: Path, relay: dict[str, bool] | None, message: str
+) -> None:
+    if relay is not None:
+        fake_docker.add_relay(**relay)
+
+    spec, code, stderr = _attempt_launch(tmp_path, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "cannot be attached to the attempt's network" in stderr
+    assert message in stderr
+    assert _started(fake_docker) == [store_names_for(spec.container_name).holder]
+    assert fake_docker.containers.keys() <= {"enginery-relay"}
+    assert fake_docker.networks == {}
+    assert not os.path.lexists(spec.receipt_path)
+    outcome = LaunchOutcome.from_state(
+        json.loads(Path(outcome_path_for(spec.receipt_path)).read_text("utf-8"))
+    )
+    assert outcome.state is OutcomeState.REFUSED
+
+
+def test_a_container_that_is_not_the_relay_is_never_attached(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    fake_docker.containers["enginery-relay"].inspect["Config"]["Labels"] = {}
+
+    _, code, stderr = _attempt_launch(tmp_path, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "exists but is not the relay" in stderr
+    assert "network connect" not in fake_docker.verbs
+    assert fake_docker.networks == {}
+
+
+def test_an_attempt_network_shared_with_anything_but_the_relay_is_refused_before_the_start(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    spec = make_spec(tmp_path, relay_container="enginery-relay")
+
+    def intruder(args: tuple[str, ...]) -> None:
+        # Another container joins the attempt's network right after the relay was connected.
+        members = fake_docker.network_members(spec.attempt_network)
+        joined = spec.attempt_network in fake_docker.networks and members == ["enginery-relay"]
+        if joined and "intruder" not in fake_docker.containers:
+            fake_docker.add_relay("intruder")
+            endpoints = fake_docker.containers["intruder"].inspect["NetworkSettings"]
+            endpoints["Networks"][spec.attempt_network] = {}
+
+    fake_docker.hooks["network inspect"] = intruder
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == EXIT_FAULT
+    assert "members beyond the relay" in stderr
+    assert _started(fake_docker) == [store_names_for(spec.container_name).holder]
+    assert fake_docker.networks == {}
+
+
+def test_a_launch_that_is_stopped_releases_the_relay_and_the_network(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    fake_docker.hold_running = True
+    stop = StopSignal()
+    _stop_after_start(fake_docker, stop, 15)
+
+    _, code, _ = _attempt_launch(tmp_path, fake_docker, stop=stop)
+
+    assert code == 128 + 15
+    assert fake_docker.containers.keys() == {"enginery-relay"}
+    assert fake_docker.networks == {}
+    assert _relay_networks(fake_docker) == ["enginery-runner-egress"]
+
+
+def test_a_network_that_cannot_be_removed_is_reported_and_left_for_reconcile(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    fake_docker.failures["network rm"] = (1, "Error response from daemon: boom")
+
+    spec, code, stderr = _attempt_launch(tmp_path, fake_docker)
+
+    assert code == 0  # the worker's own status is untouched
+    assert "the attempt network could not be removed" in stderr
+    assert spec.attempt_network in fake_docker.networks
+    assert fake_docker.network_members(spec.attempt_network) == []  # the relay did detach
+
+
+def test_the_network_of_an_earlier_attempt_of_the_same_operation_is_replaced(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    spec = make_spec(tmp_path, relay_container="enginery-relay")
+    fake_docker.engine().create_attempt_network(spec.attempt_network, operation_id="op-1")
+    fake_docker.engine().connect_network(spec.attempt_network, "enginery-relay")
+
+    code, stderr = _launch(spec, fake_docker)
+
+    assert code == 0, stderr
+    assert len(fake_docker.calls_of("network create")) == 2
+    assert fake_docker.networks == {}
+
+
+def test_the_launcher_removes_an_orphaned_attempt_network_before_it_starts(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    fake_docker.add_relay()
+    here = probe_host()
+    dead = {
+        "dev.enginery.attempt-network": "op-dead",
+        "dev.enginery.launcher": json.dumps(
+            {
+                "pid": 1,
+                "pgid": 1,
+                "start": "gone",
+                "machine": here.machine_id,
+                "boot": "an-earlier-boot",
+            }
+        ),
+    }
+    fake_docker.networks["enginery-runner-internal-dead"] = FakeNetwork(internal=True, labels=dead)
+    fake_docker.engine().connect_network("enginery-runner-internal-dead", "enginery-relay")
+
+    spec, code, stderr = _attempt_launch(tmp_path, fake_docker)
+
+    assert code == 0, stderr
+    assert "removed an orphaned attempt network whose launcher is gone" in stderr
+    assert fake_docker.networks == {}
+    assert spec.attempt_network != "enginery-runner-internal-dead"
 
 
 def test_the_receipt_records_what_the_engine_reported_and_is_written_before_the_start(
@@ -172,7 +499,9 @@ def test_the_receipt_records_what_the_engine_reported_and_is_written_before_the_
     assert receipt.permissions == PERMISSIONS
     assert receipt.harness_version is None and receipt.harness_protocol is None
     assert receipt.started_at == "2026-10-13T12:30:05Z"
-    assert profile_violations(spec.profile, receipt.effective) == ()
+    assert profile_violations(spec.profile, receipt.effective, network="none") == ()
+    assert receipt.effective.network_mode == "none"
+    assert receipt.effective.networks == ("none",)
     assert receipt.effective.env_keys == ("ANTHROPIC_AUTH_TOKEN",)
     # Environment keys are recorded, values never, anywhere the launcher writes.
     assert "dummy-credential-4f8a91c2" not in Path(spec.receipt_path).read_text("utf-8")
@@ -205,7 +534,7 @@ def test_the_launcher_asks_the_engine_for_the_exact_hardened_container(
     assert store[0] == worker[0] == "create"
     assert store[store.index("--name") + 1] == f"{spec.container_name}-store"
     assert worker[worker.index("--name") + 1] == spec.container_name
-    assert worker[worker.index("--network") + 1] == spec.profile.network
+    assert worker[worker.index("--network") + 1] == "none"
     assert store[store.index("--network") + 1] == "none"
     assert worker[worker.index(spec.image) :][:3] == (
         spec.image,
@@ -221,8 +550,7 @@ def test_every_engine_command_runs_under_the_engines_context_and_the_receipt_rec
     contexts: list[str | None] = []
     for verb in (
         "info",
-        "network inspect",
-        "network create",
+        "network ls",
         "container inspect",
         "volume inspect",
         "volume rm",
@@ -571,7 +899,7 @@ def _set_host(change: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
         (_set_host({"NanoCpus": 0}), "cpu limit is not the profile limit"),
         (_set_host({"PidsLimit": None}), "pids limit is not the profile limit"),
         (_set_host({"SecurityOpt": None}), "security option 'no-new-privileges' is not set"),
-        (_set_host({"NetworkMode": "bridge"}), "not attached only to the internal runner network"),
+        (_set_host({"NetworkMode": "bridge"}), "attached only to the network 'none'"),
         (
             _set_host({"Devices": [{"PathOnHost": "/dev/kvm", "PathInContainer": "/dev/kvm"}]}),
             "host devices",
@@ -755,17 +1083,20 @@ def test_a_verifier_that_answers_for_another_image_is_refused(
     assert "create" not in fake_docker.verbs
 
 
-def test_an_internal_network_that_is_not_internal_is_refused(
+def test_an_attempt_network_the_engine_made_routable_is_refused_before_any_container(
     fake_docker: FakeDocker, tmp_path: Path
 ) -> None:
-    spec = make_spec(tmp_path)
-    fake_docker.networks[spec.profile.network] = False
+    spec = make_spec(tmp_path, relay_container="enginery-relay")
+    fake_docker.add_relay()
+    fake_docker.honor_internal = False  # the engine hands back a network that is not internal
 
     code, stderr = _launch(spec, fake_docker)
 
     assert code == EXIT_FAULT
     assert "not internal" in stderr
     assert "create" not in fake_docker.verbs
+    assert "network connect" not in fake_docker.verbs
+    assert spec.attempt_network not in fake_docker.networks  # and it is cleaned up again
 
 
 def test_an_environment_key_outside_the_allowlist_is_refused_without_contacting_the_engine(
@@ -1258,7 +1589,8 @@ def test_real_launch_runs_the_worker_records_the_receipt_and_removes_the_contain
     assert receipt.engine == real_engine.qualify()
     assert receipt.image.image_id == standin_image
     assert receipt.host["machine_id"] == probe_host().machine_id
-    assert profile_violations(real_profile, receipt.effective) == ()
+    assert profile_violations(real_profile, receipt.effective, network="none") == ()
+    assert receipt.effective.networks == ("none",)
     assert stat.S_IMODE(Path(spec.receipt_path).stat().st_mode) == 0o600
     assert real_engine.container_exists(spec.container_name) is False
     # The host can delete everything the worker made.
@@ -1290,24 +1622,38 @@ def test_real_launch_returns_the_workers_exit_status(
     assert real_engine.container_exists(spec.container_name) is False
 
 
-def test_real_launch_refuses_an_engine_that_would_attach_a_container_to_an_open_network(
+def test_real_launch_never_touches_or_attaches_to_a_same_named_network_it_did_not_create(
     real_engine: OciEngine,
     real_profile: RunnerProfile,
     real_operation: Callable[[], str],
     standin_image: str,
     real_root: Path,
 ) -> None:
-    created = real_engine.run_cli(("network", "create", real_profile.network))
+    spec = _real_spec(
+        real_root,
+        real_operation(),
+        standin_image,
+        real_profile,
+        relay_container="enginery-relay-test-absent",
+    )
+    # A routable network that carries the name this attempt's network would get.
+    created = real_engine.run_cli(("network", "create", spec.attempt_network))
     assert created.returncode == 0, created.stderr
-    spec = _real_spec(real_root, real_operation(), standin_image, real_profile)
-    stream = io.StringIO()
+    try:
+        stream = io.StringIO()
 
-    code = run_launcher(spec, INNER, engine=real_engine, verify=_standin_verifier, stderr=stream)
+        code = run_launcher(
+            spec, INNER, engine=real_engine, verify=_standin_verifier, stderr=stream
+        )
 
-    assert code == EXIT_FAULT
-    assert "not internal" in stream.getvalue()
-    assert real_engine.container_exists(spec.container_name) is False
-    assert not os.path.lexists(spec.receipt_path)
+        assert code == EXIT_FAULT
+        assert "not an attempt network" in stream.getvalue()
+        assert real_engine.container_exists(spec.container_name) is False
+        assert not os.path.lexists(spec.receipt_path)
+        # The network the launcher did not create is left exactly as it was.
+        assert real_engine.network_info(spec.attempt_network) is not None
+    finally:
+        real_engine.run_cli(("network", "rm", spec.attempt_network))
 
 
 def test_real_hard_deadline_kills_a_worker_that_ignores_its_own_deadline(

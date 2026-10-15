@@ -68,6 +68,16 @@ def container_name_for(operation_id: str) -> str:
     return f"{_CONTAINER_NAME_PREFIX}{digest[:_NAME_DIGEST_CHARS]}"
 
 
+def worker_container_gone(engine: OciEngine, operation_id: str) -> bool:
+    """Whether an operation's worker container no longer exists, running or not.
+
+    The one container lookup shared by recovery's proof that a worker is gone and by the
+    operator's drain, so both ask the engine about exactly the same name. An engine that
+    cannot be reached raises rather than answering.
+    """
+    return not engine.container_exists(container_name_for(operation_id))
+
+
 def _cpus(nano_cpus: int) -> str:
     """Exact decimal text of a cpu count, which the engine converts back to ``nano_cpus``."""
     whole, fraction = divmod(nano_cpus, _NANOS)
@@ -367,7 +377,8 @@ def create_arguments(
     Excludes the ``docker`` executable and ``--context``. The environment is exactly
     ``spec.env``, re-checked here against the profile allowlist; nothing is inherited. When
     ``launcher`` is given, the container is labelled with that process so a later reconcile can
-    tell a live attempt from one whose launcher died.
+    tell a live attempt from one whose launcher died. The container joins exactly
+    ``spec.attempt_network`` (its own internal network, or ``none``), never a shared one.
     """
     expected_name = container_name_for(spec.operation_id)
     if spec.container_name != expected_name:
@@ -384,7 +395,7 @@ def create_arguments(
     )
     return (
         "create",
-        *hardening_arguments(spec.profile, network=spec.profile.network),
+        *hardening_arguments(spec.profile, network=spec.attempt_network),
         "--mount",
         _joining_mount(names.workspace_volume, WORKSPACE_MOUNT),
         "--mount",
@@ -685,6 +696,7 @@ def launch_violations(spec: LaunchSpec, container: Mapping[str, object]) -> tupl
         ("DeviceCgroupRules", "device cgroup rules"),
         ("PortBindings", "published ports"),
         ("Sysctls", "sysctls"),
+        ("ExtraHosts", "extra host entries"),
     ):
         if host.get(key):
             problems.append(f"container has {label}")

@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import pytest
 
-from enginery.adapters.runner_launch import runner_container_name
+from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import stage1, stage1_runner
 from enginery.domain.runner import RunnerSelection
 from enginery.ledger.service import LedgerService
@@ -43,7 +43,7 @@ def test_a_trusted_local_run_has_no_container_lookup() -> None:
 def test_an_isolated_runs_lookup_reports_the_named_container_present_or_gone() -> None:
     gone = stage1_runner.container_gone_for(_isolated())
     assert gone is not None
-    _StubEngine.existing = {runner_container_name("operation-1")}
+    _StubEngine.existing = {container_name_for("operation-1")}
 
     assert gone("operation-1") is False
     assert gone("operation-2") is True
@@ -60,7 +60,7 @@ def test_the_runtime_for_an_isolated_run_is_wired_with_the_engine_lookup(
     )
 
     assert runtime._container_gone is not None
-    _StubEngine.existing = {runner_container_name("operation-9")}
+    _StubEngine.existing = {container_name_for("operation-9")}
     assert runtime._container_gone("operation-9") is False
 
 

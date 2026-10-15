@@ -17,7 +17,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import RunnerSelection
+from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.ledger.service import LedgerService
@@ -459,7 +459,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-stage1"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -586,3 +586,48 @@ def test_a_host_default_run_is_never_probed_by_read_only_diagnostics(
     watched = json.loads(capsys.readouterr().out)
     assert watched["next_action"] == "qualify"
     assert watched["hold"] is None
+
+
+def test_watch_reports_a_new_runs_absent_cost_budget_as_unenforced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(_request(tmp_path).initial_state()), encoding="utf-8")
+    assert _start(database, request_path) == 0
+    capsys.readouterr()
+
+    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+
+    assert json.loads(capsys.readouterr().out)["cost_budget"] == {"value": None, "enforced": False}
+
+
+def test_watch_never_presents_a_legacy_carried_dollar_number_as_enforcement(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    request = _request(tmp_path)
+    legacy = replace(
+        request,
+        runner=LEGACY_RUNNER_SELECTION,
+        implementation=replace(request.implementation, cost_budget=Decimal("5.0")),
+    )
+    # A run persisted before trust modes carries its recorded number; it is read, never rewritten.
+    ledger = LedgerService.open(database)
+    try:
+        CoordinatorRuntime(ledger, owner="stage1-cli").register_run(
+            run_id=str(legacy.run.id),
+            initial_state=legacy.initial_state(),
+            now=datetime.now(tz=UTC),
+            heartbeat_window=timedelta(seconds=60),
+        )
+    finally:
+        ledger.close()
+
+    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    watched = json.loads(capsys.readouterr().out)
+    assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
+    evidence = json.loads(capsys.readouterr().out)
+
+    assert watched["cost_budget"] == {"value": "5.0", "enforced": False}
+    assert evidence["request_digest"] == str(legacy.digest)

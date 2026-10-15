@@ -34,6 +34,8 @@ from enginery.domain.runner import (
     LaunchSpec,
     ResourceLimits,
     RunnerProfile,
+    attempt_network_name,
+    expected_network,
     profile_violations,
 )
 
@@ -91,7 +93,7 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
         "--cpus",
         "2",
         "--network",
-        "enginery-runner-internal",
+        "none",
         "--ipc",
         "private",
         "--init",
@@ -137,6 +139,45 @@ def test_create_arguments_is_exactly_the_hardened_command_line(tmp_path: Path) -
     )
 
 
+def test_a_worker_without_model_access_is_created_with_no_network_at_all(tmp_path: Path) -> None:
+    spec = make_spec(tmp_path)
+
+    arguments = create_arguments(spec, INNER, nonce=NONCE)
+
+    assert spec.relay_container is None
+    assert spec.attempt_network == "none"
+    assert _values_of(arguments, "--network") == ["none"]
+
+
+def test_a_worker_with_model_access_joins_only_its_own_per_attempt_network(
+    tmp_path: Path,
+) -> None:
+    first = make_spec(tmp_path, operation_id="op-1", relay_container="enginery-relay")
+    second = make_spec(tmp_path, operation_id="op-2", relay_container="enginery-relay")
+
+    first_network = _values_of(create_arguments(first, INNER, nonce=NONCE), "--network")
+    second_network = _values_of(create_arguments(second, INNER, nonce=NONCE), "--network")
+
+    assert first_network == [attempt_network_name(first.profile, "op-1")] == [first.attempt_network]
+    assert second_network == [attempt_network_name(second.profile, "op-2")]
+    assert first_network != second_network
+    # Never the profile's own name (a shared network) and never the default bridge.
+    assert first_network != [first.profile.network]
+    assert first_network[0].startswith(f"{first.profile.network}-")
+
+
+def test_the_attempt_network_name_depends_only_on_the_profile_and_the_operation() -> None:
+    profile = RunnerProfile()
+
+    assert attempt_network_name(profile, "op-1") == attempt_network_name(profile, "op-1")
+    assert attempt_network_name(profile, "op-1") != attempt_network_name(profile, "op-2")
+    assert attempt_network_name(RunnerProfile(network="other"), "op-1").startswith("other-")
+    assert expected_network(profile, "op-1", relay=False) == "none"
+    assert expected_network(profile, "op-1", relay=True) == attempt_network_name(profile, "op-1")
+    with pytest.raises(InvalidInputError):
+        attempt_network_name(profile, "  ")
+
+
 def _values_of(arguments: Sequence[str], flag: str) -> list[str]:
     """The value of every occurrence of ``flag`` before the image (the container command is
     excluded, so a harness flag such as ``-p`` is not mistaken for an engine flag)."""
@@ -179,7 +220,8 @@ def test_create_arguments_follow_the_profile_limits(tmp_path: Path) -> None:
         ),
     )
 
-    arguments = create_arguments(make_spec(tmp_path, profile=profile, env=()), INNER, nonce=NONCE)
+    spec = make_spec(tmp_path, profile=profile, env=(), relay_container="enginery-relay")
+    arguments = create_arguments(spec, INNER, nonce=NONCE)
 
     def after(flag: str) -> str:
         return arguments[arguments.index(flag) + 1]
@@ -188,7 +230,8 @@ def test_create_arguments_follow_the_profile_limits(tmp_path: Path) -> None:
     assert after("--memory") == after("--memory-swap") == "1536m"
     assert after("--cpus") == "0.5"
     assert after("--pids-limit") == "64"
-    assert after("--network") == "relay-internal"
+    assert after("--network") == attempt_network_name(profile, "op-1")
+    assert after("--network").startswith("relay-internal-")
     tmpfs = _values_of(arguments, "--tmpfs")
     assert tmpfs == [
         "/tmp:rw,nosuid,nodev,exec,size=128m",
@@ -538,7 +581,7 @@ def test_a_container_created_from_the_arguments_satisfies_the_profile_exactly(
 
     effective = read_effective(fake_docker.engine(), spec.container_name)
 
-    assert profile_violations(spec.profile, effective) == ()
+    assert profile_violations(spec.profile, effective, network=spec.attempt_network) == ()
     assert effective.user == "65532:65532"
     assert effective.cap_drop == ("ALL",)
     assert effective.cap_add == ()
@@ -547,8 +590,8 @@ def test_a_container_created_from_the_arguments_satisfies_the_profile_exactly(
     assert effective.memory_bytes == effective.memory_swap_bytes == 4096 * 1024 * 1024
     assert effective.nano_cpus == 2_000_000_000
     assert effective.pids_limit == 512
-    assert effective.network_mode == "enginery-runner-internal"
-    assert effective.networks == ("enginery-runner-internal",)
+    assert effective.network_mode == "none"
+    assert effective.networks == ("none",)
     assert effective.mounts == (
         ("tmpfs", "/home/worker", True),
         ("tmpfs", "/tmp", True),
@@ -557,6 +600,34 @@ def test_a_container_created_from_the_arguments_satisfies_the_profile_exactly(
     )
     assert effective.devices == ()
     assert effective.env_keys == ("DISABLE_TELEMETRY",)
+
+
+def test_a_model_access_container_satisfies_the_profile_only_on_its_own_network(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, _ = _created(fake_docker, tmp_path, relay_container="enginery-relay")
+    effective = read_effective(fake_docker.engine(), spec.container_name)
+
+    assert effective.network_mode == spec.attempt_network
+    assert effective.networks == (spec.attempt_network,)
+    assert profile_violations(spec.profile, effective, network=spec.attempt_network) == ()
+    # The same container is a violation if it was supposed to have no network, or to be on a
+    # neighbour's network or the profile's shared name.
+    for wrong in ("none", spec.profile.network, attempt_network_name(spec.profile, "op-other")):
+        problems = profile_violations(spec.profile, effective, network=wrong)
+        assert any("attached only to the network" in problem for problem in problems), wrong
+
+
+def test_a_container_on_the_default_bridge_or_two_networks_is_a_violation(
+    fake_docker: FakeDocker, tmp_path: Path
+) -> None:
+    spec, document = _created(fake_docker, tmp_path, relay_container="enginery-relay")
+    document["NetworkSettings"]["Networks"]["bridge"] = {"NetworkID": ""}
+    effective = read_effective(fake_docker.engine(), spec.container_name)
+
+    problems = profile_violations(spec.profile, effective, network=spec.attempt_network)
+
+    assert any("attached only to the network" in problem for problem in problems)
 
 
 def test_environment_values_are_never_part_of_the_effective_record(
@@ -590,7 +661,7 @@ def _without(arguments: Sequence[str], flag: str, *, has_value: bool = True) -> 
         ("--memory-swap", True, "swap"),
         ("--cpus", True, "cpu limit"),
         ("--pids-limit", True, "pids limit"),
-        ("--network", True, "internal runner network"),
+        ("--network", True, "attached only to the network"),
     ],
 )
 def test_a_container_missing_any_hardening_flag_is_reported_as_a_violation(
@@ -602,7 +673,8 @@ def test_a_container_missing_any_hardening_flag_is_reported_as_a_violation(
 
     effective = read_effective(fake_docker.engine(), spec.container_name)
 
-    assert any(violation in problem for problem in profile_violations(spec.profile, effective))
+    problems = profile_violations(spec.profile, effective, network=spec.attempt_network)
+    assert any(violation in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
@@ -624,7 +696,8 @@ def test_a_container_with_an_extra_grant_is_reported_as_a_violation(
 
     effective = read_effective(fake_docker.engine(), spec.container_name)
 
-    assert any(violation in problem for problem in profile_violations(spec.profile, effective))
+    problems = profile_violations(spec.profile, effective, network=spec.attempt_network)
+    assert any(violation in problem for problem in problems)
 
 
 def test_effective_state_reads_a_realistic_engine_report() -> None:
@@ -691,12 +764,12 @@ def test_an_environment_value_that_differs_from_the_image_counts_as_injected() -
 
 def test_an_unreadable_engine_report_never_looks_hardened() -> None:
     effective = effective_from_inspect({})
-    problems = profile_violations(RunnerProfile(), effective)
+    problems = profile_violations(RunnerProfile(), effective, network="none")
 
     assert any("user is" in problem for problem in problems)
     assert any("root filesystem is writable" in problem for problem in problems)
     assert any("memory limit" in problem for problem in problems)
-    assert any("internal runner network" in problem for problem in problems)
+    assert any("attached only to the network 'none'" in problem for problem in problems)
 
 
 def _clean_container(fake: FakeDocker, spec: LaunchSpec) -> dict[str, Any]:
@@ -733,6 +806,7 @@ def test_a_container_the_launcher_asked_for_has_no_launch_violation(
         ("ports", {"PortBindings": {"80/tcp": [{"HostPort": "80"}]}}),
         ("publish all", {"PublishAllPorts": True}),
         ("sysctls", {"Sysctls": {"net.ipv4.ip_forward": "1"}}),
+        ("extra hosts", {"ExtraHosts": ["relay:10.0.0.1"]}),
         ("unmasked paths", {"MaskedPaths": []}),
         ("masked paths missing", {"MaskedPaths": None}),
         ("masked paths partly removed", {"MaskedPaths": ["/proc/acpi"]}),
@@ -831,7 +905,7 @@ def test_a_security_option_beyond_the_profile_is_a_violation(option: str) -> Non
         ),
     )
 
-    problems = profile_violations(profile, effective)
+    problems = profile_violations(profile, effective, network="none")
 
     assert any(option in problem for problem in problems)
 
@@ -859,17 +933,18 @@ def test_real_engine_container_from_create_arguments_satisfies_the_profile(
     spec = make_spec(
         real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
     )
-    real_engine.ensure_internal_network(real_profile.network)
+    # No relay container: the worker is created with ``--network none``.
 
     create_attempt(real_engine, spec, ("python3", "-c", "print(1)"))
 
     container = real_engine.container_inspect(spec.container_name)
     effective = read_effective(real_engine, spec.container_name)
-    assert profile_violations(real_profile, effective) == ()
+    assert profile_violations(real_profile, effective, network=spec.attempt_network) == ()
     assert launch_violations(spec, container) == ()
     assert store_violations(spec, container, _volumes(real_engine, spec)) == ()
     assert container["State"]["Status"] == "created"
-    assert effective.networks == (real_profile.network,)
+    assert effective.network_mode == "none"
+    assert effective.networks == ("none",)
     assert effective.env_keys == ("DISABLE_TELEMETRY",)
     assert effective.mounts == (
         ("tmpfs", "/home/worker", True),
@@ -920,7 +995,7 @@ def test_real_engine_reports_a_container_with_an_added_capability_as_weaker(
     spec = make_spec(
         real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
     )
-    real_engine.ensure_internal_network(real_profile.network)
+    # No relay container: the worker is created with ``--network none``.
 
     create_attempt(
         real_engine, spec, ("python3", "-c", "print(1)"), extra=("--cap-add", "NET_ADMIN")
@@ -956,7 +1031,7 @@ def test_real_worker_runs_as_the_profile_uid_and_works_in_a_seeded_capped_worksp
         profile=real_profile,
         seed_files=(("/workspace/seed.txt", "seed with sémantique ✓"),),
     )
-    real_engine.ensure_internal_network(real_profile.network)
+    # No relay container: the worker runs with ``--network none``, so there is nothing to join.
     # The host workspace is seeded into the volume; the host path itself is never mounted.
     (real_root / "workspace" / "existing.txt").write_text("from the host", encoding="utf-8")
     (real_root / "workspace" / "existing.txt").chmod(0o600)
@@ -976,10 +1051,11 @@ def test_real_worker_runs_as_the_profile_uid_and_works_in_a_seeded_capped_worksp
     assert sorted(entry.name for entry in (real_root / "workspace").iterdir()) == ["existing.txt"]
 
 
-def test_real_worker_cannot_reach_the_internet_on_the_internal_network(
+def test_real_worker_cannot_reach_the_internet_on_its_attempt_network(
     real_engine: OciEngine,
     real_profile: RunnerProfile,
     real_operation: Callable[[], str],
+    real_attempt_network: Callable[[LaunchSpec], str],
     standin_image: str,
     real_root: Path,
 ) -> None:
@@ -1000,9 +1076,13 @@ def test_real_worker_cannot_reach_the_internet_on_the_internal_network(
         "    print('DNS-RESOLVED')\n"
     )
     spec = make_spec(
-        real_root, operation_id=real_operation(), image=standin_image, profile=real_profile
+        real_root,
+        operation_id=real_operation(),
+        image=standin_image,
+        profile=real_profile,
+        relay_container="enginery-relay-test",
     )
-    real_engine.ensure_internal_network(real_profile.network)
+    real_attempt_network(spec)
     create_attempt(real_engine, spec, ("python3", "-c", script))
 
     code, result = start_and_wait(real_engine, spec)

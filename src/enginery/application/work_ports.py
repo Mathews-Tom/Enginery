@@ -219,22 +219,23 @@ class HarnessPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRequest:
-    """An exclusive workspace materialization request at one source revision."""
+    """An exclusive workspace materialization request at one source revision.
+
+    A workspace carries no environment: the only allowlist a worker launch consults is
+    ``application.worker_environment``, applied by the launching runtime.
+    """
 
     run_id: RunId
     repository_id: str
     repository_path: Path
     base_revision: str
     operation_id: OperationId
-    permitted_environment_keys: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not self.repository_id.strip() or not self.base_revision.strip():
             raise ValueError("workspace repository identity and base revision must be non-blank")
         if not self.repository_path.is_absolute():
             raise ValueError("workspace repository_path must be absolute")
-        if any(not key.strip() for key in self.permitted_environment_keys):
-            raise ValueError("workspace environment keys must be non-blank")
 
 
 @dataclass(frozen=True, slots=True)

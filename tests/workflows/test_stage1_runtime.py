@@ -6,11 +6,11 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
 from tests.support.execution import selection_for
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
@@ -675,7 +675,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-stage1"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -731,7 +731,8 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     assert implementation.task.constraints[-1] == (
         "Create and work only on branch 'enginery/stage1' from "
-        f"{base_revision!r}; commit and push the completed change to origin."
+        f"{base_revision!r}; commit the completed change locally and do not push: the operator "
+        "publishes the verified branch."
     )
     assert implementation.task.selection == request.execution_selection
     assert service.next_action(request.run.id).action.value == "wait"
@@ -921,7 +922,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-pr"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -947,6 +948,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -999,7 +1001,10 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    payload={
+                        "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                        "result": {"head_revision": HEAD_REVISION},
+                    },
                 ),
             ),
         )
@@ -1124,7 +1129,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-repair-gate"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -1147,6 +1152,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1191,6 +1197,21 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
                 else None
             ),
         )
+    ledger_service.append(
+        AppendCommand(
+            correlation_id="implementation-verified-head",
+            events=(
+                EventWrite(
+                    aggregate_type="node_attempt",
+                    aggregate_id=request.implementation.attempt_id,
+                    expected_version=0,
+                    event_type="node_attempt.result_ingested",
+                    schema_version=1,
+                    payload={"result": {"head_revision": HEAD_REVISION}},
+                ),
+            ),
+        )
+    )
     service.review_implementation(
         request,
         ReviewReport(producer="omp-agent", reviewer="operator", findings=()),
@@ -1267,7 +1288,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-repair"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -1290,6 +1311,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1354,7 +1376,10 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
                         expected_version=0,
                         event_type="node_attempt.result_ingested",
                         schema_version=1,
-                        payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                        payload={
+                            "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                            "result": {"head_revision": HEAD_REVISION},
+                        },
                     ),
                 ),
             )
@@ -1462,7 +1487,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-outcomes"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -1488,6 +1513,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
         outcomes=outcomes,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -1540,7 +1566,10 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    payload={
+                        "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                        "result": {"head_revision": HEAD_REVISION},
+                    },
                 ),
             ),
         )
@@ -1647,7 +1676,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-no-outcomes"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -1670,6 +1699,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1721,7 +1751,10 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    payload={
+                        "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                        "result": {"head_revision": HEAD_REVISION},
+                    },
                 ),
             ),
         )
@@ -1800,7 +1833,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-dispatch-repair"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -1823,6 +1856,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
         harness=OmpHarness(
             OmpAdapterConfig(
                 credential_reference="test-keyring", executable=str(_fake_omp(tmp_path))
@@ -1880,7 +1914,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         operation_id=lease.operation_id,
         terminal_result="passed",
         artifact_references=(str(Digest.of_bytes(b"implementation")),),
-        result={"harness_status": "succeeded"},
+        result={"harness_status": "succeeded", "head_revision": HEAD_REVISION},
     )
     # The runtime refuses a result until it has observed the worker's exit; wait for that
     # rather than guessing how long a process takes to exit.
@@ -2067,7 +2101,7 @@ def _check_disposition_fixture(
             attempt_id="implement-0",
             operation_id=OperationId("implement:run-check"),
             time_budget_seconds=60,
-            cost_budget=Decimal("1.0"),
+            cost_budget=None,
             permitted_capabilities=("git",),
             evidence_requirements=("redacted harness transcript",),
         ),
@@ -2094,6 +2128,7 @@ def _check_disposition_fixture(
             WorkLedgerPort, TerminalWorkLedger(snapshot, terminal_snapshot=terminal_snapshot)
         ),
         pull_requests=cast(PullRequestPort, pull_requests),
+        branch_publisher=RecordingBranchPublisher(),
     )
     if start:
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -2207,7 +2242,10 @@ def _drive_check_to_non_pass(
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"artifact_references": [str(Digest.of_bytes(b"implementation"))]},
+                    payload={
+                        "artifact_references": [str(Digest.of_bytes(b"implementation"))],
+                        "result": {"head_revision": HEAD_REVISION},
+                    },
                 ),
             ),
         )

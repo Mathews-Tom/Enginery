@@ -19,7 +19,8 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
@@ -45,6 +46,7 @@ WORKER_HOOKS_PATH = "/nonexistent-enginery-hooks"
 _INTAKE_SUFFIX = ".intake.git"
 _OUT_SUFFIX = ".out"
 _STAGING_KINDS = ("incoming", "retired")
+_VALIDATE_SUFFIX = ".validate"
 _MAX_BRANCH_LENGTH = 200
 _TREE_READ_CHUNK = 1 << 16
 _TREE_MAX_RECORD_BYTES = 1 << 20
@@ -85,6 +87,56 @@ def staging_trees_for(workspace_path: Path) -> tuple[Path, ...]:
             return tuple(Path(entry.path) for entry in scan if entry.name.startswith(prefixes))
     except OSError:
         return ()
+
+
+def validation_path_for(workspace_path: Path) -> Path:
+    """Host-owned checkout of a verified head that validation runs against."""
+    return workspace_path.with_name(workspace_path.name + _VALIDATE_SUFFIX)
+
+
+@contextmanager
+def verified_head_checkout(
+    *,
+    workspace_path: Path,
+    head_revision: str,
+    max_tree_entries: int = MAX_TREE_ENTRIES,
+    max_tree_bytes: int = MAX_TREE_BYTES,
+) -> Iterator[Path]:
+    """Yield a fresh, self-contained checkout of a verified head; always remove it afterwards.
+
+    The checkout is made from the host-owned intake repository, never from the worker's
+    workspace, with the same clone hardening a worker's own workspace gets. What runs against it
+    therefore sees exactly the verified revision: nothing the worker left uncommitted, ignored or
+    untracked in its workspace can influence the result. A checkout the host cannot fully remove
+    is reported, never ignored: a leftover would block the next one. The head's recursive tree
+    is held to the same entry-count and total-size bounds that admitted it, before anything is
+    cloned, so a checkout can never expand beyond what verification accepted.
+    """
+    _require_revision(head_revision, "head_revision")
+    intake_path = intake_path_for(workspace_path)
+    _require_intake_directory(intake_path)
+    _bound_tree(intake_path, head_revision, max_entries=max_tree_entries, max_bytes=max_tree_bytes)
+    checkout = validation_path_for(workspace_path)
+    stale = remove_task_local_workspace(workspace_path=checkout)
+    if stale:
+        raise ExternalConflictError(
+            "a stale validation checkout could not be removed",
+            details={"retained": ", ".join(str(path) for path in stale)},
+        )
+    try:
+        materialize_task_local_repository(
+            repository_path=intake_path, workspace_path=checkout, base_revision=head_revision
+        )
+        yield checkout
+    except BaseException:
+        remove_task_local_workspace(workspace_path=checkout)
+        raise
+    leftover = remove_task_local_workspace(workspace_path=checkout)
+    if leftover:
+        raise ExternalConflictError(
+            "the validation checkout could not be fully removed",
+            details={"retained": ", ".join(str(path) for path in leftover)},
+        )
 
 
 def resolve_commit(repository_path: Path, revision: str) -> str:
@@ -935,5 +987,7 @@ __all__ = [
     "resolve_commit",
     "staging_path_for",
     "staging_trees_for",
+    "validation_path_for",
+    "verified_head_checkout",
     "verify_intake_branch",
 ]

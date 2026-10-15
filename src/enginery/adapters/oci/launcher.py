@@ -12,6 +12,14 @@ its own, the launcher reads the result file, the bundle and the workspace back o
 volumes through the store container with an extraction that never follows a symlink. Whatever
 happens, the containers and volumes are removed before the launcher exits.
 
+Network: a container without model access (every validation container, every store container and
+every worker with ``model_access=none``) runs with ``--network none``. A worker with model access
+gets an internal network created for this one attempt, before any container exists; once the
+worker exists, is verified and has not started, the relay is connected to that network (alias
+``enginery-relay``), the network is checked to be internal and shared with nothing else, and both
+the relay and the network are released at the end. No attempt ever shares a network with another
+attempt or with a container that has no model access.
+
 The launcher records how the attempt ended in its own host-only outcome file (beside the
 receipt, outside every worker mount). Collection classifies the attempt from that file; the
 launcher's process exit status is a courtesy for the supervisor and proves nothing, because a
@@ -20,7 +28,8 @@ launcher's hard deadline passed and the container was killed; ``125`` the launch
 faulted or refused the launch; ``143`` and ``130`` the launcher was stopped by SIGTERM or SIGINT.
 
 ``python -m enginery.adapters.oci.launcher --reconcile [--docker-context NAME]`` removes runner
-containers whose launcher process is gone, and the volumes they leave behind.
+containers and attempt networks whose launcher process is gone, and the volumes they leave
+behind.
 """
 
 from __future__ import annotations
@@ -37,12 +46,18 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, TextIO
 
-from enginery.adapters.oci.engine import ObjectNotFoundError, OciEngine
+from enginery.adapters.oci.engine import (
+    ATTEMPT_NETWORK_LABEL,
+    EngineCommandError,
+    NetworkInfo,
+    ObjectNotFoundError,
+    OciEngine,
+)
 from enginery.adapters.oci.image import verify_image
 from enginery.adapters.oci.launch import (
     BUNDLE_FILE_NAME,
@@ -51,13 +66,15 @@ from enginery.adapters.oci.launch import (
     effective_from_inspect,
     engine_memory_shortfall,
     launch_violations,
+    launcher_label,
     resource_bounds,
     seed_byte_ceiling,
     store_arguments,
     store_names_for,
     store_violations,
 )
-from enginery.adapters.oci.reconcile import ReconcileReport, reconcile_runner_containers
+from enginery.adapters.oci.reconcile import ReconcileReport, reconcile_runner
+from enginery.adapters.oci.relay import RelayManager
 from enginery.adapters.oci.store import (
     TreeTransferError,
     replace_tree,
@@ -65,8 +82,9 @@ from enginery.adapters.oci.store import (
     write_tree_archive,
 )
 from enginery.adapters.runner_launch import MAX_RESULT_BYTES
-from enginery.domain.errors import EngineryError, InvalidInputError
+from enginery.domain.errors import EngineryError, InvalidInputError, MissingPrerequisiteError
 from enginery.domain.runner import (
+    NO_NETWORK,
     OUT_MOUNT,
     WORKSPACE_MOUNT,
     EffectiveContainer,
@@ -396,12 +414,16 @@ def _verify(
     log: _Log,
     *,
     what: str,
+    network: str,
 ) -> EffectiveContainer:
-    """What the engine holds for ``container_name``, refused unless it is the isolated profile."""
+    """What the engine holds for ``container_name``, refused unless it is the isolated profile.
+
+    ``network`` is the one network the container must be attached to and nothing else.
+    """
     container = engine.container_inspect(container_name)
     effective = effective_from_inspect(container, engine.image_inspect(spec.image))
     found = (
-        *profile_violations(profile, effective),
+        *profile_violations(profile, effective, network=network),
         *launch_violations(spec, container),
         *store_violations(spec, container, volumes),
     )
@@ -537,6 +559,14 @@ def run_launcher(
     created = False
     started = False
     recording = False
+    network = spec.attempt_network
+    relay = (
+        None
+        if spec.relay_container is None
+        else RelayManager(engine, profile=spec.profile, container_name=spec.relay_container)
+    )
+    network_created = False
+    relay_attached = False
     code = EXIT_FAULT
     state = OutcomeState.FAULTED
     exit_code: int | None = None
@@ -583,14 +613,17 @@ def run_launcher(
         image = verify(engine, spec.image)
         if image.image_id != spec.image:
             raise _RefusedError("the verified image is not the pinned image")
-        engine.ensure_internal_network(spec.profile.network)
         _checkpoint(stop)
         _remove_leftovers(engine, name, names, log)
         # Nothing an earlier attempt left in the result directory may be read as this one's.
         _discard(os.path.join(spec.out_path, spec.result_name))
         _discard(os.path.join(spec.out_path, BUNDLE_FILE_NAME))
         try:
-            reconciled = reconcile_runner_containers(engine, keep=frozenset({name, names.holder}))
+            reconciled = reconcile_runner(
+                engine,
+                keep_containers=frozenset({name, names.holder}),
+                keep_networks=frozenset({network}),
+            )
         except EngineryError as error:
             log(f"orphaned containers could not be reconciled: {_describe(error)}")
         else:
@@ -600,6 +633,20 @@ def run_launcher(
                 log(f"orphaned container {orphan} could not be reconciled: {reason}")
             for volume in reconciled.volumes_removed:
                 log(f"removed an orphaned volume whose container is gone: {volume}")
+            for orphan_network in reconciled.networks_removed:
+                log(f"removed an orphaned attempt network whose launcher is gone: {orphan_network}")
+            for orphan_network, reason in reconciled.networks_failed:
+                log(f"orphaned attempt network {orphan_network} could not be reconciled: {reason}")
+
+        if relay is not None:
+            # The engine can hold a network even when create reports failure. The network is
+            # this attempt's own and nothing else joins it but the relay, once the worker exists.
+            # A routable network is refused here, before any container exists.
+            network_created = True
+            engine.create_attempt_network(
+                network, operation_id=spec.operation_id, launcher=launcher_label(launcher)
+            )
+            _checkpoint(stop)
 
         bounds = resource_bounds(spec.profile)
         # The store container creates the two capped volumes and keeps them mounted; the
@@ -616,10 +663,11 @@ def run_launcher(
             engine,
             spec,
             names.holder,
-            replace(spec.profile, network="none"),
+            spec.profile,
             volumes,
             log,
             what="store container",
+            network=NO_NETWORK,
         )
         engine.start(names.holder)
         _seed_workspace(
@@ -627,10 +675,37 @@ def run_launcher(
         )
         _checkpoint(stop)
 
-        created = True
+        created = True  # the engine can hold a container even when create reports failure
         _create(engine, arguments, "container")
         _checkpoint(stop)
-        effective = _verify(engine, spec, name, spec.profile, volumes, log, what="container")
+        effective = _verify(
+            engine, spec, name, spec.profile, volumes, log, what="container", network=network
+        )
+
+        if relay is not None:
+            # The worker exists but has not started, so the relay is the network's only member
+            # when the worker comes up: it never shares the network with any other attempt.
+            relay_attached = True
+            try:
+                relay.attach(network)
+            except (EngineCommandError, MissingPrerequisiteError) as error:
+                raise _RefusedError(
+                    "the model access relay cannot be attached to the attempt's network: "
+                    + _describe(error)
+                ) from error
+            network_problems = _network_violations(
+                engine.network_info(network),
+                operation_id=spec.operation_id,
+                members=(relay.container_name,),
+            )
+            if network_problems:
+                for violation in network_problems:
+                    log(f"profile violation: {violation}")
+                raise _RefusedError(
+                    "the attempt's network is not the private internal network it must be",
+                    network_problems,
+                )
+            _checkpoint(stop)
 
         host = host_probe()
         receipt = RunnerReceipt(
@@ -696,6 +771,13 @@ def run_launcher(
     finally:
         if created:
             _tail_and_remove(engine, name, log, show_logs=started and code != 0)
+        _release_network(
+            engine,
+            network,
+            relay=relay if relay_attached else None,
+            remove=network_created,
+            log=log,
+        )
         if store_created:
             _remove_store(engine, names, log)
         if recording:
@@ -731,6 +813,52 @@ def _tail_and_remove(engine: OciEngine, name: str, log: _Log, *, show_logs: bool
         log(f"the container could not be removed: {_describe(error)}")
 
 
+def _network_violations(
+    info: NetworkInfo | None, *, operation_id: str, members: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Ways the attempt's network is not its own private internal network with only ``members``."""
+    if info is None:
+        return ("the attempt network does not exist",)
+    problems: list[str] = []
+    if not info.internal:
+        problems.append("the attempt network is not internal (it has a route out)")
+    if info.labels.get(ATTEMPT_NETWORK_LABEL) != operation_id:
+        problems.append("the attempt network was not created for this operation")
+    expected = tuple(sorted(members))
+    if info.containers != expected:
+        extra = sorted(set(info.containers) - set(expected))
+        problems.append(
+            "the attempt network has members beyond the relay"
+            if extra
+            else "the relay is not attached to the attempt network"
+        )
+    return tuple(problems)
+
+
+def _release_network(
+    engine: OciEngine,
+    network: str,
+    *,
+    relay: RelayManager | None,
+    remove: bool,
+    log: _Log,
+) -> None:
+    """Disconnect the relay from the attempt's network and remove it; never raises.
+
+    A failure is logged and left for the next launcher's (or ``--reconcile``'s) orphan pass.
+    """
+    if relay is not None:
+        try:
+            relay.detach(network)
+        except EngineryError as error:
+            log(f"the relay could not be detached from the attempt network: {_describe(error)}")
+    if remove:
+        try:
+            engine.remove_attempt_network(network)
+        except EngineryError as error:
+            log(f"the attempt network could not be removed: {_describe(error)}")
+
+
 def _parse(arguments: Sequence[str]) -> tuple[LaunchSpec, tuple[str, ...]]:
     items = list(arguments)
     if "--" not in items:
@@ -759,12 +887,20 @@ def _print_reconcile(report: ReconcileReport, stream: TextIO) -> None:
         stream.write(f"left runner container {name} (no launcher on this host is named)\n")
     for name, reason in report.failed:
         stream.write(f"could not reconcile runner container {name}: {reason}\n")
+    for name in report.networks_removed:
+        stream.write(f"removed orphaned attempt network {name}\n")
+    for name in report.networks_kept:
+        stream.write(f"kept attempt network {name} (its launcher is alive)\n")
+    for name in report.networks_unattributed:
+        stream.write(f"left attempt network {name} (no launcher on this host is named)\n")
+    for name, reason in report.networks_failed:
+        stream.write(f"could not reconcile attempt network {name}: {reason}\n")
 
 
 def reconcile_main(
     arguments: Sequence[str], *, engine: OciEngine | None = None, stdout: TextIO | None = None
 ) -> int:
-    """``--reconcile [--docker-context NAME]``: remove runner containers whose launcher is gone."""
+    """``--reconcile [--docker-context NAME]``: remove orphaned runner containers and networks."""
     items = list(arguments)
     context: str | None = None
     if items == ["--reconcile"]:
@@ -776,12 +912,12 @@ def reconcile_main(
         return EXIT_FAULT
     chosen = OciEngine(context=context) if engine is None else engine
     try:
-        report = reconcile_runner_containers(chosen)
+        report = reconcile_runner(chosen)
     except EngineryError as error:
         sys.stderr.write(f"launcher: {_describe(error)}\n")
         return EXIT_FAULT
     _print_reconcile(report, sys.stdout if stdout is None else stdout)
-    return EXIT_FAULT if report.failed else 0
+    return 0 if report.clean else EXIT_FAULT
 
 
 def main(

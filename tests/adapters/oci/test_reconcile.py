@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -15,7 +16,12 @@ import pytest
 from enginery.adapters.oci.engine import LAUNCHER_LABEL
 from enginery.adapters.oci.launch import create_arguments, launcher_label
 from enginery.adapters.oci.launcher import main, reconcile_main
-from enginery.adapters.oci.reconcile import reconcile_runner_containers
+from enginery.adapters.oci.reconcile import (
+    ReconcileReport,
+    reconcile_attempt_networks,
+    reconcile_runner,
+    reconcile_runner_containers,
+)
 from enginery.engine.supervisor import (
     HostIdentity,
     ProcessIdentity,
@@ -23,7 +29,7 @@ from enginery.engine.supervisor import (
     probe_process,
 )
 
-from .support import INNER, NONCE, FakeDocker, make_spec
+from .support import INNER, NONCE, FakeDocker, FakeNetwork, make_spec
 
 
 @pytest.fixture
@@ -307,3 +313,186 @@ def test_reconcile_removes_runner_volumes_whose_containers_are_gone_and_keeps_he
     assert set(report.volumes_removed) == {gone_names.workspace_volume, gone_names.out_volume}
     assert set(fake_docker.volumes) == {held_names.workspace_volume, held_names.out_volume}
     assert any("volume" in verb for verb in fake_docker.verbs)
+
+
+# --- attempt networks ----------------------------------------------------------------
+
+
+def _attempt_network(
+    fake: FakeDocker, name: str, operation_id: str, launcher: ProcessIdentity | None
+) -> None:
+    """An attempt network as a launcher with identity ``launcher`` created it."""
+    fake.engine().create_attempt_network(
+        name,
+        operation_id=operation_id,
+        launcher=None if launcher is None else launcher_label(launcher),
+    )
+
+
+def test_a_network_whose_launcher_is_gone_is_removed_and_the_relay_is_disconnected_not_removed(
+    fake_docker: FakeDocker, dead_launcher: ProcessIdentity
+) -> None:
+    fake_docker.add_relay()
+    _attempt_network(fake_docker, "attempt-orphan", "op-orphan", dead_launcher)
+    fake_docker.engine().connect_network("attempt-orphan", "enginery-relay", alias="enginery-relay")
+
+    report = reconcile_attempt_networks(fake_docker.engine())
+
+    assert report.networks_removed == ("attempt-orphan",)
+    assert fake_docker.networks == {}
+    assert "enginery-relay" in fake_docker.containers  # only its endpoint on the network went
+    assert sorted(
+        fake_docker.containers["enginery-relay"].inspect["NetworkSettings"]["Networks"]
+    ) == ["enginery-runner-egress"]
+    assert report.networks_kept == () and report.networks_failed == ()
+
+
+def test_a_network_whose_launcher_is_alive_is_never_touched(
+    fake_docker: FakeDocker, live_launcher: ProcessIdentity
+) -> None:
+    fake_docker.add_relay()
+    _attempt_network(fake_docker, "attempt-live", "op-live", live_launcher)
+    fake_docker.engine().connect_network("attempt-live", "enginery-relay")
+
+    report = reconcile_attempt_networks(fake_docker.engine())
+
+    assert report.networks_kept == ("attempt-live",)
+    assert report.networks_removed == ()
+    assert fake_docker.network_members("attempt-live") == ["enginery-relay"]
+    assert "network rm" not in fake_docker.verbs
+
+
+def test_a_network_recorded_for_an_earlier_boot_is_removed(
+    fake_docker: FakeDocker, live_launcher: ProcessIdentity
+) -> None:
+    here = probe_host()
+    earlier = ProcessIdentity(
+        live_launcher.pid,
+        live_launcher.process_group_id,
+        live_launcher.start_identity,
+        HostIdentity(here.machine_id, here.boot_id + "-earlier-boot"),
+    )
+    _attempt_network(fake_docker, "attempt-boot", "op-boot", earlier)
+
+    assert reconcile_attempt_networks(fake_docker.engine()).networks_removed == ("attempt-boot",)
+
+
+def test_a_network_without_a_usable_launcher_label_is_reported_not_removed(
+    fake_docker: FakeDocker,
+) -> None:
+    _attempt_network(fake_docker, "attempt-unlabelled", "op-1", None)
+    fake_docker.networks["attempt-garbled"] = FakeNetwork(
+        internal=True,
+        labels={"dev.enginery.attempt-network": "op-2", LAUNCHER_LABEL: "{not json"},
+    )
+    elsewhere = json.dumps(
+        {"pid": 1, "pgid": 1, "start": "x", "machine": "another-machine", "boot": "b"}
+    )
+    fake_docker.networks["attempt-elsewhere"] = FakeNetwork(
+        internal=True,
+        labels={"dev.enginery.attempt-network": "op-3", LAUNCHER_LABEL: elsewhere},
+    )
+
+    report = reconcile_attempt_networks(fake_docker.engine())
+
+    assert sorted(report.networks_unattributed) == [
+        "attempt-elsewhere",
+        "attempt-garbled",
+        "attempt-unlabelled",
+    ]
+    assert report.networks_removed == ()
+    assert len(fake_docker.networks) == 3
+
+
+def test_networks_without_the_attempt_label_are_never_listed_or_removed(
+    fake_docker: FakeDocker,
+) -> None:
+    fake_docker.networks["enginery-runner-egress"] = FakeNetwork(
+        internal=False, labels={"dev.enginery.runner": "1"}
+    )
+    fake_docker.networks["someone-elses"] = FakeNetwork(internal=True, labels={})
+
+    report = reconcile_attempt_networks(fake_docker.engine())
+
+    assert report == ReconcileReport()
+    assert set(fake_docker.networks) == {"enginery-runner-egress", "someone-elses"}
+
+
+def test_a_network_that_cannot_be_removed_is_reported_and_the_pass_continues(
+    fake_docker: FakeDocker, dead_launcher: ProcessIdentity
+) -> None:
+    _attempt_network(fake_docker, "attempt-a", "op-a", dead_launcher)
+    _attempt_network(fake_docker, "attempt-b", "op-b", dead_launcher)
+    fake_docker.failures["network rm"] = (1, "Error response from daemon: boom")
+
+    report = reconcile_attempt_networks(fake_docker.engine())
+
+    assert report.networks_removed == ()
+    assert {name for name, _ in report.networks_failed} == {"attempt-a", "attempt-b"}
+    assert report.clean is False
+
+
+def test_the_callers_own_network_is_never_touched(
+    fake_docker: FakeDocker, dead_launcher: ProcessIdentity
+) -> None:
+    _attempt_network(fake_docker, "attempt-mine", "op-mine", dead_launcher)
+
+    report = reconcile_attempt_networks(fake_docker.engine(), keep=frozenset({"attempt-mine"}))
+
+    assert report.networks_kept == ("attempt-mine",)
+    assert "attempt-mine" in fake_docker.networks
+
+
+def test_reconcile_runner_removes_orphaned_containers_before_their_networks(
+    fake_docker: FakeDocker, tmp_path: Path, dead_launcher: ProcessIdentity
+) -> None:
+    (tmp_path / "a").mkdir(exist_ok=True)
+    spec = make_spec(tmp_path / "a", operation_id="op-orphan", relay_container="enginery-relay")
+    fake_docker.add_relay()
+    _attempt_network(fake_docker, spec.attempt_network, "op-orphan", dead_launcher)
+    completed = fake_docker.engine().run_cli(
+        create_arguments(spec, INNER, nonce=NONCE, launcher=dead_launcher)
+    )
+    assert completed.returncode == 0, completed.stderr
+    fake_docker.engine().connect_network(spec.attempt_network, "enginery-relay")
+    fake_docker.engine().start(spec.container_name)
+    fake_docker.hold_running = True
+    fake_docker.containers[spec.container_name].state = "running"
+    assert fake_docker.network_members(spec.attempt_network) == sorted(
+        [spec.container_name, "enginery-relay"]
+    )
+
+    report = reconcile_runner(fake_docker.engine())
+
+    assert report.removed == (spec.container_name,)
+    assert report.networks_removed == (spec.attempt_network,)
+    assert report.clean
+    assert fake_docker.networks == {}
+    assert set(fake_docker.containers) == {"enginery-relay"}
+    assert fake_docker.verbs.index("rm") < fake_docker.verbs.index("network rm")
+
+
+def test_the_reconcile_command_reports_and_removes_orphaned_networks(
+    fake_docker: FakeDocker, dead_launcher: ProcessIdentity
+) -> None:
+    _attempt_network(fake_docker, "attempt-orphan", "op-orphan", dead_launcher)
+    stream = io.StringIO()
+
+    code = reconcile_main(["--reconcile"], engine=fake_docker.engine(), stdout=stream)
+
+    assert code == 0
+    assert "removed orphaned attempt network attempt-orphan" in stream.getvalue()
+    assert fake_docker.networks == {}
+
+
+def test_the_reconcile_command_fails_when_a_network_cannot_be_removed(
+    fake_docker: FakeDocker, dead_launcher: ProcessIdentity
+) -> None:
+    _attempt_network(fake_docker, "attempt-orphan", "op-orphan", dead_launcher)
+    fake_docker.failures["network rm"] = (1, "Error response from daemon: boom")
+    stream = io.StringIO()
+
+    code = reconcile_main(["--reconcile"], engine=fake_docker.engine(), stdout=stream)
+
+    assert code == 125
+    assert "could not reconcile attempt network attempt-orphan" in stream.getvalue()
