@@ -8,18 +8,20 @@ following it. The directory is synced afterwards.
 
 :func:`require_no_link_chain` refuses a symlink planted where a write would be
 redirected, so ``.enginery -> /elsewhere`` cannot move a lockfile, install root,
-owned manifest or store into another tree. The rule: the anchor is the current
-directory (``os.getcwd()``, which the operating system reports without links),
-the directory the command line resolves relative paths against. A path inside
-the anchor, relative or absolute, has every existing component strictly below
-the anchor checked with ``lstat``; "inside" is decided by real location, so a path
-spelled through a symbolic link to the current directory counts. A path outside
-the anchor is operator-chosen:
-its ancestors are never checked (system links such as macOS ``/tmp`` and
-``/var`` are legitimate), only the named root itself, and only when the caller
-asks for it; what the tool owns beneath that root is guarded by the install
-and lockfile code. The check precedes the write, so it narrows rather than
-eliminates a race with a process that can already write the workspace.
+owned manifest or store into another tree. The rule: a path written with a ``..``
+component is refused outright. The named root itself is always ``lstat``-checked
+(unless the caller opts out for a directory the tool does not own). The anchor is the
+current directory (``os.getcwd()``); a path inside it, relative or absolute, has every
+existing component strictly below the anchor checked with ``lstat``. "Inside" is
+decided by filesystem identity (``os.path.samestat`` against the current directory,
+first matching prefix as written, stopping at the first missing prefix), so a path
+spelled through a symbolic link to the current directory, or in another letter case
+on a case-insensitive filesystem, counts. A component that exists but is not a
+directory is a typed install conflict. A path outside the anchor is operator-chosen:
+its ancestors are never checked (system links such as macOS ``/tmp`` and ``/var``
+are legitimate); what the tool owns beneath that root is guarded by the install and
+lockfile code. The check precedes the write, so it narrows rather than eliminates a
+race with a process that can already write the workspace.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from enginery.capabilities.errors import CapabilitySymlinkError
+from enginery.capabilities.errors import CapabilityInstallConflictError, CapabilitySymlinkError
 
 
 def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = True) -> None:
@@ -39,12 +41,16 @@ def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = Tru
     (the directory holding a lockfile), so only the part below the anchor is checked.
     """
 
-    anchor = Path(os.path.realpath(os.getcwd()))
+    if ".." in Path(path).parts:
+        raise CapabilitySymlinkError(
+            f"{what} contains a parent-directory (..) component",
+            details={"path": str(path)},
+        )
     absolute = Path(os.path.abspath(path))
-    base = _anchor_prefix(absolute, anchor)
+    if check_named_root:
+        _refuse_link(absolute, path, what)
+    base = _anchor_prefix(absolute)
     if base is None:
-        if check_named_root:
-            _refuse_link(absolute, path, what)
         return
     current = base
     for part in absolute.relative_to(base).parts:
@@ -53,20 +59,27 @@ def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = Tru
             return
 
 
-def _anchor_prefix(absolute: Path, anchor: Path) -> Path | None:
-    """The shortest prefix of ``absolute`` whose real location is ``anchor``, if any.
+def _anchor_prefix(absolute: Path) -> Path | None:
+    """The shortest prefix of ``absolute`` that is the current directory, if any.
 
-    Classifying by real location rather than spelling covers a path written through a
-    symbolic link to the current directory (the ``$PWD`` form under a linked workspace).
+    Decided by filesystem identity (``os.path.samestat`` against ``os.stat(os.getcwd())``),
+    not by spelling, so a path written through a symbolic link to the current directory
+    or in another letter case on a case-insensitive filesystem still counts. The walk
+    stops at the first prefix that does not exist.
     """
 
+    anchor = os.stat(os.getcwd())
     prefix = Path(absolute.anchor)
     candidates = [prefix]
     for part in absolute.relative_to(prefix).parts:
         prefix = prefix / part
         candidates.append(prefix)
     for candidate in candidates:
-        if os.path.realpath(candidate) == str(anchor):
+        try:
+            info = os.stat(candidate)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if os.path.samestat(info, anchor):
             return candidate
     return None
 
@@ -78,6 +91,11 @@ def _refuse_link(candidate: Path, path: Path, what: str) -> bool:
         info = os.lstat(candidate)
     except FileNotFoundError:
         return False
+    except NotADirectoryError as error:
+        raise CapabilityInstallConflictError(
+            f"{what} has a component that is not a directory",
+            details={"path": str(path), "component": str(candidate)},
+        ) from error
     if stat.S_ISLNK(info.st_mode):
         raise CapabilitySymlinkError(
             f"{what} is reached through a symbolic link",

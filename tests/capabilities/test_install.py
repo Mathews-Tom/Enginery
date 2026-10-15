@@ -10,6 +10,7 @@ import pytest
 
 from enginery.application.delivery_ports import PackageFile
 from enginery.capabilities import install as install_module
+from enginery.capabilities.atomic import require_no_link_chain
 from enginery.capabilities.compatibility import HostProfile
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -340,6 +341,67 @@ def test_install_refuses_a_planted_link_when_the_path_is_spelled_through_a_cwd_a
 
     assert _tree(other) == before
     assert not (tmp_path / "store").exists()
+
+
+def test_install_refuses_a_root_that_is_a_link_to_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+    other = tmp_path / "other"
+    other.mkdir()
+    (tmp_path / "installed").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(other)
+
+    with pytest.raises(CapabilitySymlinkError):
+        install_lock(
+            resolved,
+            install_root=tmp_path / "installed",
+            capabilities_root=tmp_path / "store",
+            approvals=approvals_for(resolved.lock, ()),
+        )
+
+    assert _tree(other) == set()
+    assert not (tmp_path / "store").exists()
+
+
+def test_a_planted_link_is_refused_when_the_cwd_is_spelled_in_another_letter_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "Workspace"
+    workspace.mkdir()
+    swapped = tmp_path / "wORKSPACE"
+    if not swapped.exists():
+        pytest.skip("case-sensitive filesystem")
+    other = tmp_path / "other"
+    other.mkdir()
+    (workspace / ".enginery").symlink_to(other, target_is_directory=True)
+    monkeypatch.chdir(workspace)
+
+    with pytest.raises(CapabilitySymlinkError):
+        require_no_link_chain(
+            swapped / ".enginery" / "installed", what="install root", check_named_root=False
+        )
+
+
+def test_a_parent_directory_component_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    for written in (Path("a/../installed"), tmp_path / "a" / ".." / "installed", Path("..")):
+        with pytest.raises(CapabilitySymlinkError, match=r"\.\."):
+            require_no_link_chain(written, what="install root")
+
+
+def test_a_file_where_a_directory_is_expected_is_a_typed_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".enginery").write_bytes(b"a file\n")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(CapabilityInstallConflictError):
+        require_no_link_chain(Path(".enginery/installed"), what="install root")
 
 
 def test_uninstall_refuses_a_symlinked_parent_of_the_install_root(

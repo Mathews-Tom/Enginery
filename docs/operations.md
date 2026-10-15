@@ -218,17 +218,21 @@ refused on read (exit `2`) and replaced, never followed, on write. A symlink
 planted where a write would be redirected is refused on write (exit `12`)
 before anything is written, so a planted
 `.enginery -> /other/project/.enginery` cannot redirect an install, uninstall
-or lock write. The exact rule: the anchor is the current directory (the
-directory relative paths resolve against). For the lockfile's directory, the
-install root, the owned manifest and the capabilities root inside the anchor
-(relative, or absolute under it), every existing component strictly below the
+or lock write. The exact rule: a path written with a `..` component is refused
+(exit `12`). The named install root and capabilities root are always checked with
+`lstat` and must not be symlinks, wherever they are. The anchor is the current
+directory (the directory relative paths resolve against). For the lockfile's
+directory, the install root, the owned manifest and the capabilities root inside the
+anchor (relative, or absolute under it), every existing component strictly below the
 anchor must not be a symlink. A path outside the anchor is operator-chosen:
-its ancestors are never checked (so `/tmp` or `$TMPDIR` on macOS work), only
-the install root and capabilities root themselves must not be symlinks, and
+its ancestors are never checked (so `/tmp` or `$TMPDIR` on macOS work), and
 what the tool owns beneath them is guarded by the install code.
-Whether a path is "inside" the anchor is decided by its real location, so an
-absolute path spelled through a symbolic link to the current directory is
-checked the same way. `install` checks the lockfile's directory and the lockfile
+Whether a path is "inside" the anchor is decided by filesystem identity: the first
+prefix of the path, as written, that is the same file as the current directory
+(`stat` identity, so a symbolic link to the current directory or another letter case
+on a case-insensitive filesystem counts), stopping at the first missing prefix. An
+existing component that is not a directory (for example a regular file named
+`.enginery`) is refused as a conflict (exit `9`), not a crash. `install` checks the lockfile's directory and the lockfile
 itself before it writes anything. The store's own `.tmp`, `<algorithm>` and
 `<xx>` directories must not be symbolic links either: materialization and
 verification refuse (exit `12`) a store reached through one.

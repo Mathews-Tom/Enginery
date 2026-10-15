@@ -752,6 +752,46 @@ def test_a_lockfile_under_a_symlinked_directory_is_refused_before_anything_is_wr
     assert not paths.store.exists()
 
 
+def test_a_parent_directory_component_in_a_state_path_is_refused(
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    (tmp_path / "sub").mkdir()
+    flags = _project_flags(paths, sha)
+    flags[flags.index("--lockfile") + 1] = "sub/../capabilities.lock.json"
+    monkeypatch.chdir(tmp_path)
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *flags)
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE) == 12
+    assert ".." in output
+    assert not (tmp_path / "capabilities.lock.json").exists()
+    assert not paths.installed.exists()
+
+
+def test_a_regular_file_on_the_state_path_is_a_typed_refusal_not_a_crash(
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    flags = _project_flags(paths, sha)
+    flags[flags.index("--lockfile") + 1] = ".enginery/capabilities.lock.json"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".enginery").write_bytes(b"not a directory\n")
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *flags)
+
+    assert code == exit_code_for(FailureClass.EXTERNAL_CONFLICT)
+    assert "not a directory" in output
+    assert not paths.installed.exists()
+    assert (tmp_path / ".enginery").read_bytes() == b"not a directory\n"
+
+
 # --------------------------------------------------------------------------- project binding
 
 
