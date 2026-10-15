@@ -1,11 +1,14 @@
 """Git-backed capability source: a repository pinned to one immutable commit.
 
-The source is configured with a repository (a local path, or a URL fetched
-into a private bare cache) and a full 40-hex commit sha. Everything it
-reports is read from that commit's *tracked tree* with git plumbing
-(``ls-tree -r -z -l`` and ``cat-file blob``); the working tree, the index and
-untracked files are never consulted, so local junk such as ``__pycache__``
-cannot enter a closure. Nothing it reads is ever executed or imported.
+The source is configured with a repository (a local path or a URL) and a full
+40-hex commit sha. Git never runs inside the repository it is pointed at: each
+port call creates a fresh bare mirror in an owner-only temporary directory,
+fetches exactly the pinned commit into it (a local path as a ``file://`` URL),
+reads only from that mirror, and deletes it afterwards. Everything it reports is
+read from that commit's *tracked tree* with git plumbing (``ls-tree -r -z -l``
+and ``cat-file blob``); the working tree, the index and untracked files are
+never consulted, so local junk such as ``__pycache__`` cannot enter a closure.
+Nothing it reads is ever executed or imported.
 
 A package is one directory ``<package_root>/<name>/`` of the tree holding a
 ``capability.json`` manifest. Tree entries with mode ``120000`` (symlink) or
@@ -19,11 +22,13 @@ Every git subprocess uses an argument vector (never a shell), a timeout, and an
 environment built from an allowlist (``PATH``, ``HOME``, ``LANG``/``LC_*``,
 ``SSH_AUTH_SOCK``) plus no system or global configuration, no replacement
 objects (``--no-replace-objects`` and ``GIT_NO_REPLACE_OBJECTS``, so ``git
-replace`` cannot change what a pinned commit contains), ``core.fsmonitor``
-off, and no terminal prompt. The adapter never writes git configuration and
-never touches a local repository it was pointed at; a URL is fetched only into
-the adapter's own cache directory. A package whose tree sizes already exceed
-the package-wide byte limit is refused before any blob is read.
+replace`` cannot change what a pinned commit contains), no lazy fetch of a
+missing object (``GIT_NO_LAZY_FETCH``), literal pathspecs, ``core.fsmonitor``
+off, and no terminal prompt. Only the fetch may use a transport (the one its
+URL needs); every other command runs with ``GIT_ALLOW_PROTOCOL`` set so no
+transport is allowed. The adapter never writes git configuration and never
+reads or writes a repository it did not create. A package whose tree sizes
+already exceed the package-wide byte limit is refused before any blob is read.
 
 A Git source's packages are unauthenticated unless a pinned signature over the
 closure digest verifies; ``signatures`` is the only way to supply one. The
@@ -33,12 +38,13 @@ and registered with the ``project`` kind (see ``pinned_commit``).
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import os
 import re
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +59,7 @@ from enginery.application.adapter_types import (
 from enginery.application.delivery_ports import (
     CapabilityDescriptor,
     CapabilityListing,
+    CommittedTreeCapabilitySource,
     PackageFile,
 )
 from enginery.capabilities.closure import (
@@ -84,19 +91,24 @@ _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _URL_PATTERN = re.compile(r"^(https://|ssh://|file://|git@[A-Za-z0-9._-]+:)[^\s]+$")
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _PROVENANCE_LABEL = "git"
-_ALLOWED_PROTOCOLS = "file:https:ssh"
+# ``GIT_ALLOW_PROTOCOL`` for every command that must not use a transport: a name no
+# transport has, so nothing is allowed (an unset variable would allow the defaults).
+_NO_TRANSPORT = "enginery-no-transport"
 _INHERITED_VARIABLES = frozenset({"PATH", "HOME", "LANG", "SSH_AUTH_SOCK"})
 
 
-def git_environment(*, ceiling: Path | None = None) -> dict[str, str]:
+def git_environment(*, protocols: str | None = None) -> dict[str, str]:
     """A scrubbed environment for one git invocation.
 
     Built from an allowlist of the caller's environment (``PATH``, ``HOME``,
     ``LANG``/``LC_*`` and ``SSH_AUTH_SOCK``), so no proxy, askpass, ssh-command,
     exec-path, token or repository-redirecting variable is inherited. System
     and global configuration are ignored, replacement objects are ignored,
-    prompting and unreviewed transports are forbidden, and (optionally) git is
-    stopped from discovering a repository above ``ceiling``.
+    pathspecs are literal, prompting is forbidden, and a missing object is never
+    lazily fetched (``GIT_NO_LAZY_FETCH``: a partial-clone repository's promisor
+    remote would otherwise run its configured transport commands). ``protocols``
+    is the one transport a fetch may use; every other command gets a value that
+    allows no transport at all.
     """
 
     environment = {
@@ -109,15 +121,25 @@ def git_environment(*, ceiling: Path | None = None) -> dict[str, str]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_LITERAL_PATHSPECS": "1",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_OPTIONAL_LOCKS": "0",
-            "GIT_ALLOW_PROTOCOL": _ALLOWED_PROTOCOLS,
+            "GIT_ALLOW_PROTOCOL": _NO_TRANSPORT if protocols is None else protocols,
             "LC_ALL": "C",
         }
     )
-    if ceiling is not None:
-        environment["GIT_CEILING_DIRECTORIES"] = str(ceiling)
     return environment
+
+
+def _transport_of(url: str) -> str:
+    """The one git transport a fetch from ``url`` needs."""
+
+    if url.startswith("file://"):
+        return "file"
+    if url.startswith("https://"):
+        return "https"
+    return "ssh"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +151,7 @@ class _TreeItem:
     size: int
 
 
-class GitCapabilitySource:
+class GitCapabilitySource(CommittedTreeCapabilitySource):
     """Packages read from one immutable commit of a Git repository."""
 
     def __init__(
@@ -138,7 +160,7 @@ class GitCapabilitySource:
         repository: str,
         revision: str,
         package_root: str = "",
-        cache_directory: Path | None = None,
+        provenance: str = _PROVENANCE_LABEL,
         signatures: Mapping[tuple[str, str], tuple[bytes, str]] | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
@@ -159,15 +181,15 @@ class GitCapabilitySource:
                 "https://, ssh://, file:// or git@host: URL",
                 details={"repository": repository},
             )
-        elif cache_directory is None:
-            raise InvalidInputError("a URL Git capability source needs a cache_directory")
+        if not provenance.strip():
+            raise InvalidInputError("a Git capability source provenance label must be non-blank")
         self._repository = repository
         self._revision = revision
         self._package_root = normalize_path(package_root) if package_root else ""
-        self._cache_directory = cache_directory
+        self._provenance = provenance
         self._signatures = dict(signatures or {})
         self._timeout_seconds = timeout_seconds
-        self._verified_repository: Path | None = None
+        self._mirror: Path | None = None
 
     @property
     def pinned_commit(self) -> str:
@@ -190,7 +212,8 @@ class GitCapabilitySource:
                 detail="git is not installed",
             )
         try:
-            self._repo()
+            with self._session():
+                pass
         except CapabilitySourceError as error:
             return AdapterStatus(
                 kind=ProviderKind.CAPABILITY_SOURCE,
@@ -218,35 +241,37 @@ class GitCapabilitySource:
         """Every package directory with a manifest at the pinned commit; no closure is built."""
 
         listings: list[CapabilityListing] = []
-        for name, items in sorted(self._packages().items()):
-            manifest = self._manifest_of(name, items)
-            if manifest is None:
-                continue
-            listings.append(
-                CapabilityListing(
-                    name=manifest.name,
-                    version=manifest.version,
-                    provenance=_PROVENANCE_LABEL,
-                    revision=self._revision,
+        with self._session():
+            for name, items in sorted(self._packages().items()):
+                manifest = self._manifest_of(name, items)
+                if manifest is None:
+                    continue
+                listings.append(
+                    CapabilityListing(
+                        name=manifest.name,
+                        version=manifest.version,
+                        provenance=self._provenance,
+                        revision=self._revision,
+                    )
                 )
-            )
         return tuple(listings)
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
         validate_name(name)
-        items = self._package_items(name)
-        if not items:
-            return None
-        manifest = self._manifest_of(name, items)
-        if manifest is None or (manifest.name, manifest.version) != (name, version):
-            return None
-        closure = build_closure(self._files_of(name, items))
+        with self._session():
+            items = self._package_items(name)
+            if not items:
+                return None
+            manifest = self._manifest_of(name, items)
+            if manifest is None or (manifest.name, manifest.version) != (name, version):
+                return None
+            closure = build_closure(self._files_of(name, items))
         signature = self._signatures.get((name, version))
         return CapabilityDescriptor(
             name=name,
             version=version,
             digest=closure.digest,
-            provenance=_PROVENANCE_LABEL,
+            provenance=self._provenance,
             revision=self._revision,
             license=None,
             signature=None if signature is None else signature[0],
@@ -255,16 +280,15 @@ class GitCapabilitySource:
 
     def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]:
         validate_name(name)
-        items = self._package_items(name)
-        manifest = self._manifest_of(name, items) if items else None
-        if manifest is None or (manifest.name, manifest.version) != (name, version):
-            raise CapabilitySourceError(
-                "capability is not present in the Git source at the pinned commit",
-                details={"name": name, "version": version, "revision": self._revision},
-            )
-        return self._files_of(name, items)
-
-    # ------------------------------------------------------------ git plumbing
+        with self._session():
+            items = self._package_items(name)
+            manifest = self._manifest_of(name, items) if items else None
+            if manifest is None or (manifest.name, manifest.version) != (name, version):
+                raise CapabilitySourceError(
+                    "capability is not present in the Git source at the pinned commit",
+                    details={"name": name, "version": version, "revision": self._revision},
+                )
+            return self._files_of(name, items)
 
     def _prefix(self) -> str:
         return f"{self._package_root}/" if self._package_root else ""
@@ -386,7 +410,12 @@ class GitCapabilitySource:
         return items
 
     def _git(self, arguments: Sequence[str]) -> bytes:
-        completed = self._run(self._repo(), arguments)
+        """Run one read-only git command inside the private mirror, never inside the source."""
+
+        mirror = self._mirror
+        if mirror is None:  # pragma: no cover - every public entry point opens a session first
+            raise CapabilitySourceError("git was used outside a private mirror session")
+        completed = self._invoke(["--git-dir", str(mirror), *arguments], cwd=mirror)
         if completed.returncode != 0:
             raise CapabilitySourceError(
                 "git could not read the pinned commit",
@@ -398,29 +427,22 @@ class GitCapabilitySource:
             )
         return completed.stdout
 
-    def _run(
-        self, repository: Path, arguments: Sequence[str]
+    def _invoke(
+        self, arguments: Sequence[str], *, cwd: Path, protocols: str | None = None
     ) -> subprocess.CompletedProcess[bytes]:
         executable = shutil.which("git")
         if executable is None:
             raise CapabilitySourceError("git is not installed")
         try:
             return subprocess.run(
-                [
-                    executable,
-                    "--no-replace-objects",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "-C",
-                    str(repository),
-                    *arguments,
-                ],
+                [executable, "--no-replace-objects", "-c", "core.fsmonitor=false", *arguments],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 check=False,
                 shell=False,
+                cwd=cwd,
                 timeout=self._timeout_seconds,
-                env=git_environment(ceiling=repository.parent),
+                env=git_environment(protocols=protocols),
             )
         except subprocess.TimeoutExpired as error:
             raise CapabilitySourceError(
@@ -431,14 +453,68 @@ class GitCapabilitySource:
                 "git could not be started", details={"error": str(error)}
             ) from error
 
-    def _repo(self) -> Path:
-        """The repository holding the commit, verified once to resolve to exactly the sha."""
+    @contextlib.contextmanager
+    def _session(self) -> Iterator[None]:
+        """A fresh private mirror of the pinned commit, deleted when the session ends.
 
-        if self._verified_repository is not None:
-            return self._verified_repository
-        repository = self._local if self._local is not None else self._mirror()
-        completed = self._run(
-            repository, ["rev-parse", "--verify", "--quiet", f"{self._revision}^{{commit}}"]
+        The mirror is created by this adapter in an owner-only temporary
+        directory, so git never runs inside a repository the adapter did not
+        create and never reads another repository's configuration. The source
+        (a local path as a ``file://`` URL, or a remote URL) is only fetched
+        from. A session already open is reused by nested calls.
+        """
+
+        if self._mirror is not None:
+            yield
+            return
+        mirror = Path(tempfile.mkdtemp(prefix="enginery-git-"))
+        try:
+            self._populate(mirror)
+            self._mirror = mirror
+            yield
+        finally:
+            self._mirror = None
+            shutil.rmtree(mirror, ignore_errors=True)
+
+    def _populate(self, mirror: Path) -> None:
+        """Initialise ``mirror`` and fetch exactly the pinned commit into it."""
+
+        self._must_run(
+            ["init", "--bare", "--quiet", "--template=", str(mirror)],
+            cwd=mirror,
+            what="create the private mirror",
+        )
+        source = self._local.as_uri() if self._local is not None else self._repository
+        self._must_run(
+            [
+                "--git-dir",
+                str(mirror),
+                "-c",
+                "protocol.version=2",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "--depth=1",
+                "--",
+                source,
+                self._revision,
+            ],
+            cwd=mirror,
+            protocols=_transport_of(source),
+            what="fetch the pinned commit",
+        )
+        completed = self._invoke(
+            [
+                "--git-dir",
+                str(mirror),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{self._revision}^{{commit}}",
+            ],
+            cwd=mirror,
         )
         resolved = completed.stdout.decode("ascii", errors="replace").strip()
         if completed.returncode != 0 or resolved != self._revision:
@@ -446,43 +522,17 @@ class GitCapabilitySource:
                 "the pinned sha does not resolve to exactly that commit",
                 details={"repository": self._repository, "revision": self._revision},
             )
-        self._verified_repository = repository
-        return repository
 
-    def _mirror(self) -> Path:
-        """A bare cache of a URL repository, fetched only when the commit is not yet present."""
-
-        assert self._cache_directory is not None
-        key = hashlib.sha256(self._repository.encode("utf-8")).hexdigest()[:16]
-        mirror = self._cache_directory / key
-        if not (mirror / "HEAD").exists():
-            mirror.mkdir(parents=True, exist_ok=True)
-            self._must_run(mirror, ["init", "--bare", "--quiet", str(mirror)])
-        present = self._run(mirror, ["cat-file", "-e", f"{self._revision}^{{commit}}"])
-        if present.returncode != 0:
-            self._must_run(
-                mirror,
-                [
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "--no-recurse-submodules",
-                    "--",
-                    self._repository,
-                    "+refs/heads/*:refs/mirror/heads/*",
-                    "+refs/tags/*:refs/mirror/tags/*",
-                ],
-            )
-        return mirror
-
-    def _must_run(self, repository: Path, arguments: Sequence[str]) -> None:
-        completed = self._run(repository, arguments)
+    def _must_run(
+        self, arguments: Sequence[str], *, cwd: Path, what: str, protocols: str | None = None
+    ) -> None:
+        completed = self._invoke(arguments, cwd=cwd, protocols=protocols)
         if completed.returncode != 0:
             raise CapabilitySourceError(
-                "git could not prepare the repository cache",
+                f"git could not {what}",
                 details={
-                    "command": arguments[0],
+                    "operation": what,
+                    "revision": self._revision,
                     "stderr": completed.stderr.decode("utf-8", errors="replace")[:1000],
                 },
             )

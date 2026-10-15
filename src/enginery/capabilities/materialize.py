@@ -27,7 +27,7 @@ from enginery.capabilities.closure import (
     AssetRecord,
     PackageClosure,
     build_closure,
-    build_closure_from_directory,
+    read_package_directory,
 )
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -114,6 +114,20 @@ def load_verified_closure(entry: LockedCapability, root: Path) -> tuple[Path, Pa
     the one that was verified, so its manifest is trustworthy.
     """
 
+    directory, closure, _ = load_verified_package(entry, root)
+    return directory, closure
+
+
+def load_verified_package(
+    entry: LockedCapability, root: Path
+) -> tuple[Path, PackageClosure, tuple[PackageFile, ...]]:
+    """:func:`load_verified_closure` plus the exact bytes that were verified.
+
+    A caller that must run or copy package content uses these bytes, never the
+    directory again: the directory is writable by its owner, so a second read
+    could return something other than what was verified.
+    """
+
     target = digest_path(root, entry.digest)
     if not os.path.lexists(target):
         raise CapabilityIntegrityError(
@@ -121,7 +135,8 @@ def load_verified_closure(entry: LockedCapability, root: Path) -> tuple[Path, Pa
             details={"name": entry.name, "version": entry.version},
         )
     try:
-        closure = build_closure_from_directory(target)
+        files = read_package_directory(target)
+        closure = build_closure(files)
     except CapabilityError as error:
         raise CapabilityIntegrityError(
             "materialized closure is no longer a valid package",
@@ -133,7 +148,7 @@ def load_verified_closure(entry: LockedCapability, root: Path) -> tuple[Path, Pa
             },
         ) from error
     _require_matching_closure(entry, closure, "materialized closure no longer matches")
-    return target, closure
+    return target, closure, files
 
 
 def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:

@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import pytest
 import yaml
-from tests.support.capabilities import package_files, project_source, wrap_source
+from tests.support.capabilities import approvals_for, package_files, project_source, wrap_source
 
 from enginery.adapters.armory import ArmoryCapabilitySource
 from enginery.application.adapter_types import AdapterAvailability
@@ -23,7 +23,7 @@ from enginery.capabilities.errors import (
     CapabilityPathError,
     CapabilitySymlinkError,
 )
-from enginery.capabilities.lock import ApprovedCapabilities, ProvenanceStatus
+from enginery.capabilities.lock import ProvenanceStatus
 from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.sources import CapabilitySource, SourceKind
@@ -507,7 +507,7 @@ def test_approved_armory_package_materializes_its_complete_closure(tmp_path: Pat
         resolved.lock,
         resolved.files_by_name,
         root=tmp_path,
-        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["adr-writer"]),
+        approvals=approvals_for(resolved.lock, ["adr-writer"]),
     )
 
     directory = materialized["adr-writer"]
@@ -528,7 +528,7 @@ def test_armory_package_with_an_unknown_license_is_held_even_when_approved(tmp_p
             resolved.lock,
             resolved.files_by_name,
             root=tmp_path,
-            approvals=ApprovedCapabilities.for_entries(resolved.lock, ["adr-writer"]),
+            approvals=approvals_for(resolved.lock, ["adr-writer"]),
         )
 
 

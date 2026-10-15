@@ -378,7 +378,11 @@ files do not hash to the claimed digest.
   directory, under its closure-digest path and never overwritten; every
   later use re-verifies the directory (no missing, changed, or extra file,
   no symlink) against the lock entry.
-- **Lock schema.** The lock file declares `schema_version: 2`. A lock
+- **Lock schema.** The lock file declares `schema_version: 2` and, beside
+  `entries`, `retained_pins` (name, version, closure digest of capabilities
+  an earlier install held that the lock no longer carries). Retained pins are
+  drift bookkeeping outside `CapabilityLock.digest()`: the entries are exactly
+  the installed and approved lock. A lock
   without a `schema_version` is the previous single-blob schema: it decodes
   read-only as legacy entries that carry no closure, cannot be
   materialized or approved, and must be re-resolved —
@@ -403,7 +407,7 @@ permission typing.
 
 | Kind | Adapter | Trust |
 |---|---|---|
-| `project` | `GitCapabilitySource` over the reviewed repository at the run's bound base commit (`--project-source REPOSITORY@COMMIT`, optional `--project-subdir`); the commit sha is the locked revision | `local_trusted`, not run-introduced; no approval |
+| `project` | `GitCapabilitySource` over a **local** reviewed repository at the run's bound base commit (`--project-source REPOSITORY@COMMIT`, optional `--project-subdir`; a URL is refused); the commit sha is the locked revision and the lock records `project:<canonical absolute repository path>` as the source label, so the lock digest binds the repository. Binding that commit to the run's reviewed base is the operator's assertion | `local_trusted`, not run-introduced; no approval |
 | `user` | `DirectoryCapabilitySource` over a user-local directory (the only directory-backed kind) | run-introduced, `unauthenticated` |
 | `git` | `GitCapabilitySource`: repository path or URL plus a full 40-hex commit sha | run-introduced, `unauthenticated` |
 | `armory` | `ArmoryCapabilitySource` | run-introduced, `unauthenticated` |
@@ -430,15 +434,21 @@ package still needs exact-digest human approval.
   (submodule) make the package unlockable and fail with the offending path,
   and a package whose tree sizes already exceed the package-wide byte limit is
   refused before any blob is read. The sha must resolve to exactly that commit.
+  Git never runs inside a repository it did not create: every port call
+  creates a fresh bare mirror in an owner-only temporary directory, fetches
+  exactly the pinned commit into it (a local path as a `file://` URL), reads
+  only from the mirror, and deletes it afterwards, so the source repository's
+  own configuration (a promisor remote, `core.sshCommand`) is never used.
   Every git subprocess uses an argument vector, a timeout, `--no-replace-objects`
   (with `GIT_NO_REPLACE_OBJECTS=1`, so `git replace` cannot swap a pinned
   commit's content), `-c core.fsmonitor=false`, and an environment built from an
   allowlist (`PATH`, `HOME`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`) plus
-  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` and
-  `GIT_ALLOW_PROTOCOL`; it never writes git configuration. A URL is fetched
-  only into a private bare cache (a temporary directory for the read-only
-  `inspect` and `preview` commands, which therefore read the network but
-  write nothing to the workspace).
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_NO_LAZY_FETCH=1` and `GIT_LITERAL_PATHSPECS=1`. `GIT_ALLOW_PROTOCOL` names
+  only the transport the fetch needs and, for every other command, no
+  transport at all. The adapter never writes git configuration and never keeps
+  a cache, so `inspect` and `preview` read the network (for a URL) but write
+  nothing to the workspace.
 - **Armory** `discover()` lists catalog rows cheaply and never fetches or
   locks a package; a package's closure is computed only when it is selected
   (`resolve` or `fetch_closure`), and a selected package that cannot be
@@ -453,16 +463,19 @@ not installed.
 **Command boundary.** A `command` or `hook` package declares one `command`
 in its manifest: an argument vector (a reviewed interpreter — `python3`,
 `sh`, `bash`, `node` — then a package script, or a directly executable
-package script), an `input_schema`, a `timeout_seconds` (1-300) and a
-`max_output_bytes` (1 B-1 MiB). `run_package_command`
-(`src/enginery/capabilities/command.py`) runs it only while an active
-owned install record covers exactly the locked closure, re-verifies the
-materialized closure immediately before the process starts (drift is
-rejected, not run), validates the JSON input against the schema before
-spawning anything, never uses a shell, gives the process a minimal
-environment and its own process group, and returns the stdout JSON
-document in canonical form with stderr captured as diagnostics. Failures
-are distinct error classes: `CapabilityInputSchemaError` (schema
+`.sh` package script; a `.py`, `.js`, `.mjs` or `.ts` script must name its
+interpreter so the interpreter's isolation flags apply), an `input_schema`, a
+`timeout_seconds` (1-300) and a `max_output_bytes` (1 B-1 MiB).
+`run_package_command` (`src/enginery/capabilities/command.py`) runs it only
+while an active owned install record covers exactly the locked closure,
+re-verifies the materialized closure immediately before the process starts
+(drift is rejected, not run) and runs from a fresh owner-only copy of the
+bytes it just verified, removed afterwards, so a change to the store after
+verification cannot change the code that runs. It validates the JSON input
+against the schema before spawning anything, never uses a shell, gives the
+process a minimal environment and its own process group, and returns the
+stdout JSON document in canonical form with stderr captured as diagnostics.
+Failures are distinct error classes: `CapabilityInputSchemaError` (schema
 violation), `CapabilityCommandTimeoutError`, `CapabilityCommandFailedError`
 (non-zero exit), `CapabilityCommandOutputError` (not one JSON document, or
 over the output limit), and `CapabilityIntegrityError` (drift). The input

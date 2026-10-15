@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -265,7 +266,7 @@ def test_the_executable_bit_of_a_tracked_script_is_preserved(tmp_path: Path) -> 
     files = package_files(
         "tool-a",
         kind=PackageKind.COMMAND,
-        command=CommandSpec.create(argv=("scripts/run.py",), input_schema={"type": "object"}),
+        command=CommandSpec.create(argv=("scripts/run.sh",), input_schema={"type": "object"}),
     )
     assert any(item.executable for item in files)
     repo, sha, _ = _packaged_repo(tmp_path, files, directory="packages/tool-a")
@@ -322,7 +323,6 @@ def test_git_environment_drops_redirecting_and_config_variables(
         monkeypatch.setenv(key, str(tmp_path / "elsewhere"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "global-config"))
-    monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
 
     environment = git_environment()
 
@@ -331,7 +331,6 @@ def test_git_environment_drops_redirecting_and_config_variables(
     assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert "GIT_CEILING_DIRECTORIES" not in environment
-    assert git_environment(ceiling=tmp_path)["GIT_CEILING_DIRECTORIES"] == str(tmp_path)
 
 
 def test_an_inherited_git_dir_cannot_redirect_the_source_to_another_repository(
@@ -403,17 +402,21 @@ def test_the_source_never_writes_into_the_repository_it_reads(tmp_path: Path) ->
     assert _git(repo, "status", "--porcelain") == status_before
 
 
-def test_a_url_source_fetches_into_a_bare_mirror_and_matches_the_local_descriptor(
-    tmp_path: Path,
+def test_a_url_source_matches_the_local_descriptor_and_leaves_no_mirror_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, sha, files = _packaged_repo(tmp_path)
-    cache = tmp_path / "cache"
-    remote = GitCapabilitySource(
-        repository=f"file://{repo}",
-        revision=sha,
-        package_root="packages",
-        cache_directory=cache,
-    )
+    mirrors: list[Path] = []
+    modes: list[int] = []
+    real_populate = GitCapabilitySource._populate
+
+    def recording_populate(self: GitCapabilitySource, mirror: Path) -> None:
+        mirrors.append(mirror)
+        modes.append(stat.S_IMODE(mirror.stat().st_mode))
+        real_populate(self, mirror)
+
+    monkeypatch.setattr(GitCapabilitySource, "_populate", recording_populate)
+    remote = GitCapabilitySource(repository=f"file://{repo}", revision=sha, package_root="packages")
 
     descriptor = remote.resolve("skill-a", "1")
 
@@ -421,13 +424,107 @@ def test_a_url_source_fetches_into_a_bare_mirror_and_matches_the_local_descripto
     assert descriptor is not None
     assert descriptor.digest == build_closure(files).digest
     assert _as_set(remote.fetch_closure("skill-a", "1")) == _as_set(files)
-    assert cache.is_dir()
+    assert len(mirrors) == 3  # one fresh mirror per port call, including the local comparison
+    assert modes == [0o700] * 3
+    assert not [mirror for mirror in mirrors if mirror.exists()]
     assert not (repo / ".git" / "index.lock").exists()
 
 
-def test_a_url_source_needs_a_cache_directory() -> None:
-    with pytest.raises(InvalidInputError):
-        GitCapabilitySource(repository="https://example.invalid/repo.git", revision=_UNKNOWN_SHA)
+def test_git_never_runs_inside_the_repository_it_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, sha, _ = _packaged_repo(tmp_path)
+    calls: list[tuple[list[str], str, dict[str, str]]] = []
+    real_run = subprocess.run
+
+    def recording_run(command: list[str], **kwargs: Any) -> Any:
+        calls.append((command, str(kwargs["cwd"]), kwargs["env"]))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("enginery.adapters.git_capability.subprocess.run", recording_run)
+    source = _source(repo, sha)
+
+    source.discover()
+    source.fetch_closure("skill-a", "1")
+
+    assert calls
+    fetches = [call for call in calls if "fetch" in call[0]]
+    assert len(fetches) == 2
+    for command, cwd, environment in calls:
+        assert not Path(cwd).resolve().is_relative_to(repo.resolve())
+        assert str(repo / ".git") not in command
+        assert environment["GIT_NO_LAZY_FETCH"] == "1"
+        expected = "file" if "fetch" in command else None
+        assert (
+            environment["GIT_ALLOW_PROTOCOL"]
+            == git_environment(protocols=expected)["GIT_ALLOW_PROTOCOL"]
+        )
+    for command, _, _ in fetches:
+        assert f"file://{repo.resolve()}" in command
+
+
+def _git_stdin(repo: Path, data: str, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        check=True,
+        cwd=repo,
+        env=_env(),
+        input=data,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _partial_clone_repo(tmp_path: Path, sentinel: Path) -> tuple[Path, str]:
+    """A repository whose pinned tree names a blob that is not in its object store.
+
+    Its configuration declares a promisor remote and an ssh command that touches
+    ``sentinel``; any git command run inside it that needs the missing blob would
+    lazily fetch from that remote and run the command.
+    """
+
+    repo = _init_repo(tmp_path / "promisor-source")
+    manifest = package_files("skill-a")[0]
+    stored = _git_stdin(repo, manifest.content.decode(), "hash-object", "-w", "--stdin")
+    missing = _git_stdin(repo, "never stored\n", "hash-object", "--stdin")
+    references = _git_stdin(repo, f"100644 blob {missing}\tguide.md\n", "mktree", "--missing")
+    package = _git_stdin(
+        repo,
+        f"100644 blob {stored}\tcapability.json\n040000 tree {references}\treferences\n",
+        "mktree",
+        "--missing",
+    )
+    packages = _git_stdin(repo, f"040000 tree {package}\tskill-a\n", "mktree")
+    root = _git_stdin(repo, f"040000 tree {packages}\tpackages\n", "mktree")
+    commit = _git(repo, "commit-tree", "-m", "partial", root)
+    config = repo / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = touch {sentinel}; false\n"
+        + "[extensions]\n\tpartialClone = origin\n"
+        + '[remote "origin"]\n\turl = ssh://promisor.invalid/repo\n\tpromisor = true\n',
+        encoding="utf-8",
+    )
+    return repo, commit
+
+
+def test_a_partial_clone_source_cannot_lazily_fetch_and_run_its_configured_command(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "sentinel"
+    repo, commit = _partial_clone_repo(tmp_path, sentinel)
+    source = _source(repo, commit)
+
+    with pytest.raises(CapabilitySourceError):
+        source.resolve("skill-a", "1")
+    with pytest.raises(CapabilitySourceError):
+        source.fetch_closure("skill-a", "1")
+    with pytest.raises(CapabilitySourceError):
+        source.discover()
+    assert source.probe().availability is AdapterAvailability.MISCONFIGURED
+
+    assert not sentinel.exists()
 
 
 @pytest.mark.parametrize(
@@ -444,9 +541,7 @@ def test_a_repository_that_is_neither_a_directory_nor_an_allowed_url_is_rejected
     tmp_path: Path, repository: str
 ) -> None:
     with pytest.raises(InvalidInputError):
-        GitCapabilitySource(
-            repository=repository, revision=_UNKNOWN_SHA, cache_directory=tmp_path / "cache"
-        )
+        GitCapabilitySource(repository=repository, revision=_UNKNOWN_SHA)
 
 
 def test_probe_reports_available_for_a_good_source_and_misconfigured_for_an_unknown_commit(
@@ -534,7 +629,11 @@ def test_git_environment_is_built_from_an_allowlist(
     assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
     assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
-    assert environment["GIT_ALLOW_PROTOCOL"] == "file:https:ssh"
+    assert environment["GIT_ALLOW_PROTOCOL"] not in {"file", "https", "ssh"}
+    assert not {"file", "https", "ssh"} & set(environment["GIT_ALLOW_PROTOCOL"].split(":"))
+    assert environment["GIT_NO_LAZY_FETCH"] == "1"
+    assert environment["GIT_LITERAL_PATHSPECS"] == "1"
+    assert git_environment(protocols="file")["GIT_ALLOW_PROTOCOL"] == "file"
     assert "PATH" in environment
 
 

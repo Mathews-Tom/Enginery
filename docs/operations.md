@@ -164,9 +164,10 @@ requests against typed sources and manages a task-local install:
 | Command | Effect |
 |---|---|
 | `enginery capability lock --check [--lockfile PATH] [--capabilities-root PATH] [--json]` | Verify the content-addressed store against the lockfile. Exit `12` on drift. |
-| `enginery capability inspect NAME@VERSION... SOURCE-FLAGS [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Report each package's closure digest, trust, license, permissions, compatibility, approval requirement, and the selected source with every shadowed alternative; a shadowed source that fails (offline Armory, missing extra) is reported as that alternative's problem, not fatal. Reads sources only: nothing is materialized, written to the workspace, or executed (URL Git sources and Armory are read over the network). Exit `0`. |
-| `enginery capability preview NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | The same resolution plus the exact install plan: files to write (task-local destination, kind, size, digest), blockers, and approvals still required. No side effects beyond the same network reads. Exit `0` when ready; otherwise the blocker's code (`12` license hold or incompatible, `9` conflict, `5` approval required). |
-| `enginery capability install NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | Materialize the verified closures and copy them into the install root (only bytes that still hash to the lock are written), then record the owned-install manifest and the lockfile (merged with earlier pins). Refuses license holds, incompatible packages, and destinations it does not own. Exit `0`; `5` when held for approval; `3` on drift or a pinned name at another version; `9` on a conflict; `12` on a license hold, incompatibility, or legacy lockfile; `2` on bad input. |
+| `enginery capability inspect NAME@VERSION... SOURCE-FLAGS [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Report each package's closure digest, trust, license, permissions, compatibility, approval requirement, and the selected source with every shadowed alternative; a shadowed source that fails (offline Armory, missing extra) is reported as that alternative's problem, not fatal. Reads sources only: nothing is materialized, written to the workspace, or executed (URL Git sources and Armory are read over the network). Exit `0`; `3` on drift against the lockfile or a source that cannot be read; `12` on a legacy lockfile or an invalid package; `2` on bad input. |
+| `enginery capability preview NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | The same resolution plus the exact install plan: files to write (task-local destination, kind, size, digest), blockers, and approvals still required. No side effects beyond the same network reads. Exit `0` when ready; otherwise the blocker's code (`3` drift, including a pinned name at another version; `12` license hold or incompatible; `9` conflict; `5` approval required); also `3` on drift or an unreadable source found while resolving, `12` on a legacy lockfile or an invalid package, `2` on bad input. |
+| `enginery capability install NAME@VERSION... SOURCE-FLAGS [path flags] [--json]` | Materialize the verified closures and copy them into the install root (only bytes that still hash to the lock are written), then record the owned-install manifest and the lockfile (the installed lock plus earlier pins as retained pins). Refuses license holds, incompatible packages, and destinations it does not own. Exit `0`; `5` when held for approval; `3` on drift or a pinned name at another version; `9` on a conflict; `12` on a license hold, incompatibility, legacy lockfile, or invalid package; `2` on bad input. |
+| `enginery capability uninstall [--lockfile PATH] [--capabilities-root PATH] [--install-root PATH] [--json]` | Revoke the active install record, then remove the owned, unmodified files (see below). Exit `0`; `3` when no install is recorded under the install root; `2` on bad input. |
 
 Source flags (at least one is required; precedence is project, user, git,
 Armory — the first source offering `name@version` is selected and the rest
@@ -174,16 +175,16 @@ are reported as shadowed):
 
 | Flag | Source |
 |---|---|
-| `--project-source REPOSITORY@COMMIT`, `--project-subdir DIR` | The reviewed base: a Git repository (existing directory, or URL) pinned to a full 40-hex commit sha, with packages under `DIR` of that commit's tracked tree (`DIR/<name>/capability.json`). The only source that resolves `local_trusted` and installs without approval. Only committed content at that sha is read — never a working tree, the index, or an uncommitted edit — and the sha is recorded as the lock entry's origin revision. Bind the sha to the run's reviewed base revision; a bare directory, an abbreviated sha, or a ref is refused (exit `2`). |
+| `--project-source REPOSITORY@COMMIT`, `--project-subdir DIR` | The reviewed base: a **local** Git repository directory (a URL is refused, exit `2`) pinned to a full 40-hex commit sha, with packages under `DIR` of that commit's tracked tree (`DIR/<name>/capability.json`). The only source that resolves `local_trusted` and installs without approval. Only committed content at that sha is read — never a working tree, the index, or an uncommitted edit — and the sha is recorded as the lock entry's origin revision. The lock entry's source label is `project:<canonical absolute repository path>`, which the lock digest binds. That the commit is the run's reviewed base is the operator's assertion: nothing checks it. A bare directory, an abbreviated sha, or a ref is refused (exit `2`). |
 | `--user-source DIR` (repeatable) | User-local package directory; run-introduced and `unauthenticated` (needs approval). The only directory-backed source. |
-| `--git-source REPOSITORY@COMMIT` (repeatable), `--git-subdir DIR`, `--git-cache DIR` (`install` only) | A Git repository (existing directory, or `https://`, `ssh://`, `file://`, `git@host:` URL) pinned to a full 40-hex commit sha; packages are read from `DIR` inside that commit's tracked tree. `unauthenticated` unless a pinned signature verifies. |
+| `--git-source REPOSITORY@COMMIT` (repeatable), `--git-subdir DIR` | A Git repository (existing directory, or `https://`, `ssh://`, `file://`, `git@host:` URL) pinned to a full 40-hex commit sha; packages are read from `DIR` inside that commit's tracked tree. `unauthenticated` unless a pinned signature verifies. |
 | `--armory`, `--armory-revision SHA` | The Armory catalog at one commit (network; needs the `armory` extra). |
 | `--replace-legacy-lock` | Resolve fresh past a legacy single-blob lockfile; `install` then replaces that file. |
 
 Path flags default to `.enginery/capabilities.lock.json` (`--lockfile`),
 `.enginery/capabilities` (`--capabilities-root`, the content-addressed
-store), `.enginery/installed` (`--install-root`), and, for `install` only,
-`.enginery/git-cache` (`--git-cache`).
+store), and `.enginery/installed` (`--install-root`). There is no persistent
+Git cache.
 
 **Approval is never recorded by this CLI.** An entry that needs
 exact-digest human approval (anything not served by the project source) is
@@ -203,13 +204,19 @@ classification changes the lock digest and supersedes an earlier approval.
 **Drift.** When the lockfile already records `name@version`, a source that
 now serves a different closure for it is rejected (exit `3`) rather than
 silently re-locked; remove the lockfile deliberately to accept changed
-content. `install` keeps every earlier pin: the lockfile it writes is the new
-resolution plus every earlier entry the resolution does not replace, so
-installing and uninstalling other packages never forgets a pin. A request for
-a *different version* of a name the lockfile already pins is refused (exit
-`3`, before anything is written) — the lockfile pins one version per name.
-An install of a different lock than the one recorded under the install root
-is refused until the active install is uninstalled.
+content. The lockfile's `entries` are exactly the lock that `install` installed
+and that the install record, the `HOLD` output and any approval name, so its
+digest is the one bound everywhere. Pins from earlier installs are kept only
+as `retained_pins` (name, version, closure digest) outside that digest, so
+installing and uninstalling other packages never forgets a pin: both an active
+entry and a retained pin block a changed closure. A request for a *different
+version* of a name the lockfile pins (in either form) is refused as a drift
+blocker by `install` (exit `3`, before anything is written) and reported by
+`preview` as a blocker with the same exit `3` — the lockfile pins one version
+per name. The lockfile is written atomically and a symlink at its path is
+refused on read (exit `2`) and replaced, never followed, on write. An install
+of a different lock than the one recorded under the install root is refused
+until the active install is uninstalled.
 
 **Legacy lockfile.** A lockfile in the previous single-blob schema cannot be
 read as pins. `inspect`, `preview` and `install` refuse it (exit `12`) and
@@ -219,37 +226,53 @@ current-schema lockfile. Without the flag the legacy file is never touched;
 you can also move it aside.
 
 **Read-only commands still read the network.** `inspect` and `preview` write
-nothing to the workspace: any Git cache a URL source needs is a temporary
-directory deleted afterwards (`--git-cache` applies to `install` only).
-A URL Git source or the Armory catalog is still read over the network, so
-these commands perform network reads; a local-directory Git source performs
-none.
+nothing to the workspace. Every Git source, for every command, is read
+through a private bare mirror that the adapter creates in an owner-only
+temporary directory, fills with a fetch of exactly the pinned commit (a local
+path as a `file://` URL), reads only from, and deletes afterwards: git never
+runs inside a repository it did not create, so the source repository's own
+configuration (a promisor remote, `core.sshCommand`, hooks) is never used,
+and no missing object is lazily fetched. A URL Git source or the Armory
+catalog is read over the network, so these commands perform network reads; a
+local-directory Git source performs none.
 
-**Run boundary.** A package command runs from its verified closure with a
-minimal environment, no shell, bounded output, and a timeout, in its own
-session. After the command exits, however it exits, its whole process group
-is killed, so a background child does not outlive the run. This is not
-containment: a descendant that calls `setsid` leaves the group and is
-outside this boundary, and a command can still use everything the operator's
-account can (trusted-local is not isolation). Python commands run with
-`-B -s -E` (no bytecode, no user site-packages, no `PYTHON*` variables). Node
-commands run under Node's permission model, allowed to read only the
-closure directory (Node 20 or newer; an older Node is refused), so a bare
-`require()` cannot reach an ancestor `node_modules`; residual risk: any
-other interpreter (`sh`, `bash`) and anything the closure itself ships runs
-with the operator's account. `run_package_command` also refuses to run when the
-lock's compatibility receipt was recorded for a different host than the one
-it runs on.
+**Run boundary.** A package command runs with a minimal environment, no
+shell, bounded output, and a timeout, in its own session. The closure is
+verified immediately before the run and the bytes that were verified are
+written to a fresh owner-only directory, which the command runs from and
+which is removed afterwards, so a change to the content-addressed store
+after verification cannot change the code that runs. After the command exits,
+however it exits, its whole process group is killed (where the platform has
+`os.waitid` the leader is still unreaped at that moment, so the group id
+cannot belong to another process; on macOS, which lacks it, the leader is
+reaped first and a recycled pid is a residual risk), so a background child
+does not outlive the run. This is not containment: a descendant that calls
+`setsid` leaves the group and is outside this boundary, and a command can
+still use everything the operator's account can (trusted-local is not
+isolation). A `.py`, `.js`, `.mjs` or `.ts` script must be run through its
+interpreter (`python3` or `node`), never executed directly, so the
+interpreter flags always apply; only a `.sh` script may run directly. Python
+commands run with `-B -s -E` (no bytecode, no user site-packages, no
+`PYTHON*` variables). Node commands run under Node's permission model,
+allowed to read only the copied closure directory (Node 20 or newer; an
+older Node is refused), so a bare `require()` cannot reach an ancestor
+`node_modules`; residual risk: any other interpreter (`sh`, `bash`) and
+anything the closure itself ships runs with the operator's account.
+`run_package_command` also refuses to run when the lock's compatibility
+receipt was recorded for a different host than the one it runs on.
 
 **Uninstall retention.** `uninstall` removes only files listed in the owned
 manifest whose digest still matches, never anything outside the install
-root, and replaces the manifest with a revocation record named
-`.enginery-install-revoked-<revoked lock digest hex>-<n>.json` (a revoked
-install has no authority to run a package command). Each uninstall writes a
-new record and never overwrites an earlier one (`<n>` counts records for the
-same lock digest from 1). The manifest and the record are written to a fresh
-exclusively created temporary file in the install root, synced, renamed into
-place, and the directory synced; a symlink planted at any fixed name is never
+root. It revokes first and deletes second: the revocation record
+`.enginery-install-revoked-<revoked lock digest hex>-<n>.json` is linked into
+place and the owned manifest is removed before any file is deleted, so a
+failure to record the revocation aborts with every file still installed (a
+revoked install has no authority to run a package command). The record is
+hard-linked, which fails rather than replaces when the name exists: an
+earlier record is never overwritten (`<n>` counts records for the same lock
+digest from 1). Every manifest and record is first written to a fresh
+exclusively created temporary file in the install root, synced, and the
+directory synced afterwards; a symlink planted at any fixed name is never
 followed. It never deletes the content-addressed store, the lockfile, the
 ledger, or any evidence or raw artifact, and it reports what it removed and
 what it retained (modified files, the store, and the lockfile are listed as

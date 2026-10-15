@@ -17,8 +17,10 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from enginery.adapters.git_capability import GitCapabilitySource
 from enginery.application.adapter_types import AdapterStatus
 from enginery.application.delivery_ports import CapabilityDescriptor, CapabilityListing, PackageFile
+from enginery.capabilities.approval import approved_capabilities, materialize_approval_schema
 from enginery.capabilities.closure import build_closure
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -32,6 +34,9 @@ from enginery.capabilities.materialize import materialize_lock
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.signature import PinnedKeyring, PinnedPublisherKey, descriptor_verifier
 from enginery.capabilities.sources import CapabilitySource, SourceKind
+from enginery.domain.principal import AuthorityPrincipal, PrincipalType
+from enginery.policy.approval import ApprovalRegistry
+from enginery.policy.evaluator import PolicyEvaluator
 
 
 def _token(rng: random.Random) -> str:
@@ -72,13 +77,14 @@ def _descriptor(
     license_id: str | None = None,
     signature: bytes | None = None,
     signer_key_id: str | None = None,
+    revision: str = "adversarial-revision",
 ) -> CapabilityDescriptor:
     return CapabilityDescriptor(
         name=name,
         version="1",
         digest=build_closure(files).digest,
         provenance=provenance,
-        revision="adversarial-revision",
+        revision=revision,
         license=license_id,
         signature=signature,
         signer_key_id=signer_key_id,
@@ -86,14 +92,29 @@ def _descriptor(
 
 
 _PINNED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_OPERATOR = AuthorityPrincipal(
+    id="gate-operator",
+    principal_type=PrincipalType.HUMAN,
+    role="operator",
+    authorization_source="cli",
+)
+_RUN = AuthorityPrincipal(
+    id="gate-run",
+    principal_type=PrincipalType.AGENT,
+    role="run",
+    authorization_source="coordinator",
+)
 
 
-class _FakeSource:
-    """An in-memory stand-in; a project-kind source must declare the commit it is pinned to."""
+class _FakeSource(GitCapabilitySource):
+    """An in-memory stand-in for any source kind, answering the port from memory.
 
-    pinned_commit = _PINNED_COMMIT
+    The resolver accepts only a Git source as the project source, so this is one; no
+    repository is ever read.
+    """
 
     def __init__(self, descriptor: CapabilityDescriptor, files: tuple[PackageFile, ...]) -> None:
+        super().__init__(repository=tempfile.gettempdir(), revision=_PINNED_COMMIT)
         self._descriptor = descriptor
         self._files = files
 
@@ -225,7 +246,7 @@ def _case_run_introduced_capability_blocks_without_approval(rng: random.Random) 
         lock,
         {name: files},
         root=_scratch_root(),
-        approvals=ApprovedCapabilities.for_entries(lock, [name]),
+        approvals=_approve(lock, [name]),
     )
     _assert(name in materialized, "an approved run-introduced capability must materialize")
 
@@ -234,8 +255,12 @@ def _case_active_run_mutation(rng: random.Random) -> None:
     name = f"skill-{_token(rng)}"
     original_files = _package(name, _token(rng).encode())
     mutated_files = _package(name, _token(rng).encode())
-    original = _descriptor(name, original_files, provenance="repository-local")
-    mutated = _descriptor(name, mutated_files, provenance="repository-local")
+    original = _descriptor(
+        name, original_files, provenance="repository-local", revision=_PINNED_COMMIT
+    )
+    mutated = _descriptor(
+        name, mutated_files, provenance="repository-local", revision=_PINNED_COMMIT
+    )
     resolver = CapabilityResolver([_source(original, original_files, SourceKind.PROJECT)])
     previous_lock: CapabilityLock = resolver.resolve([CapabilityRequest(name=name, version="1")])
 
@@ -247,6 +272,18 @@ def _case_active_run_mutation(rng: random.Random) -> None:
             [CapabilityRequest(name=name, version="1")], previous_lock=previous_lock
         ),
     )
+
+
+def _approve(lock: CapabilityLock, names: list[str]) -> ApprovedCapabilities:
+    """Approvals through the real path: a registered human records the exact schema."""
+
+    registry = ApprovalRegistry([_OPERATOR])
+    evaluator = PolicyEvaluator("policy-gate", approval_registry=registry)
+    for entry in lock.pending_approval():
+        if entry.name in names:
+            schema = materialize_approval_schema(entry, lock, requesting_principal_id=_RUN.id)
+            registry.record_approval(schema, [_OPERATOR])
+    return approved_capabilities(lock, evaluator, requesting_principal_id=_RUN.id)
 
 
 def _scratch_root() -> Path:

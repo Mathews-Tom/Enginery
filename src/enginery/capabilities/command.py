@@ -5,7 +5,10 @@ and *only* while an active owned install record covers exactly that closure:
 uninstalling revokes the record and with it the authority to run. Immediately
 before executing, the materialized directory is re-verified against the lock
 entry, so a changed sibling script, reference, or added file is rejected
-rather than executed.
+rather than executed. The bytes that were verified are written to a fresh
+owner-only directory and the command runs from that copy, which is removed
+afterwards, so a change to the store after verification cannot change the code
+that runs.
 
 The command is the manifest's declared argument vector, executed directly
 (never through a shell). Its input is a JSON document validated against the
@@ -35,13 +38,15 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
+from enginery.application.delivery_ports import PackageFile
 from enginery.capabilities.compatibility import current_host, evaluate_compatibility
 from enginery.capabilities.errors import (
     CapabilityApprovalRequiredError,
@@ -57,7 +62,7 @@ from enginery.capabilities.errors import (
 from enginery.capabilities.install import load_owned_manifest
 from enginery.capabilities.lock import NO_APPROVALS, ApprovedCapabilities, CapabilityLock
 from enginery.capabilities.manifest import PackageKind
-from enginery.capabilities.materialize import load_verified_closure
+from enginery.capabilities.materialize import load_verified_package
 from enginery.capabilities.schema import MAX_INSTANCE_DEPTH, exceeds_depth, validate_instance
 from enginery.domain.digests import Digest
 
@@ -145,6 +150,68 @@ def _kill_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         process.kill()
+
+
+# ``os.waitid`` is absent on some platforms (macOS); the constants are read the same way so the
+# module imports, and type-checks, everywhere.
+_WAITID: Any = getattr(os, "waitid", None)
+_P_PID: int = getattr(os, "P_PID", 1)
+_WEXITED: int = getattr(os, "WEXITED", 0)
+_WNOWAIT: int = getattr(os, "WNOWAIT", 0)
+
+
+def _has_exited(process: subprocess.Popen[bytes]) -> bool:
+    """Whether the leader has exited, without reaping it where the platform allows.
+
+    ``os.waitid`` with ``WNOWAIT`` leaves an exited leader unreaped, so its pid
+    (also the process-group id) cannot be reused before the group is ended. Where
+    ``os.waitid`` does not exist (macOS), ``poll`` reaps the leader.
+    """
+
+    if _WAITID is not None:
+        return _WAITID(_P_PID, process.pid, _WEXITED | os.WNOHANG | _WNOWAIT) is not None
+    return process.poll() is not None
+
+
+def _end_group(process: subprocess.Popen[bytes]) -> None:
+    """Wait for the leader to exit, end whatever remains of its process group, and reap it.
+
+    With ``os.waitid`` the group is killed while the exited leader is still
+    unreaped, so the group id cannot belong to an unrelated process. Without it
+    (macOS) the leader is reaped first and a pid reused as a new group leader in
+    that instant would be signalled; that platform keeps this residual risk.
+    A descendant that left the group with ``setsid`` is outside this boundary.
+    """
+
+    if _WAITID is not None:
+        _WAITID(_P_PID, process.pid, _WEXITED | _WNOWAIT)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        return
+    process.wait()
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+@contextlib.contextmanager
+def _private_copy(files: Sequence[PackageFile]) -> Iterator[Path]:
+    """The verified ``files`` written to a fresh owner-only directory, removed afterwards."""
+
+    root = Path(tempfile.mkdtemp(prefix="enginery-run-"))
+    try:
+        for item in files:
+            destination = root / item.path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(destination, flags, 0o500 if item.executable else 0o400)
+            with os.fdopen(descriptor, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o555 if item.executable else 0o444)
+                handle.write(item.content)
+                handle.flush()
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _diagnostic(raw: bytes) -> str:
@@ -281,25 +348,28 @@ def run_package_command(
             "capability is incompatible with this host",
             details={"name": name, "reasons": list(entry.receipt.reasons)},
         )
-    directory, closure = load_verified_closure(entry, capabilities_root)
+    _, closure, verified = load_verified_package(entry, capabilities_root)
     command = closure.manifest.command
     if command is None:
         raise _not_runnable(name, entry.kind)
     validate_instance(command.input_schema, payload)
-    argv = _resolve_argv(command.argv, command.interpreter, directory, interpreter_paths or {})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
     )
-    return _execute(
-        name=name,
-        version=entry.version,
-        digest=entry.digest,
-        argv=argv,
-        directory=directory,
-        payload=encoded,
-        timeout=command.timeout_seconds,
-        limit=command.max_output_bytes,
-    )
+    # Only the bytes just verified are executed, from a private copy: the store directory is
+    # owner-writable, so running from it would let a swap after verification change the code.
+    with _private_copy(verified) as directory:
+        argv = _resolve_argv(command.argv, command.interpreter, directory, interpreter_paths or {})
+        return _execute(
+            name=name,
+            version=entry.version,
+            digest=entry.digest,
+            argv=argv,
+            directory=directory,
+            payload=encoded,
+            timeout=command.timeout_seconds,
+            limit=command.max_output_bytes,
+        )
 
 
 def _not_runnable(name: str, kind: PackageKind) -> CapabilityCommandNotRunnableError:
@@ -345,7 +415,7 @@ def _execute(
     stderr = _BoundedReader(process.stderr, limit, overflow)
     deadline = started + timeout
     timed_out = False
-    while process.poll() is None:
+    while not _has_exited(process):
         if overflow.is_set():
             _kill_group(process)
             break
@@ -354,11 +424,7 @@ def _execute(
             _kill_group(process)
             break
         time.sleep(0.005)
-    process.wait()
-    # Whatever the exit path, nothing the command started may outlive it: end the whole group.
-    # A descendant that left the group with setsid is outside this boundary.
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
+    _end_group(process)
     for reader in (stdout, stderr):
         reader.join(timeout=1)
         if reader.alive:

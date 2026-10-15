@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -284,3 +285,100 @@ def test_legacy_decoder_rejects_duplicate_names() -> None:
 
     with pytest.raises(InvalidInputError, match="unique"):
         legacy_lock_from_json(document)
+
+
+def _good_pin() -> dict[str, str]:
+    return pin_for("skill-a", package_files("skill-a")).to_json()
+
+
+def _lock_with_retained_pins() -> CapabilityLock:
+    return CapabilityLock(
+        entries=(locked_entry("skill-b"),),
+        retained_pins=(pin_for("skill-a", package_files("skill-a")),),
+    )
+
+
+def test_retained_pins_round_trip_and_are_not_part_of_the_lock_digest() -> None:
+    lock = _lock_with_retained_pins()
+
+    restored = lock_from_json(lock_to_json(lock))
+
+    assert restored == lock
+    assert [pin.name for pin in restored.retained_pins] == ["skill-a"]
+    assert restored.digest() == lock_of(locked_entry("skill-b")).digest()
+
+
+def test_a_lock_without_the_retained_pins_list_is_refused() -> None:
+    payload = lock_to_json(_lock())
+    del payload["retained_pins"]
+
+    with pytest.raises(InvalidInputError, match="retained_pins"):
+        lock_from_json(payload)
+
+
+@pytest.mark.parametrize(
+    "retained",
+    [
+        {},
+        ["skill-a"],
+        [{"name": "skill-a", "version": "1"}],
+        [_good_pin(), _good_pin()],
+        [{**_good_pin(), "name": "skill-b"}],
+    ],
+    ids=["not-a-list", "not-an-object", "missing-digest", "duplicate", "repeats-an-entry"],
+)
+def test_malformed_retained_pins_are_refused(retained: object) -> None:
+    payload = lock_to_json(_lock_with_retained_pins())
+    payload["retained_pins"] = retained
+
+    with pytest.raises(InvalidInputError):
+        lock_from_json(payload)
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_write_lock_replaces_a_planted_symlink_instead_of_writing_through_it(
+    tmp_path: Path, target_exists: bool
+) -> None:
+    target = tmp_path / "elsewhere.json"
+    if target_exists:
+        target.write_text("untouched", encoding="utf-8")
+    path = tmp_path / "capabilities.lock.json"
+    path.symlink_to(target)
+
+    write_lock(_lock(), path)
+
+    assert not path.is_symlink()
+    assert read_lock(path).digest() == _lock().digest()
+    assert target.exists() is target_exists
+    if target_exists:
+        assert target.read_text(encoding="utf-8") == "untouched"
+
+
+def test_write_lock_leaves_the_old_file_and_no_temporary_when_the_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "capabilities.lock.json"
+    write_lock(lock_of(locked_entry("skill-a")), path)
+    before = path.read_bytes()
+
+    def explode(source: object, destination: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", explode)
+    with pytest.raises(OSError, match="replace failed"):
+        write_lock(_lock(), path)
+
+    assert path.read_bytes() == before
+    assert [item.name for item in tmp_path.iterdir()] == [path.name]
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_read_lock_refuses_a_symlink(tmp_path: Path, target_exists: bool) -> None:
+    target = tmp_path / "real.lock.json"
+    if target_exists:
+        write_lock(_lock(), target)
+    path = tmp_path / "capabilities.lock.json"
+    path.symlink_to(target)
+
+    with pytest.raises(InvalidInputError, match="symlink"):
+        read_lock(path)

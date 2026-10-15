@@ -17,6 +17,7 @@ from enginery.capabilities.errors import (
     CapabilityInstallConflictError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
+    CapabilityLockDriftError,
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.install import (
@@ -28,7 +29,7 @@ from enginery.capabilities.install import (
     load_owned_manifest,
     uninstall_install,
 )
-from enginery.capabilities.lock import ApprovedCapabilities
+from enginery.capabilities.lock import CapabilityLock
 from enginery.capabilities.manifest import PackageCompatibility
 from enginery.capabilities.materialize import digest_path
 from enginery.capabilities.resolver import (
@@ -39,6 +40,7 @@ from enginery.capabilities.resolver import (
 from enginery.capabilities.sources import CapabilitySource
 from tests.support.capabilities import (
     HOST,
+    approvals_for,
     package_files,
     project_source,
     replace_file,
@@ -68,7 +70,7 @@ def _install(resolved: ResolvedCapabilities, tmp_path: Path, approved: Iterable[
         resolved,
         install_root=tmp_path / "installed",
         capabilities_root=tmp_path / "store",
-        approvals=ApprovedCapabilities.for_entries(resolved.lock, approved),
+        approvals=approvals_for(resolved.lock, approved),
     )
     return tmp_path / "installed"
 
@@ -124,7 +126,7 @@ def test_preview_is_ready_once_the_approval_is_supplied(tmp_path: Path) -> None:
     plan = build_install_plan(
         resolved,
         install_root=tmp_path / "installed",
-        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["skill-a"]),
+        approvals=approvals_for(resolved.lock, ["skill-a"]),
     )
 
     assert plan.ready
@@ -161,7 +163,7 @@ def test_preview_reports_license_and_compatibility_holds(tmp_path: Path) -> None
     plan = build_install_plan(
         resolved,
         install_root=tmp_path / "installed",
-        approvals=ApprovedCapabilities.for_entries(resolved.lock, ["skill-a"]),
+        approvals=approvals_for(resolved.lock, ["skill-a"]),
     )
 
     kinds = {blocker.kind for blocker in plan.blockers}
@@ -426,7 +428,7 @@ def test_an_approval_computed_for_one_lock_does_not_authorize_a_drifted_lock(
     tmp_path: Path,
 ) -> None:
     first = _resolve(user_source(package_files("skill-a")))
-    approvals = ApprovedCapabilities.for_entries(first.lock, ["skill-a"])
+    approvals = approvals_for(first.lock, ["skill-a"])
     drifted = _resolve(user_source(package_files("skill-a", body=b"# drifted closure\n")))
 
     with pytest.raises(CapabilityApprovalRequiredError):
@@ -443,7 +445,7 @@ def test_an_approval_computed_for_one_lock_does_not_authorize_a_drifted_lock(
 
 def test_an_approval_for_the_same_closure_in_a_different_lock_is_refused(tmp_path: Path) -> None:
     alone = _resolve(user_source(package_files("skill-a")))
-    approvals = ApprovedCapabilities.for_entries(alone.lock, ["skill-a"])
+    approvals = approvals_for(alone.lock, ["skill-a"])
     widened = _resolve(
         user_source(package_files("skill-a"), package_files("skill-b")),
         names=("skill-a", "skill-b"),
@@ -571,3 +573,63 @@ def test_a_failed_manifest_write_leaves_no_temporary_file(
         _install(resolved, tmp_path)
 
     assert not list((tmp_path / "installed").rglob("*.tmp"))
+
+
+# --------------------------------------------------------------------------- pins
+
+
+def _resolve_version_two() -> ResolvedCapabilities:
+    resolver = CapabilityResolver([project_source(package_files("skill-a", "2"))], host=HOST)
+    return resolver.resolve_with_files([CapabilityRequest(name="skill-a", version="2")])
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_plan_and_install_refuse_a_different_version_of_a_pinned_name(
+    tmp_path: Path, retained: bool
+) -> None:
+    pinned = _resolve(project_source(package_files("skill-a"))).lock
+    previous = CapabilityLock((), (pinned.entries[0].pin(),)) if retained else pinned
+    resolved = _resolve_version_two()
+
+    plan = build_install_plan(resolved, install_root=tmp_path / "installed", previous=previous)
+
+    assert not plan.ready
+    assert [(item.kind, item.package) for item in plan.blockers] == [(BlockerKind.DRIFT, "skill-a")]
+    assert "different version" in plan.blockers[0].detail
+    with pytest.raises(CapabilityLockDriftError, match="different version"):
+        install_lock(
+            resolved,
+            install_root=tmp_path / "installed",
+            capabilities_root=tmp_path / "store",
+            previous=previous,
+        )
+    assert not (tmp_path / "installed").exists()
+    assert not (tmp_path / "store").exists()
+
+
+def test_plan_is_ready_when_the_previous_pin_matches(tmp_path: Path) -> None:
+    resolved = _resolve(project_source(package_files("skill-a")))
+
+    plan = build_install_plan(resolved, install_root=tmp_path / "installed", previous=resolved.lock)
+
+    assert plan.ready
+
+
+# --------------------------------------------------------------------------- uninstall order
+
+
+def test_uninstall_aborts_before_deleting_anything_when_the_revocation_cannot_be_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _install(_resolve(project_source(package_files("skill-a"))), tmp_path)
+    before = _tree(root)
+
+    def no_hard_links(source: object, destination: object) -> None:
+        raise OSError("hard links are not available")
+
+    monkeypatch.setattr(install_module.os, "link", no_hard_links)
+    with pytest.raises(OSError, match="hard links"):
+        uninstall_install(root)
+
+    assert _tree(root) == before
+    assert load_owned_manifest(root) is not None

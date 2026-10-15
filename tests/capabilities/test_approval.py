@@ -15,6 +15,7 @@ from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator
 from tests.support.capabilities import (
+    approvals_for,
     lock_of,
     locked_entry,
     package_files,
@@ -110,7 +111,7 @@ def test_an_approval_computed_for_one_lock_covers_no_other_lock() -> None:
 def test_approvals_do_not_cover_a_different_closure_under_the_same_name() -> None:
     approved_entry = locked_entry(files=package_files("skill-a"), introduced_by_run=True)
     lock = lock_of(approved_entry)
-    approvals = ApprovedCapabilities.for_entries(lock, ["skill-a"])
+    approvals = approvals_for(lock, ["skill-a"])
     changed = package_files("skill-a", body=b"# changed\n")
     drifted = locked_entry(files=changed, introduced_by_run=True)
 

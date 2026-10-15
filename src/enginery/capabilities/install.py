@@ -14,9 +14,10 @@ path it wrote with its digest.
 ``uninstall_install`` removes only files that the owned manifest lists *and*
 whose current digest still matches. It never touches anything outside the
 install root, never the content-addressed store, the lockfile, the ledger, or
-any evidence or raw artifact, and it revokes the active install record by
-replacing the manifest with a revocation tombstone. What it removed and what
-it retained are both reported.
+any evidence or raw artifact. It revokes the active install record *first*
+(a revocation record is linked into place and the owned manifest is removed)
+and only then deletes files, so a failure to record the revocation leaves every
+file in place. What it removed and what it retained are both reported.
 """
 
 from __future__ import annotations
@@ -25,11 +26,11 @@ import enum
 import json
 import os
 import stat
-import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from enginery.capabilities.atomic import fsync_directory, write_atomically, write_temporary
 from enginery.capabilities.closure import (
     AssetKind,
     AssetRecord,
@@ -43,6 +44,7 @@ from enginery.capabilities.errors import (
     CapabilityInstallConflictError,
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
+    CapabilityLockDriftError,
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.license import LicenseDisposition
@@ -52,6 +54,7 @@ from enginery.capabilities.lock import (
     CapabilityLock,
     LockedCapability,
     ProvenanceStatus,
+    check_pins,
 )
 from enginery.capabilities.manifest import (
     CapabilityPermission,
@@ -76,6 +79,7 @@ class BlockerKind(enum.StrEnum):
     LICENSE_HOLD = "license_hold"
     INCOMPATIBLE = "incompatible"
     CONFLICT = "conflict"
+    DRIFT = "drift"
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,45 +383,15 @@ def _owned_file(package: str, entry: object) -> OwnedFile:
     return OwnedFile(path=path, digest=digest_from_text(digest), size=size, executable=executable)
 
 
-def _fsync_directory(directory: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(directory, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+_TEMPORARY_PREFIX = ".enginery-install-"
 
 
-def _write_temporary(directory: Path, document: object) -> Path:
-    """Write ``document`` to a fresh, exclusively created file in ``directory``.
-
-    ``mkstemp`` picks an unpredictable name and creates it with ``O_EXCL``, so a
-    planted file or symlink can never be written through.
-    """
-
-    payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    descriptor, name = tempfile.mkstemp(dir=directory, prefix=".enginery-install-", suffix=".tmp")
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            os.fchmod(handle.fileno(), 0o644)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
+def _encode(document: object) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _write_json_atomically(path: Path, document: object) -> None:
-    temporary = _write_temporary(path.parent, document)
-    try:
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    _fsync_directory(path.parent)
+    write_atomically(path, _encode(document), prefix=_TEMPORARY_PREFIX)
 
 
 def _write_revocation(install_root: Path, lock_digest: Digest, document: object) -> Path:
@@ -428,7 +402,7 @@ def _write_revocation(install_root: Path, lock_digest: Digest, document: object)
     revocation of the same lock digest takes the next free index.
     """
 
-    temporary = _write_temporary(install_root, document)
+    temporary = write_temporary(install_root, _encode(document), prefix=_TEMPORARY_PREFIX)
     try:
         for index in range(1, _MAX_REVOCATION_RECORDS + 1):
             final = install_root / f"{REVOKED_RECORD_PREFIX}{lock_digest.hex_value}-{index}.json"
@@ -436,7 +410,7 @@ def _write_revocation(install_root: Path, lock_digest: Digest, document: object)
                 os.link(temporary, final)
             except FileExistsError:
                 continue
-            _fsync_directory(install_root)
+            fsync_directory(install_root)
             return final
     finally:
         temporary.unlink(missing_ok=True)
@@ -517,8 +491,14 @@ def build_install_plan(
     *,
     install_root: Path,
     approvals: ApprovedCapabilities = NO_APPROVALS,
+    previous: CapabilityLock | None = None,
 ) -> InstallPlan:
-    """Describe installing ``resolved`` into ``install_root`` without any side effect."""
+    """Describe installing ``resolved`` into ``install_root`` without any side effect.
+
+    ``previous`` is the lock an earlier install recorded: the plan reports, as a
+    blocker, any resolved capability that would move one of its pins to another
+    version or closure, exactly as :func:`install_lock` would refuse it.
+    """
 
     lock = resolved.lock
     lock_digest = lock.digest()
@@ -526,6 +506,13 @@ def build_install_plan(
     packages: list[PlannedPackage] = []
     approvals_required: list[PlannedApproval] = []
     blockers: list[PlanBlocker] = []
+    try:
+        check_pins(previous, lock)
+    except CapabilityLockDriftError as error:
+        name = error.details.get("name")
+        blockers.append(
+            PlanBlocker(BlockerKind.DRIFT, name if isinstance(name, str) else None, str(error))
+        )
     if owned is not None and owned.lock_digest != lock_digest:
         blockers.append(
             PlanBlocker(
@@ -632,6 +619,8 @@ def _conflicts(
 
 def _raise_for(blocker: PlanBlocker) -> None:
     details: dict[str, object] = {"package": blocker.package, "reason": blocker.detail}
+    if blocker.kind is BlockerKind.DRIFT:
+        raise CapabilityLockDriftError(blocker.detail, details=details)
     if blocker.kind is BlockerKind.LICENSE_HOLD:
         raise CapabilityLicenseHoldError("install refused: license hold", details=details)
     if blocker.kind is BlockerKind.INCOMPATIBLE:
@@ -644,6 +633,7 @@ def _raise_for(blocker: PlanBlocker) -> None:
 
 
 _BLOCKER_PRIORITY = (
+    BlockerKind.DRIFT,
     BlockerKind.LICENSE_HOLD,
     BlockerKind.INCOMPATIBLE,
     BlockerKind.CONFLICT,
@@ -657,10 +647,13 @@ def install_lock(
     install_root: Path,
     capabilities_root: Path,
     approvals: ApprovedCapabilities = NO_APPROVALS,
+    previous: CapabilityLock | None = None,
 ) -> InstallReport:
     """Install every package of ``resolved`` into ``install_root`` and record ownership."""
 
-    plan = build_install_plan(resolved, install_root=install_root, approvals=approvals)
+    plan = build_install_plan(
+        resolved, install_root=install_root, approvals=approvals, previous=previous
+    )
     for kind in _BLOCKER_PRIORITY:
         for blocker in plan.blockers:
             if blocker.kind is kind:
@@ -797,7 +790,7 @@ def uninstall_install(install_root: Path) -> UninstallReport:
             details={"install_root": str(install_root)},
         )
     _require_real_directory(install_root, what="install root")
-    removed: list[str] = []
+    planned: list[tuple[str, Path, Digest]] = []
     retained: list[RetainedPath] = []
     absent: list[str] = []
     directories: set[str] = set()
@@ -818,11 +811,9 @@ def uninstall_install(install_root: Path) -> UninstallReport:
                 reason = "modified after install" if modified else "no longer a plain file"
                 retained.append(RetainedPath(item.path, reason))
                 continue
-            target.unlink()
-            removed.append(item.path)
-    for directory in sorted(directories, key=lambda value: (-value.count("/"), value)):
-        _remove_if_empty(install_root / directory)
-    revoked_digest = manifest.lock_digest
+            planned.append((item.path, target, item.digest))
+    # Revoke before deleting anything: authority to run is withdrawn first, so a failure to
+    # record the revocation aborts with every file still in place.
     record = {
         "schema_version": INSTALL_SCHEMA_VERSION,
         "revoked_lock_digest": str(manifest.lock_digest),
@@ -830,12 +821,21 @@ def uninstall_install(install_root: Path) -> UninstallReport:
             {"name": package.name, "closure_digest": str(package.closure_digest)}
             for package in manifest.packages
         ],
-        "removed": removed,
+        "removed": [path for path, _, _ in planned],
         "retained": [{"path": item.path, "reason": item.reason} for item in retained],
         "already_absent": absent,
     }
-    revocation = _write_revocation(install_root, revoked_digest, record)
+    revocation = _write_revocation(install_root, manifest.lock_digest, record)
     (install_root / OWNED_MANIFEST_NAME).unlink()
+    removed: list[str] = []
+    for path, target, digest in planned:
+        if _file_digest(target) != digest:
+            retained.append(RetainedPath(path, "modified after install"))
+            continue
+        target.unlink()
+        removed.append(path)
+    for directory in sorted(directories, key=lambda value: (-value.count("/"), value)):
+        _remove_if_empty(install_root / directory)
     return UninstallReport(
         lock_digest=manifest.lock_digest,
         install_root=install_root,

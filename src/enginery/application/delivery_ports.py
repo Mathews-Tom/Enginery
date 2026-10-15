@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import enum
 from dataclasses import dataclass
 from pathlib import Path
@@ -252,10 +253,38 @@ class CapabilitySourcePort(Protocol):
     def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]: ...
 
 
+class CommittedTreeCapabilitySource(abc.ABC):
+    """A capability source that serves only the committed tree of one pinned commit.
+
+    This is a nominal base class, not a structural port: only an adapter that
+    deliberately subclasses it can be registered as the reviewed ``project``
+    source, so a duck-typed object that merely claims a commit is never one.
+    Every revision it reports must equal :attr:`pinned_commit`.
+    """
+
+    @property
+    @abc.abstractmethod
+    def pinned_commit(self) -> str:
+        """The full commit sha every read is pinned to."""
+
+    @abc.abstractmethod
+    def probe(self) -> AdapterStatus: ...
+
+    @abc.abstractmethod
+    def discover(self) -> tuple[CapabilityListing, ...]: ...
+
+    @abc.abstractmethod
+    def resolve(self, name: str, version: str) -> CapabilityDescriptor | None: ...
+
+    @abc.abstractmethod
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]: ...
+
+
 __all__ = [
     "CapabilityDescriptor",
     "CapabilityListing",
     "CapabilitySourcePort",
+    "CommittedTreeCapabilitySource",
     "DeploymentPort",
     "DeploymentReceipt",
     "DeploymentRequest",

@@ -16,19 +16,22 @@
   shadowed alternative (a shadowed source that fails is reported, not fatal).
   It reads sources only: it materializes nothing, writes nothing to the
   workspace, and executes nothing. A URL Git source or Armory is read over the
-  network; any Git cache it needs is a temporary directory removed afterwards.
+  network; every Git source is read through a private mirror removed afterwards.
 * ``preview`` is the same resolution plus the exact install plan (files to
   write, sizes, blockers, approvals still required). It has no side effects
   beyond those network reads; its exit code is non-zero when the plan has a
   blocker.
 * ``install`` writes the verified closures into the task-local install root
-  and records the owned-install manifest and lockfile. The lockfile keeps every
-  earlier pin the new resolution does not replace. It never records an
+  and records the owned-install manifest and lockfile. The lockfile's entries are
+  exactly the installed lock (its digest is the one the install record and any
+  approval name); every earlier pin the new resolution does not replace is kept
+  only as a drift-only retained pin. It never records an
   approval: an entry that needs exact-digest human approval is *held*, and the
   command prints the name, version, closure digest, and lock digest an owner
   would have to approve through the ``capability.materialize`` policy action.
   Project packages -- committed content of a pinned reviewed base commit --
-  install without approval; a working directory is never a project source.
+  install without approval; a working directory is never a project source, and
+  the project source must be a local repository, never a URL.
 * ``uninstall`` removes only the owned, unmodified files of the active install
   and revokes its record. It never deletes the content-addressed store, the
   lockfile, the ledger, or any evidence.
@@ -41,8 +44,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +68,7 @@ from enginery.capabilities.install import (
     install_lock,
     uninstall_install,
 )
-from enginery.capabilities.lock import CapabilityLock, LockedCapability, merge_locks
+from enginery.capabilities.lock import CapabilityLock, LockedCapability, carry_pins
 from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.capabilities.materialize import verify_materialized
 from enginery.capabilities.resolver import (
@@ -87,15 +90,16 @@ from enginery.domain.errors import FailureClass, InvalidInputError
 DEFAULT_LOCKFILE = Path(".enginery/capabilities.lock.json")
 DEFAULT_CAPABILITIES_ROOT = Path(".enginery/capabilities")
 DEFAULT_INSTALL_ROOT = Path(".enginery/installed")
-DEFAULT_GIT_CACHE = Path(".enginery/git-cache")
 
 _BLOCKER_FAILURE_CLASS = {
+    BlockerKind.DRIFT: FailureClass.MISSING_PREREQUISITE,
     BlockerKind.LICENSE_HOLD: FailureClass.VALIDATION_FAILURE,
     BlockerKind.INCOMPATIBLE: FailureClass.VALIDATION_FAILURE,
     BlockerKind.CONFLICT: FailureClass.EXTERNAL_CONFLICT,
     BlockerKind.APPROVAL_REQUIRED: FailureClass.HUMAN_ACTION_REQUIRED,
 }
 _BLOCKER_PRIORITY = (
+    BlockerKind.DRIFT,
     BlockerKind.LICENSE_HOLD,
     BlockerKind.INCOMPATIBLE,
     BlockerKind.CONFLICT,
@@ -129,7 +133,7 @@ def check_lock(*, lockfile: Path, capabilities_root: Path) -> CapabilityLockChec
     more generally, with no capabilities configured at all.
     """
 
-    if not lockfile.exists():
+    if not os.path.lexists(lockfile):
         return CapabilityLockCheckReport(lockfile=None, findings=())
     document = read_lock_document(lockfile)
     if is_legacy_lock(document):
@@ -174,15 +178,15 @@ def _add_path_arguments(parser: argparse.ArgumentParser, *, install_root: bool =
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
 
-def _add_source_arguments(parser: argparse.ArgumentParser, *, writes_cache: bool = False) -> None:
+def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "requests", nargs="+", metavar="NAME@VERSION", help="Capabilities to resolve."
     )
     parser.add_argument(
         "--project-source",
         metavar="REPOSITORY@COMMIT",
-        help="Reviewed base: a Git repository (path or URL) pinned to a full 40-hex commit sha; "
-        "its committed tree is read, never a working tree.",
+        help="Reviewed base: a local Git repository directory (never a URL) pinned to a full "
+        "40-hex commit sha; its committed tree is read, never a working tree.",
     )
     parser.add_argument(
         "--project-subdir",
@@ -208,13 +212,6 @@ def _add_source_arguments(parser: argparse.ArgumentParser, *, writes_cache: bool
         default="",
         help="Directory inside each Git source that holds the package directories.",
     )
-    if writes_cache:
-        parser.add_argument(
-            "--git-cache",
-            type=Path,
-            default=DEFAULT_GIT_CACHE,
-            help="Directory caching URL Git sources (written by install only).",
-        )
     parser.add_argument(
         "--replace-legacy-lock",
         action="store_true",
@@ -255,7 +252,7 @@ def add_capability_parser(subparsers: Any) -> None:
     install_parser = commands.add_parser(
         "install", help="Install verified closures into the task-local install root."
     )
-    _add_source_arguments(install_parser, writes_cache=True)
+    _add_source_arguments(install_parser)
     _add_path_arguments(install_parser)
 
     uninstall_parser = commands.add_parser(
@@ -282,24 +279,41 @@ def _parse_requests(values: Sequence[str]) -> tuple[CapabilityRequest, ...]:
 
 
 def _git_port(
-    raw: str, *, flag: str, subdir: str, git_cache: Path
+    raw: str, *, flag: str, subdir: str, project: bool = False
 ) -> tuple[str, GitCapabilitySource]:
+    """A Git source from ``REPOSITORY@COMMIT``; a project source must be a local repository.
+
+    A project source records ``project:<canonical absolute repository path>`` as its
+    provenance label, which the lock digest binds, and is never a URL: a reviewed
+    base is a repository on this host, not something fetched from a remote.
+    """
+
     repository, separator, revision = raw.rpartition("@")
     if not separator or not repository:
         raise InvalidInputError(
             f"{flag} must be REPOSITORY@COMMIT with a full 40-hex commit sha",
             details={"source": raw},
         )
+    provenance = "git"
+    if project:
+        local = Path(repository).expanduser()
+        if not local.is_dir():
+            raise InvalidInputError(
+                f"{flag} must name a local repository directory; a URL is never a reviewed base",
+                details={"source": raw},
+            )
+        repository = str(local.resolve())
+        provenance = f"project:{repository}"
     port = GitCapabilitySource(
         repository=repository,
         revision=revision,
         package_root=subdir,
-        cache_directory=git_cache,
+        provenance=provenance,
     )
     return repository, port
 
 
-def build_sources(args: argparse.Namespace, *, git_cache: Path) -> list[CapabilitySource]:
+def build_sources(args: argparse.Namespace) -> list[CapabilitySource]:
     """The typed sources the flags select; precedence is applied by the resolver.
 
     The project source is read with git plumbing from one pinned commit and
@@ -313,7 +327,7 @@ def build_sources(args: argparse.Namespace, *, git_cache: Path) -> list[Capabili
             args.project_source,
             flag="--project-source",
             subdir=args.project_subdir,
-            git_cache=git_cache,
+            project=True,
         )
         sources.append(
             CapabilitySource(
@@ -329,9 +343,7 @@ def build_sources(args: argparse.Namespace, *, git_cache: Path) -> list[Capabili
             )
         )
     for raw in args.git_source:
-        repository, port = _git_port(
-            raw, flag="--git-source", subdir=args.git_subdir, git_cache=git_cache
-        )
+        repository, port = _git_port(raw, flag="--git-source", subdir=args.git_subdir)
         sources.append(CapabilitySource(kind=SourceKind.GIT, label=f"git:{repository}", port=port))
     if args.armory:
         sources.append(
@@ -357,7 +369,7 @@ def _previous_lock(args: argparse.Namespace) -> CapabilityLock | None:
     it, resolution starts fresh and ``install`` replaces the legacy file.
     """
 
-    if not args.lockfile.exists():
+    if not os.path.lexists(args.lockfile):
         return None
     document = read_lock_document(args.lockfile)
     if not is_legacy_lock(document):
@@ -373,10 +385,10 @@ def _previous_lock(args: argparse.Namespace) -> CapabilityLock | None:
 
 
 def _resolve(
-    args: argparse.Namespace, *, report_shadowed: bool, git_cache: Path
+    args: argparse.Namespace, *, report_shadowed: bool
 ) -> tuple[ResolvedCapabilities, CapabilityLock | None]:
     previous = _previous_lock(args)
-    resolver = CapabilityResolver(build_sources(args, git_cache=git_cache))
+    resolver = CapabilityResolver(build_sources(args))
     resolved = resolver.resolve_with_files(
         _parse_requests(args.requests),
         previous_lock=previous,
@@ -385,16 +397,17 @@ def _resolve(
     return resolved, previous
 
 
-def _resolve_read_only(args: argparse.Namespace) -> ResolvedCapabilities:
-    """Resolve for ``inspect``/``preview``: any Git cache is a temporary directory.
+def _resolve_read_only(
+    args: argparse.Namespace,
+) -> tuple[ResolvedCapabilities, CapabilityLock | None]:
+    """Resolve for ``inspect``/``preview``, which also report every shadowed alternative.
 
-    The cache is deleted afterwards, so these commands leave nothing behind; a
-    URL Git source or Armory is still read over the network.
+    Every Git source is read through a private mirror deleted afterwards, so these
+    commands leave nothing behind; a URL Git source or Armory is still read over
+    the network.
     """
 
-    with tempfile.TemporaryDirectory(prefix="enginery-git-cache-") as cache:
-        resolved, _ = _resolve(args, report_shadowed=True, git_cache=Path(cache))
-    return resolved
+    return _resolve(args, report_shadowed=True)
 
 
 # --------------------------------------------------------------------------- output
@@ -487,7 +500,7 @@ def _run_lock(args: argparse.Namespace) -> int:
 
 
 def _run_inspect(args: argparse.Namespace) -> int:
-    resolved = _resolve_read_only(args)
+    resolved, _ = _resolve_read_only(args)
     plan = build_install_plan(resolved, install_root=args.install_root)
     payload: dict[str, object] = {
         "lock_digest": str(plan.lock_digest),
@@ -501,8 +514,8 @@ def _run_inspect(args: argparse.Namespace) -> int:
 
 
 def _run_preview(args: argparse.Namespace) -> int:
-    resolved = _resolve_read_only(args)
-    plan = build_install_plan(resolved, install_root=args.install_root)
+    resolved, previous = _resolve_read_only(args)
+    plan = build_install_plan(resolved, install_root=args.install_root, previous=previous)
     lines = [f"lock {plan.lock_digest}", f"install root {plan.install_root}"]
     lines.extend(_package_lines(plan, with_files=True))
     lines.extend(_approval_lines(plan.approvals_required))
@@ -515,9 +528,8 @@ def _run_preview(args: argparse.Namespace) -> int:
 
 
 def _run_install(args: argparse.Namespace) -> int:
-    resolved, previous = _resolve(args, report_shadowed=False, git_cache=args.git_cache)
-    merged = merge_locks(previous, resolved.lock)
-    plan = build_install_plan(resolved, install_root=args.install_root)
+    resolved, previous = _resolve(args, report_shadowed=False)
+    plan = build_install_plan(resolved, install_root=args.install_root, previous=previous)
     only_approvals = all(item.kind is BlockerKind.APPROVAL_REQUIRED for item in plan.blockers)
     if plan.blockers and only_approvals:
         hold = {"status": "hold", **plan.to_json()}
@@ -537,8 +549,11 @@ def _run_install(args: argparse.Namespace) -> int:
         resolved,
         install_root=args.install_root,
         capabilities_root=args.capabilities_root,
+        previous=previous,
     )
-    write_lock(merged, args.lockfile)
+    # The saved lock has exactly the installed lock's entries (so its digest is the digest the
+    # install record and any approval name); earlier pins ride along as drift-only pins.
+    write_lock(carry_pins(previous, resolved.lock), args.lockfile)
     payload = {**report.to_json(), "lockfile": str(args.lockfile), "status": "installed"}
     lines = [
         f"installed {', '.join(report.packages)} into {report.install_root}",

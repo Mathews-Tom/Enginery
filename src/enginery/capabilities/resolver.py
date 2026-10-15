@@ -21,7 +21,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from enginery.application.delivery_ports import CapabilityDescriptor, PackageFile
+from enginery.application.delivery_ports import (
+    CapabilityDescriptor,
+    CommittedTreeCapabilitySource,
+    PackageFile,
+)
 from enginery.capabilities.closure import (
     PackageClosure,
     build_closure,
@@ -36,6 +40,7 @@ from enginery.capabilities.errors import (
     CapabilityLockDriftError,
     CapabilityManifestError,
     CapabilityNotFoundError,
+    CapabilitySourceError,
 )
 from enginery.capabilities.license_text import (
     UNKNOWN_LICENSE,
@@ -51,6 +56,7 @@ from enginery.capabilities.lock import (
 from enginery.capabilities.sources import (
     CapabilitySource,
     SourceCandidate,
+    SourceKind,
     SourceSelection,
     order_sources,
 )
@@ -73,6 +79,24 @@ MAX_DEPENDENCY_DEPTH = 8
 def _no_signatures(descriptor: CapabilityDescriptor) -> str | None:
     del descriptor
     return None
+
+
+def _require_pinned_revision(source: CapabilitySource, descriptor: CapabilityDescriptor) -> None:
+    """A project source may only offer content of the one commit it is pinned to."""
+
+    if source.kind is not SourceKind.PROJECT:
+        return
+    port = source.port
+    pinned = port.pinned_commit if isinstance(port, CommittedTreeCapabilitySource) else None
+    if descriptor.revision != pinned:
+        raise CapabilitySourceError(
+            "the project source offered a revision other than its pinned commit",
+            details={
+                "name": descriptor.name,
+                "revision": descriptor.revision,
+                "pinned_commit": str(pinned),
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +309,7 @@ class CapabilityResolver:
                 descriptor = source.port.resolve(request.name, request.version)
                 if descriptor is None:
                     continue
+                _require_pinned_revision(source, descriptor)
                 chosen, chosen_descriptor = source, descriptor
                 selected = SourceCandidate(
                     kind=source.kind, label=source.label, descriptor=descriptor
@@ -391,11 +416,10 @@ class CapabilityResolver:
     ) -> None:
         if previous_lock is None:
             return
-        previous_entry = previous_lock.get(request.name)
-        if previous_entry is None:
+        pinned = previous_lock.pin_for(request.name)
+        if pinned is None:
             return
-        same_version = previous_entry.version == descriptor.version
-        if same_version and previous_entry.digest != descriptor.digest:
+        if pinned.version == descriptor.version and pinned.closure_digest != descriptor.digest:
             raise CapabilityLockDriftError(
                 "a mutable capability reference resolved to a different closure digest "
                 "than the in-flight lock recorded",

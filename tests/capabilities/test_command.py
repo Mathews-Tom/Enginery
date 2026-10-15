@@ -4,11 +4,14 @@ import dataclasses
 import json
 import os
 import shutil
+import stat
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,12 +33,14 @@ from enginery.capabilities.errors import (
     CapabilityNotInstalledError,
 )
 from enginery.capabilities.install import OWNED_MANIFEST_NAME, install_lock, uninstall_install
-from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock
+from enginery.capabilities.lock import ApprovedCapabilities, CapabilityLock, LockedCapability
 from enginery.capabilities.manifest import CommandSpec, PackageKind
 from enginery.capabilities.materialize import digest_path, load_verified_closure
 from enginery.capabilities.resolver import CapabilityRequest, CapabilityResolver
 from enginery.capabilities.sources import CapabilitySource
+from enginery.domain.errors import InvalidInputError
 from tests.support.capabilities import (
+    approvals_for,
     lock_of,
     locked_entry,
     package_files,
@@ -79,11 +84,7 @@ class Installed:
             payload,
             install_root=self.install_root,
             capabilities_root=self.capabilities_root,
-            approvals=(
-                ApprovedCapabilities.for_entries(chosen, approved)
-                if approvals is None
-                else approvals
-            ),
+            approvals=approvals_for(chosen, approved) if approvals is None else approvals,
             interpreter_paths=INTERPRETERS,
         )
 
@@ -114,7 +115,7 @@ def _install(
         resolved,
         install_root=install_root,
         capabilities_root=capabilities_root,
-        approvals=ApprovedCapabilities.for_entries(resolved.lock, approved),
+        approvals=approvals_for(resolved.lock, approved),
     )
     return Installed(resolved.lock, install_root, capabilities_root)
 
@@ -197,12 +198,13 @@ def test_run_captures_stderr_as_diagnostics_even_on_success(tmp_path: Path) -> N
     assert result.duration_seconds >= 0
 
 
-def test_run_executes_in_the_materialized_directory_with_a_minimal_environment(
+def test_run_executes_from_a_private_copy_with_a_minimal_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = _script(
         "import json, os",
-        "print(json.dumps({'cwd': os.getcwd(), 'env': sorted(os.environ)}))",
+        "print(json.dumps({'cwd': os.getcwd(), 'env': sorted(os.environ),"
+        " 'files': sorted(os.listdir('.'))}))",
     )
     installed = _install(tmp_path, _command_package(script))
     monkeypatch.setenv("ENGINERY_TEST_SECRET", "leak")
@@ -210,7 +212,11 @@ def test_run_executes_in_the_materialized_directory_with_a_minimal_environment(
     result = installed.run({})
 
     assert isinstance(result.output, dict)
-    assert os.path.realpath(str(result.output["cwd"])) == os.path.realpath(installed.directory)
+    cwd = Path(str(result.output["cwd"]))
+    assert cwd.resolve() != installed.directory.resolve()
+    assert cwd.name.startswith("enginery-run-")
+    assert not cwd.exists()
+    assert result.output["files"] == ["SKILL.md", "capability.json", "references", "scripts"]
     environment = result.output["env"]
     assert isinstance(environment, list)
     assert "ENGINERY_TEST_SECRET" not in environment
@@ -505,7 +511,7 @@ def test_a_license_hold_refuses_to_run(tmp_path: Path) -> None:
     held = lock_of(dataclasses.replace(entry, license=None))
     _rebind_install(installed, held)
 
-    approvals = ApprovedCapabilities.for_entries(held, [NAME])
+    approvals = approvals_for(held, [NAME])
     with pytest.raises(CapabilityLicenseHoldError):
         installed.run({"marker": str(marker)}, lock=held, approvals=approvals)
 
@@ -589,7 +595,7 @@ def test_an_approval_computed_for_another_lock_does_not_authorize_a_run(tmp_path
     entry = installed.lock.get(NAME)
     assert entry is not None
     other_lock = lock_of(entry, locked_entry("other", introduced_by_run=True))
-    foreign = ApprovedCapabilities.for_entries(other_lock, [NAME])
+    foreign = approvals_for(other_lock, [NAME])
 
     with pytest.raises(CapabilityApprovalRequiredError):
         installed.run({"marker": str(marker)}, approvals=foreign)
@@ -704,12 +710,16 @@ def test_node_runs_under_its_permission_model_limited_to_the_closure(
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_node_cannot_resolve_a_bare_module_from_an_ancestor_node_modules(tmp_path: Path) -> None:
+def test_node_cannot_resolve_a_bare_module_from_an_ancestor_node_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     node = shutil.which("node")
     assert node is not None
     if command_module._node_version(node) < (20, 0):
         pytest.skip("node is too old for the permission model")
-    planted = tmp_path / "node_modules" / "planted"
+    scratch = tmp_path / "scratch"
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    planted = scratch / "node_modules" / "planted"
     planted.mkdir(parents=True)
     (planted / "index.js").write_text("module.exports = 'loaded';\n")
     script = _script(
@@ -736,3 +746,98 @@ def test_node_cannot_resolve_a_bare_module_from_an_ancestor_node_modules(tmp_pat
     )
 
     assert result.output == {"outcome": "blocked"}
+
+
+# --- private verified copy ---------------------------------------------------------------------
+
+
+def test_a_store_swap_after_verification_cannot_change_the_code_that_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _install(tmp_path, _command_package(_script("print('\"verified\"')")))
+    real = command_module.load_verified_package
+
+    def swap_after_verifying(entry: LockedCapability, root: Path) -> object:
+        verified = real(entry, root)
+        script = installed.directory / "scripts" / "run.py"
+        script.unlink()
+        script.write_text("print('\"swapped\"')\n")
+        return verified
+
+    monkeypatch.setattr(command_module, "load_verified_package", swap_after_verifying)
+
+    result = installed.run({})
+
+    assert result.output == "verified"
+    assert (installed.directory / "scripts" / "run.py").read_text() == "print('\"swapped\"')\n"
+
+
+def test_the_run_directory_is_owner_only_and_removed_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _install(tmp_path, _command_package(ECHO))
+    seen: list[tuple[Path, int]] = []
+    real = command_module._execute
+
+    def recording_execute(**kwargs: Any) -> CommandResult:
+        directory = kwargs["directory"]
+        seen.append((directory, stat.S_IMODE(directory.stat().st_mode)))
+        return real(**kwargs)
+
+    monkeypatch.setattr(command_module, "_execute", recording_execute)
+
+    installed.run({})
+
+    ((directory, mode),) = seen
+    assert mode == 0o700
+    assert directory != installed.directory
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("script", ["scripts/run.py", "scripts/run.js", "scripts/run.mjs"])
+def test_a_script_run_through_its_interpreter_cannot_be_executed_directly(script: str) -> None:
+    with pytest.raises(InvalidInputError, match="interpreter"):
+        CommandSpec.create(argv=(script,), input_schema={"type": "object"})
+
+
+def test_a_shell_script_may_still_run_directly_from_the_private_copy(tmp_path: Path) -> None:
+    spec = CommandSpec.create(argv=("scripts/run.sh",), input_schema={"type": "object"})
+    script = b"#!/bin/sh\ncat > /dev/null\nprintf '{\"ok\": true}'\n"
+    files = package_files(NAME, kind=PackageKind.COMMAND, command=spec, script=script)
+    installed = _install(tmp_path, files)
+
+    result = installed.run({})
+
+    assert result.output == {"ok": True}
+    assert result.argv[0].endswith("scripts/run.sh")
+
+
+class _FakeProcess:
+    pid = 4242
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def wait(self) -> int:
+        self._events.append("wait")
+        return 0
+
+
+@pytest.mark.parametrize("has_waitid", [True, False])
+def test_the_group_is_killed_before_the_leader_is_reaped_where_waitid_exists(
+    monkeypatch: pytest.MonkeyPatch, has_waitid: bool
+) -> None:
+    events: list[str] = []
+
+    def waitid(*arguments: int) -> None:
+        events.append("waitid")
+
+    def killpg(pid: int, signal_number: int) -> None:
+        events.append("killpg")
+
+    monkeypatch.setattr(command_module, "_WAITID", waitid if has_waitid else None)
+    monkeypatch.setattr(command_module.os, "killpg", killpg)
+
+    command_module._end_group(_FakeProcess(events))  # type: ignore[arg-type]
+
+    assert events == (["waitid", "killpg", "wait"] if has_waitid else ["wait", "killpg"])

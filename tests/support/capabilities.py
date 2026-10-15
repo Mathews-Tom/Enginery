@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
+from enginery.adapters.git_capability import GitCapabilitySource
 from enginery.application.adapter_types import ADAPTER_API_VERSION, AdapterStatus
 from enginery.application.delivery_ports import (
     CapabilityDescriptor,
@@ -15,6 +17,8 @@ from enginery.application.delivery_ports import (
 from enginery.capabilities.closure import build_closure
 from enginery.capabilities.compatibility import HostProfile, evaluate_compatibility
 from enginery.capabilities.lock import (
+    ApprovedCapabilities,
+    CapabilityApproval,
     CapabilityLock,
     LockedCapability,
     ProvenanceRecord,
@@ -153,12 +157,13 @@ class FakeCapabilitySource:
         cls,
         *packages: Sequence[PackageFile],
         provenance: str = "repository-local",
+        revision: str = "rev-1",
         pinned_commit: str | None = None,
     ) -> FakeCapabilitySource:
         descriptors: dict[tuple[str, str], CapabilityDescriptor] = {}
         contents: dict[tuple[str, str], tuple[PackageFile, ...]] = {}
         for files in packages:
-            descriptor = descriptor_for(files, provenance=provenance)
+            descriptor = descriptor_for(files, provenance=provenance, revision=revision)
             key = (descriptor.name, descriptor.version)
             descriptors[key] = descriptor
             contents[key] = tuple(files)
@@ -238,20 +243,43 @@ def lock_of(*entries: LockedCapability) -> CapabilityLock:
     return CapabilityLock(entries=entries)
 
 
+class FakeProjectSource(GitCapabilitySource):
+    """A project-kind port serving in-memory packages; git is never run.
+
+    It is a real :class:`GitCapabilitySource` (the resolver accepts no other kind of
+    project source) whose port methods are answered by a fake, so no repository is read.
+    """
+
+    def __init__(self, inner: FakeCapabilitySource, *, revision: str = PINNED_COMMIT) -> None:
+        super().__init__(repository=tempfile.gettempdir(), revision=revision)
+        self._inner = inner
+
+    def probe(self) -> AdapterStatus:  # pragma: no cover - unused by the resolver
+        return self._inner.probe()
+
+    def discover(self) -> tuple[CapabilityListing, ...]:
+        return self._inner.discover()
+
+    def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
+        return self._inner.resolve(name, version)
+
+    def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]:
+        return self._inner.fetch_closure(name, version)
+
+
 def capability_source(
     kind: SourceKind, *packages: Sequence[PackageFile], label: str | None = None
 ) -> CapabilitySource:
     """A typed source wrapping an in-memory fake that serves ``packages``."""
 
-    return CapabilitySource(
-        kind=kind,
-        label=label or f"{kind.value}-source",
-        port=FakeCapabilitySource.of(
-            *packages,
-            provenance=kind.value,
-            pinned_commit=PINNED_COMMIT if kind is SourceKind.PROJECT else None,
-        ),
-    )
+    port: CapabilitySourcePort
+    if kind is SourceKind.PROJECT:
+        port = FakeProjectSource(
+            FakeCapabilitySource.of(*packages, provenance=kind.value, revision=PINNED_COMMIT)
+        )
+    else:
+        port = FakeCapabilitySource.of(*packages, provenance=kind.value)
+    return CapabilitySource(kind=kind, label=label or f"{kind.value}-source", port=port)
 
 
 def project_source(*packages: Sequence[PackageFile]) -> CapabilitySource:
@@ -270,11 +298,27 @@ def wrap_source(port: CapabilitySourcePort, kind: SourceKind = SourceKind.USER) 
     return CapabilitySource(kind=kind, label=f"{kind.value}-source", port=port)
 
 
+def approvals_for(lock: CapabilityLock, names: Iterable[str]) -> ApprovedCapabilities:
+    """Digest-bound approvals for the named entries of ``lock``, bypassing policy (tests only)."""
+
+    lock_digest = lock.digest()
+    chosen = frozenset(names)
+    return ApprovedCapabilities(
+        frozenset(
+            CapabilityApproval(entry.name, entry.digest, lock_digest)
+            for entry in lock.entries
+            if entry.name in chosen
+        )
+    )
+
+
 __all__ = [
     "HOST",
     "NOW",
     "PINNED_COMMIT",
     "FakeCapabilitySource",
+    "FakeProjectSource",
+    "approvals_for",
     "capability_source",
     "closure_digest_of",
     "descriptor_for",

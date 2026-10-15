@@ -14,7 +14,6 @@ from enginery.capabilities.errors import (
     CapabilityIntegrityError,
     CapabilityLicenseHoldError,
 )
-from enginery.capabilities.lock import ApprovedCapabilities
 from enginery.capabilities.manifest import CapabilityPermission, PackageKind
 from enginery.capabilities.materialize import (
     digest_path,
@@ -23,6 +22,7 @@ from enginery.capabilities.materialize import (
     verify_materialized,
 )
 from tests.support.capabilities import (
+    approvals_for,
     lock_of,
     locked_entry,
     package_files,
@@ -203,7 +203,7 @@ def test_materialize_lock_allows_run_introduced_entry_once_approved(tmp_path: Pa
         lock,
         {"skill-a": files},
         root=tmp_path,
-        approvals=ApprovedCapabilities.for_entries(lock, ["skill-a"]),
+        approvals=approvals_for(lock, ["skill-a"]),
     )
 
     assert (materialized["skill-a"] / "scripts" / "run.py").read_bytes() == b"print('ok')\n"
@@ -216,7 +216,7 @@ def test_materialize_lock_refuses_an_approval_computed_for_a_different_lock(
     pending = locked_entry(files=files, introduced_by_run=True)
     approved_lock = lock_of(pending)
     drifted_lock = lock_of(pending, locked_entry("skill-b", introduced_by_run=False))
-    approvals = ApprovedCapabilities.for_entries(approved_lock, ["skill-a"])
+    approvals = approvals_for(approved_lock, ["skill-a"])
 
     with pytest.raises(CapabilityApprovalRequiredError):
         materialize_lock(drifted_lock, {"skill-a": files}, root=tmp_path, approvals=approvals)
@@ -237,7 +237,7 @@ def test_materialize_lock_holds_an_approved_entry_with_an_unreviewed_license(
             lock,
             {"skill-a": files},
             root=tmp_path,
-            approvals=ApprovedCapabilities.for_entries(lock, ["skill-a"]),
+            approvals=approvals_for(lock, ["skill-a"]),
         )
 
     assert not digest_path(tmp_path, pending.digest).exists()
@@ -255,7 +255,7 @@ def test_materialize_lock_checks_every_entry_before_writing_any(tmp_path: Path) 
             lock,
             {"skill-a": ready_files, "skill-b": held_files},
             root=tmp_path,
-            approvals=ApprovedCapabilities.for_entries(lock, ["skill-b"]),
+            approvals=approvals_for(lock, ["skill-b"]),
         )
 
     assert not digest_path(tmp_path, ready.digest).exists()

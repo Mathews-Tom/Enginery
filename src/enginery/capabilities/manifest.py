@@ -186,8 +186,10 @@ class CommandSpec:
 
     ``argv[0]`` is either a reviewed interpreter (``python3``, ``sh``,
     ``bash``, ``node``) followed by a package script path, or the package
-    path of an executable script. It is never interpreted by a shell. The
-    input schema is stored as canonical JSON text so the spec stays
+    path of an executable ``.sh`` script. A ``.py``, ``.js``, ``.mjs`` or ``.ts``
+    script must be run through its interpreter, never directly, so the
+    interpreter's isolation flags always apply. It is never interpreted by a
+    shell. The input schema is stored as canonical JSON text so the spec stays
     immutable and hashable.
     """
 
@@ -209,6 +211,12 @@ class CommandSpec:
         if not 1 <= self.max_output_bytes <= MAX_OUTPUT_BYTES_LIMIT:
             raise InvalidInputError(
                 f"command max_output_bytes must be 1 to {MAX_OUTPUT_BYTES_LIMIT}"
+            )
+        if self.interpreter is None and not self.argv[0].endswith(".sh"):
+            raise InvalidInputError(
+                "a command that names no interpreter may only run a .sh script; run a "
+                ".py, .js, .mjs or .ts script through its interpreter (python3 or node) so "
+                "the interpreter's isolation flags apply"
             )
         check_schema(self.input_schema)
 

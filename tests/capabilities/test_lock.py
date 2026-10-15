@@ -6,11 +6,14 @@ from datetime import datetime, timedelta
 import pytest
 
 from enginery.application.delivery_ports import PackageFile
+from enginery.capabilities.errors import CapabilityLockDriftError
 from enginery.capabilities.lock import (
     CapabilityLock,
     LockedCapability,
     ProvenanceRecord,
     ProvenanceStatus,
+    carry_pins,
+    check_pins,
 )
 from enginery.capabilities.manifest import PackageKind
 from enginery.domain.digests import Digest
@@ -254,3 +257,66 @@ def test_provenance_timestamp_must_be_timezone_aware() -> None:
             signer_key_id=None,
             verified_at=datetime(2026, 1, 1),
         )
+
+
+def test_retained_pins_never_change_the_lock_digest() -> None:
+    entry = locked_entry("skill-b")
+    pin = pin_for("skill-a", package_files("skill-a"))
+
+    assert CapabilityLock((entry,), (pin,)).digest() == lock_of(entry).digest()
+
+
+def test_a_retained_pin_cannot_repeat_an_entry_or_another_pin() -> None:
+    entry = locked_entry("skill-a")
+
+    with pytest.raises(InvalidInputError, match="repeat"):
+        CapabilityLock((entry,), (entry.pin(),))
+    with pytest.raises(InvalidInputError, match="unique"):
+        CapabilityLock((), (entry.pin(), entry.pin()))
+
+
+def test_pin_for_consults_entries_and_retained_pins() -> None:
+    entry = locked_entry("skill-b")
+    retained = pin_for("skill-a", package_files("skill-a"))
+    lock = CapabilityLock((entry,), (retained,))
+
+    assert lock.pin_for("skill-b") == entry.pin()
+    assert lock.pin_for("skill-a") == retained
+    assert lock.pin_for("other") is None
+
+
+def test_carry_pins_keeps_the_resolved_entries_exactly_and_retains_the_rest() -> None:
+    earlier_a = locked_entry("skill-a")
+    earlier_b = locked_entry("skill-b")
+    previous = CapabilityLock((earlier_a,), (earlier_b.pin(),))
+    resolved = lock_of(locked_entry("skill-c"))
+
+    carried = carry_pins(previous, resolved)
+
+    assert carried.entries == resolved.entries
+    assert carried.digest() == resolved.digest()
+    assert set(carried.retained_pins) == {earlier_a.pin(), earlier_b.pin()}
+    assert carry_pins(None, resolved) == resolved
+
+
+def test_carry_pins_drops_a_retained_pin_the_resolution_replaces() -> None:
+    entry = locked_entry("skill-a")
+    previous = CapabilityLock((), (entry.pin(),))
+
+    carried = carry_pins(previous, lock_of(entry))
+
+    assert carried.retained_pins == ()
+    assert [item.name for item in carried.entries] == ["skill-a"]
+
+
+def test_a_retained_pin_blocks_a_changed_closure_and_a_different_version() -> None:
+    entry = locked_entry("skill-a")
+    previous = CapabilityLock((), (entry.pin(),))
+    changed = locked_entry("skill-a", body=b"# changed closure\n")
+    other_version = locked_entry("skill-a", version="2")
+
+    with pytest.raises(CapabilityLockDriftError, match="closure digest"):
+        check_pins(previous, lock_of(changed))
+    with pytest.raises(CapabilityLockDriftError, match="different version"):
+        carry_pins(previous, lock_of(other_version))
+    check_pins(previous, lock_of(entry))

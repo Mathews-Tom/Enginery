@@ -8,8 +8,11 @@ permission typing. What differs is only *trust*, and trust follows the
 source's kind, never a package's own claim:
 
 * ``project``: packages in the reviewed repository base revision, read with git
-  plumbing from one pinned commit (never a working tree). This is the
-  only source that resolves as ``local_trusted`` and not run-introduced.
+  plumbing from one pinned commit (never a working tree) of a local repository,
+  recorded in each lock entry's source label as ``project:<canonical path>`` so the
+  lock digest binds which repository was trusted. This is the only source that
+  resolves as ``local_trusted`` and not run-introduced. That the commit is the
+  run's reviewed base is the operator's assertion; nothing here checks it.
 * ``user``: a user-local directory; run-introduced and unauthenticated.
 * ``git``: a repository URL pinned to an immutable commit sha;
   run-introduced and unauthenticated unless a pinned signature verifies.
@@ -30,7 +33,11 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from enginery.application.delivery_ports import CapabilityDescriptor, CapabilitySourcePort
+from enginery.application.delivery_ports import (
+    CapabilityDescriptor,
+    CapabilitySourcePort,
+    CommittedTreeCapabilitySource,
+)
 from enginery.domain.errors import InvalidInputError
 
 
@@ -63,12 +70,13 @@ class CapabilitySource:
     def __post_init__(self) -> None:
         if not self.label.strip():
             raise InvalidInputError("capability source label must be non-blank")
-        if self.kind is SourceKind.PROJECT and not _PINNED_COMMIT.fullmatch(
-            str(getattr(self.port, "pinned_commit", ""))
+        if self.kind is SourceKind.PROJECT and not (
+            isinstance(self.port, CommittedTreeCapabilitySource)
+            and _PINNED_COMMIT.fullmatch(self.port.pinned_commit)
         ):
             raise InvalidInputError(
-                "a project source must be a Git source pinned to a full 40-hex commit; a "
-                "working directory is never a reviewed base"
+                "a project source must be a committed-tree (Git) source pinned to a full "
+                "40-hex commit; a working directory is never a reviewed base"
             )
 
     @property

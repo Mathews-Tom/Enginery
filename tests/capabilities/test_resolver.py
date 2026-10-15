@@ -17,6 +17,7 @@ from enginery.capabilities.errors import (
     CapabilityLicenseMismatchError,
     CapabilityLockDriftError,
     CapabilityManifestError,
+    CapabilitySourceError,
 )
 from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
 from enginery.capabilities.manifest import (
@@ -43,7 +44,9 @@ from enginery.domain.errors import (
 )
 from tests.support.capabilities import (
     HOST,
+    PINNED_COMMIT,
     FakeCapabilitySource,
+    FakeProjectSource,
     capability_source,
     closure_digest_of,
     descriptor_for,
@@ -618,9 +621,39 @@ def test_expected_license_is_enforced_for_a_name_a_dependency_already_resolved()
         resolver.resolve([_request("skill-a"), _request("dep-a", expected_license="MIT")])
 
 
-def _license_source(manifest_license: str | None, text: bytes) -> FakeCapabilitySource:
+def test_a_project_source_must_be_a_committed_tree_source() -> None:
+    port = FakeCapabilitySource.of(
+        package_files("skill-a"), revision=PINNED_COMMIT, pinned_commit=PINNED_COMMIT
+    )
+
+    with pytest.raises(InvalidInputError, match="committed-tree"):
+        CapabilitySource(SourceKind.PROJECT, "project:/repo", port)
+
+
+def test_a_project_source_offering_a_revision_other_than_its_pin_is_refused() -> None:
+    files = package_files("skill-a")
+    port = FakeProjectSource(FakeCapabilitySource.of(files, revision="rev-1"))
+    resolver = CapabilityResolver([CapabilitySource(SourceKind.PROJECT, "project:/repo", port)])
+
+    with pytest.raises(CapabilitySourceError, match="pinned commit"):
+        resolver.resolve([_request()])
+
+
+def test_a_retained_pin_makes_a_changed_closure_drift() -> None:
+    original = package_files("skill-a")
+    previous = CapabilityLock((), (pin_for("skill-a", original),))
+    changed = package_files("skill-a", body=b"# changed closure\n")
+    resolver = CapabilityResolver([user_source(changed)])
+
+    with pytest.raises(CapabilityLockDriftError):
+        resolver.resolve([_request()], previous_lock=previous)
+    unchanged = CapabilityResolver([user_source(original)])
+    assert unchanged.resolve([_request()], previous_lock=previous).entries[0].name == "skill-a"
+
+
+def _license_source(manifest_license: str | None, text: bytes) -> CapabilitySource:
     files = package_files("skill-a", license_id=manifest_license, extra={"LICENSE": text})
-    return FakeCapabilitySource.of(files)
+    return user_source(files)
 
 
 def test_a_declared_mit_package_shipping_gpl_text_resolves_to_unknown() -> None:
@@ -649,7 +682,7 @@ def test_a_conflicting_notice_makes_the_declared_license_unknown() -> None:
         },
     )
 
-    entry = CapabilityResolver([FakeCapabilitySource.of(files)]).resolve([_request()]).entries[0]
+    entry = CapabilityResolver([user_source(files)]).resolve([_request()]).entries[0]
 
     assert entry.license == "unknown"
 

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,6 +15,10 @@ import pytest
 from enginery.application.delivery_ports import PackageFile
 from enginery.application.git_environment import repository_isolated_environment
 from enginery.capabilities.closure import build_closure
+from enginery.capabilities.command import run_package_command
+from enginery.capabilities.install import load_owned_manifest
+from enginery.capabilities.manifest import PackageKind
+from enginery.capabilities.serialization import read_lock
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
@@ -337,7 +342,8 @@ def test_install_keeps_earlier_pins_so_a_changed_closure_is_still_drift(
     assert _run(capsys, "install", "skill-b@1", *_project_flags(paths, first))[0] == 0
     assert _run(capsys, "uninstall", *paths.flags(), "--json")[0] == 0
     pinned = json.loads(paths.lockfile.read_text(encoding="utf-8"))
-    assert {entry["name"] for entry in pinned["entries"]} == {"skill-a", "skill-b"}
+    assert {entry["name"] for entry in pinned["entries"]} == {"skill-b"}
+    assert {pin["name"] for pin in pinned["retained_pins"]} == {"skill-a"}
     second = _commit_project(paths, package_files("skill-a", body=b"# changed closure\n"))
 
     code, _, output = _run(capsys, "install", "skill-a@1", *_project_flags(paths, second))
@@ -469,7 +475,7 @@ def test_a_committed_package_at_the_pinned_commit_is_local_trusted_at_that_revis
     assert package["approval_required"] is False
     assert package["introduced_by_run"] is False
     assert package["revision"] == sha
-    assert package["source"]["selected"]["label"] == f"project:{paths.repository}"
+    assert package["source"]["selected"]["label"] == f"project:{paths.repository.resolve()}"
 
 
 def test_an_uncommitted_edit_is_not_part_of_the_reviewed_base(
@@ -595,4 +601,216 @@ def test_a_git_source_pinned_to_a_commit_is_held_for_approval(
 
     assert code == exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
     assert document["status"] == "hold"
+    assert not paths.installed.exists()
+
+
+# --------------------------------------------------------------------------- saved lock
+
+
+def test_the_saved_lockfile_is_the_installed_lock_and_earlier_pins_still_block_drift(
+    paths: _Paths, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_package(paths.project, package_files("skill-a"), "skill-a")
+    first = _commit_project(paths, package_files("tool", kind=PackageKind.COMMAND), "tool")
+    assert _run(capsys, "install", "skill-a@1", *_project_flags(paths, first))[0] == 0
+    assert _run(capsys, "uninstall", *paths.flags(), "--json")[0] == 0
+
+    code, document, _ = _run(capsys, "install", "tool@1", *_project_flags(paths, first))
+
+    assert code == 0
+    lock = read_lock(paths.lockfile)
+    assert [entry.name for entry in lock.entries] == ["tool"]
+    assert [pin.name for pin in lock.retained_pins] == ["skill-a"]
+    record = load_owned_manifest(paths.installed)
+    assert record is not None
+    assert str(record.lock_digest) == document["lock_digest"] == str(lock.digest())
+    result = run_package_command(
+        lock,
+        "tool",
+        {},
+        install_root=paths.installed,
+        capabilities_root=paths.store,
+        interpreter_paths={"python3": sys.executable},
+    )
+    assert result.output == {"echo": {}}
+    second = _commit_project(paths, package_files("skill-a", body=b"# changed closure\n"))
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *_project_flags(paths, second))
+
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert "different closure digest" in output
+
+
+def test_preview_reports_a_different_version_of_a_pinned_name_as_a_drift_blocker(
+    paths: _Paths, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = _commit_project(paths, package_files("skill-a", "1"))
+    assert _run(capsys, "install", "skill-a@1", *_project_flags(paths, first))[0] == 0
+    assert _run(capsys, "uninstall", *paths.flags(), "--json")[0] == 0
+    second = _commit_project(paths, package_files("skill-a", "2"))
+
+    code, document, output = _run(capsys, "preview", "skill-a@2", *_project_flags(paths, second))
+
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert document["ready"] is False
+    assert [item["kind"] for item in document["blockers"]] == ["drift"]
+    assert "different version" in output
+
+
+# --------------------------------------------------------------------------- lockfile links
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_a_symlink_planted_at_the_lockfile_path_is_never_followed(
+    paths: _Paths, tmp_path: Path, capsys: pytest.CaptureFixture[str], target_exists: bool
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    target = tmp_path / "elsewhere.json"
+    if target_exists:
+        target.write_text('{"entries": []}\n', encoding="utf-8")
+    paths.lockfile.parent.mkdir(parents=True)
+    paths.lockfile.symlink_to(target)
+    before = target.read_bytes() if target_exists else None
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *_project_flags(paths, sha))
+    replaced, _, _ = _run(
+        capsys,
+        "install",
+        "skill-a@1",
+        *_project_flags(paths, sha),
+        "--replace-legacy-lock",
+    )
+
+    assert code == exit_code_for(FailureClass.INVALID_INPUT)
+    assert "symlink" in output
+    assert replaced == exit_code_for(FailureClass.INVALID_INPUT)
+    assert paths.lockfile.is_symlink()
+    assert (target.read_bytes() if target_exists else None) == before
+    assert target.exists() is target_exists
+    assert not paths.installed.exists()
+
+
+# --------------------------------------------------------------------------- project binding
+
+
+@pytest.mark.parametrize("url", ["https://example.invalid/repo.git", "file:///tmp/a-repository"])
+def test_a_url_is_refused_as_the_project_source(
+    paths: _Paths, capsys: pytest.CaptureFixture[str], url: str
+) -> None:
+    code, _, output = _run(
+        capsys,
+        "install",
+        "skill-a@1",
+        "--project-source",
+        f"{url}@{_NOT_A_COMMIT}",
+        *paths.flags(),
+    )
+
+    assert code == exit_code_for(FailureClass.INVALID_INPUT)
+    assert "local repository" in output
+    assert not paths.installed.exists()
+    assert not paths.lockfile.exists()
+
+
+def test_the_project_repository_is_recorded_in_the_lock_and_bound_into_its_digest(
+    paths: _Paths, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(paths.repository), str(clone))
+    clone_flags = [
+        "--project-source",
+        f"{clone}@{sha}",
+        "--project-subdir",
+        "packages",
+        *paths.flags(),
+        "--json",
+    ]
+
+    _, original, _ = _run(capsys, "inspect", "skill-a@1", *_project_flags(paths, sha))
+    _, cloned, _ = _run(capsys, "inspect", "skill-a@1", *clone_flags)
+    assert _run(capsys, "install", "skill-a@1", *_project_flags(paths, sha))[0] == 0
+
+    assert original["lock_digest"] != cloned["lock_digest"]
+    (entry,) = read_lock(paths.lockfile).entries
+    assert entry.provenance.source_label == f"project:{paths.repository.resolve()}"
+
+
+# --------------------------------------------------------------------------- hostile repository
+
+
+def _git_stdin(repository: Path, data: str, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        env=_git_environment(),
+        input=data,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _partial_clone_repository(base: Path, sentinel: Path) -> tuple[Path, str]:
+    """A repository whose pinned tree names a blob it does not store.
+
+    Its configuration declares a promisor remote and an ssh command that touches
+    ``sentinel``, which any git command run inside it that needs the blob would run.
+    """
+
+    repository = base / "promisor-repository"
+    repository.mkdir()
+    _git(repository, "init", "-q", "-b", "main")
+    manifest = package_files("skill-a")[0]
+    stored = _git_stdin(repository, manifest.content.decode(), "hash-object", "-w", "--stdin")
+    missing = _git_stdin(repository, "never stored\n", "hash-object", "--stdin")
+    references = _git_stdin(repository, f"100644 blob {missing}\tguide.md\n", "mktree", "--missing")
+    package = _git_stdin(
+        repository,
+        f"100644 blob {stored}\tcapability.json\n040000 tree {references}\treferences\n",
+        "mktree",
+        "--missing",
+    )
+    packages = _git_stdin(repository, f"040000 tree {package}\tskill-a\n", "mktree")
+    root = _git_stdin(repository, f"040000 tree {packages}\tpackages\n", "mktree")
+    commit = _git(repository, "commit-tree", "-m", "partial", root)
+    config = repository / ".git" / "config"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = touch {sentinel}; false\n"
+        + "[extensions]\n\tpartialClone = origin\n"
+        + '[remote "origin"]\n\turl = ssh://promisor.invalid/repo\n\tpromisor = true\n',
+        encoding="utf-8",
+    )
+    return repository, commit
+
+
+@pytest.mark.parametrize("command", ["inspect", "preview", "install"])
+@pytest.mark.parametrize("flag", ["--git-source", "--project-source"])
+def test_a_partial_clone_source_never_runs_its_configured_commands(
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    flag: str,
+) -> None:
+    sentinel = tmp_path / "sentinel"
+    repository, commit = _partial_clone_repository(tmp_path, sentinel)
+    subdir = "--git-subdir" if flag == "--git-source" else "--project-subdir"
+
+    code, _, _ = _run(
+        capsys,
+        command,
+        "skill-a@1",
+        flag,
+        f"{repository}@{commit}",
+        subdir,
+        "packages",
+        *paths.flags(),
+        "--json",
+    )
+
+    assert code != 0
+    assert not sentinel.exists()
     assert not paths.installed.exists()

@@ -181,7 +181,7 @@ def test_fetch_closure_returns_the_exact_files_and_preserves_the_executable_bit(
     files = package_files(
         "tool-a",
         kind=PackageKind.COMMAND,
-        command=CommandSpec.create(argv=("scripts/run.py",), input_schema={"type": "object"}),
+        command=CommandSpec.create(argv=("scripts/run.sh",), input_schema={"type": "object"}),
     )
     assert any(item.executable for item in files)
     _write_package(tmp_path, "tool-a", files)
