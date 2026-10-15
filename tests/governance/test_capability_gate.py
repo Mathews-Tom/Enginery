@@ -101,7 +101,7 @@ def _accept_every_asset_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         closure,
         "classify_asset",
-        lambda path, *, executable=False: closure.AssetKind.DATA,
+        lambda path, *, executable=False, content=None: closure.AssetKind.DATA,
     )
 
 
@@ -110,9 +110,11 @@ def _ignore_the_executable_bit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     classify = closure.classify_asset
 
-    def classify_without_the_bit(path: str, *, executable: bool = False) -> closure.AssetKind:
+    def classify_without_the_bit(
+        path: str, *, executable: bool = False, content: bytes | None = None
+    ) -> closure.AssetKind:
         del executable
-        return classify(path)
+        return classify(path, content=content)
 
     def check_without_the_bit(self: closure.AssetRecord) -> None:
         closure.normalize_path(self.path)
