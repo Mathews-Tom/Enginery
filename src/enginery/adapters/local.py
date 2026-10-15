@@ -27,6 +27,7 @@ from enginery.application.delivery_ports import (
     ValidationResult,
     ValidationStatus,
 )
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.application.work_ports import (
     ChangeSet,
     HarnessOutput,
@@ -205,7 +206,14 @@ class LocalWorkspace:
 
     @staticmethod
     def _git(cwd: Path, *args: str) -> str:
-        result = subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            ("git", *args),
+            cwd=cwd,
+            env=repository_isolated_environment(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         return result.stdout.strip()
 
 
@@ -267,7 +275,12 @@ class LocalGit:
 
     def _git(self, *args: str) -> str:
         result = subprocess.run(
-            ("git", *args), cwd=self.repository, check=True, capture_output=True, text=True
+            ("git", *args),
+            cwd=self.repository,
+            env=repository_isolated_environment(),
+            check=True,
+            capture_output=True,
+            text=True,
         )
         return result.stdout.strip()
 

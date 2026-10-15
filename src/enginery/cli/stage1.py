@@ -20,7 +20,13 @@ from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
-from enginery.domain.errors import InvalidInputError
+from enginery.cli.stage1_runner import (
+    DriftedRunnerWiring,
+    IsolatedWiring,
+    container_gone_for,
+    isolated_wiring,
+)
+from enginery.domain.errors import InternalInvariantViolationError, InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
 from enginery.engine.recovery import assess_worker
@@ -74,13 +80,31 @@ def run_stage1(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runtime_for_run(ledger: LedgerService, *, owner: str, run_id: str) -> CoordinatorRuntime:
+    """A runtime whose recovery can prove an isolated run's runner container is gone.
+
+    Recovery of a task-local worker must see that the launcher and its container are both
+    absent before it records the worker as exited. The container lookup needs the run's bound
+    engine, so the run is read first; a run that is not a Stage 1 run gets the plain runtime.
+    """
+    plain = CoordinatorRuntime(ledger, owner=owner)
+    try:
+        request = Stage1RunService(runtime=plain, ledger=ledger).read(RunId(run_id)).request
+    except InternalInvariantViolationError:
+        return plain
+    container_gone = container_gone_for(request.runner)
+    if container_gone is None:
+        return plain
+    return CoordinatorRuntime(ledger, owner=owner, container_gone=container_gone)
+
+
 def _start(args: argparse.Namespace) -> None:
     raw_request = _read_json(args.request)
     request = stage1_request_from_state(raw_request)
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
-        run = Stage1RunService(runtime=runtime, ledger=ledger).start(
+        run = _read_only_service(runtime=runtime, ledger=ledger, request=request).start(
             request,
             now=_now(),
             heartbeat_window=_HEARTBEAT_WINDOW,
@@ -93,7 +117,7 @@ def _start(args: argparse.Namespace) -> None:
 def _watch(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
         service = (
             _advancing_service(runtime=runtime, ledger=ledger, request=request)
@@ -133,23 +157,29 @@ def _watch(args: argparse.Namespace) -> None:
         ledger.close()
 
 
-def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarness:
+def _harness_for(
+    configuration: Stage1ExecutionConfiguration, wiring: IsolatedWiring | None = None
+) -> SupervisedHarness:
     artifact_store = ArtifactStore(configuration.artifact_root)
     if configuration.harness_provider == "omp":
+        omp_config = OmpAdapterConfig(
+            credential_reference=configuration.harness_credential_reference,
+            executable=configuration.harness_executable,
+        )
+        if wiring is None:
+            return OmpHarness(omp_config, artifact_store)
         return OmpHarness(
-            OmpAdapterConfig(
-                credential_reference=configuration.harness_credential_reference,
-                executable=configuration.harness_executable,
-            ),
-            artifact_store,
+            omp_config, artifact_store, command_runner=wiring.probe, runner=wiring.context
         )
     if configuration.harness_provider == "claude-code":
+        claude_config = ClaudeCodeAdapterConfig(
+            credential_reference=configuration.harness_credential_reference,
+            executable=configuration.harness_executable,
+        )
+        if wiring is None:
+            return ClaudeCodeHarness(claude_config, artifact_store)
         return ClaudeCodeHarness(
-            ClaudeCodeAdapterConfig(
-                credential_reference=configuration.harness_credential_reference,
-                executable=configuration.harness_executable,
-            ),
-            artifact_store,
+            claude_config, artifact_store, command_runner=wiring.probe, runner=wiring.context
         )
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
@@ -157,14 +187,35 @@ def _harness_for(configuration: Stage1ExecutionConfiguration) -> SupervisedHarne
     )
 
 
+def _once(probe: Callable[[], InstalledHost | None]) -> Callable[[], InstalledHost | None]:
+    """Run ``probe`` at most once: the pinned image is immutable, so one answer holds for a run."""
+    answers: list[InstalledHost | None] = []
+
+    def probed() -> InstalledHost | None:
+        if not answers:
+            answers.append(probe())
+        return answers[0]
+
+    return probed
+
+
 def _host_probe_for(
-    configuration: Stage1ExecutionConfiguration,
+    configuration: Stage1ExecutionConfiguration, wiring: IsolatedWiring | None
 ) -> Callable[[], InstalledHost | None]:
-    """Return a probe that only runs the host's identity command: no artifact store, no files."""
+    """Return a probe that only runs the identity command of the harness that will run.
+
+    A trusted-local run probes the host's own binary. An isolated run probes the binary in the
+    pinned image, in a throw-away hardened container: the host binary is not what runs. No
+    artifact store and no files are created either way.
+    """
     if configuration.harness_provider == "omp":
-        return lambda: probe_installed_omp(configuration.harness_executable)
+        if wiring is None:
+            return lambda: probe_installed_omp(configuration.harness_executable)
+        return _once(lambda: probe_installed_omp(configuration.harness_executable, wiring.probe))
     if configuration.harness_provider == "claude-code":
-        return lambda: probe_installed_claude(configuration.harness_executable)
+        if wiring is None:
+            return lambda: probe_installed_claude(configuration.harness_executable)
+        return _once(lambda: probe_installed_claude(configuration.harness_executable, wiring.probe))
     raise InvalidInputError(
         "Stage 1 harness_provider is not a configured harness",
         details={"harness_provider": configuration.harness_provider},
@@ -175,10 +226,14 @@ def _read_only_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
     """A service for diagnostics and decisions that must never create harness state."""
+    wiring = isolated_wiring(request, create_directories=False)
+    if isinstance(wiring, DriftedRunnerWiring):
+        return Stage1RunService(runtime=runtime, ledger=ledger, runner_admission=wiring.admission)
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
-        host_probe=_host_probe_for(request.execution_configuration),
+        host_probe=_host_probe_for(request.execution_configuration, wiring),
+        runner_admission=None if wiring is None else wiring.admission,
     )
 
 
@@ -186,26 +241,35 @@ def _advancing_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
     configuration = request.execution_configuration
+    wiring = isolated_wiring(request, create_directories=True)
     github = GitHubAdapterConfig(
         repository=configuration.github_repository,
         credential_reference=configuration.github_credential_reference,
         executable=configuration.github_executable,
     )
     pull_requests = GitHubPullRequests(github)
+    # A run bound to a profile that is no longer current gets no harness and no validation
+    # runner: it can only report its hold, and nothing can launch under other restrictions.
+    harness = (
+        None if isinstance(wiring, DriftedRunnerWiring) else _harness_for(configuration, wiring)
+    )
+    isolated_validation = wiring.validation if isinstance(wiring, IsolatedWiring) else None
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
         work_ledger=GitHubWorkLedger(github),
         pull_requests=pull_requests,
-        harness=_harness_for(configuration),
+        harness=harness,
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
+        runner_admission=None if wiring is None else wiring.admission,
+        isolated_command_runner=isolated_validation,
     )
 
 
 def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         selection = (
             Stage1RunService(runtime=runtime, ledger=ledger)
             .read(RunId(args.run_id))
@@ -303,7 +367,7 @@ def _required_string(state: dict[str, object], field_name: str) -> str:
 def _cancel(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=_HEARTBEAT_WINDOW)
         runtime.cancel_node(run_id=args.run_id, node_id=args.node_id, epoch=epoch.epoch, now=_now())
         _print({"run_id": args.run_id, "node_id": args.node_id, "status": "cancelled"})
@@ -314,7 +378,7 @@ def _cancel(args: argparse.Namespace) -> None:
 def _resume(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
-        runtime = CoordinatorRuntime(ledger, owner=args.owner)
+        runtime = _runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=_HEARTBEAT_WINDOW)
         request = runtime.read_node_request(run_id=args.run_id, node_id=args.node_id)
         runtime.resume_human_wait(

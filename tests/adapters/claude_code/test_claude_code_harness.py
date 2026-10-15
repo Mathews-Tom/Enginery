@@ -14,6 +14,7 @@ from enginery.application.work_ports import HarnessTask
 from enginery.domain.errors import CancellationError, WorkerFailureError
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.runner import trusted_local_permission_mapping
 from enginery.ledger.artifact_store import ArtifactStore
 
 
@@ -179,7 +180,10 @@ def test_start_launches_a_scoped_headless_command(tmp_path: Path) -> None:
     assert "-p" in command
     assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--strict-mcp-config" in command
-    assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+    declared = trusted_local_permission_mapping("claude-code")
+    assert declared.unconditional_bypass
+    start_at = command.index(declared.arguments[0])
+    assert command[start_at : start_at + len(declared.arguments)] == declared.arguments
     assert "--no-session-persistence" in command
     assert "--bare" not in command
     assert "--model" not in command

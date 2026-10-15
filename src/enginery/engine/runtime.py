@@ -28,7 +28,12 @@ from enginery.engine.scheduler import (
     SchedulingLimits,
 )
 from enginery.engine.supervisor import ProcessIdentity, WorkerSupervisor
-from enginery.engine.workspace import GitWorktreeBackend, WorkspaceReservation
+from enginery.engine.workspace import (
+    WORKSPACE_MODE_GIT_WORKTREE,
+    WORKSPACE_MODES,
+    GitWorktreeBackend,
+    WorkspaceReservation,
+)
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 
@@ -54,6 +59,7 @@ class FixtureDispatch:
     workflow_definition_id: str | None = None
     retain_workspace: bool = False
     log_directory: Path | None = None
+    workspace_mode: str = WORKSPACE_MODE_GIT_WORKTREE
 
     def __post_init__(self) -> None:
         if not all(
@@ -76,6 +82,8 @@ class FixtureDispatch:
             raise InvalidInputError("fixture dispatch dependencies must be non-blank node keys")
         if self.workflow_definition_id is not None and not self.workflow_definition_id.strip():
             raise InvalidInputError("workflow definition id must be non-blank when present")
+        if self.workspace_mode not in WORKSPACE_MODES:
+            raise InvalidInputError("fixture dispatch workspace mode is not supported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,7 @@ class FixtureRuntime:
             repository_path=request.repository_path,
             workspace_path=request.workspace_path,
             base_revision=request.base_revision,
+            mode=request.workspace_mode,
             epoch=epoch,
             now=now,
         )
@@ -226,6 +235,7 @@ class CoordinatorRuntime:
         *,
         owner: str,
         fault_hook: Callable[[str], None] | None = None,
+        container_gone: Callable[[str], bool] | None = None,
     ) -> None:
         self._ledger = ledger
         self._coordinator = Coordinator(ledger, owner=owner)
@@ -233,6 +243,17 @@ class CoordinatorRuntime:
         self._leases = FencedNodeLeases(ledger, self._coordinator)
         self._workspaces = GitWorktreeBackend(ledger, self._coordinator, fault_hook=fault_hook)
         self._fault_hook = fault_hook
+        self._container_gone = container_gone
+
+    def _recovery(self) -> RecoveryCoordinator:
+        """Recovery that also checks, for task-local runs, that the runner container is gone.
+
+        ``container_gone`` maps a launch operation id to whether its runner container no longer
+        exists; without it the launcher process's proven absence is the only proof.
+        """
+        return RecoveryCoordinator(
+            self._ledger, self._coordinator, container_gone=self._container_gone
+        )
 
     @property
     def coordinator(self) -> Coordinator:
@@ -670,11 +691,12 @@ class CoordinatorRuntime:
                 self._ledger, self._coordinator, fault_hook=self._fault
             ).cancel_persisted(lease=lease, now=now, coordinator_epoch=transition_epoch)
             reservation = self._require_workspace(request)
-            assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+            assessment = self._recovery().reconcile(
                 lease=lease,
                 workspace_path=reservation.workspace_path,
                 epoch=transition_epoch,
                 now=now,
+                workspace_mode=reservation.mode,
             )
             attempt = self._ledger.read_projection(
                 aggregate_type="node_attempt", aggregate_id=request.attempt_id
@@ -781,8 +803,12 @@ class CoordinatorRuntime:
             lease=lease, coordinator_epoch=epoch.epoch, now=now
         )
         reservation = self._require_workspace(request)
-        reconciled = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
-            lease=lease, workspace_path=reservation.workspace_path, epoch=epoch.epoch, now=now
+        reconciled = self._recovery().reconcile(
+            lease=lease,
+            workspace_path=reservation.workspace_path,
+            epoch=epoch.epoch,
+            now=now,
+            workspace_mode=reservation.mode,
         )
         attempt = self._ledger.read_projection(
             aggregate_type="node_attempt", aggregate_id=request.attempt_id
@@ -867,11 +893,12 @@ class CoordinatorRuntime:
             identity=dispatched.identity,
             now=now,
         )
-        RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+        self._recovery().reconcile(
             lease=dispatched.lease,
             workspace_path=dispatched.workspace.workspace_path,
             epoch=dispatched.lease.epoch,
             now=now,
+            workspace_mode=dispatched.workspace.mode,
         )
         envelope = WorkerResultEnvelope(
             run_id=dispatched.lease.run_id,
@@ -1012,11 +1039,17 @@ class CoordinatorRuntime:
                 )
             self._require_completed_dependencies(request)
             if actor_type is ActorType.AGENT:
-                assessment = RecoveryCoordinator(self._ledger, self._coordinator).reconcile(
+                reservation = self._workspaces.read_reservation(request.repository_id)
+                assessment = self._recovery().reconcile(
                     lease=self._active_lease(current),
                     workspace_path=request.workspace_path,
                     epoch=epoch,
                     now=now,
+                    workspace_mode=(
+                        reservation.mode
+                        if reservation is not None and reservation.run_id == request.run_id
+                        else None
+                    ),
                 )
                 if not assessment.ready_to_release:
                     raise ExternalConflictError(
@@ -1027,7 +1060,6 @@ class CoordinatorRuntime:
                             "reason": assessment.reason,
                         },
                     )
-                reservation = self._workspaces.read_reservation(request.repository_id)
                 if (
                     reservation is not None
                     and reservation.run_id == request.run_id
@@ -1273,7 +1305,7 @@ def _node_id(request: FixtureDispatch) -> str:
 def _request_state(
     request: FixtureDispatch, *, status: str, actor_type: ActorType
 ) -> dict[str, object]:
-    return {
+    state: dict[str, object] = {
         "run_id": request.run_id,
         "node_id": request.node_id,
         "attempt_id": request.attempt_id,
@@ -1291,6 +1323,11 @@ def _request_state(
         "actor_type": actor_type.value,
         "status": status,
     }
+    if request.workspace_mode != WORKSPACE_MODE_GIT_WORKTREE:
+        # A request persisted before workspace modes existed has no key and decodes as a
+        # git worktree, so its stored state is exactly what it was.
+        state["workspace_mode"] = request.workspace_mode
+    return state
 
 
 def _request_from_state(state: object) -> FixtureDispatch:
@@ -1313,6 +1350,9 @@ def _request_from_state(state: object) -> FixtureDispatch:
     log_directory = state.get("log_directory")
     if log_directory is not None and (not isinstance(log_directory, str) or not log_directory):
         raise InternalInvariantViolationError("runtime node state has invalid log directory")
+    workspace_mode = state.get("workspace_mode", WORKSPACE_MODE_GIT_WORKTREE)
+    if not isinstance(workspace_mode, str) or workspace_mode not in WORKSPACE_MODES:
+        raise InternalInvariantViolationError("runtime node state has invalid workspace mode")
     workflow_definition_id = state.get("workflow_definition_id")
     if (
         not isinstance(command, list)
@@ -1353,6 +1393,7 @@ def _request_from_state(state: object) -> FixtureDispatch:
         workflow_definition_id=workflow_definition_id,
         retain_workspace=retain_workspace,
         log_directory=Path(log_directory) if log_directory is not None else None,
+        workspace_mode=workspace_mode,
     )
 
 

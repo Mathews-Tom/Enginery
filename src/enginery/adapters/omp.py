@@ -9,11 +9,19 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
+from enginery.adapters.runner_launch import (
+    isolated_command,
+    publish_runner_receipt,
+    read_attempt_result,
+    require_isolated_permissions,
+    verified_image_host,
+    worker_environment,
+)
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -40,9 +48,17 @@ from enginery.application.work_ports import (
 from enginery.domain.artifact import RedactionClassification
 from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
-from enginery.domain.execution_receipt import ExecutionReceipt
+from enginery.domain.execution_receipt import ExecutionReceipt, RunnerReceiptRef
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.runner import (
+    WORKER_HOME,
+    WORKSPACE_MOUNT,
+    PermissionMapping,
+    RunnerContext,
+    isolated_permission_mapping,
+    trusted_local_permission_mapping,
+)
 from enginery.engine.omp_worker import OmpWorkerResult
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.redaction import redact_credential_shaped_text
@@ -116,6 +132,11 @@ class OmpHarness:
             arguments, check=False, capture_output=True, text=True
         )
     )
+    permissions: PermissionMapping | None = None
+    """Overrides the mapping resolved from the trust mode (never a bypass when isolated)."""
+    runner: RunnerContext | None = None
+    """Set to run the worker in the isolated container profile instead of as the operator."""
+    _image_host: InstalledHost | None = field(default=None, init=False)
     _sessions: dict[str, HarnessSession] = field(default_factory=dict, init=False)
     _tasks: dict[str, HarnessTask] = field(default_factory=dict, init=False)
     _commands: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
@@ -126,6 +147,18 @@ class OmpHarness:
     )
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
     _cancelled: set[str] = field(default_factory=set, init=False)
+
+    def __post_init__(self) -> None:
+        if self.runner is not None and self.permissions is not None:
+            require_isolated_permissions(self.permissions)
+
+    def resolved_permissions(self) -> PermissionMapping:
+        """The permission mapping this harness launches with: declared, never implicit."""
+        if self.permissions is not None:
+            return self.permissions
+        if self.runner is not None:
+            return isolated_permission_mapping(_HARNESS_ID)
+        return trusted_local_permission_mapping(_HARNESS_ID)
 
     def probe(self) -> AdapterStatus:
         try:
@@ -162,10 +195,22 @@ class OmpHarness:
         )
 
     def installed_host(self) -> InstalledHost | None:
-        """Return the probed executable version and the adapter's declared protocol."""
-        return probe_installed_host(self.config.executable, self.command_runner)
+        """Return the probed executable version and the adapter's declared protocol.
+
+        An isolated harness is probed inside the pinned image, never on the host. The image is
+        immutable for the run, so one probe is kept for the harness's lifetime.
+        """
+        if self.runner is None:
+            return probe_installed_host(self.config.executable, self.command_runner)
+        if self._image_host is None:
+            self._image_host = probe_installed_host(self.config.executable, self.command_runner)
+        return self._image_host
 
     def start(self, task: HarnessTask) -> HarnessSession:
+        if self.runner is not None:
+            raise WorkerFailureError(
+                "an isolated OMP worker is started through the supervised launcher"
+            )
         session = HarnessSession(
             session_id=f"omp-{task.operation_id}", operation_id=task.operation_id
         )
@@ -236,26 +281,38 @@ class OmpHarness:
         return self._host_command(task)[0]
 
     def _host_command(self, task: HarnessTask) -> tuple[tuple[str, ...], str | None]:
-        """Return the host command and the version observed while preparing its controls."""
+        """The host command and the version observed while preparing its controls.
+
+        Host paths for trusted-local, in-container paths when isolated.
+        """
         launch = prepare_native_controls(
             task.selection,
             harness=_HARNESS_ID,
             catalog=self.catalog,
             probe_installed_host=self.installed_host,
         )
+        workspace = str(task.workspace_path) if self.runner is None else WORKSPACE_MOUNT
         command = (
             self.config.executable,
             "--mode=json",
             "--no-session",
             "--cwd",
-            str(task.workspace_path),
+            workspace,
             "--max-time",
             str(task.time_budget_seconds),
+            *self.resolved_permissions().arguments,
             *launch.arguments,
             "-p",
             _render_task(task),
         )
         return command, launch.observed_executable_version
+
+    def container_environment(self, task: HarnessTask) -> tuple[tuple[str, str], ...]:
+        """The explicit environment of the isolated worker; nothing is inherited from the host."""
+        del task
+        if self.runner is None:
+            raise InvalidInputError("only an isolated OMP worker has a container environment")
+        return worker_environment((("PI_CODING_AGENT_DIR", f"{WORKER_HOME}/.omp/agent"),))
 
     def _receipt(
         self,
@@ -264,18 +321,44 @@ class OmpHarness:
         launched_command: tuple[str, ...] | None,
         *,
         observed_at_launch: str | None,
+        runner: RunnerReceiptRef | None = None,
     ) -> ExecutionReceipt:
-        return build_receipt(
+        receipt = build_receipt(
             task.selection,
             harness=_HARNESS_ID,
             catalog=self.catalog,
             launched_command=launched_command,
             models=(event.attributes["model"] for event in events if "model" in event.attributes),
             observed_at_launch=observed_at_launch,
+            runner=runner,
+        )
+        if runner is None:
+            return receipt
+        # An isolated worker is not trusted: the model id it printed is its own claim.
+        return replace(receipt, effective_model=receipt.effective_model.worker_reported())
+
+    def _catalog_host(self) -> InstalledHost:
+        """The identity an isolated worker's runner receipt must record: the tested one."""
+        host = self.catalog.host(_HARNESS_ID)
+        return InstalledHost(
+            executable_version=host.tested_executable_version,
+            protocol_fingerprint=host.protocol_fingerprint,
         )
 
     def supervised_command(self, task: HarnessTask, *, result_path: Path) -> tuple[str, ...]:
         """Return a worker command whose parent is the coordinator supervisor."""
+        if self.runner is not None:
+            image_host = verified_image_host(self.catalog.host(_HARNESS_ID), self.installed_host())
+            return isolated_command(
+                runner=self.runner,
+                harness=_HARNESS_ID,
+                task=task,
+                result_path=result_path,
+                permissions=self.resolved_permissions(),
+                environment=self.container_environment(task),
+                inner_command=self.command_for(task),
+                image_host=image_host,
+            )
         if not result_path.is_absolute():
             raise InvalidInputError("OMP worker result path must be absolute")
         command, observed = self._host_command(task)
@@ -299,10 +382,15 @@ class OmpHarness:
         result_path: Path,
         launched_command: tuple[str, ...] | None = None,
     ) -> tuple[tuple[NormalizedAdapterEvent, ...], HarnessResult]:
-        """Read a supervised worker handoff after its process exit is observed."""
+        """Read a supervised worker handoff after its process exit is observed.
+
+        An isolated worker's result file is untrusted: it is size-bounded, its output is
+        redacted before it is published, and the attempt is only accepted together with the
+        runner receipt the launcher wrote for it.
+        """
         try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            payload = json.loads(self._read_result(task, result_path))
+        except json.JSONDecodeError as error:
             raise WorkerFailureError(
                 "OMP supervised worker did not retain a valid result"
             ) from error
@@ -326,14 +414,26 @@ class OmpHarness:
             raise WorkerFailureError("OMP supervised worker result has invalid field types")
         if schema_version != 1:
             raise WorkerFailureError("OMP supervised worker result schema version is unsupported")
+        if operation_id != str(task.operation_id):
+            raise WorkerFailureError("OMP supervised worker result operation does not match task")
+        runner_ref: RunnerReceiptRef | None = None
+        observed_at_launch = launch_observation(launched_command)
+        if self.runner is not None:
+            output = redact_credential_shaped_text(output)
+            image_host = self._catalog_host()
+            runner_ref = publish_runner_receipt(
+                self.runner, task, self.artifact_store, expected_host=image_host
+            )
+            # The launcher recorded the harness it saw in the container, and the receipt
+            # was just required to equal the tested identity, so that is the version
+            # observed at launch; a host command carries it in the wrapper instead.
+            observed_at_launch = image_host.executable_version
         result = OmpWorkerResult(
             operation_id=operation_id,
             terminal_status=terminal_status,
             output=output,
             schema_version=schema_version,
         )
-        if result.operation_id != str(task.operation_id):
-            raise WorkerFailureError("OMP supervised worker result operation does not match task")
         digest = self.artifact_store.publish_bytes(
             result.output.encode("utf-8"),
             media_type="application/json",
@@ -358,10 +458,21 @@ class OmpHarness:
                     task,
                     events,
                     launched_command,
-                    observed_at_launch=launch_observation(launched_command),
+                    observed_at_launch=observed_at_launch,
+                    runner=runner_ref,
                 ),
             ),
         )
+
+    def _read_result(self, task: HarnessTask, result_path: Path) -> str:
+        if self.runner is not None:
+            return read_attempt_result(self.runner, task, result_path, what="OMP supervised worker")
+        try:
+            return result_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise WorkerFailureError(
+                "OMP supervised worker did not retain a valid result"
+            ) from error
 
     def _require_session(self, session: HarnessSession) -> None:
         if self._sessions.get(session.session_id) != session:

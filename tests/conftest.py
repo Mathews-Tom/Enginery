@@ -5,9 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from enginery.application.git_environment import scrub_repository_variables
 from enginery.ledger.service import LedgerService
 from tests.support.clock import FrozenClock
 from tests.support.ids import SequentialIdGenerator
+
+# A suite started by `git rebase --exec` (or a git hook) inherits GIT_DIR and its companions,
+# which override the working directory of every fixture that runs `git init` or `git config`
+# and would write the fixture's identity into the enclosing repository's shared configuration.
+# Removed at import, before any test or collection-time subprocess can use them.
+scrub_repository_variables()
 
 
 @pytest.fixture

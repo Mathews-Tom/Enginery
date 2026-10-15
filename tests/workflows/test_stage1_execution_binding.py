@@ -31,6 +31,7 @@ from enginery.domain.execution_selection import (
     SelectionLayer,
 )
 from enginery.domain.ids import RunId
+from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerProfile, RunnerSelection
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
@@ -76,7 +77,11 @@ def _drifted_catalog() -> ExecutionCatalog:
 
 
 def _legacy(request: Stage1RunRequest) -> Stage1RunRequest:
-    return replace(request, execution_selection=ExecutionSelection.legacy_host_default("omp"))
+    return replace(
+        request,
+        execution_selection=ExecutionSelection.legacy_host_default("omp"),
+        runner=LEGACY_RUNNER_SELECTION,
+    )
 
 
 def test_a_new_request_digest_binds_the_selection_and_changes_with_it(
@@ -687,3 +692,81 @@ def test_collect_implementation_gives_the_executor_the_services_own_catalog(
 
     assert result == "collected"
     assert len(captured) == 1 and captured[0] is injected
+
+
+def _runner_legacy(request: Stage1RunRequest) -> Stage1RunRequest:
+    return replace(request, runner=LEGACY_RUNNER_SELECTION)
+
+
+def _isolated(request: Stage1RunRequest) -> Stage1RunRequest:
+    selection = RunnerSelection.isolated(image="sha256:" + "a" * 64, profile=RunnerProfile())
+    return replace(request, runner=selection)
+
+
+def test_a_request_state_without_a_runner_decodes_as_legacy_and_keeps_its_digest(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False
+    )
+    legacy = _runner_legacy(request)
+    state = legacy.initial_state()
+    assert "runner" not in state
+    assert "runner" in request.initial_state()
+    assert legacy.digest != request.digest
+
+    decoded = stage1_request_from_state(state)
+    assert decoded.runner == LEGACY_RUNNER_SELECTION
+    assert decoded.digest == legacy.digest
+
+    runtime.register_run(
+        run_id=str(legacy.run.id), initial_state=state, now=now, heartbeat_window=_WINDOW
+    )
+    read_back = service.read(legacy.run.id)
+    assert read_back.request.runner.legacy
+    assert read_back.request.digest == legacy.digest
+    progression = service.next_action(legacy.run.id)
+    assert progression.action is Stage1ProgressionAction.QUALIFY
+    assert progression.hold is None
+
+
+def test_start_rejects_a_new_run_with_a_legacy_runner_selection(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, _, now = _check_disposition_fixture(ledger_service, tmp_path, start=False)
+
+    with pytest.raises(InvalidInputError, match="must bind a trust mode"):
+        service.start(_runner_legacy(request), now=now, heartbeat_window=_WINDOW)
+
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
+
+
+def test_an_isolated_selection_without_runner_admission_is_held_unqualified(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False
+    )
+    isolated = _isolated(request)
+    assert service.runner_admission is None
+
+    with pytest.raises(HumanActionRequiredError):
+        service.start(isolated, now=now, heartbeat_window=_WINDOW)
+    assert (
+        ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
+        is None
+    )
+
+    runtime.register_run(
+        run_id=str(isolated.run.id),
+        initial_state=isolated.initial_state(),
+        now=now,
+        heartbeat_window=_WINDOW,
+    )
+    progression = service.next_action(isolated.run.id)
+    assert progression.action is Stage1ProgressionAction.HOLD
+    assert progression.hold is not None
+    assert progression.hold.reason is HoldReason.RUNNER_UNQUALIFIED

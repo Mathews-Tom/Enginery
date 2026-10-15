@@ -82,6 +82,8 @@ def _reservation_payload(reservation: WorkspaceReservation) -> dict[str, object]
         "repository_path": str(reservation.repository_path),
         "workspace_path": str(reservation.workspace_path),
         "base_revision": reservation.base_revision,
+        "base_oid": reservation.base_oid,
+        "mode": reservation.mode,
         "status": reservation.status,
     }
 
@@ -100,7 +102,8 @@ def _print_reservations(reservations: tuple[WorkspaceReservation, ...], *, as_js
     for reservation in reservations:
         print(
             f"[{reservation.status}] {reservation.repository_id} run={reservation.run_id} "
-            f"workspace={reservation.workspace_path}"
+            f"workspace={reservation.workspace_path} mode={reservation.mode} "
+            f"base={reservation.resolved_base_revision}"
         )
 
 

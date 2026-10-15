@@ -36,6 +36,7 @@ from enginery.domain.ids import (
     WorkflowDefinitionId,
 )
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.engine.scheduler import SchedulingLimits
@@ -71,6 +72,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-dogfood"),
             work_item_id=snapshot.work_item.id,

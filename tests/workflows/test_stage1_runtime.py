@@ -37,6 +37,7 @@ from enginery.domain.node_attempt import EvidenceResult, ReconciliationResult
 from enginery.domain.observation import ObservationState
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.check import CheckDisposition
 from enginery.domain.workflow.manifest import WorkflowManifest
@@ -632,6 +633,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-stage1"),
             work_item_id=snapshot.work_item.id,
@@ -887,6 +889,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-pr"),
             work_item_id=snapshot.work_item.id,
@@ -1089,6 +1092,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-repair-gate"),
             work_item_id=snapshot.work_item.id,
@@ -1231,6 +1235,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-repair"),
             work_item_id=snapshot.work_item.id,
@@ -1425,6 +1430,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-outcomes"),
             work_item_id=snapshot.work_item.id,
@@ -1609,6 +1615,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-no-outcomes"),
             work_item_id=snapshot.work_item.id,
@@ -1761,6 +1768,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
     manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-dispatch-repair"),
             work_item_id=snapshot.work_item.id,
@@ -2027,6 +2035,7 @@ def _check_disposition_fixture(
         manifest = manifest_transform(manifest)
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-check"),
             work_item_id=snapshot.work_item.id,

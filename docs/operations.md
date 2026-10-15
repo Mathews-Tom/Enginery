@@ -309,6 +309,7 @@ GitHub issue, instead of the hand-written Python composition in
 
 ```bash
 uv run enginery stage1 build-request \
+  --runner trusted-local \
   --output request.json \
   --run-id issue-142 \
   --repository <owner>/<repo> \
@@ -480,7 +481,8 @@ A run's `implement` node reserves one workspace per repository for the
 run's lifetime. If a run is aborted outside the normal lifecycle (the
 process was killed, or a human decides not to continue), that
 reservation can outlive the run. `enginery workspace inspect` lists
-every repository's current reservation, from the same durable state
+every repository's current reservation (with its workspace `mode` and the resolved base
+object id `base_oid`), from the same durable state
 `stage1`'s coordinator already reads:
 
 ```bash
@@ -762,19 +764,230 @@ a run against a restored ledger.
 event log; use it if a projection appears stale or inconsistent after a
 manual intervention. It never rewrites historical events.
 
+## Trust modes and the isolated runner
+
+Every Stage 1 run is bound, when its request is built, to exactly one
+trust mode. `enginery stage1 build-request` requires the choice:
+
+```bash
+uv run enginery stage1 build-request ... --runner trusted-local
+uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sha256:<image id> [--docker-context NAME]
+```
+
+- **`trusted-local`** runs the worker as you, in a git worktree of your
+  repository, with your environment and filesystem. It is explicitly the
+  weaker mode and is never containment. Its harness permission mapping is
+  declared rather than implicit: Claude Code runs with `--permission-mode
+  bypassPermissions` and omp with its headless default approval mode, both of
+  which are recorded as unconditional bypasses.
+- **`isolated-oci`** runs the worker in a container built from a pinned image.
+  A run bound to it is *held*, never run as `trusted-local`, when no qualified
+  engine, image, or profile is available; `stage1 start` refuses to bind it
+  and `stage1 watch` reports the hold (`runner_unqualified` or
+  `runner_fingerprint_drift`) with the retained binding intact.
+
+A request persisted before trust modes existed decodes unchanged as a legacy
+`trusted-local` run and keeps its original request digest; a new run cannot be
+started without an explicit mode.
+
+### The isolated profile
+
+`enginery runner build-image [--docker-context NAME]` builds the worker image
+from the recipe packaged with Enginery on a qualified engine and prints its
+exact image id and recipe digest; `enginery runner status --image sha256:<id>`
+reports whether the engine, image, and profile are admitted. The image is built
+from a base pinned by digest with pinned packages (Claude Code 2.1.296, omp
+18.10.3, bun 1.3.14, git, python3, uv) and is identified by its exact id,
+never a mutable tag. A qualified engine reports cgroup v2, a confined seccomp
+profile, and enforces memory, swap, CPU, and pids limits; an engine that cannot
+is refused with the missing requirement named. Docker Desktop and rootless
+Docker are the engines the profile has been exercised on.
+
+Each worker attempt runs with a non-root uid/gid, every capability dropped,
+`no-new-privileges`, a read-only root filesystem with tmpfs scratch and home,
+hard memory/swap/CPU/pids limits, no devices, no privilege, no Docker socket,
+no host-home mount, a private IPC namespace, and an attachment to a single
+`--internal` container network. No host path is mounted: the workspace and the
+result tree are per-attempt tmpfs volumes, both read-write. The
+environment is an explicit allowlist, never inherited from the host. The
+engine's own report of the created container is checked against the profile
+before the worker starts, and a launch that is weaker than the profile in any
+respect is refused and removed.
+
+The worker never sees your repository's `.git`, hooks, or configuration. The
+workspace is a self-contained clone with no remote and no reference to the host
+repository, and it contains only what is reachable from the run's base revision:
+the base is resolved once to a full object id when the run is reserved, published
+under a temporary branch for a `--no-local --single-branch --no-tags` clone, and
+the temporary branch is removed again, so unreachable objects, stashes, other
+branches and tags of your repository never reach the workspace. The workspace,
+its result directory and its intake repository live side by side in one parent
+directory that must be a real directory owned by the operator with mode `0700`; an
+existing parent that is laxer is refused rather than re-permissioned. When the
+worker finishes it hands back its branch as a git bundle; the host imports that
+bundle into an intake repository it created itself, verifies the branch there
+(name, ancestry from the resolved base object id, a non-empty change, and a bound
+of 200,000 tree entries and 2 GiB of blob data on the branch's recursive tree,
+enforced while the tree is streamed so a tree that expands from a few objects is
+stopped early), and never runs git inside the worker's repository, whose
+configuration and hooks the worker controls. That includes recovery after a worker
+failure, cancel, human wait or retry: for a task-local clone the host proves the
+launcher is gone and, for a run bound to the isolated profile, asks that run's own
+container engine whether the runner container is gone (an engine that cannot answer holds
+recovery) and checks `.git/index.lock` with a non-following `lstat`; it never runs
+`git status` there. Host git in linked worktrees (the `trusted-local` backend) runs with
+`core.fsmonitor=false`, `core.hooksPath=/dev/null` and an allowlisted environment. An
+isolated worker commits locally and holds no remote and no credentials; its branch
+is not on any remote until the verified branch is published by a separate,
+host-side step.
+
+Validation commands for an isolated run execute inside the same restricted
+runner against the task-local workspace, never on the host. They run offline:
+the repository's validation must work with what the image and the workspace
+provide.
+
+### Harness permissions
+
+The isolated profile never launches a harness with permission checks off, and
+each mapping is recorded in the runner receipt:
+
+- Claude Code runs restricted to the workspace with `--permission-mode dontAsk
+  --permission-prompts none`, an allow-list of file tools and of git and test
+  commands, and a deny-list that refuses `git push`, remote and fetch commands,
+  `curl`/`wget`/`ssh`, and web tools. Anything not allowed is denied, never
+  prompted.
+- omp runs with `--approval-mode write` and a read-only policy overlay baked
+  into the image that allows the same git and test commands and denies the
+  rest; the repository's own settings cannot widen it.
+
+### Launcher outcome, result intake and resource bounds
+
+The host-side launcher records how every attempt ended in its own file beside the
+runner receipt (outside both worker mounts, mode `0600`): refused, hard deadline,
+stopped, faulted, or "the container exited with N". Collection and isolated
+validation classify an attempt from that record and never from the launcher's process
+exit status, because the contained command can exit with any status, including the
+launcher's own `124` and `125`. A refused, timed-out, stopped, faulted or unfinished
+launch is a worker failure, and so is a nonce-bound `"succeeded"` result from a
+container that exited non-zero.
+
+Everything the worker wrote is untrusted input. The host opens the result file
+relative to its directory with `O_NOFOLLOW | O_NONBLOCK`, checks the open
+descriptor is a regular file within the size cap, and never follows a symlink or
+waits on a FIFO. Before it starts the container the launcher removes any result,
+bundle, receipt and outcome an earlier attempt of the same operation left behind,
+and it mints a per-launch nonce that it passes to the in-image wrapper; a result
+is accepted only if it echoes that nonce, so a result replayed from another attempt
+is refused.
+
+The container's log is rotated (`json-file`, 2 files of at most 1 MiB), so a
+process that writes to the container's stdout cannot fill the engine's disk. The
+workspace and result trees are tmpfs volumes created per attempt with a size and an
+inode cap the kernel enforces (4 GiB and 500,000 entries for the workspace, 1 GiB and
+100,000 entries for the result directory by default; a profile can lower them): a
+write past a cap fails inside the worker with `ENOSPC`, however many processes write
+at once, and nothing on the host measures or races the worker. This works the same on
+Docker Desktop and on rootless Docker. The receipt records the mechanism
+(`kernel-capped-volume`) and the numbers. Both volumes are mounted `nosuid,nodev`, so
+a setuid file or device node a worker writes there is inert. The result volume is also
+`noexec`: it holds only the result file and the bundle, which the host reads back as
+data. The workspace cannot be `noexec`, because the worker runs the project's own
+commands, scripts and compiled extensions from it (a `noexec` mount also refuses the
+executable mappings of shared libraries). Each file is additionally limited by the
+kernel's per-file size limit. Orphaned volumes of a dead launcher are removed by
+reconcile.
+
+#### Engine memory
+
+tmpfs pages live in the engine's memory, never on its disk, and are accounted in two
+different ways. Pages the worker writes (into either volume, `/tmp` or its home
+directory) are charged to the worker's memory limit (4 GiB by default), so a worker
+that fills them is ended by the kernel's out-of-memory kill, an ordinary non-zero
+exit. The pages the launcher seeds into the workspace volume with `docker cp` are
+not charged to the worker or to any container, because the engine writes them.
+Measured on Docker Desktop 29.8.2 (20 GiB VM): a container limited to 64 MiB that held
+a 287 MiB seeded volume reported 0 bytes of shmem and 7 MiB of memory in its own
+cgroup, while the VM's shmem rose from 0.5 MiB to 287 MiB. With 200 MiB seeded, a
+worker limited to 64 MiB was killed after it wrote 58.5 MiB beside the seeded
+content, and the VM's shmem was then 259 MiB. One attempt therefore needs, in the
+engine's memory, the seeded workspace plus the worker's memory limit plus headroom
+for the engine itself (1 GiB).
+
+The volume objects persist until they are removed, but their content exists only
+while a container has them mounted. The launcher's store container holds the
+volumes for the attempt; once it is removed the pages are freed at once (measured:
+shmem back to 0.5 MiB). The launcher removes the store container, the worker and
+both volumes after every attempt, and reconcile removes what a dead launcher left,
+so nothing keeps engine memory between attempts.
+
+The engine's memory is the memory of the virtual machine that runs it: Docker
+Desktop's Settings, Resources, Memory (reported as `MemTotal` by `docker info`), or
+the Lima instance's memory (`limactl edit --memory <GiB> <instance>`, then restart
+it). A rootless engine on a Linux host has the host's memory. Admission requires
+`MemTotal` of at least the worker's memory limit plus 1 GiB (5 GiB for the default
+profile) and otherwise holds the run as `runner_unqualified`, naming both numbers and
+never falling back to trusted-local mode. The launcher then caps the seeded workspace
+at `MemTotal` minus that floor (or the volume's cap, if lower) and refuses an attempt
+whose workspace is larger. The check reads total memory, not free memory, and covers
+one attempt: for N attempts at once provision N times the worker limit, plus every
+seeded workspace, plus the headroom. A default-profile worker with a workspace at its
+4 GiB cap needs 9 GiB.
+
+The workspace, result and intake directories must sit in one private parent
+(operator-owned, mode `0700`); the launcher refuses a launch otherwise. No host
+directory is ever mounted into a worker, so no permission on the host tree is opened
+for it: the launcher streams the workspace into the worker's volume as a tar archive
+owned by the worker's uid, and after the worker exits on its own it reads the result
+file, the bundle and the workspace back with an extraction that opens every
+directory with `O_NOFOLLOW` (a symlink the worker planted never redirects a write),
+skips FIFOs and devices, strips setuid and sticky bits, caps bytes and entries, keeps
+a 1 GiB free-space reserve on the host disk and replaces the host workspace only
+after a complete extraction. A killed, timed-out or faulted attempt copies nothing
+back, so a retry sees the workspace as it was before the attempt.
+
+The launcher labels each container with its own pid, start identity and host. A
+launcher that is killed outright (a SIGKILL after the stop grace, a crash) leaves
+its container running; every launch first removes runner containers whose launcher
+is provably gone, and `python -m enginery.adapters.oci.launcher --reconcile
+[--docker-context NAME]` does the same on demand. A container whose launcher is
+still the same live process is never touched, and a container that names no
+launcher on this host is reported and left alone. The launcher also refuses a
+permission mapping that is an unconditional bypass and a command that does not
+carry the mapping's arguments, and rejects an engine-created container with
+`seccomp` or `apparmor` unconfined, `label=disable`, unmasked kernel paths,
+sysctls, a host cgroup namespace, a runtime other than `runc`, or scratch space of
+a different size than the profile's.
+
+### Receipts
+
+Every isolated attempt retains a runner receipt, digest-identified in the
+artifact store and referenced from the attempt's execution receipt: engine kind,
+version and security options, image id and recipe digest, profile digest, host
+identity, the container's effective flags as the engine reported them (never
+the requested ones), the permission mapping, and environment key names (never
+values), and the disk and log bounds the attempt ran under with the mechanism that
+enforces the disk bound. `enginery stage1 watch` prints the reference.
+
+Model access for an isolated worker is not part of this profile: with only the
+internal network attached, a worker has no route to any model until a model
+relay is configured.
+
 ## Security limits
 
 State every guarantee precisely; do not imply more than what is
 implemented.
 
-- **Worktree isolation is not hostile-code containment.** Enginery's
-  workspace backend is a git worktree with a child-process policy. It
-  reduces *accidental* interference between concurrent runs sharing one
-  repository. It does not prevent a process — malicious, compromised, or
-  prompt-injected — from reaching the operator's user account, filesystem,
-  network, keychain, or other host processes. A stronger execution-
-  containment claim requires a separately designed container or VM backend,
-  which does not exist in this release.
+- **Trusted-local worktree execution is not hostile-code containment.** In
+  `trusted-local` mode Enginery's workspace backend is a git worktree with a
+  child-process policy. It reduces *accidental* interference between
+  concurrent runs sharing one repository. It does not prevent a process —
+  malicious, compromised, or prompt-injected — from reaching the operator's
+  user account, filesystem, network, keychain, or other host processes. The
+  `isolated-oci` mode (see
+  [Trust modes and the isolated runner](#trust-modes-and-the-isolated-runner))
+  runs the worker in a hardened container and is a different, stronger claim
+  with its own stated limits; it is never selected for you and never
+  substituted for a run that asked for it.
 - **Trusted-local is not containment, and no hostile-code safety claim is
   made.** Run Enginery only against repositories, issues, and harness
   sessions you trust. Stage 1 never merges. A Stage 2 pull-request merge is

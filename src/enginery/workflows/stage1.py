@@ -11,6 +11,10 @@ from enum import StrEnum
 from pathlib import Path
 
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.runner_ports import (
+    IsolatedCommandRunner,
+    RunnerAdmissionPort,
+)
 from enginery.application.work_ports import (
     DeclaredWorkClassification,
     HarnessResult,
@@ -28,6 +32,7 @@ from enginery.domain.errors import (
     InternalInvariantViolationError,
     InvalidInputError,
     MissingPrerequisiteError,
+    OperationTimeoutError,
     StaleEvidenceError,
 )
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
@@ -42,6 +47,7 @@ from enginery.domain.execution_selection import (
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.serialization import (
     run_from_dict,
     run_to_dict,
@@ -63,6 +69,8 @@ from enginery.engine.runtime import (
     WorkflowNodeDispatch,
 )
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.engine.task_repository import out_path_for, resolve_commit
+from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
 from enginery.ledger.service import LedgerService
@@ -107,6 +115,7 @@ class Stage1RunRequest:
     implementation: Stage1ImplementationRequest
     execution_configuration: Stage1ExecutionConfiguration
     execution_selection: ExecutionSelection
+    runner: RunnerSelection = LEGACY_RUNNER_SELECTION
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -213,6 +222,10 @@ class Stage1RunRequest:
             # A run persisted before execution selections existed has no selection key, so
             # its state, and therefore its request digest, is exactly what it was.
             state["execution_selection"] = self.execution_selection.to_state()
+        if not self.runner.legacy:
+            # A run persisted before trust modes existed has no runner key, so its state, and
+            # therefore its request digest, is exactly what it was.
+            state["runner"] = self.runner.to_state()
         return state
 
 
@@ -349,6 +362,8 @@ class Stage1RunService:
     outcomes: OutcomeCaptureService | None = None
     execution_catalog: ExecutionCatalog | None = None
     host_probe: Callable[[], InstalledHost | None] | None = None
+    runner_admission: RunnerAdmissionPort | None = None
+    isolated_command_runner: IsolatedCommandRunner | None = None
 
     def start(
         self,
@@ -374,6 +389,12 @@ class Stage1RunService:
         ):
             _require_current_check_contracts(request)
             _require_bound_selection(request)
+            _require_bound_runner(request)
+            runner_hold = self._runner_hold(request)
+            if runner_hold is not None:
+                raise HumanActionRequiredError(
+                    runner_hold.message, details=dict(runner_hold.details)
+                )
             validate_against_catalog(request.execution_selection, catalog=self._current_catalog())
         self.runtime.register_run(
             run_id=str(request.run.id),
@@ -443,28 +464,126 @@ class Stage1RunService:
         return held
 
     def _binding_check(self, request: Stage1RunRequest) -> _BindingCheck:
-        """Return a catalog drift hold, else a host fingerprint drift hold, else no hold.
+        """Return a catalog drift hold, else a runner or host fingerprint drift hold, else none.
 
-        The host is only probed when the run selected a native control, so a host-default
-        run never depends on the installed version. The version that probe observed is
-        returned with the verdict instead of being discarded, so a diagnostic can show it.
+        A trusted-local run probes the host only when it selected a native control, so a
+        host-default run never depends on the installed version. An isolated run always probes
+        the harness inside its pinned image and holds when it is not the catalog's tested
+        executable and protocol, whether or not a native control was selected: the worker's
+        version and protocol are part of what the runner receipt must prove. The version that
+        probe observed is returned with the verdict instead of being discarded, so a
+        diagnostic can show it.
         """
         hold = self._catalog_hold(request)
         if hold is not None:
             return _BindingCheck(hold)
+        runner_hold = self._runner_hold(request)
+        if runner_hold is not None:
+            return _BindingCheck(runner_hold)
         selection = request.execution_selection
-        if selection.legacy or not selection.requires_native_controls:
+        if selection.legacy:
             return _BindingCheck(None)
         probe = self.host_probe
         if probe is None and self.harness is not None:
             probe = self.harness.installed_host
-        if probe is None:
+        if request.runner.isolated_mode:
+            return self._image_harness_check(selection, probe)
+        if not selection.requires_native_controls or probe is None:
             return _BindingCheck(None)
         installed = probe()
         return _BindingCheck(
             detect_host_drift(selection, installed=installed),
             None if installed is None else installed.executable_version,
         )
+
+    def _image_harness_check(
+        self,
+        selection: ExecutionSelection,
+        probe: Callable[[], InstalledHost | None] | None,
+    ) -> _BindingCheck:
+        """Hold unless the harness in the pinned image is the catalog's tested one.
+
+        The image pins exactly the version the catalog tested, so a version merely inside
+        the accepted range does not qualify an isolated run; the probed version is returned
+        with the verdict so a diagnostic can show it.
+        """
+        if probe is None:
+            return _BindingCheck(
+                ExecutionHold(
+                    reason=HoldReason.RUNNER_UNQUALIFIED,
+                    message=(
+                        "the run requires the isolated runner but the harness inside its image "
+                        "cannot be probed; it is held, not run unverified"
+                    ),
+                    details={"harness": selection.harness},
+                )
+            )
+        host = self._current_catalog().host(selection.harness)
+        try:
+            installed = probe()
+        except (MissingPrerequisiteError, OperationTimeoutError) as error:
+            return _BindingCheck(
+                ExecutionHold(
+                    reason=HoldReason.RUNNER_UNQUALIFIED,
+                    message=(
+                        f"the harness inside the pinned runner image could not be probed: "
+                        f"{error}; the run is held, not run unverified"
+                    ),
+                    details={"harness": selection.harness},
+                )
+            )
+        observed = None if installed is None else installed.executable_version
+        if installed is not None and host.matches_tested(installed):
+            return _BindingCheck(None, observed)
+        return _BindingCheck(
+            ExecutionHold(
+                reason=HoldReason.RUNNER_FINGERPRINT_DRIFT,
+                message=(
+                    f"the {selection.harness} inside the pinned runner image is not the "
+                    "tested executable and protocol the execution catalog names; the run is "
+                    "held and its original binding is retained. Rebuild the runner image from "
+                    "the current recipe or restore the catalog it was bound to"
+                ),
+                details={
+                    "harness": selection.harness,
+                    **host.version.details(),
+                    "catalog_protocol_fingerprint": host.protocol_fingerprint,
+                    "image_executable_version": "unobservable" if observed is None else observed,
+                    "image_protocol_fingerprint": (
+                        "unobservable" if installed is None else installed.protocol_fingerprint
+                    ),
+                },
+            ),
+            observed,
+        )
+
+    def _runner_hold(self, request: Stage1RunRequest) -> ExecutionHold | None:
+        """Return a hold unless an isolated selection is currently admitted by a qualified runner.
+
+        A run bound to the isolated profile is never run in another mode: with no runner
+        admission configured, or one that does not qualify the pinned engine, image and
+        profile, the run is held and its recorded binding is retained.
+        """
+        if not request.runner.isolated_mode:
+            return None
+        if self.runner_admission is None:
+            return ExecutionHold(
+                reason=HoldReason.RUNNER_UNQUALIFIED,
+                message=(
+                    "the run requires the isolated runner but no runner admission is "
+                    "configured; it is held, not run in trusted-local mode"
+                ),
+                details={"trust_mode": request.runner.trust_mode.value},
+            )
+        return self.runner_admission.admit(request.runner).hold
+
+    def _require_isolated_runner(self) -> IsolatedCommandRunner:
+        if self.isolated_command_runner is None:
+            raise HumanActionRequiredError(
+                "isolated validation requires the isolated runner; it is not configured, and "
+                "validation is never run on the host instead"
+            )
+        return self.isolated_command_runner
 
     def _recorded_execution_hold(
         self, implement_state: Mapping[str, object]
@@ -748,16 +867,19 @@ class Stage1RunService:
                 ordinal=generation,
             )
             repair_context = _repair_context(wait_state)
+        base_revision = self._implementation_base(request)
         task = _implementation_task(
             request,
             attempt_id=attempt_id,
             operation_id=operation_id,
             repair_context=repair_context,
+            base_revision=base_revision,
         )
         result_path = _implementation_result_path(request, operation_id=operation_id)
         dispatch = WorkflowDispatch(
             _fixture_dispatch(
                 request,
+                base_revision=base_revision,
                 node_id="implement",
                 attempt_id=attempt_id,
                 operation_id=str(operation_id),
@@ -950,7 +1072,11 @@ class Stage1RunService:
         attempt_id = _string(implement_state, "attempt_id")
         operation_id = OperationId(_string(implement_state, "operation_id"))
         task = _implementation_task(
-            request, attempt_id=attempt_id, operation_id=operation_id, repair_context=None
+            request,
+            attempt_id=attempt_id,
+            operation_id=operation_id,
+            repair_context=None,
+            base_revision=self._implementation_base(request),
         )
         result_path = _implementation_result_path(request, operation_id=operation_id)
         return Stage1ImplementationExecutor(
@@ -983,10 +1109,13 @@ class Stage1RunService:
         self._require_executable(request)
         self._require_passed_node(request.run.id, "implement")
         generation = self._implement_generation(request.run.id)
-        return Stage1ValidationExecutor(
+        executor = Stage1ValidationExecutor(
             runtime=self.runtime,
             artifact_store=self._require_harness().artifact_store,
-        ).validate(
+        )
+        if request.runner.isolated_mode:
+            executor = replace(executor, command_runner=self._require_isolated_runner())
+        return executor.validate(
             dispatch=WorkflowNodeDispatch(
                 _fixture_dispatch(
                     request,
@@ -1363,6 +1492,34 @@ class Stage1RunService:
                 details={"run_id": str(run_id), "node_id": node_id},
             )
 
+    def _implementation_base(self, request: Stage1RunRequest) -> str:
+        """Return the base the implementation worker and its verification must share.
+
+        An isolated worker clones only what the base reaches, so a branch or tag name does not
+        resolve inside its clone. The base is therefore a full object id, resolved once: the
+        first implementation dispatch binds it to the run's implementation node, and every later
+        attempt (a repair generation, a retry, the collection of a result) reuses it, so a base
+        name that has since moved cannot change what the run builds on. Before any dispatch the
+        id an existing reservation holds is used, else the one the repository resolves now. A
+        trusted-local run keeps the requested revision.
+        """
+        if not request.runner.isolated_mode:
+            return request.run.base_revision
+        if self._node_state_optional(request.run.id, "implement") is not None:
+            bound = self.runtime.read_node_request(
+                run_id=str(request.run.id), node_id="implement"
+            ).base_revision
+            if bound != request.run.base_revision:
+                return bound
+        reservation = self.runtime.read_workspace_reservation(request.repository_id)
+        if (
+            reservation is not None
+            and reservation.run_id == str(request.run.id)
+            and reservation.status in {"reserved", "materialized", "retained"}
+        ):
+            return reservation.resolved_base_revision
+        return resolve_commit(request.repository_path, request.run.base_revision)
+
     def _require_work_ledger(self) -> WorkLedgerPort:
         if self.work_ledger is None:
             raise MissingPrerequisiteError("Stage 1 source-work ledger is not configured")
@@ -1385,17 +1542,30 @@ def _implementation_task(
     attempt_id: str,
     operation_id: OperationId,
     repair_context: str | None,
+    base_revision: str,
 ) -> HarnessTask:
     execution = request.implementation
+    isolated = request.runner.isolated_mode
     if repair_context is None:
         branch_constraint = (
             f"Create and work only on branch {request.head_branch!r} from "
-            f"{request.run.base_revision!r}; commit and push the completed change to origin."
+            f"{base_revision!r}; "
+            + (
+                "commit the completed change locally. You hold no remote and no credentials: "
+                "do not push; the operator publishes the verified branch."
+                if isolated
+                else "commit and push the completed change to origin."
+            )
         )
     else:
         branch_constraint = (
             f"Continue only on the existing branch {request.head_branch!r}; do not create "
-            f"a new branch. {repair_context} Commit and push the corrected change to origin."
+            f"a new branch. {repair_context} "
+            + (
+                "Commit the corrected change locally; do not push, the operator publishes it."
+                if isolated
+                else "Commit and push the corrected change to origin."
+            )
         )
     return HarnessTask(
         run_id=request.run.id,
@@ -1411,6 +1581,8 @@ def _implementation_task(
         time_budget_seconds=execution.time_budget_seconds,
         cost_budget=execution.cost_budget,
         selection=request.execution_selection,
+        head_branch=request.head_branch if isolated else None,
+        base_revision=base_revision if isolated else None,
     )
 
 
@@ -1432,9 +1604,12 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
-    return request.workspace_path / (
-        f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
-    )
+    name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
+    if request.runner.isolated_mode:
+        # The worker writes its result into the per-attempt output directory, the only
+        # writable mount besides its task-local workspace, never into a host-owned path.
+        return out_path_for(request.workspace_path) / name
+    return request.workspace_path / name
 
 
 def _scheduled_implementation(
@@ -1510,6 +1685,7 @@ def _fixture_dispatch(
     operation_id: str,
     command: tuple[str, ...],
     dependencies: tuple[tuple[str, str], ...] = (),
+    base_revision: str | None = None,
 ) -> FixtureDispatch:
     return FixtureDispatch(
         run_id=str(request.run.id),
@@ -1518,7 +1694,7 @@ def _fixture_dispatch(
         repository_id=request.repository_id,
         repository_path=request.repository_path,
         workspace_path=request.workspace_path,
-        base_revision=request.run.base_revision,
+        base_revision=request.run.base_revision if base_revision is None else base_revision,
         command=command,
         expected_attempt_version=0,
         operation_id=operation_id,
@@ -1529,6 +1705,11 @@ def _fixture_dispatch(
             request.execution_configuration.artifact_root / "worker-logs"
             if node_id == "implement"
             else None
+        ),
+        workspace_mode=(
+            WORKSPACE_MODE_TASK_LOCAL_CLONE
+            if request.runner.isolated_mode
+            else WORKSPACE_MODE_GIT_WORKTREE
         ),
     )
 
@@ -1546,6 +1727,27 @@ def _require_bound_selection(request: Stage1RunRequest) -> None:
 def _selection_digest(request: Stage1RunRequest) -> Digest | None:
     """Return the digest decisions and evidence bind to, or None for a pre-selection run."""
     return None if request.execution_selection.legacy else request.execution_selection.digest
+
+
+def _require_bound_runner(request: Stage1RunRequest) -> None:
+    """Fail loudly unless a new run binds an explicit trust mode.
+
+    Trusted-local is a declared, weaker choice, never what a run gets by omission.
+    """
+    if request.runner.legacy:
+        raise InvalidInputError(
+            "a new Stage 1 run must bind a trust mode (--runner trusted-local or isolated-oci); "
+            "rebuild the request with the current `enginery stage1 build-request`",
+            details={"run_id": str(request.run.id)},
+        )
+
+
+def _runner_from_state(state: Mapping[str, object]) -> RunnerSelection:
+    """Decode the bound trust mode; a run persisted before trust modes decodes as legacy."""
+    raw = state.get("runner")
+    if raw is None:
+        return LEGACY_RUNNER_SELECTION
+    return RunnerSelection.from_state(raw)
 
 
 def _selection_from_state(
@@ -1630,6 +1832,7 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         required_checks=tuple(required_checks_value),
         repair_limit=_integer(state, "repair_limit"),
         implementation=implementation,
+        runner=_runner_from_state(state),
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")

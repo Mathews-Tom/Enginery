@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.domain.errors import ExternalConflictError
 from enginery.engine.coordinator import Coordinator
 from enginery.engine.results import WorkerResultEnvelope
@@ -60,7 +61,12 @@ class Counters:
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 

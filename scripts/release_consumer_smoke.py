@@ -181,6 +181,8 @@ def _build_request_command(executable: Path, *, root: Path, output: Path) -> lis
         str(executable),
         "stage1",
         "build-request",
+        "--runner",
+        "trusted-local",
         "--output",
         str(output),
         "--run-id",

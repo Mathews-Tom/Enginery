@@ -27,6 +27,7 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     stage1_request_from_state,
 )
+from tests.adapters.oci.support import IMAGE_ID
 from tests.support.github import write_stand_in_gh
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
 
@@ -64,6 +65,8 @@ def _build_argv(tmp_path: Path, *extra: str, output: Path | None = None) -> list
     return [
         "stage1",
         "build-request",
+        "--runner",
+        "trusted-local",
         "--output",
         str(output or tmp_path / "request.json"),
         "--run-id",
@@ -811,6 +814,44 @@ def test_build_request_does_not_probe_a_host_default_run(tmp_path: Path) -> None
                 tmp_path,
                 "--harness-executable",
                 str(_fake_host(tmp_path, "omp v19.0.0")),
+                output=output,
+            )
+        )
+        == 0
+    )
+
+    host = json.loads(output.read_text(encoding="utf-8"))["execution_selection"]["host"]
+    assert host["observed_executable_version"] is None
+
+
+@pytest.mark.parametrize(
+    ("harness", "model", "banner"),
+    [
+        ("omp", OMP_MODEL, "omp v19.0.0"),
+        ("claude-code", CLAUDE_MODEL, "3.0.0 (Claude Code)"),
+    ],
+)
+def test_an_isolated_build_request_never_consults_the_operators_host_binary(
+    tmp_path: Path, harness: str, model: str, banner: str
+) -> None:
+    output = tmp_path / "request.json"
+
+    assert (
+        main(
+            _build_argv(
+                tmp_path,
+                "--runner",
+                "isolated-oci",
+                "--runner-image",
+                IMAGE_ID,
+                "--validation-command",
+                "python3 -m unittest",
+                "--harness-provider",
+                harness,
+                "--model",
+                model,
+                "--harness-executable",
+                str(_fake_host(tmp_path, banner)),
                 output=output,
             )
         )

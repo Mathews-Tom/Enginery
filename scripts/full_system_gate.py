@@ -113,6 +113,7 @@ from enginery.adapters.local_service import (
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
 from enginery.application.delivery_ports import DeploymentRequest
 from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.git_environment import repository_isolated_environment
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -152,6 +153,7 @@ from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.domain.run import Run, RunState
+from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.fixture_build import FixtureBuilder
@@ -324,6 +326,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     )
     snapshot = _snapshot(run_index)
     request = Stage1RunRequest(
+        runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(run_id),
             work_item_id=snapshot.work_item.id,
@@ -1005,7 +1008,12 @@ def _run_stage2_leg(
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=cwd,
+        env=repository_isolated_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 

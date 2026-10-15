@@ -50,8 +50,8 @@ attempt and return `wait`, never launch a second worker.
    pure function is enough to exercise the full lifecycle quickly. Record the
    issue number.
 
-2. **Compose the request.** `enginery stage1 build-request` needs the
-   repository, an `owner/repo#issue_number`-shaped `--external-reference`
+2. **Compose the request.** `enginery stage1 build-request` needs
+   `--runner trusted-local`, the repository, an `owner/repo#issue_number`-shaped `--external-reference`
    (not a full issue URL — that is a request-composition detail this
    demonstration's own worked example got wrong on a first attempt; see the
    published write-up), a `--repository-path` pointing at a local clone,

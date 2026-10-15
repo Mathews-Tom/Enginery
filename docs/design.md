@@ -29,7 +29,7 @@ Enginery coordinates engineering work across ticket-style work ledgers, coding-a
 - A foundation model or a bespoke coding-agent loop.
 - A hosted multi-tenant service, organization RBAC, browser dashboard, or interactive TUI.
 - A distributed scheduler, Kubernetes layer, or mandatory container runtime.
-- Hostile-code containment on the git-worktree backend.
+- Hostile-code containment on the trusted-local git-worktree backend (the isolated OCI runner is a separate, bounded backend).
 - Production or publication credentials in agent processes, arbitrary command nodes, or workspaces.
 - Online mutation of active workflows or generic user-programmable workflow manifests.
 - Universal support for every tracker, source host, CI system, or deployment provider.
@@ -139,7 +139,7 @@ These ten invariants are what "workflow integrity" means in practice: durable, e
 
 ### Safety scope and claim boundary
 
-Enginery protects **workflow integrity**, not host integrity. Its first backend is designed to prevent unauthorized workflow transitions, acceptance of stale or incomplete evidence, and blind retries of supported external actions. It also keeps production and publication credentials in fixed broker code rather than agent processes or workspaces. These controls do not contain a malicious, compromised, or prompt-injected agent process: a worktree process can still reach the user's account, filesystem, network, keychain, and other host processes. Stronger execution-containment claims require a separately designed container or VM backend with constrained mounts, network policy, and a distinct operating-system identity.
+Enginery protects **workflow integrity** first. Its `trusted-local` backend is designed to prevent unauthorized workflow transitions, acceptance of stale or incomplete evidence, and blind retries of supported external actions. That backend does not contain a malicious, compromised, or prompt-injected agent process: a worktree process can still reach the user's account, filesystem, network, keychain, and other host processes, and its harness permission checks are declared off. The separate `isolated-oci` backend runs the worker in a hardened task-local container (non-root, no capabilities, read-only root filesystem, enforced memory/CPU/pids limits, an internal-only network, only the task workspace and a result directory mounted, an explicit environment allowlist) so the worker cannot read the operator's repository, ledger, artifacts, configuration, credentials, or Docker socket, and its container is verified against the profile before it starts. That claim is bounded: it holds for the container engines and image the runner has been exercised on, it depends on the engine enforcing what it reports, and it is never selected for a run implicitly nor substituted for a run that asked for it. It is not a claim about a malicious worker that finds a container-engine escape.
 
 Every public claim must name its boundary. "Reconciliation before retry" applies only to adapter operations with a stable provider-visible operation ID and a deterministic reconciliation query. It does not make a provider operation atomic, revoke an already-issued request, or establish that competing products lack an equivalent mechanism.
 
@@ -493,7 +493,7 @@ Deterministic nodes use argument vectors rather than implicit shells; shell exec
 
 ### Workspace limitations
 
-The worktree backend reduces accidental interference. It does not prevent a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require a future container or VM backend.
+The worktree backend reduces accidental interference. It does not prevent a process from accessing the user account, network, filesystem, keychain, or other processes. Untrusted workloads require the `isolated-oci` runner (a hardened task-local container; see the operations guide), which is an explicit, separately bound mode and never the default.
 
 ### Supply chain
 
