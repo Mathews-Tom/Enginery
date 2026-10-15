@@ -321,6 +321,70 @@ ledger, or any evidence or raw artifact, and it reports what it removed and
 what it retained (modified files, the store, and the lockfile are listed as
 retained).
 
+#### Operator smoke with the committed fixture package
+
+`tests/fixtures/capabilities/project/word-counter` is a reviewed multi-file
+package (manifest, instruction, reference, and script) that needs no network.
+A project package is committed content, so the recipe commits the fixture to a
+scratch repository and pins that commit as the reviewed base; run it from
+scratch copies, never from the checkout:
+
+```bash
+CHECKOUT=/path/to/enginery
+enginery() { uv run --project "$CHECKOUT" enginery "$@"; }
+WORK=$(mktemp -d)
+commit() { git -C "$WORK/reviewed" -c user.name=smoke -c user.email=smoke@example.invalid commit -q -m "$1"; }
+
+git init -q -b main "$WORK/reviewed"
+cp -R "$CHECKOUT/tests/fixtures/capabilities/project" "$WORK/reviewed/capability-packages"
+git -C "$WORK/reviewed" add -A && commit "reviewed package"
+BASE=$(git -C "$WORK/reviewed" rev-parse HEAD)
+PIN=(--project-source "$WORK/reviewed@$BASE" --project-subdir capability-packages)
+mkdir "$WORK/project" && cd "$WORK/project"
+
+enginery capability inspect word-counter@1.0.0 "${PIN[@]}"    # exit 0, no files written
+enginery capability preview word-counter@1.0.0 "${PIN[@]}"    # exit 0, lists the four files
+enginery capability install word-counter@1.0.0 "${PIN[@]}"    # exit 0
+enginery capability lock --check                              # exit 0, "no drift"
+
+# An edit that is not committed is not part of the pinned commit:
+echo '# changed' >> "$WORK/reviewed/capability-packages/word-counter/scripts/count_words.py"
+enginery capability preview word-counter@1.0.0 "${PIN[@]}"    # exit 0, the pinned commit does not see it
+enginery capability install word-counter@1.0.0 "${PIN[@]}"    # exit 0, "already installed"
+
+# The same edit, committed, is a different closure under the same name and version:
+git -C "$WORK/reviewed" add -A && commit "change the script"
+NEW=$(git -C "$WORK/reviewed" rev-parse HEAD)
+CHANGED=(--project-source "$WORK/reviewed@$NEW" --project-subdir capability-packages)
+enginery capability preview word-counter@1.0.0 "${CHANGED[@]}"    # exit 3, rejected as drift
+enginery capability install word-counter@1.0.0 "${CHANGED[@]}"    # exit 3, installed copy untouched
+enginery capability preview word-counter@1.0.0 "${PIN[@]}"        # exit 0, the pinned commit still serves the original
+
+# A user directory is never the reviewed base. While the install is active the same closure conflicts:
+cp -R "$CHECKOUT/tests/fixtures/capabilities/project" "$WORK/user-packages"
+enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 9, uninstall first
+
+enginery capability uninstall                                      # exit 0
+find .enginery -maxdepth 2                                         # store and lockfile remain
+
+# After the uninstall, and in a fresh workspace, the same package is held:
+enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 5, nothing written
+mkdir "$WORK/fresh" && cd "$WORK/fresh"
+enginery capability install word-counter@1.0.0 --user-source "$WORK/user-packages"    # exit 5, nothing written
+```
+
+`uninstall` lists the four owned files as removed and
+`.enginery/capabilities` (the content-addressed store) and
+`.enginery/capabilities.lock.json` as retained; the revocation record is
+`.enginery/installed/.enginery-install-revoked-<lock digest hex>-1.json`. The
+held `install` prints a `HOLD word-counter@1.0.0: closure <digest> lock
+<digest> …` line with the closure and lock digests to approve, and writes
+nothing. The same unmodified `--user-source` copy is held (exit `5`) in a fresh
+workspace and in one where the install was uninstalled, and is a conflict
+(exit `9`, "an install of lock … is already recorded") while an install is
+active. Only a user-source copy whose closure differs from the pinned
+`word-counter@1.0.0` is rejected as drift (exit `3`).
+
 ### Gate G4 operational evidence
 
 G4 is a measurement gate, not a self-improvement capability. A failing or unmeasured status blocks the later self-improvement work; it never creates a pass through a local flag, manually edited ledger row, or a command transcript.
