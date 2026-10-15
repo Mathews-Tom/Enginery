@@ -63,6 +63,12 @@ the process that pushes, and in no worker environment.
 """
 
 _GIT_TIMEOUT_SECONDS = 300.0
+_OPERATOR_CONFIG_DIRECTORY = Path("/")
+"""Where the operator's own git configuration is read from: a directory that is no repository.
+
+Git evaluates ``includeIf "gitdir:..."`` against the repository it runs in, so reading from the
+process's start directory would make the result depend on where the host happened to be started.
+"""
 _STDERR_DETAIL_CHARS = 2000
 _OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -360,9 +366,10 @@ class GitBranchPublisher:
     def _operator_credential_helpers(self) -> list[tuple[str, str]]:
         """Every ``credential.helper`` and ``credential.<url>.helper`` of the operator, in order.
 
-        Read from the system then user configuration only, never a repository, so a helper a
-        worker planted next to the code is not among them. An empty value is kept: it is how
-        the operator's own configuration clears helpers collected before it.
+        Read from the system then user configuration only, never a repository, and from a fixed
+        directory that is not a repository, so a helper a worker planted next to the code is not
+        among them and conditional includes keyed on a repository never apply. An empty value is
+        kept: it is how the operator's own configuration clears helpers collected before it.
         """
         entries: list[tuple[str, str]] = []
         for scope in ("--system", "--global"):
@@ -375,7 +382,7 @@ class GitBranchPublisher:
                     "--get-regexp",
                     r"^credential\.(.+\.)?helper$",
                 ],
-                cwd=None,
+                cwd=_OPERATOR_CONFIG_DIRECTORY,
             )
             if completed.returncode != 0:
                 continue
@@ -386,11 +393,15 @@ class GitBranchPublisher:
         return entries
 
     def _operator_values(self, key: str) -> list[str]:
-        """Read ``key`` from the operator's system then user configuration only, never a repo."""
+        """Read ``key`` from the operator's system then user configuration only, never a repo.
+
+        Run from a fixed directory that is not a repository, like the credential helper reads.
+        """
         values: list[str] = []
         for scope in ("--system", "--global"):
             completed = self._invoke(
-                ["config", "--includes", scope, "--null", "--get-all", key], cwd=None
+                ["config", "--includes", scope, "--null", "--get-all", key],
+                cwd=_OPERATOR_CONFIG_DIRECTORY,
             )
             if completed.returncode == 0:
                 values.extend(

@@ -943,15 +943,16 @@ run resumes unchanged.
   own user and system git configuration say: the generic `credential.helper` entries
   and the URL-scoped `credential.<url>.helper` entries (the form `gh auth setup-git`
   writes, so an https origin keeps working), in configuration order, from the
-  system and user files only, never from a repository. Files pulled in by an
-  unconditional `include` are followed, but the helpers are read outside any
-  repository, so a helper that appears only inside an `includeIf` section (for
-  example `gitdir:`) is not carried over and a push relying on it fails to
-  authenticate rather than leaking anything; define the helper unconditionally,
-  URL-scoped, in your user or system configuration. A helper written into
-  repository configuration, scoped or not, never runs; URL rewrites
-  (`url.<base>.insteadOf`) in repository configuration cannot be neutralised that
-  way. Use `isolated-oci` when that matters.
+  system and user files only, never from a repository. They are read from a fixed
+  directory that is not a repository, so the result does not depend on where
+  Enginery was started; files pulled in by an unconditional `include` are
+  followed, but a helper that appears only under a repository-conditional
+  `includeIf` (for example `gitdir:`) is not carried over, and a push relying on
+  it fails to authenticate rather than leaking anything. Define the helper
+  unconditionally, URL-scoped, in your user or system configuration.
+  A helper written into repository configuration, scoped or not, never runs; URL
+  rewrites (`url.<base>.insteadOf`) in repository configuration cannot be
+  neutralised that way. Use `isolated-oci` when that matters.
 - **Protected paths are held for an operator decision.** Before pushing, the host
   reads `git diff --name-only -z --no-ext-diff --no-textconv --no-renames
   --ignore-submodules=none <base>..<head>` from its verified repository (renames list

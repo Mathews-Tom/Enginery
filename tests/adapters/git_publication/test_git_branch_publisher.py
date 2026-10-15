@@ -886,6 +886,40 @@ def test_url_scoped_helpers_are_re_emitted_after_the_reset_in_configuration_orde
     assert not any("evil.example" in value or "planted" in value for value in overrides)
 
 
+def test_operator_helpers_are_read_outside_any_repository_so_conditional_includes_never_apply(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_system_git_config(monkeypatch)
+    start = rig.root / "start-directory"
+    start.mkdir()
+    git("init", "-q", cwd=start)
+    conditional = rig.home / "conditional.gitconfig"
+    conditional.write_text(
+        '[credential "https://conditional.example"]\n\thelper = !conditional\n', encoding="utf-8"
+    )
+    (rig.home / ".gitconfig").write_text(
+        '[credential "https://github.com"]\n\thelper = !unconditional\n'
+        f'[includeIf "gitdir:{start.resolve()}/"]\n\tpath = {conditional}\n',
+        encoding="utf-8",
+    )
+    head = _implement(rig)
+    monkeypatch.chdir(start)
+
+    rig.publisher(wrapped=True).publish(rig.request(head))
+
+    (argv,) = (
+        [str(argument) for argument in entry["argv"]]  # type: ignore[attr-defined]
+        for entry in rig.invocations()
+        if "push" in entry["argv"]  # type: ignore[operator]
+    )
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+    helpers = [value for value in overrides if value.startswith("credential.")]
+    assert helpers == [
+        "credential.helper=",
+        "credential.https://github.com.helper=!unconditional",
+    ]
+
+
 def test_an_ssh_command_planted_in_the_repository_never_runs(rig: Rig) -> None:
     marker = rig.root / "ssh-ran"
     planted = rig.root / "planted-ssh.sh"
