@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from enginery.capabilities.compatibility import HostProfile, evaluate_compatibility
 from enginery.capabilities.errors import CapabilityLegacyLockError, CapabilityPathError
 from enginery.capabilities.lock import CapabilityLock, ProvenanceStatus
 from enginery.capabilities.manifest import CapabilityPermission, PackageCompatibility
@@ -180,6 +182,30 @@ def test_lock_from_json_rejects_a_traversing_recorded_path() -> None:
 
     with pytest.raises(CapabilityPathError, match="unsafe"):
         lock_from_json(payload)
+
+
+def test_lock_from_json_requires_the_compatibility_receipt() -> None:
+    payload = lock_to_json(lock_of(locked_entry("skill-a")))
+    del _entries(payload)[0]["compatibility_receipt"]
+
+    with pytest.raises(InvalidInputError, match="compatibility receipt"):
+        lock_from_json(payload)
+
+
+def test_the_compatibility_receipt_survives_a_round_trip_and_is_bound_into_the_digest() -> None:
+    compatible = locked_entry("skill-a")
+    incompatible = replace(
+        compatible,
+        receipt=evaluate_compatibility(
+            PackageCompatibility(platforms=("darwin",)), HostProfile(1, "linux")
+        ),
+    )
+
+    restored = lock_from_json(lock_to_json(lock_of(incompatible)))
+
+    assert restored.entries[0].receipt == incompatible.receipt
+    assert not restored.entries[0].receipt.compatible
+    assert lock_of(incompatible).digest() != lock_of(compatible).digest()
 
 
 def test_read_lock_rejects_invalid_json(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import pytest
 
 from enginery.application.delivery_ports import (
     CapabilityDescriptor,
+    CapabilityListing,
     DeploymentReceipt,
     DeploymentRequest,
     PublicationReceipt,
@@ -139,6 +140,10 @@ def test_validation_result_rejects_blank_revision() -> None:
             provenance="local",
             revision=" ",
         ),
+        lambda: CapabilityListing(name=" ", version="1", provenance="local", revision="rev-1"),
+        lambda: CapabilityListing(name="capability", version=" ", provenance="local", revision="r"),
+        lambda: CapabilityListing(name="capability", version="1", provenance=" ", revision="r"),
+        lambda: CapabilityListing(name="capability", version="1", provenance="local", revision=" "),
     ],
 )
 def test_delivery_values_reject_blank_security_boundaries(factory: Callable[[], object]) -> None:
