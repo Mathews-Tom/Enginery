@@ -301,6 +301,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
 
     # The built-in default harness is a factory-layer input; only a harness the operator named
     # on the command line is a run-layer input, so the recorded source says which it was.
+    runner_selection = _runner_selection(args)
     selection = resolve_execution_selection(
         (
             LayerControls(layer=SelectionLayer.FACTORY, harness=_FACTORY_DEFAULT_HARNESS),
@@ -315,7 +316,11 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             ),
         ),
         catalog=load_execution_catalog(),
-        probe_host=lambda harness: _probe_host(args, harness),
+        # An isolated run executes the image's pinned harness, never the operator's binary, so
+        # the host binary is neither consulted nor recorded as observed at bind time.
+        probe_host=None
+        if runner_selection.isolated_mode
+        else lambda harness: _probe_host(args, harness),
     )
 
     # Everything the source decides is read once the operator's own flags are valid, and is
@@ -403,7 +408,7 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
             artifact_root=args.artifact_root.resolve(),
         ),
         execution_selection=selection,
-        runner=_runner_selection(args),
+        runner=runner_selection,
     )
 
 
