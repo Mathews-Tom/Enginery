@@ -1,11 +1,13 @@
 """The capability gate passes as shipped and every closure case fails once its guard is removed.
 
-Each mutation below disables exactly one guard in the library (the drift check, the
+Each guard-removal row below disables exactly one guard in the library (the drift check, the
 materialized-closure re-verification, a dependency pin check, link handling, path or asset
-validation, the license hold, the approval requirement, approval binding, the digest check
-inside an approval, or the uninstall scope). A case that still passed with its guard gone would
-be vacuous, and so would one that fails for some other reason: every row names the message the
-case itself raises, and the removal must produce exactly that.
+validation, the executable-bit rule, the license hold, the approval requirement, approval
+binding, the digest check inside an approval, or the uninstall scope). The two retention rows
+remove no library guard: they inject a destructive uninstall to prove the retention assertions
+can fail. A case that still passed with its guard gone would be vacuous, and so would one that
+fails for some other reason: every row names the message the case itself raises, and the
+removal must produce exactly that.
 """
 
 from __future__ import annotations
@@ -101,6 +103,22 @@ def _accept_every_asset_type(monkeypatch: pytest.MonkeyPatch) -> None:
         "classify_asset",
         lambda path, *, executable=False: closure.AssetKind.DATA,
     )
+
+
+def _ignore_the_executable_bit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the executable-bit rule in asset classification and in the asset record check."""
+
+    classify = closure.classify_asset
+
+    def classify_without_the_bit(path: str, *, executable: bool = False) -> closure.AssetKind:
+        del executable
+        return classify(path)
+
+    def check_without_the_bit(self: closure.AssetRecord) -> None:
+        closure.normalize_path(self.path)
+
+    monkeypatch.setattr(closure, "classify_asset", classify_without_the_bit)
+    monkeypatch.setattr(closure.AssetRecord, "__post_init__", check_without_the_bit)
 
 
 def _never_hold_a_license(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,6 +239,12 @@ GUARD_REMOVALS: tuple[tuple[str, str, Mutation, str], ...] = (
         "asset-classification",
         _accept_every_asset_type,
         r"reached the filesystem",
+    ),
+    (
+        "unreviewed_asset_type",
+        "executable-bit",
+        _ignore_the_executable_bit,
+        r"an unreviewed asset 'SKILL\.md' reached the filesystem",
     ),
     (
         "unknown_license_redistribution_hold",

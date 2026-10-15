@@ -20,7 +20,9 @@ cases also present approvals computed for a different lock.
 
 Each guard a case exercises has a mutation test
 (``tests/governance/test_capability_gate.py``) proving the case fails, with
-that case's own message, when the guard is removed.
+that case's own message, when the guard is removed. The two retention rows do
+not remove a library guard: they inject a destructive uninstall to prove the
+retention assertions can fail.
 """
 
 from __future__ import annotations
@@ -36,11 +38,10 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from enginery.adapters.git_capability import GitCapabilitySource
 from enginery.adapters.directory_capability import DirectoryCapabilitySource
+from enginery.adapters.git_capability import GitCapabilitySource
 from enginery.application.adapter_types import AdapterStatus
 from enginery.application.delivery_ports import CapabilityDescriptor, CapabilityListing, PackageFile
-from enginery.capabilities.approval import approved_capabilities, materialize_approval_schema
 from enginery.capabilities import approval as approval_module
 from enginery.capabilities import install as install_module
 from enginery.capabilities.closure import AssetRecord, build_closure, classify_asset, closure_digest
@@ -213,13 +214,16 @@ def _source(
     return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=port)
 
 
-class _MultiSource:
-    """An in-memory source serving several packages, each with its own descriptor and files."""
+class _MultiSource(GitCapabilitySource):
+    """An in-memory source serving several packages, each with its own descriptor and files.
 
-    pinned_commit = _PINNED_COMMIT
+    It is a committed-tree source pinned to one commit, so it may be registered as the project
+    source; no repository is ever read.
+    """
 
     def __init__(self, *packages: tuple[CapabilityDescriptor, tuple[PackageFile, ...]]) -> None:
-        self._packages = {(item[0].name, item[0].version): item for item in packages}
+        super().__init__(repository=tempfile.gettempdir(), revision=_PINNED_COMMIT)
+        self._served_packages = {(item[0].name, item[0].version): item for item in packages}
 
     def probe(self) -> AdapterStatus:  # pragma: no cover - unused by the resolver
         raise NotImplementedError
@@ -232,22 +236,30 @@ class _MultiSource:
                 provenance=descriptor.provenance,
                 revision=descriptor.revision,
             )
-            for descriptor, _ in self._packages.values()
+            for descriptor, _ in self._served_packages.values()
         )
 
     def resolve(self, name: str, version: str) -> CapabilityDescriptor | None:
-        package = self._packages.get((name, version))
+        package = self._served_packages.get((name, version))
         return None if package is None else package[0]
 
     def fetch_closure(self, name: str, version: str) -> tuple[PackageFile, ...]:
-        return self._packages[(name, version)][1]
+        return self._served_packages[(name, version)][1]
 
 
 def _served(kind: SourceKind, *packages: tuple[PackageFile, ...]) -> CapabilitySource:
     """A typed in-memory source serving each of ``packages`` under their own manifest identity."""
 
     served = tuple(
-        (_descriptor(build_closure(files).manifest.name, files, provenance=kind.value), files)
+        (
+            _descriptor(
+                build_closure(files).manifest.name,
+                files,
+                provenance=kind.value,
+                revision=_PINNED_COMMIT,
+            ),
+            files,
+        )
         for files in packages
     )
     return CapabilitySource(kind=kind, label=f"{kind.value}-gate", port=_MultiSource(*served))
@@ -279,20 +291,6 @@ def _write_directory(root: Path, name: str, files: Sequence[PackageFile]) -> Pat
         if item.executable:
             target.chmod(0o755)
     return directory
-
-
-_OPERATOR = AuthorityPrincipal(
-    id="operator-gate",
-    principal_type=PrincipalType.HUMAN,
-    role="operator",
-    authorization_source="cli",
-)
-_RUN = AuthorityPrincipal(
-    id="run-gate",
-    principal_type=PrincipalType.AGENT,
-    role="run",
-    authorization_source="coordinator",
-)
 
 
 def _case_unsigned_external_asset(rng: random.Random) -> None:
@@ -426,9 +424,11 @@ def _approve(lock: CapabilityLock, names: list[str]) -> ApprovedCapabilities:
     evaluator = PolicyEvaluator("policy-gate", approval_registry=registry)
     for entry in lock.pending_approval():
         if entry.name in names:
-            schema = materialize_approval_schema(entry, lock, requesting_principal_id=_RUN.id)
+            schema = approval_module.materialize_approval_schema(
+                entry, lock, requesting_principal_id=_RUN.id
+            )
             registry.record_approval(schema, [_OPERATOR])
-    return approved_capabilities(lock, evaluator, requesting_principal_id=_RUN.id)
+    return approval_module.approved_capabilities(lock, evaluator, requesting_principal_id=_RUN.id)
 
 
 def _case_sibling_script_drift(rng: random.Random) -> None:
@@ -465,7 +465,7 @@ def _case_reference_drift(rng: random.Random) -> None:
         resolved = CapabilityResolver(
             [_directory_source(base / "packages", SourceKind.USER)]
         ).resolve_with_files([_request(name)])
-        approvals = ApprovedCapabilities.for_entries(resolved.lock, [name])
+        approvals = _approve(resolved.lock, [name])
         install_root, store = base / "installed", base / "store"
         install_lock(
             resolved, install_root=install_root, capabilities_root=store, approvals=approvals
@@ -544,7 +544,7 @@ def _case_symlink_escape(rng: random.Random) -> None:
                 resolved,
                 install_root=install_root,
                 capabilities_root=base / "store",
-                approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
+                approvals=_approve(resolved.lock, [name]),
             ),
         )
         _assert(not any(outside.iterdir()), "an install wrote through a symlinked destination")
@@ -558,9 +558,7 @@ def _resolve_and_install(source: CapabilitySource, name: str, work: Path) -> Non
     """
 
     resolved = CapabilityResolver([source]).resolve_with_files([_request(name)])
-    approvals = ApprovedCapabilities.for_entries(
-        resolved.lock, [entry.name for entry in resolved.lock.entries]
-    )
+    approvals = _approve(resolved.lock, [entry.name for entry in resolved.lock.entries])
     install_lock(
         resolved,
         install_root=work / "installed",
@@ -583,7 +581,7 @@ def _refused(
         attack()
     except Exception as error:
         raised = error
-    leftovers = _tree_listing(written)
+    leftovers = _written_files(written)
     _assert(not leftovers, f"{what} reached the filesystem: {leftovers[:3]}")
     if raised is None:
         raise RuntimeError(f"{what} was not refused; expected {error_type.__name__}")
@@ -712,7 +710,7 @@ def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
                     resolved,
                     install_root=base / "installed",
                     capabilities_root=base / "store",
-                    approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
+                    approvals=_approve(resolved.lock, [name]),
                 ),
             )
             _assert(not (base / "store").exists(), "a held package was materialized")
@@ -732,7 +730,7 @@ def _case_unknown_license_redistribution_hold(rng: random.Random) -> None:
                 resolved,
                 install_root=base / "installed",
                 capabilities_root=base / "store",
-                approvals=ApprovedCapabilities.for_entries(resolved.lock, [parent, dependency]),
+                approvals=_approve(resolved.lock, [parent, dependency]),
             ),
         )
 
@@ -755,8 +753,8 @@ def _case_unauthenticated_asset_requires_approval(rng: random.Random) -> None:
             base = Path(scratch)
             insufficient = (
                 NO_APPROVALS,
-                ApprovedCapabilities.for_entries(resolved.lock, ["some-other-package"]),
-                ApprovedCapabilities.for_entries(elsewhere, [name]),
+                _approve(resolved.lock, ["some-other-package"]),
+                _approve(elsewhere, [name]),
             )
             for approvals in insufficient:
                 _expect(
@@ -826,8 +824,14 @@ def _case_approval_superseded_after_drift(rng: random.Random) -> None:
         _assert(not (base / "store").exists(), "a superseded approval materialized the closure")
 
 
-def _tree_listing(root: Path) -> list[str]:
-    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+def _written_files(root: Path) -> list[str]:
+    """Files and links under ``root``; an empty directory does not count as reaching it."""
+
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_symlink() or path.is_file()
+    )
 
 
 def _snapshot(root: Path) -> dict[str, bytes]:
@@ -872,7 +876,7 @@ def _case_uninstall_retains_evidence_and_ledger(rng: random.Random) -> None:
             resolved,
             install_root=install_root,
             capabilities_root=store,
-            approvals=ApprovedCapabilities.for_entries(resolved.lock, [name]),
+            approvals=_approve(resolved.lock, [name]),
         )
         write_lock(resolved.lock, lockfile)
         ledger = base / "ledger.db"
