@@ -95,11 +95,18 @@ def _require_matching_files(entry: LockedCapability, files: Sequence[PackageFile
 
 
 def verify_materialized(entry: LockedCapability, root: Path) -> Path:
-    """Re-verify a materialized closure against its lock entry and return its directory.
+    """Re-verify a materialized closure against its lock entry and return its directory."""
+
+    return load_verified_closure(entry, root)[0]
+
+
+def load_verified_closure(entry: LockedCapability, root: Path) -> tuple[Path, PackageClosure]:
+    """Re-verify a materialized closure and return its directory with the closure read from it.
 
     Rejects a missing directory, any extra, missing, or changed file, and
     any symlink or non-regular entry anywhere inside it. Call this
-    immediately before using materialized content.
+    immediately before using materialized content; the returned closure is
+    the one that was verified, so its manifest is trustworthy.
     """
 
     target = digest_path(root, entry.digest)
@@ -121,7 +128,7 @@ def verify_materialized(entry: LockedCapability, root: Path) -> Path:
             },
         ) from error
     _require_matching_closure(entry, closure, "materialized closure no longer matches")
-    return target
+    return target, closure
 
 
 def _write_closure(directory: Path, files: Sequence[PackageFile]) -> None:
@@ -221,6 +228,7 @@ def materialize_lock(
 __all__ = [
     "closure_differences",
     "digest_path",
+    "load_verified_closure",
     "materialize_capability",
     "materialize_lock",
     "verify_materialized",

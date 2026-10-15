@@ -1,0 +1,332 @@
+"""The only path by which a package command runs.
+
+A command or hook package runs *only* from its verified, materialized closure
+and *only* while an active owned install record covers exactly that closure:
+uninstalling revokes the record and with it the authority to run. Immediately
+before executing, the materialized directory is re-verified against the lock
+entry, so a changed sibling script, reference, or added file is rejected
+rather than executed.
+
+The command is the manifest's declared argument vector, executed directly
+(never through a shell). Its input is a JSON document validated against the
+package's declared input schema (a bounded, documented subset; see
+``enginery.capabilities.schema``) before anything is spawned. The process gets
+a minimal environment, its own session so a timeout kills the whole process
+group, and bounded stdout and stderr. Stdout must be exactly one JSON
+document and is returned in canonical form; stderr is captured as
+diagnostics. Each failure mode has its own error class: schema violation,
+timeout, non-zero exit, and invalid or oversized output.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import threading
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO
+
+from enginery.capabilities.errors import (
+    CapabilityApprovalRequiredError,
+    CapabilityCommandFailedError,
+    CapabilityCommandNotRunnableError,
+    CapabilityCommandOutputError,
+    CapabilityCommandTimeoutError,
+    CapabilityIncompatibleError,
+    CapabilityLicenseHoldError,
+    CapabilityNotFoundError,
+    CapabilityNotInstalledError,
+)
+from enginery.capabilities.install import load_owned_manifest
+from enginery.capabilities.lock import CapabilityLock
+from enginery.capabilities.manifest import PackageKind
+from enginery.capabilities.materialize import load_verified_closure
+from enginery.capabilities.schema import validate_instance
+from enginery.domain.digests import Digest
+
+SAFE_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+_DIAGNOSTIC_CHARACTERS = 4096
+_CHUNK_BYTES = 8192
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    """The outcome of one bounded package command."""
+
+    name: str
+    version: str
+    closure_digest: Digest
+    output: object
+    canonical_output: str
+    stderr: str
+    duration_seconds: float
+    argv: tuple[str, ...]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "closure_digest": str(self.closure_digest),
+            "output": self.output,
+            "stderr": self.stderr,
+            "duration_seconds": round(self.duration_seconds, 6),
+        }
+
+
+class _BoundedReader:
+    """Reads one pipe in a thread, stopping at ``limit + 1`` bytes."""
+
+    def __init__(self, stream: IO[bytes], limit: int, on_overflow: threading.Event) -> None:
+        self._descriptor = stream.fileno()
+        self._limit = limit
+        self._on_overflow = on_overflow
+        self.data = bytearray()
+        self.overflowed = False
+        self._thread = threading.Thread(target=self._read, daemon=True)
+        self._thread.start()
+
+    def _read(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self._descriptor, _CHUNK_BYTES)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self.data.extend(chunk)
+            if len(self.data) > self._limit:
+                self.overflowed = True
+                self._on_overflow.set()
+                return
+
+    @property
+    def alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout)
+
+
+def _write_stdin(process: subprocess.Popen[bytes], payload: bytes) -> threading.Thread:
+    def write() -> None:
+        stdin = process.stdin
+        if stdin is None:  # pragma: no cover - always a pipe here
+            return
+        try:
+            stdin.write(payload)
+            stdin.close()
+        except (BrokenPipeError, OSError):
+            return  # the command exited without reading its input
+
+    thread = threading.Thread(target=write, daemon=True)
+    thread.start()
+    return thread
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
+
+
+def _diagnostic(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")[:_DIAGNOSTIC_CHARACTERS]
+
+
+def _resolve_argv(
+    argv: tuple[str, ...],
+    interpreter: str | None,
+    directory: Path,
+    interpreter_paths: Mapping[str, str],
+) -> tuple[str, ...]:
+    if interpreter is None:
+        return (str(directory / argv[0]), *argv[1:])
+    located = interpreter_paths.get(interpreter) or shutil.which(interpreter, path=SAFE_PATH)
+    if located is None or not os.path.isabs(located):
+        raise CapabilityCommandNotRunnableError(
+            "the reviewed interpreter for this command is not available on the host",
+            details={"interpreter": interpreter},
+        )
+    return (located, *argv[1:])
+
+
+def run_package_command(
+    lock: CapabilityLock,
+    name: str,
+    payload: object,
+    *,
+    install_root: Path,
+    capabilities_root: Path,
+    approved_names: frozenset[str] = frozenset(),
+    interpreter_paths: Mapping[str, str] | None = None,
+) -> CommandResult:
+    """Run the declared command of installed package ``name`` with ``payload`` as JSON input."""
+
+    entry = lock.get(name)
+    if entry is None:
+        raise CapabilityNotFoundError("capability is not part of the lock", details={"name": name})
+    active = load_owned_manifest(install_root)
+    owned = active.package(name) if active is not None else None
+    if active is None or owned is None or active.lock_digest != lock.digest():
+        raise CapabilityNotInstalledError(
+            "no active install covers this capability and lock",
+            details={"name": name, "install_root": str(install_root)},
+        )
+    if owned.closure_digest != entry.digest:
+        raise CapabilityNotInstalledError(
+            "the active install records a different closure", details={"name": name}
+        )
+    if entry.kind not in (PackageKind.COMMAND, PackageKind.HOOK):
+        raise _not_runnable(name, entry.kind)
+    if entry.requires_human_approval() and name not in approved_names:
+        raise CapabilityApprovalRequiredError(
+            "capability requires interactive exact-digest human approval before it can execute",
+            details={"name": name, "version": entry.version},
+        )
+    if entry.redistribution_blocked():
+        raise CapabilityLicenseHoldError(
+            "capability license is not cleared for redistribution",
+            details={"name": name, "license": entry.license},
+        )
+    if not entry.receipt.compatible:
+        raise CapabilityIncompatibleError(
+            "capability is incompatible with this host",
+            details={"name": name, "reasons": list(entry.receipt.reasons)},
+        )
+    directory, closure = load_verified_closure(entry, capabilities_root)
+    command = closure.manifest.command
+    if command is None:
+        raise _not_runnable(name, entry.kind)
+    validate_instance(command.input_schema, payload)
+    argv = _resolve_argv(command.argv, command.interpreter, directory, interpreter_paths or {})
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _execute(
+        name=name,
+        version=entry.version,
+        digest=entry.digest,
+        argv=argv,
+        directory=directory,
+        payload=encoded,
+        timeout=command.timeout_seconds,
+        limit=command.max_output_bytes,
+    )
+
+
+def _not_runnable(name: str, kind: PackageKind) -> CapabilityCommandNotRunnableError:
+    return CapabilityCommandNotRunnableError(
+        "package is not a runnable command or hook",
+        details={"name": name, "kind": kind.value},
+    )
+
+
+def _execute(
+    *,
+    name: str,
+    version: str,
+    digest: Digest,
+    argv: tuple[str, ...],
+    directory: Path,
+    payload: bytes,
+    timeout: int,
+    limit: int,
+) -> CommandResult:
+    environment = {
+        "PATH": SAFE_PATH,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    started = time.monotonic()
+    process = subprocess.Popen(
+        argv,
+        cwd=directory,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        close_fds=True,
+        start_new_session=True,
+    )
+    overflow = threading.Event()
+    writer = _write_stdin(process, payload)
+    assert process.stdout is not None and process.stderr is not None
+    stdout = _BoundedReader(process.stdout, limit, overflow)
+    stderr = _BoundedReader(process.stderr, limit, overflow)
+    deadline = started + timeout
+    timed_out = False
+    while process.poll() is None:
+        if overflow.is_set():
+            _kill_group(process)
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            _kill_group(process)
+            break
+        time.sleep(0.005)
+    process.wait()
+    for reader in (stdout, stderr):
+        reader.join(timeout=1)
+        if reader.alive:
+            # A surviving descendant still holds the pipe open: end the whole group.
+            _kill_group(process)
+            reader.join(timeout=5)
+    writer.join(timeout=1)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
+    duration = time.monotonic() - started
+    diagnostics = _diagnostic(bytes(stderr.data))
+    if timed_out:
+        raise CapabilityCommandTimeoutError(
+            "package command exceeded its timeout",
+            details={"name": name, "timeout_seconds": timeout, "stderr": diagnostics},
+        )
+    if stdout.overflowed or stderr.overflowed:
+        raise CapabilityCommandOutputError(
+            "package command output exceeded the output limit",
+            details={"name": name, "max_output_bytes": limit, "stderr": diagnostics},
+        )
+    if process.returncode != 0:
+        raise CapabilityCommandFailedError(
+            "package command exited with a non-zero status",
+            details={"name": name, "exit_code": process.returncode, "stderr": diagnostics},
+        )
+    output = _parse_output(bytes(stdout.data), name=name, diagnostics=diagnostics)
+    canonical = json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return CommandResult(
+        name=name,
+        version=version,
+        closure_digest=digest,
+        output=output,
+        canonical_output=canonical,
+        stderr=diagnostics,
+        duration_seconds=duration,
+        argv=argv,
+    )
+
+
+def _reject_constant(value: str) -> object:
+    raise ValueError(f"non-finite number {value} is not valid JSON output")
+
+
+def _parse_output(raw: bytes, *, name: str, diagnostics: str) -> object:
+    try:
+        return json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise CapabilityCommandOutputError(
+            "package command stdout is not a single valid JSON document",
+            details={"name": name, "reason": str(error), "stderr": diagnostics},
+        ) from error
+
+
+__all__ = ["SAFE_PATH", "CommandResult", "run_package_command"]
