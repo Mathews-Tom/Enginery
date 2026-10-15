@@ -132,9 +132,9 @@ REQUIRED: dict[str, str] = {
         "read back on the host)"
     ),
     "r-m3-disk-per-file-limit": (
-        "A single allocation larger than the per-file limit the receipt records, yet small enough "
-        "for the volume, is stopped by the kernel's RLIMIT_FSIZE (SIGXFSZ) and allocates nothing, "
-        "while one below the limit succeeds"
+        "A single allocation larger than the per-file limit the receipt records, yet smaller than "
+        "the free space statvfs reports just before it, is stopped by the kernel's RLIMIT_FSIZE "
+        "(SIGXFSZ) and allocates nothing, while one below the limit succeeds"
     ),
     "r-m3-disk-receipt-and-readback": (
         "The receipt records the kernel-capped-volume mechanism with the profile's byte and "
@@ -870,7 +870,7 @@ _BURST_PROCESSES = 8
 _BURST_BIG_MIB = 6
 _BURST_CHUNK_MIB = 2
 _FILE_UNDER_MIB = 4
-_FILE_OVER_MIB = 12
+_FILE_OVER_MIB = 10
 _PER_FILE_LIMIT_BYTES = min(_SMALL_WORKSPACE_MIB, _SMALL_OUT_MIB) * _MIB
 """The per-file size limit the launcher gives a worker: the smaller of the two volumes."""
 
@@ -1338,6 +1338,7 @@ def step_m3_disk(gate: Gate) -> None:
         and under.get("exit") == 0
         and under.get("allocated_bytes") == under_bytes
         and under_host == under_bytes
+        and over.get("free_bytes_before", 0) > over_bytes
         and over.get("signal") == "SIGXFSZ"
         and over.get("allocated_bytes") in (None, 0)
         and over_host in (None, 0)
@@ -1347,7 +1348,8 @@ def step_m3_disk(gate: Gate) -> None:
             *_attempt_commands(gate, filesize),
             f"[in container] fallocate -l {_FILE_UNDER_MIB}M /workspace/gate-fill/under_limit ; "
             f"fallocate -l {_FILE_OVER_MIB}M /workspace/gate-fill/over_limit",
-            "[in container] resource.getrlimit(RLIMIT_FSIZE) ; os.statvfs(/workspace)",
+            "[in container] resource.getrlimit(RLIMIT_FSIZE) ; os.statvfs(/workspace) before each "
+            "allocation and at the end",
             "RunnerReceipt.bounds.max_file_bytes",
         ],
         observed={
@@ -1362,7 +1364,9 @@ def step_m3_disk(gate: Gate) -> None:
         },
         expected=(
             "a file below the per-file limit is allocated, one above the limit that the volume "
-            "would hold is ended by SIGXFSZ with nothing allocated, the in-container RLIMIT_FSIZE "
+            "still has room for (the free space statvfs reported just before it is larger than the "
+            "request, so ENOSPC is ruled out) is ended by SIGXFSZ with nothing allocated, the "
+            "in-container RLIMIT_FSIZE "
             "and the receipt's recorded limit both equal the smaller of the two caps"
         ),
         observer={

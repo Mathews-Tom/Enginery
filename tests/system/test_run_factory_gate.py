@@ -1171,7 +1171,8 @@ def test_the_parallel_burst_asks_for_more_than_the_volume_but_less_than_the_file
     assert total_mib > review._SMALL_WORKSPACE_MIB
     # The over-limit allocation fits the volume, so only the per-file limit can stop it.
     assert review._PER_FILE_LIMIT_BYTES < review._FILE_OVER_MIB * review._MIB
-    assert review._FILE_OVER_MIB < review._SMALL_WORKSPACE_MIB
+    # Both files must fit the volume together (the under-limit file is allocated first).
+    assert review._FILE_UNDER_MIB + review._FILE_OVER_MIB < review._SMALL_WORKSPACE_MIB
     assert review._FILE_UNDER_MIB * review._MIB < review._PER_FILE_LIMIT_BYTES
 
 

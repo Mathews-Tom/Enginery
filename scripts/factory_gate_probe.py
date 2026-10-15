@@ -1495,12 +1495,20 @@ def _fallocate_burst(root: str, params: dict[str, Any]) -> dict[str, Any]:
 
 def _file_size_limit(root: str, params: dict[str, Any]) -> dict[str, Any]:
     """One allocation below the per-file limit (``RLIMIT_FSIZE``) and one above it that still fits
-    the volume, so that only the per-file limit can be what stops the second."""
+    the space left on the volume after the first, so that only the per-file limit can be what
+    stops the second; the free space before each allocation is recorded."""
     report: dict[str, Any] = {"rlimit_fsize": list(resource.getrlimit(resource.RLIMIT_FSIZE))}
     for label in ("under", "over"):
         path = os.path.join(root, f"{label}_limit")
         mib = int(params[f"{label}_mib"])
-        outcome: dict[str, Any] = {"requested_mib": mib, **_fallocate_cli(path, mib)}
+        # The free space just before the allocation: a request larger than it would end with
+        # ENOSPC, so the observation carries it for the verdict to rule that out.
+        free_before = _volume_stats(root)["free_bytes"]
+        outcome: dict[str, Any] = {
+            "requested_mib": mib,
+            "free_bytes_before": free_before,
+            **_fallocate_cli(path, mib),
+        }
         try:
             info = os.lstat(path)
             outcome["allocated_bytes"] = info.st_blocks * 512
@@ -1523,7 +1531,9 @@ def mode_disk(params: dict[str, Any]) -> dict[str, Any]:
     root = os.path.join(where, "gate-fill")
     os.makedirs(root, exist_ok=True)
     if params.get("plant_links"):
-        # A symlink and a FIFO in the volume: neither may ever be copied out to the host.
+        # A symlink and a FIFO in the volume. Read back to the host as data, the symlink comes
+        # back as the same link (never followed) and the FIFO is skipped; the result volume
+        # reads back neither.
         os.symlink("/etc/passwd", os.path.join(where, "gate-link"))
         os.mkfifo(os.path.join(where, "gate-fifo"))
     before = _volume_stats(where)

@@ -1599,8 +1599,10 @@ a positive control is not claimed for every assertion.
   values the launcher records after checking the engine's volume options; the `statvfs`
   totals are the independent check). Each file is also limited by the kernel's per-file
   limit, the smaller of the two volumes and recorded in the receipt: a file below it
-  is allocated, one above it that the volume would hold is ended by `SIGXFSZ` with
-  nothing allocated (`r-m3-disk-per-file-limit`). A symlink or FIFO planted in the
+  is allocated, one above it that the space still free on the volume would hold (the
+  free space `statvfs` reports just before it is larger than the request, so `ENOSPC`
+  cannot be the cause) is ended by `SIGXFSZ` with nothing allocated
+  (`r-m3-disk-per-file-limit`). A symlink or FIFO planted in the
   result volume never reaches the host; in the workspace, which is read back as data,
   a symlink comes back as the same link, never followed, and a FIFO is skipped. A
   worker filling a tmpfs volume past its memory limit ends in an ordinary exit 137
