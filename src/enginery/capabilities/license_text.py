@@ -244,6 +244,24 @@ _CC0_BODY = (
     "is not a party to this document and has no duty or obligation with respect to "
     "this cc0 or use of the work."
 )
+_CC0_DISCLAIMER = (
+    "creative commons corporation is not a law firm and does not provide legal "
+    "services. distribution of this document does not create an attorney-client "
+    'relationship. creative commons provides this information on an "as-is" basis. '
+    "creative commons makes no warranties regarding the use of this document or the "
+    "information or works provided hereunder, and disclaims liability for damages "
+    "resulting from the use of this document or the information or works provided "
+    "hereunder."
+)
+_CC0_TITLE = "cc0 1.0 universal"
+_CC0_STATEMENT = _CC0_BODY.removeprefix(_CC0_TITLE + " ")
+_CC0_VARIANTS = frozenset(
+    {
+        _CC0_BODY,
+        f"{_CC0_TITLE} {_CC0_DISCLAIMER} {_CC0_STATEMENT}",
+        f"creative commons legal code {_CC0_TITLE} {_CC0_DISCLAIMER} {_CC0_STATEMENT}",
+    }
+)
 _CC0_REFERENCES = (
     " for more information, please see <http://creativecommons.org/publicdomain/zero/1.0/>",
     " for more information, please see <https://creativecommons.org/publicdomain/zero/1.0/>",
@@ -401,7 +419,10 @@ _TITLES = frozenset(
         "isc license",
         "0bsd license",
         "zero-clause bsd license",
+        "bsd zero clause license",
         "zlib license",
+        "creative commons legal code",
+        "cc0 1.0 universal",
     }
 )
 
@@ -418,12 +439,16 @@ _TEMPLATES: dict[str, frozenset[str]] = {
         "bsd-3-clause license",
     ),
     "ISC": _with_titles(_ISC_BODY, "isc license"),
-    "0BSD": _with_titles(_ZERO_BSD_BODY, "0bsd license", "zero-clause bsd license"),
+    "0BSD": _with_titles(
+        _ZERO_BSD_BODY, "0bsd license", "zero-clause bsd license", "bsd zero clause license"
+    ),
     "Zlib": _with_titles(_ZLIB_BODY, "zlib license"),
     "Unlicense": frozenset(
         {_UNLICENSE_BODY, *(_UNLICENSE_BODY + reference for reference in _UNLICENSE_REFERENCES)}
     ),
-    "CC0-1.0": frozenset({_CC0_BODY, *(_CC0_BODY + reference for reference in _CC0_REFERENCES)}),
+    "CC0-1.0": frozenset(
+        {*_CC0_VARIANTS, *(v + reference for v in _CC0_VARIANTS for reference in _CC0_REFERENCES)}
+    ),
 }
 _BY_TEXT = {text: spdx for spdx, texts in _TEMPLATES.items() for text in texts}
 

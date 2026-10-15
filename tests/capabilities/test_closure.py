@@ -430,3 +430,26 @@ def test_eula_legal_terms_and_patent_names_are_license_like(name: str) -> None:
     closure = build_closure((*package_files("skill-a"), PackageFile(name, b"terms")))
 
     assert {record.path: record.kind for record in closure.files}[name] is AssetKind.METADATA
+
+
+@pytest.mark.parametrize(
+    "name", ["GPL.md", "COPYLEFT.md", "MPL-2.0.md", "GPLv3.txt", "AGPL", "LGPL-3.0"]
+)
+def test_license_family_root_names_are_license_like(name: str) -> None:
+    assert is_license_like_name(name)
+
+
+@pytest.mark.parametrize("name", ["example.md", "simple.txt", "template.md", "gplot.md"])
+def test_names_merely_containing_family_letters_are_not_license_like(name: str) -> None:
+    assert not is_license_like_name(name)
+
+
+def test_versioned_family_root_name_is_rejected_by_shape() -> None:
+    with pytest.raises(CapabilityAssetTypeError):
+        build_closure(package_files("skill-a", extra={"MPL-2.0.md": b"terms"}))
+
+
+def test_plain_family_root_name_is_metadata() -> None:
+    closure = build_closure(package_files("skill-a", extra={"GPL.md": b"terms"}))
+
+    assert {record.path: record.kind for record in closure.files}["GPL.md"] is AssetKind.METADATA

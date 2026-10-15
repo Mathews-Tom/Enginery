@@ -246,7 +246,9 @@ field of its own. Four facts about this adapter matter operationally:
   the repository `LICENSE` at the pinned revision — declared metadata only.
   After NFKC normalization and case-folding, a root file is license-like
   when its name contains `licen`, `copying`, `notice`, `unlicense`,
-  `copyright`, `eula`, `legal`, `terms` or `patent`, or is not ASCII; each
+  `copyright`, `eula`, `legal`, `terms` or `patent`, contains `gpl`, `lgpl`,
+  `agpl`, `mpl` as a whole word (optionally with a version) or `copyleft`,
+  or is not ASCII; each
   one is a metadata asset of the closure, never an instruction. A
   license-like name is accepted only as one ASCII-letter word, or that word
   followed by one or two words from a closed list (`mit`, `apache`,
@@ -274,9 +276,10 @@ field of its own. Four facts about this adapter matter operationally:
   optional trailing `.` (an initial or abbreviation), or `&`; `and` is an
   ordinary token. The holder may be followed by `, ` and exactly one closed
   suffix (`Inc`, `Ltd`, `LLC`, `GmbH`, `Corp`, `Co.`, `PBC`,
-  `and contributors`, `et al.`) and a final `.`. A full stop, `!` or `?`
-  may only end the line or close an initial or suffix: one followed by
-  whitespace and more text makes the line non-removable, as do other
+  `and contributors`, `et al.`) and a final `.`. A full stop may only end
+  the line or follow a trailing initial or corporate suffix; a stop
+  followed by whitespace and more text makes the line non-removable, as
+  do `!`, `?`, other
   commas, dashes between words, colons, semicolons, a terms word,
   `All rights reserved`, or an other-license marker. The leading block ends
   at the first non-blank line that is neither the license title nor such a

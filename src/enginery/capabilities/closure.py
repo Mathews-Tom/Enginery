@@ -68,6 +68,7 @@ _LICENSE_WORDS = (
     "patent",
 )
 _TEXT_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
+_LICENSE_FAMILY_WORDS = re.compile(r"(?<![a-z])(?:[la]?gpl|mpl)(?:v?\d|(?![a-z]))|copyleft")
 _LICENSE_EXTENSIONS = frozenset({"", *_TEXT_EXTENSIONS})
 _FORBIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
 _LICENSE_SUFFIX_WORDS = frozenset(
@@ -154,7 +155,9 @@ def is_license_like_name(path: str) -> bool:
 
     After NFKC normalization and case folding, the name contains ``licen``,
     ``copying``, ``notice``, ``unlicense``, ``copyright``, ``eula``, ``legal``,
-    ``terms`` or ``patent``, or the normalized name is not ASCII (fails
+    ``terms`` or ``patent``, contains ``gpl``, ``lgpl``, ``agpl``, ``mpl`` as a
+    whole word (optionally followed by a version) or ``copyleft``, or the
+    normalized name is not ASCII (fails
     closed). Such a file is accepted only with a plain text shape and UTF-8
     content, is metadata, and decides the package license: a canonical name is
     classified by its text, any other name only counts when its text equals a
@@ -166,7 +169,9 @@ def is_license_like_name(path: str) -> bool:
     name = _folded(path)
     if not name.isascii():
         return True
-    return any(word in name for word in _LICENSE_WORDS)
+    return any(word in name for word in _LICENSE_WORDS) or (
+        _LICENSE_FAMILY_WORDS.search(name) is not None
+    )
 
 
 def is_notice_file_name(path: str) -> bool:
@@ -236,9 +241,9 @@ def _license_name_shape_ok(name: str) -> bool:
     """Whether a license-like root name is plain text shaped.
 
     After NFKC normalization and case folding and after dropping one ``.md``,
-    ``.txt`` or ``.rst`` extension, the name is one ASCII-letter word (the
-    license word, with no extension) or that word followed by one or two
-    words, each from a closed list of license-family words, joined by ``.``,
+    ``.txt`` or ``.rst`` extension, the name is one ASCII-letter word (any
+    such word of a license-like name, with no extension) or that word
+    followed by one or two words, each from a closed list of license-family words, joined by ``.``,
     ``-`` or ``_`` (``LICENSE-MIT``, ``COPYING.LESSER``,
     ``THIRD_PARTY_NOTICES.md``). Anything else is refused.
     """
