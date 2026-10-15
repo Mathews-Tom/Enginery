@@ -27,7 +27,9 @@ discovery and never without exact-digest human approval. A package's
 license is decided by the license-like files it ships at its root (after
 NFKC normalization and case-folding, a name containing ``licen``,
 ``copying``, ``notice``, ``unlicense``, ``copyright``, ``eula``, ``legal``,
-``terms`` or ``patent``, or not ASCII) when it carries any, else by the
+``terms`` or ``patent``, containing ``gpl``, ``lgpl``, ``agpl`` or ``mpl`` as a
+whole word (optionally with a version) or ``copyleft``, or not ASCII) when it
+carries any, else by the
 repository ``LICENSE`` at the pinned revision. Such a name is accepted only
 as one letters-only word, or that word followed by one or two words from a
 closed list (``mit``, ``apache``, ``apache2``, ``bsd``, ``isc``, ``lesser``,

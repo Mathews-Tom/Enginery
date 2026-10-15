@@ -12,8 +12,9 @@ trailing ``.`` (for an initial or abbreviation), or ``&``; ``and`` is an
 ordinary token. The holder may be followed by ``, `` and exactly one of a
 closed list of suffixes (``inc``, ``ltd``, ``llc``, ``gmbh``, ``corp``,
 ``co.``, ``pbc``, ``and contributors``, ``et al.``) and a final ``.``. A full
-stop (or ``!``/``?``) may only end the line or close an initial or suffix: one
-followed by whitespace and more text makes the line non-removable, as do other
+stop may only end the line or follow a trailing initial or corporate suffix;
+``!`` and ``?`` are never accepted. A stop followed by whitespace and more text
+makes the line non-removable, as do other
 commas, dashes between words, colons and semicolons. The leading block ends at
 the first non-blank line that is neither a license title nor such a copyright
 line, and at most three copyright lines in it are removed (a fourth makes the
