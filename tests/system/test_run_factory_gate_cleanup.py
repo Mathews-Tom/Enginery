@@ -196,3 +196,32 @@ def test_cleanup_continues_past_a_command_that_hangs(tmp_path: Path) -> None:
     assert any(
         f"network enginery-gate-{RID}-internal" in error for error in gate.cleanup_report["errors"]
     )
+
+
+def test_a_validation_container_the_product_launched_is_tracked_from_its_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validation = "enginery-00000000000000aa"
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "op.validation-receipt.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "factory_gate_context.read_receipt",
+        lambda _path: (SimpleNamespace(container_name=validation), {}),
+    )
+    fake = FakeEngine()
+    fake.add_attempt(validation, store=True, volumes=True)
+    gate = make_gate(fake, tmp_path)
+    work = tmp_path / "fixture-work"
+    work.mkdir()  # cleanup also sweeps the task workspaces under it; there are none
+    gate.fixture = SimpleNamespace(receipts=receipts, work=work)  # type: ignore[assignment]
+    names = store_names_for(validation)
+
+    strays = gate.stray_objects()
+
+    assert {validation, names.holder} <= set(strays.containers)
+    assert {names.workspace_volume, names.out_volume} <= set(strays.volumes)
+    assert not strays.clean
+    gate.cleanup()
+    assert not fake.containers
+    assert not fake.volumes

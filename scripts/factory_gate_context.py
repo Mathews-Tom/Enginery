@@ -349,6 +349,8 @@ class Gate:
         Their names derive from the worker's, so the gate need not see the launcher create them; a
         tracked container that is no worker (the relay, a control) simply has none.
         """
+        if self.fixture is not None:
+            self.track_validation_receipts(self.fixture.receipts)
         holders: list[str] = []
         volumes: list[str] = []
         for name in dict.fromkeys(self._containers):
@@ -356,6 +358,17 @@ class Gate:
             holders.append(names.holder)
             volumes += [names.workspace_volume, names.out_volume]
         return holders, volumes
+
+    def track_validation_receipts(self, receipts: Path) -> None:
+        """Track the container of every validation receipt the product launcher published.
+
+        The product's validation runner starts its own container (and store) during the gate; the
+        gate never sees it created, so the receipt it publishes is the record of its name.
+        """
+        for path in sorted(receipts.glob("*.validation-receipt.json")):
+            receipt, _document = read_receipt(path)
+            if receipt is not None and receipt.container_name not in self._containers:
+                self.track_container(receipt.container_name)
 
     def on_cleanup(self, action: Callable[[], None]) -> None:
         self._cleanups.append(action)
