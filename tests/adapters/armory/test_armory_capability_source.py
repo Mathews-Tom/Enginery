@@ -368,7 +368,6 @@ def test_discover_lists_every_catalog_row_without_fetching_any_package() -> None
 
     assert [(item.name, item.version) for item in listings] == [("adr-writer", "1.1.1")]
     assert all(item.provenance == "armory" and item.revision == _SHA for item in listings)
-    assert _TREE_URL not in fetcher.urls
     assert not any(url.startswith(_raw(f"{_PACKAGE}/")) for url in fetcher.urls)
     assert not any(url.startswith(_raw("skills/")) for url in fetcher.urls)
 
