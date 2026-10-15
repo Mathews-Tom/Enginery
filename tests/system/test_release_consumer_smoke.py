@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import stat
 import sys
+import zipfile
 from importlib import metadata
 from pathlib import Path
 
@@ -76,13 +78,16 @@ def test_a_missing_sdist_is_rejected_before_anything_is_installed(tmp_path: Path
 def test_the_real_consumer_surface_passes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    release_consumer_smoke.exercise_surface(
+    not_run = release_consumer_smoke.exercise_surface(
         executable=_EXECUTABLE, python=_PYTHON, root=tmp_path, version=_version()
     )
     assert (tmp_path / "request-claude-code.json").is_file()
     assert (tmp_path / "request-omp.json").is_file()
     assert not (tmp_path / "rejected-request.json").exists()
-    observed = [line for line in capsys.readouterr().out.splitlines() if line.startswith("ok ")]
+    output = capsys.readouterr().out.splitlines()
+    observed = [line for line in output if line.startswith("ok ")]
+    # The dev environment is an editable install, so the installed package *is* the source tree
+    # and the digest comparison is reported NOT RUN (it runs for real against a wheel install).
     expected_fragments = [
         "enginery --version",
         "enginery doctor",
@@ -91,10 +96,19 @@ def test_the_real_consumer_surface_passes(
         "packaged execution catalog",
         "valid pins write requests",
         "gate status --gate G4 remains fail-closed",
+        "runner --help, runner status --help and enginery-operator --help",
+        "stage1 build-request lists --runner, --runner-image and --model-access",
+        "packaged worker and relay recipe files are present",
     ]
     assert len(observed) == len(expected_fragments)
     for line, fragment in zip(observed, expected_fragments, strict=True):
         assert fragment in line
+    skipped = [line for line in output if "NOT RUN" in line]
+    assert skipped == not_run
+    assert sum("recipe digests equal" in line for line in skipped) == 1
+    engine_lines = [line for line in output if line.startswith("engine ")]
+    assert len(engine_lines) == 1
+    assert engine_lines[0].startswith("engine ok") != (engine_lines[0] in not_run)
 
 
 def test_a_doctor_reporting_another_version_fails_the_doctor_check(tmp_path: Path) -> None:
@@ -319,4 +333,253 @@ def test_a_stand_in_that_equals_the_tested_version_fails_the_pin_check(
     with pytest.raises(ConsumerSmokeError, match="other than the tested"):
         release_consumer_smoke._check_valid_pins(
             _EXECUTABLE, root=tmp_path, packaged={**real, "versions": versions}
+        )
+
+
+# --- the isolated-runner surface -------------------------------------------------------------
+
+_ASSET_MEMBERS = (
+    "Dockerfile.worker",
+    "worker_entry.py",
+    "omp-isolated-policy.yml",
+    "Dockerfile.relay",
+    "relay.py",
+)
+_SOURCE_ASSETS = (
+    Path(__file__).resolve().parents[2] / "src" / "enginery" / "adapters" / "oci" / "assets"
+)
+
+
+def _wheel_with(directory: Path, *, omit: str | None = None, tamper: str | None = None) -> Path:
+    wheel = directory / "enginery-0.0.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in _ASSET_MEMBERS:
+            if name == omit:
+                continue
+            content = (_SOURCE_ASSETS / name).read_bytes()
+            if name == tamper:
+                content += b"# tampered\n"
+            archive.writestr(f"enginery/adapters/oci/assets/{name}", content)
+    return wheel
+
+
+def _source_copy(directory: Path) -> Path:
+    source = directory / "src"
+    shutil.copytree(
+        release_consumer_smoke._SOURCE_ROOT,
+        source,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return source
+
+
+def test_the_installed_recipes_equal_the_source_tree_and_the_wheel_carries_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = _wheel_with(tmp_path)
+    not_run = release_consumer_smoke._check_runner_recipes(
+        _PYTHON, root=tmp_path, source_root=_source_copy(tmp_path), wheel=wheel
+    )
+    printed = capsys.readouterr().out
+    assert not_run == []
+    assert "installed recipe digests equal the source tree's" in printed
+    assert "carries every recipe file, byte-identical" in printed
+
+
+def test_an_editable_install_is_reported_not_run_not_passed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    not_run = release_consumer_smoke._check_runner_recipes(
+        _PYTHON, root=tmp_path, source_root=release_consumer_smoke._SOURCE_ROOT, wheel=None
+    )
+    assert len(not_run) == 1 and "editable install" in not_run[0]
+    assert "ok installed recipe digests equal" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"omit": "relay.py"}, "lacks enginery/adapters/oci/assets/relay.py"),
+        ({"tamper": "Dockerfile.worker"}, "differs from the source"),
+    ],
+)
+def test_a_wheel_missing_or_altering_a_recipe_file_fails(
+    tmp_path: Path, kwargs: dict[str, str], message: str
+) -> None:
+    wheel = _wheel_with(tmp_path, **kwargs)
+    with pytest.raises(ConsumerSmokeError, match=message):
+        release_consumer_smoke._check_runner_recipes(
+            _PYTHON, root=tmp_path, source_root=release_consumer_smoke._SOURCE_ROOT, wheel=wheel
+        )
+
+
+def test_a_source_tree_with_a_different_recipe_fails_the_digest_comparison(
+    tmp_path: Path,
+) -> None:
+    source = _source_copy(tmp_path)
+    dockerfile = source / "enginery" / "adapters" / "oci" / "assets" / "Dockerfile.worker"
+    dockerfile.write_text(dockerfile.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
+    with pytest.raises(
+        ConsumerSmokeError, match=r"recipe digest .* differs from the source tree's"
+    ):
+        release_consumer_smoke._check_runner_recipes(
+            _PYTHON, root=tmp_path, source_root=source, wheel=None
+        )
+
+
+def test_without_a_source_tree_the_digest_comparison_is_reported_not_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    not_run = release_consumer_smoke._check_runner_recipes(
+        _PYTHON, root=tmp_path, source_root=tmp_path / "no-src", wheel=None
+    )
+    printed = capsys.readouterr().out
+    assert len(not_run) == 1 and not_run[0].startswith("NOT RUN recipe digests")
+    assert "NOT RUN" in printed
+    assert "installed recipe digests equal" not in printed
+
+
+def test_the_operator_entry_point_must_be_installed(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, "exit 0")
+    with pytest.raises(ConsumerSmokeError, match="enginery-operator"):
+        release_consumer_smoke._check_runner_help(launcher, root=tmp_path)
+
+
+def test_an_operator_help_without_its_commands_fails(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, "exit 0")
+    operator = tmp_path / "enginery-operator"
+    operator.write_text("#!/bin/sh\necho usage: enginery-operator\n", encoding="utf-8")
+    operator.chmod(operator.stat().st_mode | stat.S_IXUSR)
+    with pytest.raises(ConsumerSmokeError, match="does not list"):
+        release_consumer_smoke._check_runner_help(launcher, root=tmp_path)
+
+
+def test_a_help_without_the_runner_flags_fails_the_stage1_check(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, 'echo "usage: --model --effort --runner"; exit 0')
+    with pytest.raises(ConsumerSmokeError, match="--runner-image"):
+        release_consumer_smoke._check_stage1_runner_flags(launcher, root=tmp_path)
+
+
+def _engine_probe(directory: Path, *, reachable: bool) -> Path:
+    path = directory / "engine-probe"
+    body = (
+        "echo qualified; exit 0"
+        if reachable
+        else "echo 'MissingPrerequisiteError: no engine'; exit 3"
+    )
+    path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_an_unreachable_engine_is_reported_not_run_never_passed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    launcher = _launcher(tmp_path, "exit 99")
+    not_run = release_consumer_smoke._check_runner_engine(
+        launcher, _engine_probe(tmp_path, reachable=False), root=tmp_path
+    )
+    printed = capsys.readouterr().out
+    assert len(not_run) == 1 and not_run[0].startswith("engine NOT RUN")
+    assert "engine ok" not in printed
+
+
+def test_a_reachable_engine_must_hold_an_absent_image(tmp_path: Path) -> None:
+    holding = _launcher(
+        tmp_path,
+        'echo \'{"admitted": false, "hold": {"reason": "runner_unqualified"}}\'; exit 5',
+    )
+    probe = _engine_probe(tmp_path, reachable=True)
+    assert release_consumer_smoke._check_runner_engine(holding, probe, root=tmp_path) == []
+    admitting = _launcher(tmp_path, 'echo \'{"admitted": true, "hold": null}\'; exit 0')
+    with pytest.raises(ConsumerSmokeError, match="did not hold an absent image"):
+        release_consumer_smoke._check_runner_engine(admitting, probe, root=tmp_path)
+    silent = _launcher(tmp_path, "exit 5")
+    with pytest.raises(ConsumerSmokeError, match="printed no report"):
+        release_consumer_smoke._check_runner_engine(silent, probe, root=tmp_path)
+
+
+def test_an_unqualified_engine_is_distinguished_from_an_unreachable_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    launcher = _launcher(tmp_path, "exit 99")
+    unqualified = tmp_path / "unqualified-probe"
+    unqualified.write_text(
+        "#!/bin/sh\necho 'unqualified: MissingPrerequisiteError: missing cgroup v2'; exit 4\n",
+        encoding="utf-8",
+    )
+    unqualified.chmod(unqualified.stat().st_mode | stat.S_IXUSR)
+    not_run = release_consumer_smoke._check_runner_engine(launcher, unqualified, root=tmp_path)
+    assert len(not_run) == 1 and "(unqualified)" in not_run[0] and "unreachable" not in not_run[0]
+    unreachable = release_consumer_smoke._check_runner_engine(
+        launcher, _engine_probe(tmp_path, reachable=False), root=tmp_path
+    )
+    assert "(unreachable)" in unreachable[0] and "(unqualified)" not in unreachable[0]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("details", "kind", "code"),
+    [({"missing": "cgroup v2", "engine": "x"}, "unqualified", 4), ({}, "unreachable", 3)],
+)
+def test_the_engine_probe_program_classifies_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    details: dict[str, object],
+    kind: str,
+    code: int,
+) -> None:
+    from enginery.adapters.oci import engine as engine_module
+    from enginery.domain.errors import MissingPrerequisiteError
+
+    class _Engine:
+        def qualify(self) -> None:
+            raise MissingPrerequisiteError("no", details=details)
+
+    monkeypatch.setattr(engine_module, "OciEngine", _Engine)
+    with pytest.raises(SystemExit) as raised:
+        exec(release_consumer_smoke._ENGINE_PROGRAM, {"__name__": "probe"})
+    assert raised.value.code == code
+    assert capsys.readouterr().out.startswith(kind + ":")
+
+
+def test_an_incomplete_run_never_prints_pass(capsys: pytest.CaptureFixture[str]) -> None:
+    code = release_consumer_smoke.report_outcome(["engine NOT RUN x", "NOT RUN recipe digests y"])
+    printed = capsys.readouterr().out
+    assert code == release_consumer_smoke.INCOMPLETE_EXIT != 0
+    assert "PASS" not in printed
+    assert "INCOMPLETE" in printed and "engine NOT RUN x" in printed
+    assert release_consumer_smoke.report_outcome([]) == 0
+    assert "PASS release-consumer-smoke" in capsys.readouterr().out
+
+
+def test_a_wheel_is_claimed_byte_identical_only_when_it_was_compared(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = _wheel_with(tmp_path)
+    not_run = release_consumer_smoke._check_runner_recipes(
+        _PYTHON, root=tmp_path, source_root=tmp_path / "no-src", wheel=wheel
+    )
+    printed = capsys.readouterr().out
+    assert len(not_run) == 2
+    assert any(item.startswith("NOT RUN wheel recipe files are byte-identical") for item in not_run)
+    claims = [line for line in printed.splitlines() if line.startswith("ok ")]
+    assert not any("byte-identical" in line for line in claims)
+    assert "carries every recipe file" in printed
+
+
+def test_require_engine_turns_a_skipped_engine_check_into_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        release_consumer_smoke,
+        "_check_runner_engine",
+        lambda *args, **kwargs: ["engine NOT RUN runner status against a container engine"],
+    )
+    arguments = {"executable": _EXECUTABLE, "python": _PYTHON, "root": tmp_path}
+    skipped = release_consumer_smoke.exercise_surface(**arguments, version=_version())
+    assert skipped[-1] == "engine NOT RUN runner status against a container engine"
+    with pytest.raises(ConsumerSmokeError, match="--require-engine: the container engine was"):
+        release_consumer_smoke.exercise_surface(
+            **arguments, version=_version(), require_engine=True
         )

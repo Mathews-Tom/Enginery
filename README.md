@@ -47,6 +47,9 @@ any pattern learned from them is independently re-implemented under this
 repository's Apache-2.0 license. Trusted-local operation is not containment:
 a worker process can reach the operator's account, filesystem, network, and
 keychain, and Enginery makes no claim of safety against hostile code.
+What the isolated runner enforces, how it was qualified and what stays out of
+scope is stated in
+[Security limits and what is qualified](docs/operations.md#security-limits-and-what-is-qualified).
 Stage 1 never merges. A Stage 2 pull-request merge is policy-gated: the
 shipped default rules allow low- and medium-risk merges once current-head
 merge-ready evidence passes, and deny high-risk merges by default. Release

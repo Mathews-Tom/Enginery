@@ -1505,6 +1505,327 @@ implemented.
   itself is a separately policy-gated action in Stage 2, which bounds the
   practical consequence of this residual window.
 
+## Security limits and what is qualified
+
+The isolated runner (`--runner isolated-oci`) is qualified by an executable
+scenario, not by this page: `scripts/run_factory_gate.py --scenario
+runner-boundary` runs hostile code inside the real hardened container, through
+the product's own launcher, worker image and model-access relay, and records
+what the *host* observed. A result counts as a qualification only where its
+evidence file reports the verdict `pass` for the engine it names; this section
+says what that scenario covers and, as precisely, what it does not.
+
+### What the isolated runner enforces, and what was observed to refuse
+
+Each line below summarises assertions of the scenario: the action was attempted
+inside the container and the outcome was read at the site recorded for each
+assertion (the engine's own inspect output and event stream, the runner receipt,
+file hashes, listener connection logs, the bare origin's refs, marker files, and
+what the in-container probe itself reported). Which assertions are decided on the
+host, inside the container or on both, and which have a positive control, is
+listed under [Which assertions are observed where](#which-assertions-are-observed-where);
+a positive control is not claimed for every assertion.
+
+- **Reads.** The ledger, artifact store, configuration, broker and gateway
+  token files, the installed engine, holdouts, `~/.ssh` and `gh` credentials are
+  not mounted: reading them by host path fails, a filesystem search for their
+  names and contents finds nothing, and neither the environment nor any
+  `/proc/*/environ` holds a credential-shaped variable or a canary value.
+- **Writes.** The root filesystem is read-only: writes to `/etc`, `/usr`,
+  `/opt/enginery` (including the worker entry point and the omp permission
+  overlay), site-packages, `/` and host-looking absolute paths are refused and
+  the image files are unchanged. Only the task workspace, the result directory
+  and the tmpfs scratch and home are writable.
+- **Container escape.** No Docker or containerd socket, no host device and no
+  host mount is visible; `/proc/self/mountinfo` shows only the admitted mounts;
+  every capability is dropped, `no-new-privileges` is set, the seccomp filter is
+  active, and `mount`, `unshare`, `chroot`, `setuid`, `mknod` and raw sockets
+  are denied. The engine's own report of every container the scenario created
+  matched the isolated profile (`profile_violations` is empty in each receipt).
+- **Network.** A validation container and a worker without model access run with
+  `--network none`. A worker with model access joins its own per-attempt internal
+  network, shared only with the relay for that attempt's lifetime and removed
+  afterwards, so two concurrent workers cannot reach each other. Direct connections
+  to a stand-in gateway and broker (bound on host loopback and on all interfaces),
+  through `host.docker.internal`, `host.lima.internal`, the host-gateway address and
+  the bridge gateway address, to public addresses and the metadata address, and DNS
+  lookups of public names, all failed; the host listeners recorded zero connections
+  while a default-networked control container reached them. While the relay was up,
+  a validation container and a none-mode worker could not reach it by name or
+  address and the upstream saw no request from them, while a model-access worker
+  reached it (`r-m5-*`).
+- **Source control and brokers.** The workspace has no remote and no
+  credentials; `git push` and `ls-remote` to the bare origin by path and URL, to
+  GitHub over https, ssh and git, and calls to the broker all failed, and the
+  bare origin's refs were unchanged. Only the operator-side publisher, after the
+  host verified the worker's bundle in an intake repository it owns, published
+  exactly the verified revision, once, and refused a mismatched expected head.
+- **Model access.** The relay forwards only `POST /v1/messages`, `POST
+  /v1/pi/stream` and `GET /v1/models`, injects the gateway bearer itself and
+  strips the worker's `Authorization`, `X-Api-Key` and cookies. Other providers
+  (including `google-antigravity/…`), colliding bare ids on `/v1/pi/stream`,
+  `/v1/credentials/check`, `/v1/usage`, other APIs, smuggled `model` fields
+  (object, whitespace, unicode, duplicate keys) and method and path tricks were
+  refused with zero requests reaching the upstream. A bare `claude-…` id on
+  `/v1/messages` reaches the upstream as `anthropic/claude-…`.
+- **Resource limits.** A memory breach is OOM-killed (exit 137, an engine `oom`
+  event), a fork bomb stops at the pids limit, a worker past its time budget has
+  its process group killed and its container removed, a worker that ignores
+  termination is killed by the launcher's own hard deadline (exit 124), and CPU
+  use is throttled to the limit.
+- **Object store, result collection and bounds** (`r-` assertions). Objects
+  planted in the host repository as an unreachable
+  blob, a stash, an unrelated branch and a tag are absent from the workspace
+  clone (the base-only clone, scanned on the host and inside the container). A
+  result file the worker replaced by a symlink or a FIFO in its own result volume never
+  reaches the host (the launcher copies regular files only, and logs the refusal), and
+  the product's own collection also refuses a symlink or FIFO on the host path
+  (no-follow, non-blocking, bounded read); a result replayed from an earlier attempt is
+  refused for lack of the per-launch nonce; a worker exiting 125 or 124 is
+  classified from the launcher's own outcome file as an exited container while a
+  genuine launcher refusal is classified as a refusal. The engine-side container log
+  stays under its cap while a worker spams it. The disk bound of the workspace and
+  result volumes is the kernel's: on small capped volumes (16 MiB workspace, 8 MiB
+  result, 4000 and 64 inodes) a write past a cap and an entry burst past an inode cap
+  fail with `ENOSPC` inside the worker, and so do the allocations of a burst of 8
+  parallel `fallocate` processes that each ask for less than the per-file limit (6 MiB
+  of 8 MiB) but together for more than the workspace holds (48 MiB of 16 MiB): some are
+  granted, the rest are refused with `No space left on device`, and a signal, a
+  missing command or any other failure fails the assertion. No more than the cap is
+  allocated (`statvfs` and allocated blocks inside the container, and the bytes read
+  back on the host), the launcher kills nothing (outcome `exited`), and the receipt
+  records `kernel-capped-volume` with the profile's byte and inode numbers, which equal
+  the totals the kernel reports inside the container (the receipt's bounds are profile
+  values the launcher records after checking the engine's volume options; the `statvfs`
+  totals are the independent check). Each file is also limited by the kernel's per-file
+  limit, the smaller of the two volumes and recorded in the receipt: a file below it
+  is allocated, one above it that the space still free on the volume would hold (the
+  free space `statvfs` reports just before it is larger than the request, so `ENOSPC`
+  cannot be the cause) is ended by `SIGXFSZ` with nothing allocated
+  (`r-m3-disk-per-file-limit`). A symlink or FIFO planted in the
+  result volume never reaches the host; in the workspace, which is read back as data,
+  a symlink comes back as the same link, never followed, and a FIFO is skipped. A
+  worker filling a tmpfs volume past its memory limit ends in an ordinary exit 137
+  (`r-m3-disk-*`, `r-m3-memory-fill-exit-137`). A bundle whose tree exceeds
+  the intake entry cap is refused during host verification before any host checkout.
+  A candidate editing `.github/workflows/x.yml` is held with nothing pushed to the
+  bare origin and is published only after the explicit approval. In the real image
+  the worker environment carries command-scoped `core.hooksPath=/dev/null`, so a
+  planted `pre-commit` hook does not run even when repository configuration
+  re-enables it (it runs when the environment is removed). A `core.fsmonitor` the
+  worker planted never runs on the host through the recovery assessment or the
+  coordinator runtime's failure and cancel handling (it runs when git is run in the
+  clone, as a control). Containers created with `seccomp=unconfined`,
+  `apparmor=unconfined`, `label=disable`, `systempaths=unconfined` or a host cgroup
+  namespace are flagged.
+- **Hostile candidates.** Hooks, `conftest.py`, `core.sshCommand`, attribute
+  drivers and similar traps a worker plants never ran on the host during
+  intake, validation or publication, and the installed engine and every
+  protected host file were byte-identical afterwards. Validation ran inside the
+  runner against a clean checkout of the verified head, without the worker's
+  uncommitted leftovers.
+- **Fail-closed admission.** A missing image id, an image built from another
+  recipe, an unreachable engine and a profile that drifted from the one a run
+  is bound to are each held, never run in `trusted-local` mode; the launcher
+  refuses (exit 125) a missing image, an unreachable engine and a model-access worker whose relay is not running
+  without running the command on the host; and `profile_violations`
+  flags containers made deliberately weaker (privileged, added capabilities, a
+  writable root filesystem, no limits, default networking, a host mount, an
+  unlisted environment variable, a mapped device).
+
+### Which assertions are observed where
+
+The `runner-boundary` scenario records **64 required assertions** (65 with
+`--gateway-url`, which adds `f-relay-real-gateway-models-and-denials`) and **5
+controls** (the positive controls that prove the observers can see what they claim
+to refuse: an unhardened container reaches a host listener, the worker's network code
+executes, the host marker observer detects execution, the product-created container
+has no violation, and admission admits the qualified selection). The table
+`OBSERVED_ON_HOST` / `OBSERVED_IN_CONTAINER` / `OBSERVED_ON_BOTH` in
+`scripts/factory_gate_boundary.py` assigns every assertion to exactly one site and a
+test keeps the counts below true.
+
+- **27 are decided from the host alone** (outside the container: the engine's
+  inspect output and event stream, the receipts, host files and hashes, the stub
+  listeners' and upstream's logs, `docker logs`): `c-container-profile`,
+  `d-network-host-listeners-zero-connections`, `e-bare-origin-unchanged`,
+  `e-operator-publication`, `f-relay-bare-claude-rewrite`, `g-limits-memory`,
+  `g-limits-wall-time`, `g-limits-launcher-deadline`, `h-hooks-not-executed-on-host`,
+  `h-engine-install-unchanged`, `h-validation-in-runner`, the six `i-*`, the four
+  `z-*`, `r-m2-exit-125-spoof-classified`, `r-m3-container-log-bounded`,
+  `r-m3-memory-fill-exit-137`,
+  `r-m4-protected-path-held-then-published`, `r-b1-fsmonitor-not-run-on-host` and
+  `r-m7-weaker-container-flagged`.
+- **19 are decided from what the in-container probe itself reports**, which the host
+  cannot reproduce independently (the host only confirms that nothing changed on the
+  host): the four `a-read-*`, the three `b-write-*`, the five `c-escape-*`,
+  `d-network-direct-refused`, `d-network-internet-and-dns-refused`,
+  `e-git-push-refused`, `e-scm-and-broker-network-refused`,
+  `e-credentials-unreadable`, `h-image-paths-read-only` and
+  `f-relay-models-filtered`.
+- **18 need both**, a probe observation and an independent host observation:
+  `f-relay-hardened-and-reachable`, `f-relay-allowed-routes-forwarded`,
+  `f-relay-denied-zero-upstream`, `g-limits-pids`, `g-limits-cpu`,
+  `r-m1-no-host-objects-in-workspace` (the container's object scan and the host
+  clone's), the three `r-m2-*` result-forgery assertions, `r-m3-disk-enospc-bytes`,
+  `r-m3-disk-enospc-inodes`, `r-m3-disk-parallel-fallocate-capped` (`statvfs` inside
+  the container and the bytes read back on the host), `r-m3-disk-per-file-limit` (the
+  signal that ended the over-limit allocation and `RLIMIT_FSIZE` inside the container,
+  the receipt's recorded limit and the workspace read back on the host),
+  `r-m3-disk-receipt-and-readback` (the receipt's numbers against the kernel's `statvfs`
+  totals inside the container, and the workspace and result directory read back on the
+  host), `r-m3-git-bomb-refused-at-intake`,
+  `r-m4-hooks-disabled-in-image` (the hook log is written in the workspace and read
+  by the host), `r-m5-validation-and-none-mode-cannot-reach-relay` and
+  `r-m5-concurrent-workers-isolated-networks`.
+
+Positive controls cover a stated subset of the assertions, not every one; an
+assertion not named here is not claimed to have one. The five recorded controls
+back the claims they name: the unhardened container's connection to a host listener
+and the hardened worker's own loopback connection (the `d-network-*` refusals), the
+host marker observer seeing a deliberate execution (`h-hooks-not-executed-on-host`),
+a container created from the product's own arguments having no violation
+(`i-profile-violations-flagged`) and admission admitting the qualified selection
+(the `i-admission-*` assertions). Controls built into an assertion are:
+`a-read-protected-paths` and `a-read-filesystem-search` (a planted control file is
+read and found), `b-write-workspace-plants` (the planted writes succeed),
+`r-m1-no-host-objects-in-workspace` (the planted objects exist in the host
+repository and a base object is found by both scans), `r-m2-symlink-result-refused`
+and `r-m2-fifo-result-refused` (the same link or FIFO on the host path is real and a
+legitimate result is collected), `r-m3-container-log-bounded` (a container created
+without the log cap keeps every byte),
+`r-m5-validation-and-none-mode-cannot-reach-relay` (a model-access worker reaches
+the relay) and `r-m7-weaker-container-flagged` (the product's own container has no
+violation).
+
+The probe is delivered through the launch spec and reports through its collected
+result (and a copy in the workspace, which the launcher reads back), because the
+worker's workspace and result trees are volumes no host path reaches. The probe counts
+only an explicit refusal (`EROFS`, `EACCES`, `EPERM`, `ENOENT`, `ECONNREFUSED`,
+`ENETUNREACH`, a failed name lookup and similar; for a `git` command only a specific
+sandbox refusal message) as refused; a timeout or an unexpected exception is
+`inconclusive` and fails the assertion. `z-no-hosted-inference` is computed from
+observed connection counts (internet connects completed by workers, relay forwards
+against the stub's request log, gateway and broker listener connections and, with
+a real gateway, relay forwards beyond `GET /v1/models`), never from a constant.
+
+### Engines
+
+The profile targets two engines: **Docker Desktop** on macOS and **rootless
+Docker inside a Lima VM**. Both are qualified by running the same scenario on
+them; one engine's result says nothing about the other. An engine that cannot
+enforce the profile (no cgroup v2, no confined seccomp profile, unenforced
+memory, CPU or pids limits) is refused before anything runs. On a Linux engine
+the internal network's gateway address is an address of the engine host itself:
+do not leave services bound to all interfaces on that host, and read the
+scenario's record of that address, not this page, to know whether it answered.
+
+### What remains out of scope
+
+- **Container-engine and kernel escapes.** The boundary is the container
+  engine's. A vulnerability in the kernel, `runc`, the engine, or the virtual
+  machine Docker Desktop and Lima run on defeats it; the scenario tests the
+  configuration Enginery asks for, not the engine's own bugs.
+- **A malicious worker that has model access.** Through the relay it may use
+  any model of the allowed providers on any text it can read, which includes
+  the whole workspace it was given, and it may spend your subscription's
+  allowance. The relay constrains routes and providers; it does not inspect
+  prompts, redact content or ration usage. A worker may also freeze its own
+  container (for example by tracing its init process); that is bounded by the
+  launcher's hard deadline, not prevented.
+- **The workspace and result volumes live in memory.** They are tmpfs volumes whose
+  size and inode caps the kernel enforces, so a write past a cap fails inside the
+  worker; their pages are charged to the worker's memory limit, which is the real
+  ceiling (a worker that fills a volume past it is killed by the kernel and ends in
+  exit 137). The gate qualifies this on each engine (`r-m3-disk-*`,
+  `r-m3-memory-fill-exit-137`) with small caps; the product's default caps are not
+  filled to the byte.
+- **A worker can forge its own result.** The per-launch nonce stops a stale or
+  replayed result from an earlier attempt; the worker can read the nonce of its own
+  launch from its supervisor's command line, so a result is the worker's claim, never
+  evidence. Host-side verification is what is trusted.
+- **The protected-path hold is qualified at the policy and publisher level.** The
+  scenario drives the changed-path read and the protected-path policy the Stage 1
+  hold uses, and the publisher before and after the explicit approval; the ledgered
+  human-wait wrapper around them is covered by the Stage 1 tests, not this scenario.
+- **`trusted-local` is not containment** and is never substituted for an
+  isolated run.
+- **The relay is not network-isolated.** It sits on an ordinary bridge network
+  so it can reach the gateway; its egress can reach host loopback services and
+  the internet, and nothing here filters it. Keep the relay image pinned and
+  its token file private.
+- **The gateway bearer is held by the relay.** Anyone who can read the
+  operator's token file, or who can run `docker exec` or `docker inspect` against
+  the engine's containers, can obtain it. Workers hold only a placeholder.
+- **Validation runs offline.** A repository whose validation needs the network
+  or a package index cannot pass inside the runner.
+- **Free-tier and terms-of-service judgement is yours.** Enginery does not assess
+  whether automated use of a subscription, free tier or account is permitted by
+  the provider; the operator authorizes each use.
+
+### Running the boundary scenario
+
+From a checkout, with the worker and relay images built (`enginery runner
+build-image`, `enginery runner build-relay-image`):
+
+```bash
+uv run python scripts/run_factory_gate.py --scenario runner-boundary \
+  --docker-context desktop-linux \
+  --runner-image sha256:<worker image id> --relay-image sha256:<relay image id> \
+  --evidence-out evidence/runner-boundary.json
+```
+
+Without `--runner-image`/`--relay-image` the images are built from the packaged
+recipes on the selected engine (an image tag the run created is removed
+afterwards; pre-existing images are never removed). Adding `--gateway-url
+http://host.docker.internal:<port> --gateway-token-file <0600 file>` also does a
+real `GET /v1/models` and a set of refused requests through the relay against
+your gateway; it never sends an inference request.
+
+Pass `--subject-commit <sha>` (or `ENGINERY_FACTORY_GATE_SUBJECT_COMMIT`) when
+running an installed wheel: the evidence records that commit next to the wheel's
+record digest, as it records the git revision of a checkout.
+
+The script and its `factory_gate_*.py` siblings are self-contained: to qualify a
+Lima engine, copy `scripts/` into the VM next to an installed `enginery` wheel
+and run the same command there. The evidence JSON (schema version 1, printed and
+written to `--evidence-out`) names the subject, build, configuration, host,
+engine, image, profile and evaluator identities, every assertion with the
+commands it ran, what it observed, what it expected and the independent host
+observation, the controls, the external-effect counts, and a `<name>.raw/`
+directory of raw artifacts beside it. The exit status is `0` only if every
+required assertion ran and passed, `1` if any failed or did not run, `2` for a
+usage error, `3` (verdict `hold`) when the engine, an image or a permission is
+missing, and `130` when the run was interrupted (Ctrl-C, SIGTERM or SIGHUP; what the
+run created is still removed before it exits; a SIGTERM or SIGHUP that arrives during that
+cleanup is held until it is done). An assertion that cannot run fails or
+holds the run; none is skipped. At the end the run lists the engine's containers (the
+per-attempt store containers included), volumes and networks and fails if any it
+created remains, if it had to remove a store, a volume, an attempt network or a validation
+container that the launcher should have removed itself, or if the engine could not be listed
+(`z-cleanup-no-stray-containers`). A run killed with SIGKILL cannot clean up: remove
+its `enginery-gate-<id>-*` networks and `enginery-*` containers and volumes by hand.
+
+### The live authentication scenario
+
+`--scenario runner-auth --harness omp|claude` runs exactly one non-mutating
+authentication session (a prompt asking for the word `OK`, no tools) through the
+relay inside the runner, after repeating the credential-read refusals in the
+same image. Without `--live` it runs the same path against a loopback stub
+upstream and records mode `local`. With `--live` it uses your real gateway and
+token file, so it is an **operator-run, owner-authorized action**: it needs
+`--gateway-url`, `--gateway-token-file`, `--custody-receipt` and
+`--confirm-single-session` (`--live` without `--custody-receipt` is a usage
+error, exit 2, before anything runs). The receipt is the one made on this host
+with `enginery runner custody-receipt`; a receipt for the other host (macOS
+versus the Lima VM), a malformed or tampered one, one that does not conform, or
+one naming a different gateway or token file is a HOLD with a stated reason,
+as are a gateway 401/403/429, a deadline, and a harness output that reported no
+usage figures. The run starts one session, enforces a process-group deadline of
+at most 900 seconds, and records the relay's request counts, the usage the
+harness reports and that the token value appears in no artifact. Nothing in
+Enginery starts it for you.
+
 ## Release scope and gate-deferred work
 
 `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0` (2026-08-11), and `v0.6.0`
