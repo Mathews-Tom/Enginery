@@ -26,6 +26,7 @@ race with a process that can already write the workspace.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import tempfile
@@ -49,7 +50,7 @@ def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = Tru
     absolute = Path(os.path.abspath(path))
     if check_named_root:
         _refuse_link(absolute, path, what)
-    base = _anchor_prefix(absolute)
+    base = _anchor_prefix(absolute, path, what)
     if base is None:
         return
     current = base
@@ -59,7 +60,7 @@ def require_no_link_chain(path: Path, *, what: str, check_named_root: bool = Tru
             return
 
 
-def _anchor_prefix(absolute: Path) -> Path | None:
+def _anchor_prefix(absolute: Path, path: Path, what: str) -> Path | None:
     """The shortest prefix of ``absolute`` that is the current directory, if any.
 
     Decided by filesystem identity (``os.path.samestat`` against ``os.stat(os.getcwd())``),
@@ -79,9 +80,27 @@ def _anchor_prefix(absolute: Path) -> Path | None:
             info = os.stat(candidate)
         except (FileNotFoundError, NotADirectoryError):
             return None
+        except OSError as error:
+            raise _typed_os_error(error, candidate, path, what) from error
         if os.path.samestat(info, anchor):
             return candidate
     return None
+
+
+def _typed_os_error(
+    error: OSError, candidate: Path, path: Path, what: str
+) -> CapabilitySymlinkError | CapabilityInstallConflictError:
+    """A typed refusal for an unexpected ``OSError`` met while inspecting ``candidate``."""
+
+    if error.errno == errno.ELOOP:
+        return CapabilitySymlinkError(
+            f"{what} is reached through a symbolic link loop",
+            details={"path": str(path), "link": str(candidate)},
+        )
+    return CapabilityInstallConflictError(
+        f"{what} cannot be inspected: {error.strerror or error}",
+        details={"path": str(path), "component": str(candidate)},
+    )
 
 
 def _refuse_link(candidate: Path, path: Path, what: str) -> bool:
@@ -96,6 +115,8 @@ def _refuse_link(candidate: Path, path: Path, what: str) -> bool:
             f"{what} has a component that is not a directory",
             details={"path": str(path), "component": str(candidate)},
         ) from error
+    except OSError as error:
+        raise _typed_os_error(error, candidate, path, what) from error
     if stat.S_ISLNK(info.st_mode):
         raise CapabilitySymlinkError(
             f"{what} is reached through a symbolic link",

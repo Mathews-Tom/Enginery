@@ -792,6 +792,41 @@ def test_a_regular_file_on_the_state_path_is_a_typed_refusal_not_a_crash(
     assert (tmp_path / ".enginery").read_bytes() == b"not a directory\n"
 
 
+def _make_link_loops(base: Path) -> None:
+    (base / "st").symlink_to("st")
+    (base / "ping").symlink_to("pong")
+    (base / "pong").symlink_to("ping")
+
+
+@pytest.mark.parametrize("loop", ["st", "ping"])
+def test_a_link_loop_on_a_state_path_is_a_typed_refusal_for_install_and_uninstall(
+    loop: str,
+    paths: _Paths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = _commit_project(paths, package_files("skill-a"))
+    _make_link_loops(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    flags = _project_flags(paths, sha)
+    flags[flags.index("--lockfile") + 1] = f"{loop}/l.json"
+
+    code, _, output = _run(capsys, "install", "skill-a@1", *flags)
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE) == 12
+    assert "Traceback" not in output
+    assert not paths.installed.exists()
+    assert not paths.store.exists()
+
+    code, _, output = _run(
+        capsys, "uninstall", *paths.flags()[:4], "--install-root", f"{loop}/installed"
+    )
+
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE) == 12
+    assert "Traceback" not in output
+
+
 # --------------------------------------------------------------------------- project binding
 
 

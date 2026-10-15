@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 from collections.abc import Iterable
@@ -465,6 +466,40 @@ def test_install_refuses_an_install_root_that_is_itself_a_symlink(
         )
 
     assert list(other.iterdir()) == []
+
+
+@pytest.mark.parametrize("loop", ["self", "cycle-a"])
+def test_a_link_loop_is_a_typed_symlink_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, loop: str
+) -> None:
+    (tmp_path / "self").symlink_to("self")
+    (tmp_path / "cycle-a").symlink_to("cycle-b")
+    (tmp_path / "cycle-b").symlink_to("cycle-a")
+    monkeypatch.chdir(tmp_path)
+
+    for check_named_root in (True, False):
+        with pytest.raises(CapabilitySymlinkError):
+            require_no_link_chain(
+                Path(loop) / "child", what="the root", check_named_root=check_named_root
+            )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_an_unsearchable_directory_is_a_typed_conflict_not_an_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    (tmp_path / "door").symlink_to("closed/inner")
+    monkeypatch.chdir(tmp_path)
+    closed.chmod(0)
+    try:
+        with pytest.raises(CapabilityInstallConflictError):
+            require_no_link_chain(Path("door") / "child", what="the root")
+        with pytest.raises(CapabilityInstallConflictError):
+            require_no_link_chain(Path("closed") / "inner" / "child", what="the root")
+    finally:
+        closed.chmod(0o700)
 
 
 def test_install_refuses_a_symlinked_destination_directory(tmp_path: Path) -> None:
