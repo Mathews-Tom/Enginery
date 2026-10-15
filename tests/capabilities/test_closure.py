@@ -15,6 +15,8 @@ from enginery.capabilities.closure import (
     build_closure,
     build_closure_from_directory,
     is_license_file_name,
+    is_license_like_name,
+    is_notice_file_name,
     read_package_directory,
 )
 from enginery.capabilities.errors import (
@@ -83,6 +85,45 @@ def test_root_license_style_files_are_metadata_never_instructions(name: str) -> 
 )
 def test_other_names_are_not_license_files(name: str) -> None:
     assert not is_license_file_name(name)
+
+
+_LICENSE_LIKE_NAMES = [
+    "LICENSE-GPL.md",
+    "LICENSE.gpl.md",
+    "COPYING.LESSER.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE_GPL.md",
+    "LICENSE.md.md",
+    "UNLICENSE.md",
+    "LICENSES.md",
+    "\uff2c\uff29\uff23\uff25\uff2e\uff33\uff25.md",
+    "LICENSE-MIT",
+    "LICENSE.MIT",
+    "COPYING.LESSER",
+    "UNLICENSE",
+    "COPYRIGHT.txt",
+    "license.md",
+    "NOTICE",
+]
+
+
+@pytest.mark.parametrize("name", _LICENSE_LIKE_NAMES)
+def test_every_license_like_root_name_is_metadata(name: str) -> None:
+    assert is_license_like_name(name)
+    closure = build_closure(package_files("skill-a", extra={name: b"terms"}))
+
+    assert {record.path: record.kind for record in closure.files}[name] is AssetKind.METADATA
+
+
+@pytest.mark.parametrize("name", ["README.md", "docs/LICENSE", "references/LICENSE.md", "SKILL.md"])
+def test_other_names_are_not_license_like(name: str) -> None:
+    assert not is_license_like_name(name)
+
+
+def test_full_width_license_names_are_canonical_after_nfkc() -> None:
+    assert is_license_file_name("\uff2c\uff29\uff23\uff25\uff2e\uff33\uff25.md")
+    assert is_notice_file_name("\uff2e\uff2f\uff34\uff29\uff23\uff25")
+    assert not is_notice_file_name("LICENSE")
 
 
 def test_closure_digest_is_independent_of_file_order() -> None:

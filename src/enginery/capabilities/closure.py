@@ -56,6 +56,7 @@ MAX_PATH_DEPTH = 12
 
 _DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 _LICENSE_STEMS = frozenset({"license", "licence", "copying", "notice"})
+_LICENSE_WORDS = ("licen", "copying", "notice", "unlicense", "copyright")
 _LICENSE_EXTENSIONS = frozenset({"", ".md", ".txt", ".rst"})
 _SCRIPT_EXTENSIONS = frozenset({".py", ".sh", ".js", ".mjs", ".ts"})
 _REFERENCE_EXTENSIONS = frozenset({".md", ".txt", ".rst"})
@@ -110,18 +111,46 @@ def _path_problem(raw: str) -> str | None:
     return None
 
 
-def is_license_file_name(path: str) -> bool:
-    """Whether ``path`` is a root license-style file.
+def _folded(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold()
 
-    The name stem (before the first dot) is ``license``, ``licence``,
-    ``copying`` or ``notice`` in any case, with no extension or ``.md``,
-    ``.txt`` or ``.rst``. Nested paths never match.
+
+def is_license_file_name(path: str) -> bool:
+    """Whether ``path`` is a canonical root license-style file.
+
+    After NFKC normalization and case folding, the name stem (before the first
+    dot) is ``license``, ``licence``, ``copying`` or ``notice``, with no
+    extension or ``.md``, ``.txt`` or ``.rst``. Nested paths never match.
     """
 
     if "/" in path:
         return False
-    stem, dot, rest = path.partition(".")
-    return stem.casefold() in _LICENSE_STEMS and (dot + rest).casefold() in _LICENSE_EXTENSIONS
+    stem, dot, rest = _folded(path).partition(".")
+    return stem in _LICENSE_STEMS and (dot + rest) in _LICENSE_EXTENSIONS
+
+
+def is_license_like_name(path: str) -> bool:
+    """Whether a root file is named like a license, notice or copyright file.
+
+    After NFKC normalization and case folding, the name contains ``licen``,
+    ``copying``, ``notice``, ``unlicense`` or ``copyright``, or its stem (split
+    on the first ``.``, ``-`` or ``_``) is one of those words. Every such file
+    is metadata and decides the package license: a canonical name is
+    classified by its text, any other name only counts when its text equals a
+    canonical template exactly, and otherwise the license is ``unknown``.
+    """
+
+    if "/" in path:
+        return False
+    name = _folded(path)
+    stem = re.split(r"[.\-_]", name, maxsplit=1)[0]
+    return stem in _LICENSE_WORDS or any(word in name for word in _LICENSE_WORDS)
+
+
+def is_notice_file_name(path: str) -> bool:
+    """Whether ``path`` is a canonical root ``NOTICE`` file."""
+
+    return is_license_file_name(path) and _folded(path).partition(".")[0] == "notice"
 
 
 def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
@@ -149,7 +178,7 @@ def classify_asset(path: str, *, executable: bool = False) -> AssetKind:
 
 def _kind_for(parts: list[str], name: str, suffix: str) -> AssetKind | None:
     if len(parts) == 1:
-        if name == MANIFEST_FILE_NAME or is_license_file_name(name):
+        if name == MANIFEST_FILE_NAME or is_license_file_name(name) or is_license_like_name(name):
             return AssetKind.METADATA
         return AssetKind.INSTRUCTION if suffix == ".md" else None
     top = parts[0]
@@ -430,6 +459,8 @@ __all__ = [
     "classify_asset",
     "closure_digest",
     "is_license_file_name",
+    "is_license_like_name",
+    "is_notice_file_name",
     "normalize_path",
     "read_package_directory",
 ]

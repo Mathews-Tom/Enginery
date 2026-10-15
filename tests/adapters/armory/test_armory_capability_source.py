@@ -583,6 +583,54 @@ def test_license_files_with_other_casing_and_extensions_are_classified(name: str
 
 
 @pytest.mark.parametrize(
+    "name",
+    [
+        "LICENSE-GPL.md",
+        "LICENSE.gpl.md",
+        "COPYING.LESSER.md",
+        "THIRD_PARTY_NOTICES.md",
+        "LICENSE_GPL.md",
+        "LICENSE.md.md",
+        "UNLICENSE.md",
+        "LICENSES.md",
+        "\uff2c\uff29\uff23\uff25\uff2e\uff33\uff25.md",
+        "LICENSE-MIT",
+        "COPYRIGHT.txt",
+    ],
+)
+def test_every_license_like_root_file_with_non_template_text_makes_the_license_unknown(
+    name: str,
+) -> None:
+    assert _package_license(_GPL_TEXT, name=name) == "unknown"
+    assert _package_license(_LICENSE_TEXT + b"\nSee also the LGPL.\n", name=name) == "unknown"
+    assert _package_license(_LICENSE_TEXT, name=name) == "MIT"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"Copyright 2024 Foo. Files in vendor/ are GPLv3.",
+        b"Copyright 2024 Foo. Selling copies needs a paid agreement with Foo.",
+        b"Copyright (c) 2024 Foo; the Commons Clause v1.0 applies to this package.",
+        b"(c) 2024 vendor/ code is AGPL-3.0",
+        b"Copyright 2024 Foo <!-- sale needs a paid agreement; vendor/ is GPLv3 -->",
+        "Copyright 2024 Foo. Com\u200bmercial u\u200bse prohi\u200bbited.".encode(),
+    ],
+)
+def test_terms_smuggled_on_a_copyright_line_never_yield_mit(line: bytes) -> None:
+    body = b"THE SOFTWARE IS PROVIDED"
+
+    assert _package_license(line + b"\n" + _LICENSE_TEXT) == "unknown"
+    assert _package_license(_LICENSE_TEXT.replace(body, line + b"\n" + body, 1)) == "unknown"
+
+
+def test_license_lines_split_with_a_line_separator_never_yield_mit() -> None:
+    text = _LICENSE_TEXT.replace(b"\n\n", "\u2028Commercial use prohibited\u2028".encode(), 1)
+
+    assert _package_license(text) == "unknown"
+
+
+@pytest.mark.parametrize(
     "notice",
     [
         b"This package is licensed under the GPLv3.\n",

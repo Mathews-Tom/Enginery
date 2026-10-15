@@ -87,7 +87,8 @@ from enginery.capabilities.closure import (
     MAX_FILE_COUNT,
     MAX_TOTAL_BYTES,
     build_closure,
-    is_license_file_name,
+    is_license_like_name,
+    is_notice_file_name,
     normalize_path,
 )
 from enginery.capabilities.errors import (
@@ -416,14 +417,15 @@ class ArmoryCapabilitySource:
     def _package_license(self, files: Sequence[PackageFile]) -> str:
         """The package's own license file when it ships one, else the repository license.
 
-        Root license-style files decide the license only by exact canonical
-        template match; ``NOTICE`` files never decide it and make it ``unknown``
+        Every root license-like file decides the license: a canonical text
+        equal to a template classifies it, any other text makes it ``unknown``.
+        Canonical ``NOTICE`` files never decide it; they make it ``unknown``
         when they name another license family or reserve all rights.
         """
 
-        shipped = [item for item in files if is_license_file_name(item.path)]
+        shipped = [item for item in files if is_license_like_name(item.path)]
         repository = self._license()
-        notices = [item for item in shipped if item.path.partition(".")[0].casefold() == "notice"]
+        notices = [item for item in shipped if is_notice_file_name(item.path)]
         if any(notice_conflicts(_decode(item)) for item in notices):
             return UNKNOWN_LICENSE
         deciding = [item for item in shipped if item not in notices]

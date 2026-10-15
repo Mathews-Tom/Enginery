@@ -1,11 +1,23 @@
 """Exact-template license classification for Armory packages.
 
 A license file is classified only by equality with a canonical license text
-after normalization: case-folded, markdown heading markers removed, copyright
-lines removed, whitespace collapsed. Inserted terms, appended terms,
-carve-outs, dual licensing, and every other license text are ``unknown``.
+after normalization: case-folded, markdown heading markers removed, strictly
+shaped copyright lines in the leading block (and the Apache appendix's
+``Copyright [yyyy] [name of copyright owner]`` line) removed, whitespace collapsed.
+A removable copyright line is ``copyright``, ``(c)`` or ``©`` (optionally
+followed by ``(c)``/``©``), a year, year range or list, or ``[yyyy]``, and an
+optional holder of letters, digits, spaces and ``.,'&-`` (at most 80
+characters, no sentence break, no terms word, no other-license marker); the
+leading block ends at the first line longer than 40 characters that is not
+such a copyright line. Copyright lines anywhere else stay and break the match.
+Text with Unicode format characters, line or paragraph separators, control
+characters, HTML comments or any non-ASCII character other than ``©`` is
+``unknown``, as are inserted terms, appended terms, carve-outs, dual
+licensing, and every other license text.
 ``NOTICE`` files never decide a license; they only make it ``unknown`` when
-they carry another license's marker.
+they carry another license's marker (a GPL, MPL, SSPL, Creative Commons,
+BUSL, Elastic, EPL, PolyForm or OSL family name, copyleft, non-commercial
+terms, a proprietary or dual-license statement) or reserve all rights.
 """
 
 from __future__ import annotations
@@ -14,15 +26,22 @@ import re
 
 UNKNOWN_LICENSE = "unknown"
 
-# A copyright line is an attribution (year, holder placeholder, or (c)) that states no terms.
-_COPYRIGHT_PREFIX = re.compile(r"^(?:copyright|\(c\))")
+_APACHE_APPENDIX_COPYRIGHT = "copyright [yyyy] [name of copyright owner]"
+# A removable copyright line is a bare attribution: a prefix, a year (range or list) or
+# ``[yyyy]``, then an optional holder of letters, digits, spaces and ``.,'&-``.
+_COPYRIGHT_LINE = re.compile(
+    r"^(?:copyright|\(c\)|\u00a9)(?:\s*(?:\(c\)|\u00a9))?\s+"
+    r"(?:\d{4}(?:\s*[-,]\s*\d{4})*|\[yyyy\])"
+    r"(?:[\s,.-][a-z0-9 .,'&-]*)?$"
+)
+_SENTENCE_BREAK = re.compile(r"[.!?]\s+\S")
 _TERMS_WORDS = re.compile(
     r"\b(?:may|must|shall|should|not|no|only|prohibited|forbidden|commercial|without|except|"
     r"unless|provided|free|use|used|using|licen[sc]e[ds]?|permitted|permission|allowed|"
     r"restricted|terms|conditions|redistribut\w*|educational|personal|research)\b"
 )
-_MAX_COPYRIGHT_LINE = 100
-_ATTRIBUTION_MARK = re.compile(r"\d|\[|\(c\)|\u00a9")
+_MAX_COPYRIGHT_LINE = 80
+_MAX_TITLE_LINE = 40
 _HEADING_MARKERS = re.compile(r"^#+\s*")
 
 _MIT_BODY = (
@@ -251,6 +270,13 @@ _OTHER_LICENSE_MARKERS = re.compile(
     r"|dual[-\s]licen"
     r"|at your option"
     r"|choose either"
+    r"|\bbusl\b"
+    r"|business source license"
+    r"|elastic license"
+    r"|\bepl(?:-?\d|\b)"
+    r"|polyform"
+    r"|\bosl\b"
+    r"|copyleft"
 )
 _PERMISSIVE_GRANT_MARKERS = (
     "permission is hereby granted, free of charge",
@@ -258,26 +284,67 @@ _PERMISSIVE_GRANT_MARKERS = (
 )
 
 
+def _is_suspect(text: str) -> bool:
+    """Hidden or non-ASCII content that could smuggle terms past a line-based reading.
+
+    Every Unicode format character (category ``Cf``) and every line or
+    paragraph separator is non-ASCII, so the ASCII-plus-``©`` rule covers them.
+    """
+
+    if "<!--" in text:
+        return True
+    return any(
+        (ord(char) < 0x20 and char not in "\t\n\r") or (ord(char) > 0x7E and char != "\u00a9")
+        for char in text
+    )
+
+
+def _removable_copyright(line: str) -> bool:
+    """Whether ``line`` is a strictly shaped attribution that states no terms."""
+
+    return (
+        len(line) <= _MAX_COPYRIGHT_LINE
+        and _COPYRIGHT_LINE.match(line) is not None
+        and _TERMS_WORDS.search(line) is None
+        and _OTHER_LICENSE_MARKERS.search(line) is None
+        and "all rights reserved" not in line
+        and _SENTENCE_BREAK.search(line) is None
+    )
+
+
 def normalize_license_text(text: str) -> str:
-    """Case-fold, drop heading markers and copyright lines, collapse whitespace."""
+    """Case-fold, drop heading markers and leading copyright lines, collapse whitespace.
+
+    Only strictly shaped copyright lines in the leading block (before the first
+    long line of prose) are dropped; anywhere else they stay and break the
+    exact match.
+    """
 
     kept: list[str] = []
+    leading = True
     for raw in text.casefold().splitlines():
         line = _HEADING_MARKERS.sub("", raw.strip())
-        if (
-            _COPYRIGHT_PREFIX.match(line)
-            and _ATTRIBUTION_MARK.search(line) is not None
-            and len(line) <= _MAX_COPYRIGHT_LINE
-            and _TERMS_WORDS.search(line) is None
-        ):
+        if line == _APACHE_APPENDIX_COPYRIGHT:
             continue
+        if leading:
+            if _removable_copyright(line):
+                continue
+            if len(line) > _MAX_TITLE_LINE:
+                leading = False
         kept.append(line)
     return " ".join(" ".join(kept).split())
 
 
 def classify_license_text(text: str) -> str:
-    """The SPDX id of a text equal to a canonical template, else ``unknown``."""
+    """The SPDX id of a text equal to a canonical template, else ``unknown``.
 
+    Text with Unicode format characters, line or paragraph separators, control
+    characters, HTML comments or non-ASCII characters other than ``©`` is
+    ``unknown``.
+    """
+
+    if _is_suspect(text):
+        return UNKNOWN_LICENSE
     return _BY_TEXT.get(normalize_license_text(text), UNKNOWN_LICENSE)
 
 
