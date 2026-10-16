@@ -64,7 +64,8 @@ for scripting.
 
 ## Configuration
 
-Enginery reads layered configuration (below) when it builds a Stage 1 request. Every
+Enginery reads layered configuration (below) when it builds a Stage 1 request and when
+`factory init`, `doctor` and `explain` compile it for a project. Every
 run's provider configuration is an explicit, versioned `--request` document passed to
 `enginery stage1 start` (see
 [Running a Stage 1 workflow](#running-a-stage-1-workflow) below): work-item
@@ -253,6 +254,8 @@ script against a command that is not listed above.
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
 | `enginery factory init --runner MODE [--apply] [--project PATH] [choices...] [--json]` | Preview, or with `--apply` perform, guided project setup (below). |
 | `enginery factory doctor [--project PATH] [--json]` | Report the prerequisites the project's compiled selection needs, read-only (below). |
+| `enginery factory explain [--project PATH] [--json]` | Show where every compiled field comes from, which files setup owns and what is held, read-only (below). |
+| `enginery factory uninstall [--apply] [--project PATH] [--json]` | Preview, or with `--apply` perform, removal of exactly the unmodified files setup created (below). |
 | `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
 
 ### Capability packages
@@ -653,9 +656,9 @@ configuration the choices compile to. `--apply` performs exactly that plan:
   `conflict`, exits 9, and writes nothing at all. If it already holds exactly what init
   would write, nothing changes, so repeating `init` with the same choices is a no-op.
 - **A private ownership record** under `$XDG_STATE_HOME/enginery/projects/<id>/`
-  lists the files setup created with the sha256 of what it wrote. Every newly created
-  private directory has mode 0700. The record is written before the policy and restored
-  if creating the policy fails.
+  lists the files setup created with the sha256 of what it wrote, and the `.enginery`
+  directory when setup had to create it. Every newly created private directory has mode
+  0700. The record is written before the policy and restored if creating the policy fails.
 - Capabilities are never installed by init. For a selected capability that is not
   installed under `.enginery/installed`, init returns a hold (exit 5) naming the exact
   `enginery capability preview` and `install` commands; approvals stay digest-bound
@@ -690,6 +693,28 @@ the container-engine contact in `network_access`. Repair commands carry `--docke
 when a context is configured, so they target the same engine. Select a machine-local context
 with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or with
 `enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
+
+
+`factory explain` answers "why does this run use that value, and what did setup leave
+behind?" from the same compiler output `doctor` and `build-request` use. For every
+compiled field it prints the value, the winning layer, each shadowed lower-layer value
+with its source file and sha256, then the hard constraints that applied, every layer
+file with its digest, each file setup created with its status (`owned`,
+`user-modified`, `missing`, or `user-owned` for a policy setup did not create), and the
+holds that can be derived from local files (an undeclared trust mode, a permitted
+capability that is not installed). It reads local files only, changes nothing, exits 5
+while a hold remains and 2 for a malformed policy or user file. Host prerequisites
+remain `doctor`'s job.
+
+`factory uninstall` previews by default and, with `--apply`, undoes exactly what
+`init` did, using only the private ownership record. It removes the policy file only
+while its sha256 still equals the one setup recorded; a file you edited is kept and
+reported as user-owned, and a file that is already gone is a no-op. The `.enginery`
+directory setup created is removed only while it is empty, and the ownership record is
+removed last, so a second run reports nothing to uninstall. It never touches `user.toml`,
+the ledger, evidence and artifacts, the capability store or lockfile, or authentication
+state; a record that names any path other than the two setup creates is refused rather
+than obeyed, and a symbolic link on the way to either path is refused.
 
 ## Running a Stage 1 workflow
 
@@ -2243,6 +2268,25 @@ at most 900 seconds, and records the relay's request counts, the usage the
 harness reports and that the token value appears in no artifact. Nothing in
 Enginery starts it for you.
 
+### The setup scenario
+
+`scripts/run_factory_gate.py --scenario setup --evidence-out evidence/setup.json` qualifies
+guided setup and layered configuration locally. It needs no container engine, network,
+credential or hosted session: it builds a disposable `HOME` with both XDG directories,
+puts recording `gh` and `omp` stand-ins first on `PATH`, and drives the real `enginery`
+CLI in subprocesses. Its assertions cover `factory init` (preview writes nothing, apply
+performs the previewed plan, repeating it changes nothing, a differing policy is a
+conflict), the run, project and user layers each reaching the `--model` and `--thinking`
+argv the real Stage 1 adapter submitted to the stand-in harness, a project hard
+constraint refusing a run override, an unknown key being refused, `factory doctor`
+holding an unauthenticated `gh` with `gh auth login`, `factory uninstall` removing only
+unmodified setup-owned files, and the disposable home's global locations (`~/.config/gh`,
+`~/.omp`, `~/.claude`, `~/.claude.json`, MCP configuration, launchd and systemd
+directories) being byte-identical before and after. `--live`, `--harness`, `--model`
+and the gateway, image and custody flags are rejected for it. Exit status and evidence
+follow the same contract as the other scenarios: `0` only if every required assertion
+ran and passed, `3` (hold) when `git` is missing.
+
 ## Release scope and gate-deferred work
 
 `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0` (2026-08-11), and `v0.6.0`
@@ -2275,17 +2319,17 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ### Proposed factory commands (not shipped)
 
-`enginery factory init` and `enginery factory doctor` are shipped (see
+`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
 [Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
 `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `runner`, `capability`, and `factory`; `factory` provides `init` and
-`doctor` only. `gate status` accepts `--gate G4` only, and `stage1` provides
+`workspace`, `runner`, `capability`, and `factory`; `factory` provides those four
+subcommands only. `gate status` accepts `--gate G4` only, and `stage1` provides
 `start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
 and `build-request`.
 
 The rest of a manual-first factory layer is proposed with this command family:
-`factory collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`,
-`review`, `watch`, and `evidence`. Do not script against these names;
+`factory collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
+and `evidence`. Do not script against these names;
 they are a proposal, not a compatibility promise. The proposed boundary:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;
