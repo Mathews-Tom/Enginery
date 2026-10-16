@@ -30,9 +30,9 @@ from enginery.application.human_decisions import (
     bounded_json,
     checked_time,
     subject_digest as compute_subject_digest,
+    policy_action,
 )
 from enginery.domain.digests import Digest
-from enginery.domain.policy_decision import PolicyAction
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.ledger.connection import transaction
 
@@ -73,7 +73,7 @@ def issue_challenge(
         raise ActionMismatchError("a challenge requires a nonempty unique action set")
     for action in actions:
         try:
-            PolicyAction(action)
+            policy_action(action)
         except ValueError as error:
             raise ActionMismatchError("the challenge action is outside the policy namespace") from error
     digest = compute_subject_digest(run_id, subject_fields)
@@ -107,6 +107,7 @@ def consume_decision(
     registered_humans: tuple[AuthorityPrincipal, ...],
     verifier: Callable[[datetime, datetime], HumanDecision],
     now: datetime | None = None,
+    release: Callable[[HumanDecision], None] | None = None,
 ) -> HumanDecision:
     """Verify and consume the nonce with the approval write under one write lock.
 
@@ -179,6 +180,8 @@ def consume_decision(
                 "WHERE challenge_hash = ? AND consumed_at IS NULL",
                 (decided_at.isoformat(), decision.id, challenge_hash),
             )
+            if release is not None:
+                release(decision)
     if refusal is not None:
         raise refusal
     if decision is None:

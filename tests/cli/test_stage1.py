@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import getpass
 import json
+import os
+import pty
 import subprocess
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from enginery.application.work_ports import WorkLedgerSnapshot
+from enginery.application.human_decisions import ReviewAuthority
+from enginery.cli import factory_decisions
 from enginery.cli.main import main
 from enginery.cli.stage1_composition import lease_window
 from enginery.domain.digests import Digest
@@ -22,15 +29,62 @@ from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.ledger.service import LedgerService
+from enginery.ledger.human_decisions import issue_challenge
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
     stage1_request_from_state,
+    Stage1RunService,
 )
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
+from tests.cli.test_factory_decisions import _packet
+
+
+@pytest.fixture
+def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Real TTY and nonce path; only the display packet is isolated from checkout setup."""
+    master, slave = pty.openpty()
+    registration = ReviewAuthority("operator", getpass.getuser(), os.getuid())
+    original = _lifecycle
+    with (
+        os.fdopen(os.dup(slave), "r") as input_stream,
+        os.fdopen(os.dup(slave), "w") as output_stream,
+    ):
+        monkeypatch.setattr(
+            factory_decisions, "sys", SimpleNamespace(stdin=input_stream, stdout=output_stream),
+        )
+        monkeypatch.setattr(factory_decisions, "operator_registration", lambda: registration)
+
+        def authenticated(database: Path, command: str, *arguments: str) -> int:
+            if command not in {"approve", "reject", "resume"}:
+                return original(database, command, *arguments)
+            run_id = arguments[arguments.index("--run-id") + 1]
+            with LedgerService.open(database) as ledger:
+                runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
+                request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+                packet = replace(_packet(), run_id=run_id)
+                monkeypatch.setattr(factory_decisions, "build_packet", lambda *args: packet)
+                _, context = factory_decisions._authenticate(None)
+                issued = issue_challenge(
+                    ledger.connection, run_id=run_id, subject_fields=packet.subject_fields(),
+                    actions=factory_decisions._actions(ledger, request),
+                    context=context, registered_humans=registration.registered_humans,
+                )
+            reason = () if "--reason" in arguments else ("--reason", "operator investigated wait")
+            return original(
+                database, command, *arguments, *reason, "--subject-digest", issued.subject_digest,
+                "--challenge", issued.challenge,
+            )
+
+        monkeypatch.setattr(__import__(__name__, fromlist=["_lifecycle"]), "_lifecycle", authenticated)
+        try:
+            yield
+        finally:
+            os.close(master)
+            os.close(slave)
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -99,6 +153,7 @@ def test_stage1_rejects_invalid_persisted_implementation_budget(
         stage1_request_from_state(state)
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 def test_stage1_approve_resume_and_cancel_route_through_runtime(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -154,6 +209,7 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
     assert json.loads(capsys.readouterr().out)["status"] == "passed"
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 @pytest.mark.parametrize("command", ["approve", "reject"])
 def test_stage1_human_decisions_on_a_pinned_run_record_its_selection_digest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
@@ -183,6 +239,7 @@ def test_stage1_human_decisions_on_a_pinned_run_record_its_selection_digest(
     assert state["status"] == ("passed" if command == "approve" else "failed")
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 def test_stage1_human_decisions_on_a_pre_selection_run_record_no_selection_digest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -242,6 +299,7 @@ def test_stage1_cancel_rejects_human_wait_without_worker_lease(
     assert "cannot cancel a human-waiting non-agent node" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 def test_stage1_rejects_human_wait_and_invalid_request(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -55,15 +55,22 @@ def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     raised deliberately after some statements already ran — rolls back
     every statement executed since ``BEGIN IMMEDIATE``, so a multi-
     aggregate command never partially commits.
+    Nested ledger operations use a savepoint under the caller's write lock: consuming a
+    decision and releasing its node either both commit or both roll back.
     """
-    connection.execute("BEGIN IMMEDIATE")
+    nested = connection.in_transaction
+    connection.execute("SAVEPOINT enginery_nested" if nested else "BEGIN IMMEDIATE")
     try:
         yield connection
     except BaseException:
-        connection.execute("ROLLBACK")
+        if nested:
+            connection.execute("ROLLBACK TO enginery_nested")
+            connection.execute("RELEASE enginery_nested")
+        else:
+            connection.execute("ROLLBACK")
         raise
     else:
-        connection.execute("COMMIT")
+        connection.execute("RELEASE enginery_nested" if nested else "COMMIT")
 
 
 __all__ = ["open_connection", "transaction"]

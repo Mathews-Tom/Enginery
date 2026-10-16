@@ -11,6 +11,7 @@ from enginery.application.human_decisions import (
     HumanDecision,
     SubjectMismatchError,
     authenticate_context,
+    policy_action,
     subject_digest,
 )
 from enginery.domain.principal import AuthorityPrincipal
@@ -38,7 +39,7 @@ def decision_verifier(
 
     def verify(decided_at: datetime, expires_at: datetime) -> HumanDecision:
         authenticate_context(context, registered_humans)
-        if schema.action.value != action:
+        if schema.action != policy_action(action):
             raise ActionMismatchError("the approval schema does not bind the requested action")
         if schema.work_snapshot != digest or schema.target_resource != run_id:
             raise SubjectMismatchError("the approval schema does not bind the current packet")

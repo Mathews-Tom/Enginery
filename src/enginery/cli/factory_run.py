@@ -592,12 +592,20 @@ def _enrich(
         f"--owner factory --run-id {shlex.quote(run_id)}"
     )
     if awaiting is not None and awaiting["node_id"] != "review":
-        node_id = shlex.quote(str(awaiting["node_id"]))
+        node_id = str(awaiting["node_id"])
+        action = "pull_request.open" if node_id == "open_pr" else f"human_wait.{node_id}.approve"
+        project_flag = f"--project {shlex.quote(str(project))}"
         report["next_decision"] = {
-            "action": "stage1 approve|reject",
-            "command": f"enginery stage1 approve {prefix} --node-id {node_id} --reason REASON",
+            "action": "factory review|decide",
+            "review_command": f"enginery factory review {shlex.quote(run_id)} {project_flag}",
+            "command": (
+                f"enginery factory decide {shlex.quote(run_id)} {project_flag} "
+                f"--action {shlex.quote(action)} --subject-digest DIGEST --challenge CHALLENGE"
+            ),
             "reject_command": (
-                f"enginery stage1 reject {prefix} --node-id {node_id} --reason REASON"
+                f"enginery factory decide {shlex.quote(run_id)} {project_flag} "
+                f"--action human_wait.{shlex.quote(node_id)}.reject "
+                "--subject-digest DIGEST --challenge CHALLENGE --reason REASON"
             ),
         }
     elif report["next_action"] == "await_human_review":

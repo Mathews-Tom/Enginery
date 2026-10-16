@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +36,7 @@ from enginery.ledger.human_decisions import (
     list_decisions,
     require_current_decision,
 )
+from enginery.ledger.events import AppendCommand, EventWrite, append
 from enginery.ledger.migrations import apply_pending_migrations
 from enginery.policy.human_decisions import decision_verifier
 from enginery.policy.rules import HardRuleError
@@ -80,6 +81,7 @@ def _consume(
     fields: dict[str, object] | None = None, context: AuthenticatedDecisionContext = CONTEXT,
     action: str = ACTION, digest: str | None = None, now: datetime = NOW,
     schema: ApprovalSchema | None = None, reason: str = "",
+    release: Callable[[HumanDecision], None] | None = None,
 ) -> HumanDecision:
     fields = fields or _subject()
     schema = schema or ApprovalSchema(
@@ -91,6 +93,7 @@ def _consume(
         connection, run_id="run-1", action=action,
         subject_digest=digest or issued.subject_digest, current_subject_fields=fields,
         challenge=issued.challenge, context=context, registered_humans=REGISTERED, now=now,
+        release=release,
         verifier=decision_verifier(
             run_id="run-1", action=action, subject_fields=fields, context=context,
             registered_humans=REGISTERED, schema=schema, reason=reason,
@@ -114,6 +117,38 @@ def test_challenge_is_hash_only_and_success_consumes_once(connection: sqlite3.Co
         _consume(connection, issued)
     assert len(list_decisions(connection, "run-1")) == 1
     assert issued.challenge not in "\n".join(connection.iterdump())
+
+
+@pytest.mark.parametrize("fail_release", [False, True])
+def test_decision_consumption_and_human_wait_event_are_atomic(
+    connection: sqlite3.Connection, fail_release: bool,
+) -> None:
+    issued = _issue(connection)
+
+    def release(decision: HumanDecision) -> None:
+        assert connection.in_transaction
+        append(connection, AppendCommand(
+            correlation_id="human-wait-release",
+            events=(EventWrite(
+                aggregate_type="runtime_node", aggregate_id="run-1:open_pr",
+                expected_version=0, event_type="runtime_node.human_wait_resolved",
+                schema_version=1, payload={"decision_id": decision.id, "status": "passed"},
+            ),),
+        ))
+        if fail_release:
+            raise RuntimeError("release failed")
+
+    if fail_release:
+        with pytest.raises(RuntimeError, match="release failed"):
+            _consume(connection, issued, release=release)
+        assert not list_decisions(connection, "run-1")
+        assert connection.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+        row = connection.execute("SELECT consumed_at FROM human_decision_challenges").fetchone()
+        assert row["consumed_at"] is None
+    else:
+        decision = _consume(connection, issued, release=release)
+        row = connection.execute("SELECT payload FROM events").fetchone()
+        assert decision.id in row["payload"]
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,7 @@ from enginery.cli import factory_decisions
 from enginery.domain.digests import Digest
 from enginery.domain.execution_selection import SelectionLayer
 from enginery.ledger.human_decisions import list_decisions
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.policy.rules import HardRuleError
 from enginery.workflows.stage1 import Stage1RunRequest
@@ -96,6 +97,7 @@ def ingress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ingress
     request = cast(Stage1RunRequest, SimpleNamespace(
         run=SimpleNamespace(id=RUN, configuration_snapshot_digest=Digest.of_bytes(b"config")),
         repository_path=tmp_path, repository_id="owner/repository",
+        execution_selection=SimpleNamespace(legacy=True),
         implementation=SimpleNamespace(attempt_id="implement-1"),
         manifest=SimpleNamespace(
             nodes={"implement": None, "review": None, "open_pr": None, "validate": None},
@@ -246,6 +248,8 @@ def test_wrong_action_and_forged_subject_leave_challenge_unconsumed(
 
 @pytest.mark.parametrize("change", [
     {"head_revision": "c" * 40},
+    {"diff": "+different protected change"},
+    {"protected_publication_digest": str(Digest.of_bytes(b"new protected matched set"))},
     {"evidence_receipt_digests": (str(Digest.of_bytes(b"new evidence")),)},
     {"ci_evidence_json": '{"status":"failed"}'},
     {"findings_json": '["new finding"]'},
@@ -298,26 +302,49 @@ def test_current_registration_change_invalidates_effect_authority(
 
 
 def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from enginery.cli import stage1_composition
+
     ingress.states["validate"] = {"status": "awaiting_human"}
+    action = "human_wait.validate.approve"
     issued = ingress.issue()
-    assert issued["actions"] == ["policy.override"]
+    assert action in issued["actions"] and ACTION not in issued["actions"]
     with pytest.raises(HardRuleError):
-        ingress.decide(issued, action="policy.override")
-    result = ingress.decide(issued, action="policy.override", reason="operator investigated the wait")
+        ingress.decide(issued, action=action)
+
+    class Runtime:
+        def claim_epoch(self, **kwargs: Any) -> Any:
+            assert ingress.ledger.connection.in_transaction
+            return SimpleNamespace(epoch=1)
+
+        def resolve_human_wait(self, **kwargs: Any) -> None:
+            assert ingress.ledger.connection.in_transaction
+            ingress.ledger.append(AppendCommand(
+                correlation_id="resolve-wait",
+                events=(EventWrite(
+                    aggregate_type="runtime_node", aggregate_id=f"{RUN}:validate",
+                    expected_version=0, event_type="runtime_node.human_wait_resolved",
+                    schema_version=1, payload=kwargs["extra"],
+                ),),
+            ))
+            ingress.states["validate"]["status"] = kwargs["outcome"]
+
+    monkeypatch.setattr(stage1_composition, "runtime_for_run", lambda *args, **kwargs: Runtime())
+    result = ingress.decide(issued, action=action, reason="operator investigated the wait")
     assert result["node_id"] == "validate"
-    # Resolving the wait is coordinator work, not part of the ingress.
-    assert ingress.states["validate"]["status"] == "awaiting_human"
+    assert ingress.states["validate"]["status"] == "passed"
+    event = ingress.ledger.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{RUN}:validate",
+    )
+    assert event is not None and event.state["decision_id"] == result["decision_id"]
     assert factory_decisions.require_for_effect(
-        ingress.ledger, ingress.request, "policy.override", "validate",
-    ).normalized_inputs["override_scope"] == ("validate",)
-    with pytest.raises(SubjectMismatchError):
-        factory_decisions.require_for_effect(
-            ingress.ledger, ingress.request, "policy.override", "review",
-        )
+        ingress.ledger, ingress.request, action, "validate",
+    ).normalized_inputs["override_scope"] == ("approve", "validate")
     with pytest.raises(ActionMismatchError):
-        factory_decisions.require_for_effect(ingress.ledger, ingress.request, "policy.override")
+        factory_decisions.require_for_effect(ingress.ledger, ingress.request, action, "review")
+    with pytest.raises(ActionMismatchError):
+        factory_decisions.require_for_effect(ingress.ledger, ingress.request, action)
 
 
 def test_self_approval_and_hard_rule_scope_are_never_overridden(
@@ -333,7 +360,10 @@ def test_self_approval_and_hard_rule_scope_are_never_overridden(
     ingress.states["evidence.current_subject"] = {"status": "awaiting_human"}
     issued = ingress.issue()
     with pytest.raises(HardRuleError, match="hard rule"):
-        ingress.decide(issued, action="policy.override", reason="cannot weaken subject binding")
+        ingress.decide(
+            issued, action="human_wait.evidence.current_subject.approve",
+            reason="cannot weaken subject binding",
+        )
     assert not list_decisions(ingress.ledger.connection, RUN)
 
 

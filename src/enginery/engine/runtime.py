@@ -989,6 +989,7 @@ class CoordinatorRuntime:
         request: FixtureDispatch,
         epoch: int,
         now: datetime,
+        extra: Mapping[str, object] | None = None,
     ) -> None:
         """Replace a waiting attempt only with a new attempt and operation ID."""
         prior = self._request_for(request.run_id, request.node_id)
@@ -1009,6 +1010,7 @@ class CoordinatorRuntime:
             epoch=epoch,
             now=now,
             event_type="runtime_node.human_wait_resumed",
+            extra=extra,
         )
         self._fault("human_wait_resumed")
 

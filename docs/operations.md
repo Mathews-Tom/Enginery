@@ -5,9 +5,9 @@ configuration, health checks, the Stage 1 command surface, recovery,
 backup/restore, and the security limits an operator must understand before
 running real workflows.
 
-Every command shown here is copied from `--help` output or a real, executed
-invocation against this repository at the version documented in
-[`README.md`](../README.md#status). Enginery is `v0.6.0`. The Stage 1
+Commands shown here follow the shipped CLI definitions; examples use placeholders
+where operator-specific values are required. The published release documented in
+[`README.md`](../README.md#status) is `v0.6.0`. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `stage2 status` remains the only Stage 2 CLI command (a
@@ -980,9 +980,9 @@ run. A killed client or coordinator does not require a new request, workspace or
 ID; retrying pending PR publication reconciles its operation identity rather than
 creating a second PR. Binding, catalog or runner drift still holds; resume does not
 rewrite the binding or bypass those checks. `--wait-seconds` has the same wait-boundary
-meaning as on `run`. This is distinct from `stage1 resume --database DATABASE
---owner factory --run-id RUN --node-id NODE --attempt-id ATTEMPT --operation-id OPERATION`,
-which requeues a human-wait node; its flags and semantics are unchanged.
+meaning as on `run`. This is distinct from `stage1 resume`, which requeues a
+human-wait node and now requires authenticated, node-scoped authority as described
+below; a reason or an owner label alone cannot release a wait.
 
 `factory pause` reports its scope as the **project ledger**, not the whole host or
 another project's ledger. Running workers are untouched. Both `run` and `resume`
@@ -1052,20 +1052,75 @@ the matched paths. CI and behavioral receipts are current only when both their
 stored head and configuration digest match the packet; otherwise they are labeled
 `not_persisted_for_current_head` and excluded from the subject.
 
-Terminal review remains `enginery stage1 review` against the returned database and
-run ID. The independent review gate reports `next_decision` with
+### Authenticated terminal decisions
+
+Register the human operator in private user preferences, never project policy:
+
+```toml
+[review_authority]
+principal_id = "operator"
+os_user = "YOUR_OS_LOGIN"
+os_uid = 1000 # replace with your actual numeric UID from id -u
+ttl_seconds = 1800
+```
+
+Use the actual login reported by `id -un`. The lifetime may be shortened to
+1–1800 seconds, never extended beyond 30 minutes. Registration is local operator
+configuration, not a worker-supplied identity or an approval.
+
+Run `enginery factory review RUN --project PROJECT` on a genuine terminal whose
+stdin and stdout refer to the same TTY. Review lists the available action strings
+and current subject digest and issues a one-time challenge for that registered
+principal. The secret is shown only on that terminal, never in JSON (including
+serialized lines), HTML, feedback, or persisted packet artifacts; only its hash
+is stored. Redirected, piped, HTTP, or fabricated terminal contexts cannot issue
+or submit authenticated decisions. A noninteractive review can still display a
+packet but grants no authority.
+
+```text
+enginery factory decide RUN --project PROJECT --action pull_request.open --subject-digest DIGEST --challenge SECRET
+```
+
+`--principal-id ID` is optional and must match the registered principal;
+`--reason TEXT` records the operator's rationale. Use the digest and secret from
+the fresh terminal review, not a saved packet. Avoid shell history/transcripts
+that retain the secret. Successful submission atomically consumes the challenge
+and records a durable, expiring action-specific decision. Replays fail.
+
+The subject binds run, request, configuration, base/head, actual diff and protected
+paths, evidence, CI and findings. Lifecycle bookkeeping is excluded so recording
+or resolving the wait cannot invalidate its own authorization. Changed actual
+inputs supersede the decision; expiry or supersession requires a fresh review
+and decision before an effect can proceed. A review report, even one marked
+approved, never substitutes for `pull_request.open`.
+
+Human waits use `human_wait.NODE.approve`, `human_wait.NODE.reject`, or
+`human_wait.NODE.requeue`, with the actual node ID in place of `NODE`.
+Approving `open_pr` uses `pull_request.open`; rejecting it uses
+`human_wait.open_pr.reject`. Follow the exact actions and commands reported by
+review/status. `factory decide` resolves the selected wait atomically.
+
+**Breaking change:** `stage1 approve`, `stage1 reject`, and human-wait
+`stage1 resume` also require `--subject-digest DIGEST --challenge SECRET`
+and optionally `--principal-id ID`, using the same authentication and node-scoped
+actions. Retain their database/owner/run/node flags and required reason; resume
+also retains its attempt/operation flags. A legacy report or reason-only command
+no longer authorizes publication or releases work.
+
+This is a **trusted-local** protocol, not same-user process containment: another
+process with the operator's account privileges can access that account's resources.
+Use the isolated worker boundary for credential/authority separation. Merge,
+release and deployment remain outside this factory decision flow.
+
 `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
---repair-attempt N`, using the current implementation's repair index (zero initially).
-Supply the review report in the existing Stage 1 format. Other human-wait nodes
-report matching `stage1 approve` and `stage1 reject` commands with the waiting node ID
-and required `--reason REASON`; a failed implementation without a human-wait node reports
-its failure as a hold with an `enginery factory resume RUN --project P` repair using
-the bound run rather than suggesting an inapplicable review. A `blocked` action instead
-reports a hold with its recorded reason and matching repair; it is not an approval
-or a successful validation. The other Stage 1 commands retain their flags and output.
-The factory packet is a display and feedback surface only. This path ends at a verified open PR plus outcome
-observation. Merge, release and deployment are separate human actions, never actions
-performed by this factory path.
+--repair-attempt N` records findings using the current repair index (zero initially).
+It does not approve publication. `factory status`/`next_decision` report the fresh
+review/decide commands for authority-bearing waits. Feedback reports
+`findings_recorded` only when findings were actually submitted. A failed
+implementation without a human-wait node instead reports its failure and the
+matching `factory resume` repair; blocked actions remain holds, never successful
+validation. This path ends at a verified open PR plus outcome observation, not
+merge, release or deployment.
 
 The factory preserves the shared watch document's aggregate `status`, which the existing
 Stage 1 lifecycle may retain as `created`; it does not invent a run-state transition.
@@ -1083,6 +1138,18 @@ Holds report repairs; replace placeholders with the values reported for the run:
 
 | Hold | Repair |
 |---|---|
+| `human_decision_refused` | Correct the named registration/input error in private user preferences or the command, then run `enginery factory review RUN --project PROJECT` and submit its exact reported decision command. |
+| `decision_authentication_required` | Run review and decide directly on the same genuine stdin/stdout TTY as the registered OS user; remove pipes/redirection and do not submit through HTTP. |
+| `decision_principal_mismatch` | Set `[review_authority]` to the actual `id -un`/`id -u` identity in user preferences; omit `--principal-id` or use that registered ID, then obtain a fresh terminal review challenge. |
+| `decision_action_mismatch` | Run `enginery factory review RUN --project PROJECT`; use the exact available action for the intended effect and obtain a fresh challenge rather than reusing another action's authorization. |
+| `decision_subject_mismatch` | Run `enginery factory review RUN --project PROJECT` and copy its current subject digest into `factory decide`; never combine a digest and challenge from different reviews. |
+| `decision_subject_stale` | Review the changed head/diff/config/evidence/findings with `enginery factory review RUN --project PROJECT`, then decide against that new subject and challenge. |
+| `decision_challenge_unknown` | Discard the unrecognized secret; run `enginery factory review RUN --project PROJECT` on the terminal and use the newly issued challenge. |
+| `decision_challenge_expired` | Run `enginery factory review RUN --project PROJECT` again and submit the new decision before its configured expiry. |
+| `decision_challenge_replayed` | Do not replay the consumed challenge. Inspect `enginery factory status RUN --project PROJECT`; if a new decision is needed, obtain a new terminal review challenge. |
+| `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
+| `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
+| `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
 | Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
 | `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |
@@ -1216,12 +1283,14 @@ uv run enginery stage1 review --database ledger.db --owner operator --run-id run
 uv run enginery stage1 evidence --database ledger.db --owner operator --run-id run-1
 ```
 
-`stage1 review` is a separate command because it records an independent
-human or reviewer decision `watch --advance` cannot manufacture on its own.
-`stage1 approve` / `stage1 reject` resolve a node the run is durably waiting
-on a human decision for; `stage1 cancel` terminates a running or
-human-waiting node; `stage1 resume` restarts a specific human-wait node
-after a durable interruption. `stage1 evidence` prints the run's current
+`stage1 review` records independent review findings, not an authority decision.
+The diagram's approved edge requires a separate authenticated `pull_request.open`
+decision before publication; a report alone cannot traverse it.
+`stage1 approve` / `stage1 reject` resolve a human-wait node only with the
+authenticated subject/challenge protocol above; `stage1 cancel` terminates a
+running or human-waiting node. `stage1 resume` requeues a human-wait node using
+authenticated node-scoped requeue authority and its existing attempt/operation
+flags. `stage1 evidence` prints the run's current
 status, request digest, source revision, every runtime node's state, and an
 `execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
 — the operator's read path for "what is this run doing and why."
@@ -1801,18 +1870,16 @@ run resumes unchanged.
   --protected-path GLOB` (repeatable) adds patterns bound into the request; the
   defaults cannot be narrowed. A match puts the `open_pr` node into a human wait
   (`awaiting_human`) with the set, the matched paths and a digest recorded, raises a
-  human-action-required error, and pushes nothing. The reason names the commands:
-  `enginery stage1 approve --database <ledger> --owner <operator> --run-id <id>
-  --node-id open_pr --reason "<why>"` publishes it on the next `stage1 watch
-  --advance` (the node is re-registered as `open-pr-approved-<n>` and carries the
-  approved digest and the reason, which the final node keeps as
-  `publication_approval`); `stage1 reject` with the same arguments ends it. An
-  approval applies only to the exact matched set it was recorded for, and the digest
-  is compared on every attempt, including a retry or a restart after a failed
-  publication: when it no longer matches, the node returns to `awaiting_human` with
-  the new set and nothing is pushed until it is approved again. An ordinary
-  change records the empty match and publishes unheld. The hold covers changed CI
-  definitions only: a workflow, pipeline or build script the branch leaves
+  human-action-required error, and pushes nothing. Review it with
+  `enginery factory review RUN --project PROJECT`, then authenticate the exact
+  `pull_request.open` decision with the returned subject digest and terminal
+  challenge. `stage1 approve --node-id open_pr` requires the same authentication;
+  a reason alone is not authority. Rejection uses `human_wait.open_pr.reject`.
+  The decision is rechecked before publication, including retries and restarts;
+  changed head, diff, protected paths, evidence or findings require a fresh
+  decision. Ordinary changes also require authenticated publication authority,
+  even when the protected-path match is empty. The protected-path hold covers
+  changed CI definitions only: a workflow, pipeline or build script left
   unchanged still runs the candidate's code on the pushed branch with whatever access
   that CI has, so a branch with no protected change is not thereby safe to push to a
   repository whose CI runs on branch pushes with secrets.

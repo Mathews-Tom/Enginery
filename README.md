@@ -50,7 +50,12 @@ reports durable progress; `factory explain RUN` explains the run's immutable
 binding, while `factory explain` without RUN still explains current configuration.
 See the [Manual factory path](docs/operations.md#manual-factory-path) for private
 state, run identity, overrides and holds. `factory review RUN` renders a safe local
-terminal/HTML packet; `factory feedback RUN` queues repair findings, never approval.
+terminal/HTML packet and issues a terminal-only one-time challenge to a registered
+operator. `factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+records authenticated, expiring action-specific authority; publication uses
+`pull_request.open`. Feedback and Stage 1 review reports record findings only.
+See [terminal decisions](docs/operations.md#authenticated-terminal-decisions)
+for registration, node-scoped waits, supersession and trusted-local limitations.
 
 Factory `resume`, `pause`, and `drain` are shipped: reconcile and continue the
 same durable run, pause project-ledger dispatch, or drain supervised workers.

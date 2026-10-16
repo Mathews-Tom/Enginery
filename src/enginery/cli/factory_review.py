@@ -52,9 +52,7 @@ def _git(path: Path, *arguments: str) -> str:
 
 
 def _revision(path: Path, revision: str) -> str:
-    resolved = _git(
-        path, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
-    ).strip()
+    resolved = _git(path, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}").strip()
     if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", resolved) is None:
         raise InvalidInputError("review revision is not a full Git commit identity")
     return resolved
@@ -91,11 +89,9 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     }
     implementation = states["implement"]
     attempt_id = implementation.get("attempt_id")
-    if not isinstance(attempt_id, str):
-        raise MissingPrerequisiteError(
-            "review requires a collected implementation with a verified head"
-        )
-    attempt = _projection(ledger, "node_attempt", attempt_id)
+    attempt = (
+        _projection(ledger, "node_attempt", attempt_id) if isinstance(attempt_id, str) else {}
+    )
     result = attempt.get("result")
     result = dict(result) if isinstance(result, Mapping) else {}
     head = result.get("head_revision")
@@ -121,6 +117,11 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         ).split("\0")
         if value
     )
+    policy = ProtectedPathPolicy(request.protected_paths)
+    protected_digest = str(Digest.of_json({
+        "patterns": list(policy.patterns), "base_revision": base, "head_revision": head,
+        "matched_paths": list(policy.matched(changed_paths)),
+    }))
     observed = _projection(ledger, "behavioral_acceptance", run_id)
     configuration_digest = str(request.run.configuration_snapshot_digest)
     if (
@@ -140,7 +141,14 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         receipts.append(calibration)
     raw = request.initial_state()
     findings = states["review"].get("finding_ids", [])
-    ci = states["verify"]
+    ci = {
+        key: value for key, value in states["verify"].items()
+        if key in {
+            "head_revision", "configuration_snapshot_digest", "base_revision", "evidence_bundle_digest",
+            "evidence_digest",
+            "behavioral_receipt_digests", "github_evidence", "github_evidence_digest",
+        }
+    }
     ci_head = ci.get("head_revision")
     ci_view: dict[str, object] = {
         "availability": "current_head"
@@ -153,18 +161,13 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         else {},
     }
     sections = (
-        (
-            "Intent",
-            _json(
-                {
-                    "work_item": raw["work_item"],
-                    "source_revision": raw["source_revision"],
-                    "request_reference": str(
-                        private_state_directory(project) / "runs" / run_id / "request.json"
-                    ),
-                }
+        ("Intent", _json({
+            "work_item": raw["work_item"],
+            "source_revision": raw["source_revision"],
+            "request_reference": str(
+                private_state_directory(project) / "runs" / run_id / "request.json"
             ),
-        ),
+        })),
         (
             "Reproduction evidence",
             _json(
@@ -227,6 +230,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         ci_evidence_json=_json(ci_view),
         findings_json=_json(findings),
         sections=sections,
+        protected_publication_digest=protected_digest,
     )
     # No packet, even a display-only one, may leak credential-shaped worker text.
     assert_no_raw_credentials(_json(packet.to_state()))
@@ -269,11 +273,8 @@ def read_packet(project: Path, run_id: str) -> ReviewPacket:
 
 def _packet_path(project: Path, packet: ReviewPacket) -> Path:
     return (
-        private_state_directory(project)
-        / "review"
-        / packet.run_id
-        / packet.digest.hex_value
-        / "packet.html"
+        private_state_directory(project) / "review" / packet.run_id
+        / packet.digest.hex_value / "packet.html"
     )
 
 
@@ -305,8 +306,7 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
     try:
         packet = build_packet(project, ledger, request)
         payload = {
-            "kind": "packet_feedback",
-            "subject_digest": subject_digest,
+            "kind": "packet_feedback", "subject_digest": subject_digest,
             "text": redact_credential_shaped_text(text),
         }
         finding_id = _json(payload)
@@ -352,14 +352,9 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
             now=datetime.now(UTC),
             heartbeat_window=HEARTBEAT_WINDOW,
         )
-        return {
-            "run_id": run_id,
-            "subject_digest": subject_digest,
-            "review_outcome": result.outcome.value,
-            "feedback_queued": True,
-            "authority_granted": False,
-            "finding_id": str(Digest.of_json(payload)),
-        }
+        return {"run_id": run_id, "subject_digest": subject_digest,
+                "review_outcome": result.outcome.value, "feedback_queued": True,
+                "authority_granted": False, "finding_id": str(Digest.of_json(payload))}
     finally:
         ledger.close()
 
@@ -404,11 +399,11 @@ def lavish_feedback(
         findings = presenter.poll(path)
         if not findings:
             return {
-                "run_id": run_id,
-                "subject_digest": subject_digest,
-                "feedback_queued": False,
-                "authority_granted": False,
+                "run_id": run_id, "subject_digest": subject_digest,
+                "feedback_queued": False, "authority_granted": False,
             }
-        return feedback(project, run_id, subject_digest=subject_digest, text="\n".join(findings))
+        return feedback(
+            project, run_id, subject_digest=subject_digest, text="\n".join(findings)
+        )
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,13 @@ class HumanDecisionError(InvalidInputError):
     """A refused terminal decision with a stable, non-secret diagnostic code."""
 
     code: ClassVar[str] = "human_decision_refused"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.code}: {super().__str__()}; repair: in the registered operator's terminal, "
+            "run enginery factory review RUN --project PROJECT, then enginery factory decide "
+            "RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge CHALLENGE"
+        )
 
 
 class AuthenticationError(HumanDecisionError):
@@ -145,6 +153,16 @@ def checked_time(value: datetime) -> datetime:
     return value
 
 
+def wait_scope(action: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"human_wait\.([A-Za-z0-9_.-]+)\.(approve|reject|requeue)", action)
+    return None if match is None else (match[1], match[2])
+
+
+def policy_action(action: str) -> PolicyAction:
+    """Map an exact node/effect action onto the existing hard-rule namespace."""
+    return PolicyAction.POLICY_OVERRIDE if wait_scope(action) else PolicyAction(action)
+
+
 def subject_digest(run_id: str, fields: Mapping[str, object]) -> str:
     required = {
         "run_id", "request_digest", "configuration_snapshot_digest", "base_revision",
@@ -197,13 +215,13 @@ class HumanDecision:
         if subject_digest(self.run_id, self.subject_fields) != self.subject_digest:
             raise SubjectMismatchError("decision subject fields do not match their digest")
         if (
-            self.normalized_inputs.get("action") != self.action
+            self.normalized_inputs.get("action") != policy_action(self.action).value
             or self.normalized_inputs.get("work_snapshot") != self.subject_digest
             or self.normalized_inputs.get("target_resource") != self.run_id
             or Digest.of_json(thaw_json_value(self.normalized_inputs)) != self.schema_digest
         ):
             raise SubjectMismatchError("approved policy inputs do not bind this action and subject")
-        PolicyAction(self.action)
+        policy_action(self.action)
         bounded_json(self.normalized_inputs)
         bounded_json(self.reason)
         freeze_json_mapping(self, "normalized_inputs", self.normalized_inputs)
@@ -211,7 +229,7 @@ class HumanDecision:
 
     def attestation(self) -> ApprovalAttestation:
         return ApprovalAttestation(
-            action=PolicyAction(self.action), schema_digest=self.schema_digest,
+            action=policy_action(self.action), schema_digest=self.schema_digest,
             normalized_inputs=self.normalized_inputs, approvers=(self.principal,),
             approved=True, expires_at=self.expires_at,
             superseded=self.superseded_by is not None,

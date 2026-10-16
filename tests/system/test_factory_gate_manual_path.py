@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +50,12 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
     assert retained["exit"] == 5
     assert retained["json"]["blocked_workspace"]["status"] == "retained"
     assert any(hold["prerequisite"] == "retained workspace" for hold in retained["json"]["holds"])
-    assert (
-        assertions["terminal-review-approved"]["observed"]["json"]["review_outcome"] == "approved"
-    )
+    findings = assertions["terminal-review-findings-only"]["observed"]["json"]
+    assert findings["findings_recorded"] is True
+    publication = assertions["terminal-publication-decision"]
+    assert publication["observer"]["principal_id"] == manual_path.OPERATOR_PRINCIPAL
+    assert "pull_request.open" in publication["observed"]["review"]
+    assert "<challenge-sha256:" in publication["observed"]["review"]
     drain = assertions["drain-releases-resources"]["observed"]
     assert drain["wait"]["released"] == "by resume/reconcile"
     assert drain["stop"]["released"] == "now" and drain["stop"]["remaining"] == []
@@ -169,3 +173,26 @@ def test_manual_path_rejects_hosted_engine_and_custody_flags(
 
     assert refused.value.code == 2
     assert not (tmp_path / "evidence.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("code", "stderr"),
+    [
+        (1, "decision_required: unrelated failure"),
+        (5, "runner_unavailable: not an authority hold"),
+        (5, ""),
+    ],
+)
+def test_publication_hold_does_not_suppress_unrelated_cli_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int, stderr: str,
+) -> None:
+    gate = object.__new__(manual_path.ManualPathGate)
+    gate.project = tmp_path
+    gate.run_id = "held-run"
+
+    def refuse(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(list(arguments), code, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(gate, "cli", refuse)
+    with pytest.raises(RuntimeError, match="expected publication hold decision_required"):
+        gate.publication_hold()

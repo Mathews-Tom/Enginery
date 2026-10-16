@@ -53,12 +53,14 @@ class FailureRecord:
 def list_interventions(
     ledger: LedgerService, *, run_id: RunId, aggregate_type: str
 ) -> tuple[InterventionRecord, ...]:
-    """Every recorded human decision for ``run_id``, oldest evidence first
-    by node projection order. A node with no ``operator_decision`` field
-    (every non-human-wait node) is not an intervention and is excluded."""
+    """Human-wait decisions, including immutable historical intervention metadata.
+
+    New records identify the authenticated action. Historical operator_decision fields
+    remain readable for accounting only and are never used as authority.
+    """
     interventions: list[InterventionRecord] = []
     for record in _nodes_for_run(ledger, run_id, aggregate_type=aggregate_type):
-        decision = record.state.get("operator_decision")
+        decision = record.state.get("decision_action", record.state.get("operator_decision"))
         if not isinstance(decision, str):
             continue
         reason = record.state.get("reason")
@@ -79,15 +81,12 @@ def list_all_interventions(
 ) -> tuple[InterventionRecord, ...]:
     """Every recorded human decision across every run, ledger-wide.
 
-    Same recording contract as :func:`list_interventions` -- a node with
-    no ``operator_decision`` field is not an intervention and is
-    excluded -- but scoped to the whole ledger rather than one
-    ``run_id``, for callers (such as a gate-readiness report) that need
-    an aggregate count across every run rather than one run's history.
+    Same accounting-only historical decoding as :func:`list_interventions`, scoped
+    to the whole ledger. Decision metadata never authorizes another effect.
     """
     interventions: list[InterventionRecord] = []
     for record in ledger.list_projections(aggregate_type=aggregate_type):
-        decision = record.state.get("operator_decision")
+        decision = record.state.get("decision_action", record.state.get("operator_decision"))
         if not isinstance(decision, str):
             continue
         reason = record.state.get("reason")
