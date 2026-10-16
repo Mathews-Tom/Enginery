@@ -104,22 +104,53 @@ def write_document(path: Path, document: Mapping[str, object]) -> None:
     write_private_atomically(path, raw, what="factory private document")
 
 
+def ensure_private_directory(path: Path, *, what: str) -> list[Path]:
+    root = state_home()
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise InvalidInputError(f"{what} must be under the state home") from error
+    refuse_links(root.parent, Path(root.name) / relative, what=what)
+    created: list[Path] = []
+    components = [root]
+    for part in relative.parts:
+        components.append(components[-1] / part)
+    for component in components:
+        refuse_links(root.parent, component.relative_to(root.parent), what=what)
+        if not component.exists():
+            component.mkdir(mode=0o700, parents=component == root)
+            os.chmod(component, 0o700)
+            created.append(component)
+        elif not component.is_dir():
+            raise InvalidInputError(f"{what} must be a directory")
+    return created
+
+
 @contextlib.contextmanager
-def intake_lock(project: Path) -> Iterator[None]:
+def intake_lock(project: Path) -> Iterator[list[Path]]:
     path = index_path(project).with_suffix(".lock")
     require_private_path(path, what="factory intake lock")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    created = ensure_private_directory(path.parent, what="factory intake lock")
     require_private_path(path, what="factory intake lock")
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        yield created
     finally:
         os.close(descriptor)
 
 
 def database_path(project: Path) -> Path:
     return private_state_directory(project) / "ledger.sqlite"
+
+
+def ledger_sidecars(project: Path) -> frozenset[Path]:
+    path = database_path(project)
+    return frozenset(
+        sidecar
+        for suffix in ("-wal", "-shm")
+        if (sidecar := path.with_name(path.name + suffix)).exists()
+    )
 
 
 def require_state_path(path: Path, *, what: str) -> None:
@@ -243,12 +274,10 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
         "github_mutations": 0,
         "hosted_inference_calls": 0,
     }
-    ledger = database_path(project)
-    sidecars = [ledger.with_name(ledger.name + suffix) for suffix in ("-wal", "-shm")]
-    existing_sidecars = {path for path in sidecars if path.exists()}
+    existing_sidecars = ledger_sidecars(project)
     holds = intake_prerequisites(configuration, effects)
     local_writes = [
-        str(path) for path in sidecars if path not in existing_sidecars and path.exists()
+        str(path) for path in sorted(ledger_sidecars(project) - existing_sidecars, reverse=True)
     ]
     document: dict[str, object] = {
         "project": str(project),
@@ -270,17 +299,12 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             }
         )
         return document
-    intake_directory = index_path(project).parent
-    state_root = state_home()
-    relative_directory = intake_directory.relative_to(state_root)
-    missing_directories = [
-        state_root / relative
-        for relative in (*reversed(relative_directory.parents), relative_directory)
-        if not (state_root / relative).exists()
-    ]
-    with contextlib.nullcontext() if dry_run else intake_lock(project):
+    lock: contextlib.AbstractContextManager[list[Path]] = (
+        contextlib.nullcontext([]) if dry_run else intake_lock(project)
+    )
+    with lock as created_directories:
         if not dry_run:
-            local_writes.extend(str(path) for path in missing_directories)
+            local_writes.extend(str(path) for path in created_directories)
             local_writes.append(str(index_path(project).with_suffix(".lock")))
         index = read_index(project)
         intake = index.repositories.setdefault(repository, RepositoryIntake())

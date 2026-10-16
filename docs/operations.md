@@ -2356,16 +2356,16 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ### Proposed factory commands (not shipped)
 
-`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
-[Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
+`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped (see
+[Guided project setup](#guided-project-setup) and issue intake above). `enginery --help` lists exactly
 `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `runner`, `capability`, and `factory`; `factory` provides those four
+`workspace`, `runner`, `capability`, and `factory`; `factory` provides those five
 subcommands only. `gate status` accepts `--gate G4` only, and `stage1` provides
 `start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
 and `build-request`.
 
 The rest of a manual-first factory layer is proposed with this command family:
-`factory collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
+`factory run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
 and `evidence`. Do not script against these names;
 they are a proposal, not a compatibility promise. The proposed boundary:
 

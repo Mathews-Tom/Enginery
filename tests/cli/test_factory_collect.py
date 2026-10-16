@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sqlite3
 import subprocess
@@ -83,6 +84,51 @@ def test_dry_collect_has_no_local_or_external_mutations(
     assert eligible["selection"]["harness"]["winner"] == "factory"
     assert not held["eligible"] and "risk" in held["holds"][0]["detail"]
     assert "\\u001b" in "\n".join(factory_collect.document_lines(report))
+
+
+def test_collect_creates_private_directory_chain_under_permissive_umask(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
+    state_root = project.parent / "state"
+    assert not state_root.exists()
+    previous_umask = os.umask(0o022)
+    try:
+        report = collect(project, dry_run=False)
+    finally:
+        os.umask(previous_umask)
+    directories = [state_root, *(path for path in state_root.rglob("*") if path.is_dir())]
+    assert len(directories) == 5
+    for directory in directories:
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert str(directory) in report["local_writes"]
+
+
+@pytest.mark.parametrize("component", ["state", "enginery", "projects"])
+def test_collect_refuses_symlinked_directory_component(
+    project: Path, monkeypatch: pytest.MonkeyPatch, component: str
+) -> None:
+    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
+    state_root = project.parent / "state"
+    target = project.parent / "target"
+    target.mkdir()
+    link = state_root
+    if component != "state":
+        state_root.mkdir()
+        link = state_root / "enginery"
+    if component == "projects":
+        link.mkdir()
+        link /= "projects"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(InvalidInputError, match="symbolic link"):
+        collect(project, dry_run=False)
+    assert list(target.iterdir()) == []
+
+
+def test_private_directory_refuses_path_outside_state_home(project: Path) -> None:
+    with pytest.raises(InvalidInputError, match="under the state home"):
+        factory_collect.ensure_private_directory(project / "outside", what="test directory")
+    assert not (project / "outside").exists()
 
 
 def test_collect_discloses_index_and_cursor_and_detects_changed_snapshot(

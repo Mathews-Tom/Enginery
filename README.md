@@ -29,7 +29,7 @@ are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 
 ### Guided setup shipped; the rest of the factory direction proposed
 
-`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped: guided,
+`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped: guided,
 preview-first project setup, read-only prerequisite diagnostics, an explanation of where
 every configured value comes from, and reversible removal of exactly what setup created,
 described in [Guided project setup](docs/operations.md#guided-project-setup). They write
