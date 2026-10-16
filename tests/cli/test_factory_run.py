@@ -5,6 +5,7 @@ import os
 import shlex
 import sys
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,20 +114,8 @@ def test_changed_issue_holds_without_replacing_request(
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 5
     assert held["holds"][0]["detail"] == f"issue changed since run {run['run_id']} was bound"
-    assert shlex.split(held["holds"][0]["resolve"].split("; ")[0]) == [
-        "enginery",
-        "stage1",
-        "cancel",
-        "--database",
-        run["database"],
-        "--owner",
-        "factory",
-        "--run-id",
-        run["run_id"],
-        "--node-id",
-        "implement",
-    ]
-    assert shlex.split(held["holds"][0]["resolve"].split("; ")[1]) == [
+    assert "stage1 cancel" not in held["holds"][0]["resolve"]
+    assert shlex.split(held["holds"][0]["resolve"]) == [
         "enginery",
         "factory",
         "run",
@@ -228,8 +217,8 @@ def test_normalized_issue_spellings_share_one_bound_run(
 @pytest.mark.parametrize(
     ("action", "wait_seconds", "expected_calls", "expected_sleeps"),
     [
-        (Stage1ProgressionAction.WAIT, 9.0, 5, [0.5, 1.0, 2.0, 5.0, 0.5]),
-        (Stage1ProgressionAction.DISPATCH_QUEUED, 9.0, 5, [0.5, 1.0, 2.0, 5.0, 0.5]),
+        (Stage1ProgressionAction.WAIT, 9.0, 1, [0.5, 1.0, 2.0, 5.0, 0.5]),
+        (Stage1ProgressionAction.DISPATCH_QUEUED, 9.0, 1, [0.5, 1.0, 2.0, 5.0, 0.5]),
         (Stage1ProgressionAction.RECONCILE_WORKER, 0.0, 1, []),
         (Stage1ProgressionAction.WAIT_FOR_CI, 31.0, 3, [15.0, 15.0, 1.0]),
         (Stage1ProgressionAction.QUALIFY, 3.0, 3, [0.5, 1.0, 1.5]),
@@ -239,9 +228,9 @@ def test_normalized_issue_spellings_share_one_bound_run(
         (Stage1ProgressionAction.OPEN_PR, 3.0, 3, [0.5, 1.0, 1.5]),
         (Stage1ProgressionAction.VERIFY, 3.0, 3, [0.5, 1.0, 1.5]),
         (Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.HOLD, 30.0, 1, []),
-        (Stage1ProgressionAction.BLOCKED, 30.0, 1, []),
-        (Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, 30.0, 1, []),
+        (Stage1ProgressionAction.HOLD, 30.0, 0, []),
+        (Stage1ProgressionAction.BLOCKED, 30.0, 0, []),
+        (Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, 30.0, 0, []),
     ],
 )
 def test_wait_loop_backs_off_and_stops_at_deadline_without_spinning(
@@ -278,6 +267,22 @@ def test_wait_loop_backs_off_and_stops_at_deadline_without_spinning(
         sleeps.append(seconds)
         clock += seconds
 
+    monkeypatch.setattr(
+        factory_run,
+        "nodes",
+        lambda *_args, **_kwargs: [
+            {"node_id": "implement", "status": "queued", "attempt_id": "implement-0"}
+        ],
+    )
+    watch = factory_run.watch_document
+
+    def waiting_watch(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            **watch(*args, **kwargs),
+            "nodes": [{"node_id": "implement", "status": "queued", "attempt_id": "implement-0"}],
+        }
+
+    monkeypatch.setattr(factory_run, "watch_document", waiting_watch)
     monkeypatch.setattr(
         factory_run,
         "advancing_service",
@@ -466,7 +471,11 @@ def test_status_preserves_service_hold_diagnostics_and_matching_repairs(
     assert (
         report["holds"][0]["resolve"]
         == {
-            "restore": f"{doctor}; restore the run's bound configuration",
+            "restore": (
+                f"{doctor}; restore the run's bound configuration; "
+                f"enginery factory resume {original['run_id']} "
+                f"--project {shlex.quote(str(project))}"
+            ),
             "message": f"{doctor}; {hold['message']}",
             "repair": "service repair --exact",
             "nested": "service repair --nested",
@@ -502,6 +511,10 @@ def test_human_review_reports_the_current_repair_decision_command(
                     "attempt_id": f"implement-{generation}",
                 }
             ]
+        report["nodes"] = [
+            *report["nodes"],
+            {"node_id": "review", "status": "awaiting_human", "attempt_id": "review-0"},
+        ]
         return report
 
     monkeypatch.setattr(factory_run, "watch_document", review_watch)
@@ -575,25 +588,26 @@ def test_status_never_opens_the_migrating_ledger(
 
 def test_base_branch_cannot_be_interpreted_as_a_git_option(
     bound_project: tuple[Path, StandInGitHub],
-    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _ = bound_project
-    assert (
-        main(
-            [
-                "factory",
-                "run",
-                "owner/repo#1",
-                "--once",
-                "--project",
-                str(project),
-                "--base-branch=--help",
-            ]
+    calls: list[tuple[str, ...]] = []
+    real_run = factory_run.subprocess.run
+
+    def runner(argv: tuple[str, ...], **kwargs: object) -> object:
+        if "rev-parse" not in argv:
+            return real_run(argv, **kwargs)
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr="unknown revision")
+
+    monkeypatch.setattr(factory_run.subprocess, "run", runner)
+    with pytest.raises(InvalidInputError, match="git could not resolve"):
+        factory_run.request_inputs(
+            project, "owner/repo#1", "fr-test", SimpleNamespace(base_branch="--help")
         )
-        == 2
-    )
-    assert "git could not resolve the requested base branch" in capsys.readouterr().err
-    assert not (private_state_directory(project) / "runs").exists()
+    assert calls == [
+        ("git", "-C", str(project), "rev-parse", "--verify", "--end-of-options", "--help^{commit}")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -700,4 +714,356 @@ def test_supersede_checks_durable_terminal_and_effect_boundaries(
         assert report["run_id"] != run_id
     else:
         assert "supersede not safe" in report["holds"][0]["detail"]
-        assert f"--run-id {run_id}" in report["holds"][0]["resolve"]
+        assert "--supersede" in report["holds"][0]["resolve"]
+
+
+@pytest.mark.parametrize("risk", ("low", "medium"))
+def test_supersede_accepts_never_registered_implementation(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    risk: str,
+) -> None:
+    project, github = bound_project
+    github.serve(labels=("enginery/work-kind/issue", f"enginery/risk/{risk}"))
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert all(node["node_id"] != "implement" for node in original["nodes"])
+    github.serve(updated_at="2026-10-17T00:00:00Z")
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    assert "--node-id implement" not in held["holds"][0]["resolve"]
+    if risk == "medium":
+        assert "--node-id qualify" in held["holds"][0]["resolve"]
+    code, replacement = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
+    assert code == 0
+    assert replacement["run_id"] != original["run_id"]
+
+
+@pytest.mark.parametrize("failed", (False, True))
+def test_supersede_unchanged_snapshot_is_invalid(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    failed: bool,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        ledger.append(
+            AppendCommand(
+                correlation_id="unchanged-implementation",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{original['run_id']}:implement",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_status",
+                        schema_version=1,
+                        payload={
+                            "status": "failed" if failed else "running",
+                            "attempt_id": "implement-0",
+                        },
+                    ),
+                ),
+                lease_updates=(
+                    ()
+                    if failed
+                    else (
+                        LeaseWrite(
+                            run_id=original["run_id"],
+                            node_id="implement",
+                            epoch=1,
+                            fencing_token=1,
+                            owner="factory",
+                            attempt_id="implement-0",
+                            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                        ),
+                    )
+                ),
+            )
+        )
+    finally:
+        ledger.close()
+    code = main(
+        [
+            "factory",
+            "run",
+            "owner/repo#1",
+            "--supersede",
+            "--once",
+            "--project",
+            str(project),
+            "--json",
+        ]
+    )
+    assert code == 2
+    assert (
+        f"issue snapshot unchanged since run {original['run_id']} was bound; "
+        "use `factory run`/`factory resume`"
+    ) in capsys.readouterr().err
+
+
+def test_medium_risk_wait_names_approve_and_reject(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, github = bound_project
+    github.serve(labels=("enginery/work-kind/issue", "enginery/risk/medium"))
+    code, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 0
+    decision = report["next_decision"]
+    for key, action in (("command", "approve"), ("reject_command", "reject")):
+        argv = shlex.split(decision[key])
+        assert argv[:3] == ["enginery", "stage1", action]
+        assert argv[argv.index("--node-id") + 1] == "qualify"
+        assert argv[argv.index("--run-id") + 1] == report["run_id"]
+        assert argv[argv.index("--database") + 1] == report["database"]
+
+
+def test_failed_implementation_without_wait_reports_service_failure(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        ledger.append(
+            AppendCommand(
+                correlation_id="failure-decision",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{original['run_id']}:implement",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_failed",
+                        schema_version=1,
+                        payload={
+                            "status": "failed",
+                            "attempt_id": "implement-0",
+                            "message": "Implementation exceeded its time limit",
+                            "repair": "service repair --exact",
+                        },
+                    ),
+                ),
+            )
+        )
+    finally:
+        ledger.close()
+    code, report = invoke(capsys, project, "status", original["run_id"])
+    assert code == 5
+    assert "next_decision" not in report
+    assert report["holds"][0]["message"] == "Implementation exceeded its time limit"
+    assert report["holds"][0]["resolve"] == "service repair --exact"
+
+
+@pytest.mark.parametrize(
+    "action", (Stage1ProgressionAction.WAIT, Stage1ProgressionAction.DISPATCH_QUEUED)
+)
+@pytest.mark.parametrize("wait_seconds", (0.05, 9.0, 31.0))
+def test_idle_real_ledger_wait_does_not_append_per_poll(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    wait_seconds: float,
+    action: Stage1ProgressionAction,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    real_service = factory_run.advancing_service
+    advances: list[float] = []
+    clock = 0.0
+
+    def service(**kwargs: object) -> SimpleNamespace:
+        authoritative = real_service(**kwargs)
+        run = authoritative.next_action(factory_run.RunId(original["run_id"])).run
+        waiting = Stage1Progression(action, run)
+        ledger = kwargs["ledger"]
+
+        def advance(*_args: object, **_kwargs: object) -> Stage1Progression:
+            assert isinstance(ledger, LedgerService)
+            advances.append(factory_run.time.monotonic())
+            ledger.append(
+                AppendCommand(
+                    correlation_id=f"idle-attempt-{len(advances)}",
+                    events=(
+                        EventWrite(
+                            aggregate_type="idle_fixture",
+                            aggregate_id=f"idle-{len(advances)}",
+                            expected_version=0,
+                            event_type="idle_fixture.coordinator_attempt",
+                            schema_version=1,
+                            payload={},
+                        ),
+                    ),
+                )
+            )
+            return waiting
+
+        return SimpleNamespace(next_action=lambda _: waiting, advance=advance)
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(factory_run, "advancing_service", service)
+    if wait_seconds > 1:
+        monkeypatch.setattr(factory_run.time, "monotonic", lambda: clock)
+        monkeypatch.setattr(factory_run.time, "sleep", sleep)
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        ledger.append(
+            AppendCommand(
+                correlation_id="queued-implementation",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{original['run_id']}:implement",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_queued",
+                        schema_version=1,
+                        payload={"status": "queued", "attempt_id": "implement-0"},
+                    ),
+                ),
+            )
+        )
+        before = ledger.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        factory_run.advance_run(project, original["run_id"], wait_seconds=wait_seconds)
+        after = ledger.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    finally:
+        ledger.close()
+    assert after - before == len(advances)
+    assert len(advances) <= 1 + int(wait_seconds // 15)
+    assert all(right - left >= 15 for left, right in pairwise(advances))
+
+
+def test_completed_run_returns_without_advancing_or_sleeping(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=original["run_id"])
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(
+            factory_run.RunId(original["run_id"])
+        )
+    finally:
+        ledger.close()
+    progression = Stage1Progression(Stage1ProgressionAction.WAIT, run)
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("completed run must not advance or wait")
+
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **_: SimpleNamespace(next_action=lambda _: progression, advance=unexpected),
+    )
+    monkeypatch.setattr(factory_run.time, "sleep", unexpected)
+    report = factory_run.advance_run(project, original["run_id"], wait_seconds=30)
+    assert report["next_action"] == "wait"
+
+
+def test_failed_implementation_human_wait_names_its_decision(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        ledger.append(
+            AppendCommand(
+                correlation_id="implementation-human-wait",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{original['run_id']}:implement",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_awaiting",
+                        schema_version=1,
+                        payload={
+                            "status": "awaiting_human",
+                            "attempt_id": "implement-0",
+                            "operation_id": f"implement:{original['run_id']}",
+                        },
+                    ),
+                ),
+            )
+        )
+    finally:
+        ledger.close()
+    code, report = invoke(capsys, project, "status", original["run_id"])
+    assert code == 0
+    decision = report["next_decision"]
+    assert "--node-id implement" in decision["command"]
+    assert "--node-id implement" in decision["reject_command"]
+    assert decision["action"] == "stage1 approve|reject"
+
+
+def test_repeated_action_with_node_progress_advances_without_sleep(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=original["run_id"])
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(
+            factory_run.RunId(original["run_id"])
+        )
+    finally:
+        ledger.close()
+    generation = 0
+
+    def progression() -> Stage1Progression:
+        action = (
+            Stage1ProgressionAction.IMPLEMENT if generation < 3 else Stage1ProgressionAction.WAIT
+        )
+        return Stage1Progression(action, run)
+
+    def node_states(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return [
+            {
+                "node_id": "implement",
+                "attempt_id": f"implement-{generation}",
+                "status": "running" if generation < 3 else "passed",
+            }
+        ]
+
+    def advance(*_args: object, **_kwargs: object) -> Stage1Progression:
+        nonlocal generation
+        generation += 1
+        return progression()
+
+    watch = factory_run.watch_document
+
+    def progress_watch(
+        ledger: LedgerService,
+        runtime: CoordinatorRuntime,
+        progression: Stage1Progression,
+        *,
+        action_taken: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            **watch(ledger, runtime, progression, action_taken=action_taken),
+            "nodes": node_states(),
+        }
+
+    def unexpected(_seconds: float) -> None:
+        pytest.fail("durable node progress must not back off")
+
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **_: SimpleNamespace(next_action=lambda _: progression(), advance=advance),
+    )
+    monkeypatch.setattr(factory_run, "nodes", node_states)
+    monkeypatch.setattr(factory_run, "watch_document", progress_watch)
+    monkeypatch.setattr(factory_run.time, "sleep", unexpected)
+    factory_run.advance_run(project, original["run_id"], wait_seconds=30)
+    assert generation == 3

@@ -812,7 +812,8 @@ Issue numbers use positive ASCII digits without leading zeroes; `OWNER/REPO#01` 
 review, terminal state or wait boundary; `--wait-seconds` defaults to zero, returning
 at the first wait while the supervised worker may keep running. The wait must be a
 finite non-negative number. Idle or unchanged actions back off for 0.5, 1, 2, then
-5 seconds between passes; CI waits poll no more often than every 15 seconds. The
+5 seconds between read-only passes; unchanged waits advance the coordinator no more
+often than every 15 seconds. CI waits poll no more often than every 15 seconds. The
 command returns at the deadline rather than making another idle advance.
 Repeating `factory run` for the same bound issue continues that durable run.
 `status` never advances it: without RUN it lists project runs; with RUN it reports
@@ -827,10 +828,13 @@ Without RUN, `factory explain` retains the current configuration and setup-owner
 explanation described above.
 
 Terminal review remains `enginery stage1 review` against the returned database and
-run ID. An `await_human_review` action reports `next_decision` with
+run ID. The independent review gate reports `next_decision` with
 `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
 --repair-attempt N`, using the current implementation's repair index (zero initially).
-Supply the review report in the existing Stage 1 format. A `blocked` action instead
+Supply the review report in the existing Stage 1 format. Other human-wait nodes
+report matching `stage1 approve` and `stage1 reject` commands with the waiting node ID;
+a failed implementation without a human-wait node reports its failure and repair as
+a hold rather than suggesting an inapplicable review. A `blocked` action instead
 reports a hold with its recorded reason and matching repair; it is not an approval
 or a successful validation. The other Stage 1 commands retain their flags and output.
 There is no factory review UI. This path ends at a verified open PR plus outcome
@@ -852,9 +856,12 @@ Holds report the exact repair command. Common cases are:
   bound". Inspect the old run with `factory status RUN`; cancel it with
   `enginery stage1 cancel --database PATH --owner factory --run-id RUN --node-id implement`
   as appropriate before `enginery factory run OWNER/REPO#N --supersede`.
-  Superseding refuses a still-active old run: its run status must be terminal, or its
-  latest implementation attempt must be terminal with no active lease or live worker
-  and no pending `open_pr` node. The refusal names those durable read fields for inspection.
+  Superseding requires a terminal run, or a terminal latest implementation with no
+  active lease or live worker and no pending `open_pr` node. It also accepts an
+  implementation never registered when no active lease, live worker or `open_pr`
+  node exists. Cancellation repairs name only existing live nodes. An unchanged
+  snapshot with `--supersede` is an input error: use `factory run`/`factory resume`.
+  The refusal names those durable read fields for inspection.
   Cancellation does not invent a run-state transition. Superseding explicitly records
   a new binding and run; the old run remains durable and visible in status.
 - Paused dispatch: `enginery-operator resume --database DB` lifts the project-ledger

@@ -34,6 +34,7 @@ from enginery.cli.stage1_composition import (
     HEARTBEAT_WINDOW,
     advancing_service,
     lease_window,
+    nodes,
     read_only_service,
     runtime_for_run,
     start_bound_run,
@@ -42,6 +43,7 @@ from enginery.cli.stage1_composition import (
 from enginery.cli.stage1_request import RequestInputs, compile_request
 from enginery.domain.errors import EngineryError, InvalidInputError
 from enginery.domain.ids import RunId
+from enginery.domain.run import RUN_TRANSITIONS
 from enginery.engine.operator_control import live_workers, read_control_state
 from enginery.engine.runtime import RUN_AGGREGATE_TYPE, RUNTIME_NODE_AGGREGATE_TYPE
 from enginery.engine.scheduler import SchedulingLimits
@@ -53,7 +55,7 @@ from enginery.workflows.stage1 import (
     stage1_request_from_state,
 )
 
-_TERMINAL_STATUSES = frozenset({"succeeded", "cancelled", "failed", "rejected", "superseded"})
+_TERMINAL_STATUSES = frozenset(state.value for state in RUN_TRANSITIONS.terminal_states)
 _EXECUTES_NOW = frozenset(
     {
         Stage1ProgressionAction.QUALIFY,
@@ -82,15 +84,35 @@ def nonnegative_seconds(value: str) -> float:
 
 
 def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
+    repairs = []
+    connection = read_ledger(project)
+    if connection is not None:
+        try:
+            for node in LedgerService(connection).list_projections(
+                aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE
+            ):
+                if node.aggregate_id.startswith(f"{run_id}:") and node.state.get("status") in {
+                    "queued",
+                    "running",
+                    "awaiting_human",
+                }:
+                    node_id = node.aggregate_id.removeprefix(f"{run_id}:")
+                    repairs.append(
+                        f"enginery stage1 cancel "
+                        f"--database {shlex.quote(str(database_path(project)))} "
+                        f"--owner factory --run-id {shlex.quote(run_id)} "
+                        f"--node-id {shlex.quote(node_id)}"
+                    )
+        finally:
+            connection.close()
+    repairs.append(
+        f"enginery factory run {shlex.quote(issue)} --supersede "
+        f"--project {shlex.quote(str(project))}"
+    )
     return {
         "prerequisite": "bound snapshot",
         "detail": f"issue changed since run {run_id} was bound",
-        "resolve": (
-            f"enginery stage1 cancel --database {shlex.quote(str(database_path(project)))} "
-            f"--owner factory --run-id {shlex.quote(run_id)} --node-id implement; "
-            f"enginery factory run {shlex.quote(issue)} --supersede "
-            f"--project {shlex.quote(str(project))}"
-        ),
+        "resolve": "; ".join(repairs),
     }
 
 
@@ -128,18 +150,20 @@ def _supersede_hold(project: Path, issue: str, run_id: str) -> dict[str, str] | 
         implementation_state = {} if implementation is None else implementation.state
         publication_status = None if publication is None else publication.state.get("status")
         lease = ledger.read_lease(run_id=run_id, node_id="implement")
-        expiry = (
-            None
-            if lease is None or lease.expires_at is None
-            else datetime.fromisoformat(lease.expires_at)
-        )
-        lease_active = lease is not None and (
-            expiry is None or expiry.tzinfo is None or expiry > datetime.now(UTC)
-        )
+        active_leases = []
+        for node_id, expires_at in connection.execute(
+            "SELECT node_id, expires_at FROM node_leases WHERE run_id = ?", (run_id,)
+        ):
+            expiry = None if expires_at is None else datetime.fromisoformat(expires_at)
+            if expiry is None or expiry.tzinfo is None or expiry > datetime.now(UTC):
+                active_leases.append(node_id)
         workers = [worker.attempt_id for worker in live_workers(ledger) if worker.run_id == run_id]
         if (
-            implementation_state.get("status") in _TERMINAL_NODE_STATUSES
-            and not lease_active
+            (
+                implementation_state.get("status") in _TERMINAL_NODE_STATUSES
+                or (implementation is None and publication is None)
+            )
+            and not active_leases
             and not workers
             and (publication is None or publication_status in _TERMINAL_NODE_STATUSES)
         ):
@@ -154,6 +178,7 @@ def _supersede_hold(project: Path, issue: str, run_id: str) -> dict[str, str] | 
             f"{None if lease is None else lease.attempt_id!r}, "
             f"node_leases[{run_id}:implement].expires_at="
             f"{None if lease is None else lease.expires_at!r}, "
+            f"active node leases={active_leases!r}, "
             f"live worker-supervisor attempts={workers!r}, "
             f"runtime_node[{run_id}:open_pr].status={publication_status!r}"
         )
@@ -248,6 +273,11 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
         intake = index.repositories.setdefault(repository, RepositoryIntake())
         previous = intake.issues.get(issue)
         if previous is not None:
+            if previous.bound_digest == digest and args.supersede:
+                raise InvalidInputError(
+                    f"issue snapshot unchanged since run {previous.run_id} was bound; "
+                    "use `factory run`/`factory resume`"
+                )
             if previous.bound_digest != digest and not args.supersede:
                 return _held(project, [changed_hold(project, issue, previous.run_id)])
             if args.supersede:
@@ -323,8 +353,13 @@ def advance_run(
         service = advancing_service(runtime=runtime, ledger=ledger, request=run.request)
         deadline = time.monotonic() + wait_seconds
         backoff = 0
+        progression = service.next_action(RunId(run_id))
         while True:
-            previous = service.next_action(RunId(run_id))
+            before = _node_digest(nodes(ledger, runtime, run_id=run_id))
+            report = _enrich(project, ledger, watch_document(ledger, runtime, progression), run_id)
+            if _finished(report):
+                return report
+            previous = progression
             progression = service.advance(
                 RunId(run_id),
                 now=datetime.now(UTC),
@@ -332,21 +367,22 @@ def advance_run(
                 lease_window=lease_window(previous.run.request),
                 limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
             )
-            report = watch_document(
-                ledger, runtime, progression, action_taken=previous.action.value
+            last_advance = time.monotonic()
+            report = _enrich(
+                project,
+                ledger,
+                watch_document(ledger, runtime, progression, action_taken=previous.action.value),
+                run_id,
             )
-            report = _enrich(project, ledger, report, run_id)
-            if (
-                once
-                or progression.action.value in {"hold", "blocked", "await_human_review"}
-                or progression.run.status.value in _TERMINAL_STATUSES
-            ):
+            if once or _finished(report):
                 return report
-            unchanged = (
-                progression.action == previous.action
-                and progression.run.aggregate_version == previous.run.aggregate_version
-            )
-            if progression.action not in _EXECUTES_NOW or unchanged:
+            digest = _node_digest(cast(list[dict[str, object]], report["nodes"]))
+            if progression.action in _EXECUTES_NOW and (
+                progression.action != previous.action or digest != before
+            ):
+                backoff = 0
+                continue
+            while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return report
@@ -354,13 +390,59 @@ def advance_run(
                 if progression.action is Stage1ProgressionAction.WAIT_FOR_CI:
                     delay = max(15.0, delay)
                 time.sleep(min(delay, remaining))
-                if time.monotonic() >= deadline:
+                observed = service.next_action(RunId(run_id))
+                current_nodes = nodes(ledger, runtime, run_id=run_id)
+                current_digest = _node_digest(current_nodes)
+                report = _enrich(project, ledger, watch_document(ledger, runtime, observed), run_id)
+                if _finished(report) or time.monotonic() >= deadline:
                     return report
                 backoff = min(backoff + 1, len(_BACKOFF_SECONDS) - 1)
-            else:
-                backoff = 0
+                if (
+                    observed.action in _EXECUTES_NOW
+                    or observed.action != progression.action
+                    or current_digest != digest
+                    or (
+                        observed.action.value
+                        in {"dispatch_queued", "reconcile_worker", "wait_for_ci", "wait"}
+                        and time.monotonic() - last_advance >= 15.0
+                    )
+                ):
+                    if observed.action != progression.action or current_digest != digest:
+                        backoff = 0
+                    progression = observed
+                    break
     finally:
         ledger.close()
+
+
+def _node_digest(node_states: list[dict[str, object]]) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        (
+            str(node["node_id"]),
+            str(node.get("status")),
+            str(node.get("attempt_id")),
+            str(node.get("generation")),
+            str(worker.get("liveness") if isinstance(worker, Mapping) else None),
+        )
+        for node in node_states
+        for worker in (node.get("worker"),)
+    )
+
+
+def _finished(report: Mapping[str, object]) -> bool:
+    node_states = cast(list[dict[str, object]], report["nodes"])
+    return bool(
+        report.get("holds")
+        or report.get("workflow_complete")
+        or report["next_action"] in {"hold", "blocked", "await_human_review"}
+        or report["status"] in _TERMINAL_STATUSES
+        or any(node["status"] in {"awaiting_human", "blocked"} for node in node_states)
+        or (
+            report["next_action"] == "wait"
+            and node_states
+            and all(node["status"] in _TERMINAL_NODE_STATUSES for node in node_states)
+        )
+    )
 
 
 def _enrich(
@@ -408,30 +490,90 @@ def _enrich(
             ),
             **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
         }
-    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold)]
-    if report["next_action"] == "await_human_review":
-        attempt = next(
-            (
-                node["attempt_id"]
-                for node in cast(list[dict[str, object]], report["nodes"])
-                if node["node_id"] == "implement"
-            ),
-            None,
-        )
-        repair_attempt = (
-            first_attempt_generation(attempt)
-            - first_attempt_generation(request.implementation.attempt_id)
-            if isinstance(attempt, str)
-            else 0
-        )
+    node_states = cast(list[dict[str, object]], report["nodes"])
+    awaiting = next((node for node in node_states if node["status"] == "awaiting_human"), None)
+    prefix = (
+        f"--database {shlex.quote(str(database_path(project)))} "
+        f"--owner factory --run-id {shlex.quote(run_id)}"
+    )
+    if awaiting is not None and awaiting["node_id"] != "review":
+        node_id = shlex.quote(str(awaiting["node_id"]))
         report["next_decision"] = {
-            "action": "stage1 review",
-            "command": (
-                f"enginery stage1 review --database {shlex.quote(str(database_path(project)))} "
-                f"--owner factory --run-id {shlex.quote(run_id)} --report REPORT.json "
-                f"--repair-attempt {repair_attempt}"
+            "action": "stage1 approve|reject",
+            "command": f"enginery stage1 approve {prefix} --node-id {node_id}",
+            "reject_command": (
+                f"enginery stage1 reject {prefix} --node-id {node_id} --reason REASON"
             ),
         }
+    elif report["next_action"] == "await_human_review":
+        implementation = next(
+            (node for node in node_states if node["node_id"] == "implement"), None
+        )
+        validation = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:validate"
+        )
+        review_ready = (
+            implementation is not None
+            and implementation["status"] == "passed"
+            and validation is not None
+            and validation.state.get("status") == "passed"
+            and validation.state.get("validation_artifact_digest") is not None
+            and first_attempt_generation(str(validation.state["attempt_id"]))
+            == first_attempt_generation(str(implementation["attempt_id"]))
+        )
+        if (awaiting is not None and awaiting["node_id"] == "review") or review_ready:
+            attempt = None if implementation is None else implementation["attempt_id"]
+            repair_attempt = (
+                first_attempt_generation(attempt)
+                - first_attempt_generation(request.implementation.attempt_id)
+                if isinstance(attempt, str)
+                else 0
+            )
+            report["next_decision"] = {
+                "action": "stage1 review",
+                "command": (
+                    f"enginery stage1 review {prefix} --report REPORT.json "
+                    f"--repair-attempt {repair_attempt}"
+                ),
+            }
+        elif hold is None:
+            failed = next(
+                (
+                    node
+                    for node in node_states
+                    if node["status"] in _TERMINAL_NODE_STATUSES and node["status"] != "passed"
+                ),
+                None,
+            )
+            projection = (
+                None
+                if failed is None
+                else ledger.read_projection(
+                    aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+                    aggregate_id=f"{run_id}:{failed['node_id']}",
+                )
+            )
+            state = {} if projection is None else projection.state
+            failure_message = (
+                "Stage 1 requires a human decision"
+                if failed is None
+                else f"Stage 1 node {failed['node_id']} is {failed['status']}"
+            )
+            hold = {
+                "reason": state.get("reason", "human_action_required"),
+                "message": state.get("message", report.get("reason", failure_message)),
+                **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
+            }
+            details = hold.get("details")
+            supplied_repair = hold.get("repair") or hold.get("resolve")
+            if isinstance(details, Mapping):
+                supplied_repair = supplied_repair or details.get("repair") or details.get("resolve")
+            if not supplied_repair:
+                hold["resolve"] = (
+                    f"enginery factory resume {shlex.quote(run_id)} "
+                    f"--project {shlex.quote(str(project))}"
+                )
+    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, run_id)]
     report.update(
         {
             "database": str(database_path(project)),
@@ -463,7 +605,7 @@ def _enrich(
     return report
 
 
-def _hold_with_repair(project: Path, hold: Mapping[str, object]) -> dict[str, object]:
+def _hold_with_repair(project: Path, hold: Mapping[str, object], run_id: str) -> dict[str, object]:
     details = hold.get("details")
     repair = hold.get("resolve") or hold.get("repair")
     if not repair and isinstance(details, Mapping):
@@ -487,6 +629,11 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object]) -> dict[str, ob
                 else str(hold.get("message", reason or "resolve the reported hold"))
             )
             repair = f"{doctor}; {message}"
+            if message == "restore the run's bound configuration":
+                repair += (
+                    f"; enginery factory resume {shlex.quote(run_id)} "
+                    f"--project {shlex.quote(str(project))}"
+                )
     return {**hold, "resolve": repair}
 
 
