@@ -894,6 +894,9 @@ def test_a_repair_generation_publishes_only_over_the_head_its_previous_generatio
 ) -> None:
     ready = _isolated_ready_to_open(ledger_service, tmp_path)
     ready.open()
+    initial_node = _node(ledger_service, "open_pr")
+    assert initial_node is not None
+    prior_decision = initial_node["decision_id"]
     repaired = _advance_to_repair_generation(ready)
 
     ready.open()
@@ -907,7 +910,8 @@ def test_a_repair_generation_publishes_only_over_the_head_its_previous_generatio
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None
     assert open_pr["published_revision"] == repaired
-    assert open_pr["attempt_id"] == f"open-pr-{open_pr['decision_id']}-1"
+    assert open_pr["attempt_id"] == f"open-pr-{prior_decision}-1"
+    assert open_pr["decision_id"] != prior_decision
 
 
 def test_a_repair_generation_never_overwrites_a_remote_branch_that_moved_in_between(
@@ -1566,6 +1570,7 @@ def test_a_first_attempt_id_not_ending_in_zero_publishes_first_and_repairs_over_
     assert ready.remote_branch() == ready.head
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None and open_pr["attempt_id"] == f"open-pr-{first}"
+    prior_decision = open_pr["decision_id"]
     assert _next_action(ready) is Stage1ProgressionAction.WAIT_FOR_CI
 
     repaired = _advance_to_repair_generation(ready, generation=first + 1)
@@ -1579,7 +1584,8 @@ def test_a_first_attempt_id_not_ending_in_zero_publishes_first_and_repairs_over_
     assert ready.remote_branch() == repaired
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None
-    assert open_pr["attempt_id"] == f"open-pr-{open_pr['decision_id']}-{first + 1}"
+    assert open_pr["attempt_id"] == f"open-pr-{prior_decision}-{first + 1}"
+    assert open_pr["decision_id"] != prior_decision
 
 
 def test_a_review_for_another_repair_index_than_the_implementations_is_refused(
