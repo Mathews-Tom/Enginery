@@ -27,18 +27,23 @@ factory self-improvement) is gate-deferred with no committed date; run
 are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
-### Proposed factory direction (not shipped)
+### Guided setup shipped; the rest of the factory direction proposed
 
-Everything above describes shipped behavior. A manual-first software-factory
-layer on top of the shipped substrate is **proposed and not shipped**. The
-current CLI has no `enginery factory ...` command; the proposed command
-family (`init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`,
-`drain`, `review`, `watch`, `evidence`) does not exist yet and must not be
-scripted against. The proposal keeps the same boundary the shipped substrate
-already has: control is manual-first, local-first, and deterministic. Models
-never poll, schedule, keep books, or decide whether a check is complete;
-routine control uses no model. Harness, model, session, and worker machine are
-separate axes and none implies another.
+`enginery factory init` and `enginery factory doctor` are shipped: guided,
+preview-first project setup and read-only prerequisite diagnostics, described in
+[Guided project setup](docs/operations.md#guided-project-setup). They write only a
+project policy file and a private ownership record, and never install capabilities,
+sign in, or touch services, MCP servers or global configuration.
+
+A manual-first software-factory layer on top of the shipped substrate is
+otherwise **proposed and not shipped**: the remaining proposed command family
+(`collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`, `review`,
+`watch`, `evidence`) does not exist yet and must not be scripted against. The
+proposal keeps the same boundary the shipped substrate already has: control is
+manual-first, local-first, and deterministic. Models never poll, schedule, keep
+books, or decide whether a check is complete; routine control uses no model.
+Harness, model, session, and worker machine are separate axes and none implies
+another.
 
 ### Licensing and security limits
 
@@ -99,6 +104,8 @@ uv sync --all-extras --dev
 ```bash
 uv run enginery --version
 uv run enginery doctor
+uv run enginery factory init --runner trusted-local          # preview; add --apply to write
+uv run enginery factory doctor
 uv run enginery adapter doctor --json
 uv run enginery ledger verify --database ledger.db
 uv run enginery policy explain request.json
