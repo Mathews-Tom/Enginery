@@ -247,3 +247,152 @@ def test_an_invalid_choice_is_refused_with_no_writes(
     code, _ = _init(capsys, project, "--runner-image", "sha256:" + "a" * 64, "--apply")
     assert code == INVALID  # an image applies only to isolated-oci
     assert not (project / ".enginery").exists()
+
+
+@pytest.mark.parametrize("ancestor", ["enginery", "enginery/projects"])
+@pytest.mark.parametrize("apply", [False, True])
+def test_private_state_links_refused_without_writes(
+    project: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ancestor: str,
+    apply: bool,
+) -> None:
+    state = _xdg()[1]
+    target = tmp_path / "redirected"
+    target.mkdir()
+    link = state / ancestor
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+    before = _tree(project, target)
+    code, _ = _init(capsys, project, *(("--apply",) if apply else ()))
+    assert code == INVALID
+    assert _tree(project, target) == before
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_non_directory_project_state_refused_before_plan(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    apply: bool,
+) -> None:
+    (project / ".enginery").write_text("user-owned")
+    before = _tree(project, *_xdg())
+    code, plan = _init(capsys, project, *(("--apply",) if apply else ()))
+    assert code == INVALID
+    assert not plan
+    assert _tree(project, *_xdg()) == before
+
+
+@pytest.mark.parametrize("capability", ["../bad", "bad/name", "ok@../bad", "ok@x y"])
+def test_invalid_capability_refused_without_writes(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    capability: str,
+) -> None:
+    before = _tree(project, *_xdg())
+    assert _init(capsys, project, "--capability", capability, "--apply")[0] == INVALID
+    assert _tree(project, *_xdg()) == before
+
+
+def test_all_created_private_state_directories_are_private(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from enginery.cli.config_locations import private_state_directory
+
+    assert _init(capsys, project, "--apply")[0] == 0
+    directory = private_state_directory(project)
+    for path in (directory, directory.parent, directory.parent.parent):
+        assert path.stat().st_mode & 0o777 == 0o700
+
+
+def test_failed_record_write_leaves_project_and_state_unchanged(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from enginery.cli import factory_setup
+
+    plan = factory_setup.plan_init(
+        project, SetupChoices(runner_mode="trusted-local"), capability_versions={}
+    )
+    before = _tree(project, *_xdg())
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("record write refused")
+
+    monkeypatch.setattr(factory_setup, "write_private_atomically", fail)
+    with pytest.raises(OSError, match="record write refused"):
+        factory_setup.apply_plan(plan)
+    assert _tree(project, *_xdg()) == before
+
+
+@pytest.mark.parametrize("previous", [False, True])
+def test_failed_tracked_write_restores_previous_record_bytes(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    previous: bool,
+) -> None:
+    from enginery.cli import factory_setup
+    from enginery.cli.config_locations import private_state_directory
+    from enginery.cli.setup_files import OWNERSHIP_FILE, OwnershipRecord
+
+    record = private_state_directory(project) / OWNERSHIP_FILE
+    if previous:
+        record.parent.mkdir(parents=True)
+        record.write_bytes(OwnershipRecord(project=str(project), files=()).to_bytes())
+    plan = factory_setup.plan_init(
+        project, SetupChoices(runner_mode="trusted-local"), capability_versions={}
+    )
+    before = _tree(project, *_xdg())
+
+    def fail(*args: object, **kwargs: object) -> Path:
+        raise OSError("tracked write refused")
+
+    monkeypatch.setattr(factory_setup, "create_exclusive", fail)
+    with pytest.raises(OSError, match="tracked write refused"):
+        factory_setup.apply_plan(plan)
+    assert _tree(project, *_xdg()) == before
+
+
+def test_failed_record_sync_leaves_project_and_state_unchanged(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from enginery.cli import factory_setup, setup_files
+
+    plan = factory_setup.plan_init(
+        project, SetupChoices(runner_mode="trusted-local"), capability_versions={}
+    )
+    before = _tree(project, *_xdg())
+
+    def fail(directory: Path) -> None:
+        raise OSError("record sync failed")
+
+    monkeypatch.setattr(setup_files, "fsync_directory", fail)
+    with pytest.raises(OSError, match="record sync failed"):
+        factory_setup.apply_plan(plan)
+    assert _tree(project, *_xdg()) == before
+
+
+@pytest.mark.parametrize("ancestor", ["enginery", "enginery/projects"])
+def test_apply_rechecks_private_state_links_after_preview(
+    project: Path,
+    tmp_path: Path,
+    ancestor: str,
+) -> None:
+    from enginery.cli import factory_setup
+    from enginery.domain.errors import InvalidInputError
+
+    plan = factory_setup.plan_init(
+        project, SetupChoices(runner_mode="trusted-local"), capability_versions={}
+    )
+    target = tmp_path / "redirected"
+    target.mkdir()
+    link = _xdg()[1] / ancestor
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(InvalidInputError):
+        factory_setup.apply_plan(plan)
+    assert not (project / ".enginery").exists()
+    assert list(target.iterdir()) == []

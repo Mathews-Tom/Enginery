@@ -14,10 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from enginery.capabilities.atomic import fsync_directory
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
 
 OWNERSHIP_SCHEMA_VERSION = 1
@@ -38,13 +40,19 @@ def refuse_links(root: Path, relative: Path, *, what: str) -> None:
     current = root
     for part in relative.parts:
         current = current / part
-        if current.is_symlink():
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(mode):
             raise InvalidInputError(
                 f"{what} is a symbolic link; refusing to read, write or remove through it",
                 details={"path": str(current)},
             )
-        if not os.path.lexists(current):
-            return
+        if current != root / relative and not stat.S_ISDIR(mode):
+            raise InvalidInputError(
+                f"{what} has a non-directory ancestor", details={"path": str(current)}
+            )
 
 
 def read_regular(path: Path, *, what: str) -> bytes | None:
@@ -72,10 +80,14 @@ def create_exclusive(root: Path, relative: Path, payload: bytes, *, what: str) -
             f"{what} appeared while setup was running; it is user-owned and was not overwritten",
             details={"path": str(target)},
         ) from error
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     return target
 
 
@@ -85,27 +97,65 @@ def remove_regular(root: Path, relative: Path, *, what: str) -> None:
     (root / relative).unlink()
 
 
+def require_private_path(path: Path, *, what: str) -> None:
+    """Inspect every owned component below the private state root with lstat."""
+    root = path.parents[3]
+    refuse_links(root, path.relative_to(root), what=what)
+    read_regular(path, what=what)
+
+
 def write_private_atomically(path: Path, payload: bytes, *, what: str) -> None:
     """Replace one private record atomically (mode 0600) in its private directory."""
+    require_private_path(path, what=what)
     directory = path.parent
-    for component in (directory, path):
-        if component.is_symlink():
-            raise InvalidInputError(
-                f"{what} is a symbolic link; refusing to write through it",
-                details={"path": str(component)},
-            )
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, name = tempfile.mkstemp(dir=directory, prefix=".ownership-", suffix=".tmp")
-    temporary = Path(name)
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    previous = read_regular(path, what=what)
+    created: list[Path] = []
+    temporary: Path | None = None
+    backup: Path | None = None
+    replaced = False
     try:
+        for component in reversed(missing):
+            component.mkdir(mode=0o700)
+            created.append(component)
+        require_private_path(path, what=what)
+        if previous is not None:
+            descriptor, name = tempfile.mkstemp(dir=directory, prefix=".ownership-backup-")
+            backup = Path(name)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(previous)
+                handle.flush()
+                os.fsync(handle.fileno())
+        descriptor, name = tempfile.mkstemp(dir=directory, prefix=".ownership-", suffix=".tmp")
+        temporary = Path(name)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        require_private_path(path, what=what)
         os.replace(temporary, path)
+        replaced = True
+        fsync_directory(directory)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if replaced:
+            if backup is None:
+                path.unlink()
+            else:
+                os.replace(backup, path)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+        for component in reversed(created):
+            component.rmdir()
         raise
+    finally:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)
