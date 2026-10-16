@@ -32,10 +32,14 @@ def test_canonical_classification_ignores_unrelated_labels() -> None:
     [
         (("enginery/risk/low",), "exactly one declared work-kind"),
         (("enginery/work-kind/issue",), "exactly one declared risk"),
-        (("enginery/work-kind/issue", "enginery/work-kind/issue", "enginery/risk/low"),
-         "exactly one declared work-kind"),
-        (("enginery/work-kind/issue", "enginery/risk/low", "enginery/risk/medium"),
-         "exactly one declared risk"),
+        (
+            ("enginery/work-kind/issue", "enginery/work-kind/issue", "enginery/risk/low"),
+            "exactly one declared work-kind",
+        ),
+        (
+            ("enginery/work-kind/issue", "enginery/risk/low", "enginery/risk/medium"),
+            "exactly one declared risk",
+        ),
         (("ENGINERY/work-kind/issue", "enginery/risk/low"), "exact declared vocabulary"),
         (("enginery/work-kind/issue", "enginery/risk/high"), "exact declared vocabulary"),
     ],
@@ -77,14 +81,20 @@ def test_index_roundtrips_repository_cursors_and_issue_bindings() -> None:
     state = json.loads(json.dumps(index.to_state()))
     assert state == {
         "schema_version": 1,
-        "repositories": {"o/r": {
-            "last_seen_updated_at": "2026-10-16T00:00:00Z",
-            "issues": {"o/r#1": {
-                "external_reference": "o/r#1", "run_id": "fr-123",
-                "bound_digest": "sha256:abc", "source_revision": "rev-1",
-                "recorded_at": "2026-10-16T00:00:00Z",
-            }},
-        }},
+        "repositories": {
+            "o/r": {
+                "last_seen_updated_at": "2026-10-16T00:00:00Z",
+                "issues": {
+                    "o/r#1": {
+                        "external_reference": "o/r#1",
+                        "run_id": "fr-123",
+                        "bound_digest": "sha256:abc",
+                        "source_revision": "rev-1",
+                        "recorded_at": "2026-10-16T00:00:00Z",
+                    }
+                },
+            }
+        },
     }
     assert IntakeIndex.from_state(state) == index
     assert IntakeIndex.from_state(IntakeIndex().to_state()) == IntakeIndex()
@@ -98,8 +108,14 @@ def test_unknown_index_schema_is_refused(version: object) -> None:
 
 def test_index_rejects_issue_key_that_would_hide_another_binding() -> None:
     entry = IntakeEntry("o/r#1", "fr-123", "sha256:abc", "rev-1", "now")
-    state = {"schema_version": 1, "repositories": {"o/r": {
-        "last_seen_updated_at": None, "issues": {"o/r#2": entry.to_state()},
-    }}}
+    state = {
+        "schema_version": 1,
+        "repositories": {
+            "o/r": {
+                "last_seen_updated_at": None,
+                "issues": {"o/r#2": entry.to_state()},
+            }
+        },
+    }
     with pytest.raises(InvalidInputError, match="must match its external reference"):
         IntakeIndex.from_state(state)

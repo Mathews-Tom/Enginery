@@ -28,7 +28,7 @@ def test_factory_inputs_compile_the_same_bound_document_as_the_cli(
         '[runner]\nmode = "trusted-local"\n[validation]\nrepair_limit = 2\n'
         'required_checks = ["unit"]\n[implementation]\ntime_budget_seconds = 900\n',
     )
-    _write_user(monkeypatch, tmp_path, 'schema_version = 1\n')
+    _write_user(monkeypatch, tmp_path, "schema_version = 1\n")
     github = write_stand_in_gh(tmp_path / "github")
     output = tmp_path / "request.json"
     inputs = RequestInputs(
@@ -65,16 +65,26 @@ def test_factory_inputs_compile_the_same_bound_document_as_the_cli(
         )
         argv.extend(
             [
-                "--base-branch", "release",
-                "--head-branch", "factory/custom",
-                "--validation-command", "git diff --check",
-                "--required-check", "lint",
-                "--required-check", "integration",
-                "--repair-limit", "0",
-                "--protected-path", "secrets/**",
-                "--implementation-time-budget-seconds", "600",
-                "--inapplicable-criterion", "0",
-                "--environment-manifest-digest", "sha256:" + "a" * 64,
+                "--base-branch",
+                "release",
+                "--head-branch",
+                "factory/custom",
+                "--validation-command",
+                "git diff --check",
+                "--required-check",
+                "lint",
+                "--required-check",
+                "integration",
+                "--repair-limit",
+                "0",
+                "--protected-path",
+                "secrets/**",
+                "--implementation-time-budget-seconds",
+                "600",
+                "--inapplicable-criterion",
+                "0",
+                "--environment-manifest-digest",
+                "sha256:" + "a" * 64,
             ]
         )
     parser = argparse.ArgumentParser()

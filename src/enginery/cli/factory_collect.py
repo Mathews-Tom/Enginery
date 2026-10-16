@@ -40,10 +40,15 @@ def text(value: object) -> str:
 def repository_name(project: Path) -> str:
     result = subprocess.run(
         ("git", "-C", str(project), "remote", "get-url", "origin"),
-        check=False, capture_output=True, text=True,
+        check=False,
+        capture_output=True,
+        text=True,
     )
     remote = result.stdout.strip()
-    match = re.fullmatch(r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote)
+    match = re.fullmatch(
+        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+        remote,
+    )
     # A local bare origin is supported for offline operation when its basename is owner/repo.git.
     if match is None and remote.startswith("/"):
         path = Path(remote)
@@ -70,9 +75,10 @@ def read_document(path: Path) -> object | None:
     if len(raw) > MAX_DOCUMENT_BYTES:
         raise InvalidInputError("factory private document exceeds the 1 MiB limit")
     try:
-        return json.loads(raw)
+        document: object = json.loads(raw)
     except (ValueError, UnicodeError) as error:
         raise InvalidInputError("factory private document is not valid JSON") from error
+    return document
 
 
 def read_index(project: Path) -> IntakeIndex:
@@ -111,20 +117,32 @@ def paused_hold(project: Path) -> list[dict[str, str]]:
         paused = read_control_state(ledger).paused
     finally:
         ledger.close()
-    return [] if not paused else [{
-        "prerequisite": "dispatch", "detail": "dispatch is paused by the operator",
-        "resolve": f"enginery factory pause --lift --project {project}",
-    }]
+    return (
+        []
+        if not paused
+        else [
+            {
+                "prerequisite": "dispatch",
+                "detail": "dispatch is paused by the operator",
+                "resolve": f"enginery factory pause --lift --project {project}",
+            }
+        ]
+    )
 
 
 def intake_prerequisites(configuration: ProjectConfiguration) -> list[dict[str, str]]:
     holds = offline_holds(configuration)
     compiled = configuration.compiled
     if compiled is not None:
-        holds.extend({"prerequisite": item.name, "detail": item.detail,
-                      "resolve": item.resolve or "enginery factory doctor"}
-                     for item in _check_github(compiled.config.text("github_executable"), _run)
-                     if item.status == "hold")
+        holds.extend(
+            {
+                "prerequisite": item.name,
+                "detail": item.detail,
+                "resolve": item.resolve or "enginery factory doctor",
+            }
+            for item in _check_github(compiled.config.text("github_executable"), _run)
+            if item.status == "hold"
+        )
     return [*holds, *paused_hold(configuration.project)]
 
 
@@ -132,37 +150,50 @@ def github_ledger(configuration: ProjectConfiguration, repository: str) -> GitHu
     compiled = configuration.compiled
     if compiled is None:
         raise InvalidInputError("declare a runner with enginery factory init first")
-    return GitHubWorkLedger(GitHubAdapterConfig(
-        repository=repository,
-        credential_reference=compiled.config.text("github_credential_reference"),
-        executable=compiled.config.text("github_executable"),
-    ))
+    return GitHubWorkLedger(
+        GitHubAdapterConfig(
+            repository=repository,
+            credential_reference=compiled.config.text("github_credential_reference"),
+            executable=compiled.config.text("github_executable"),
+        )
+    )
 
 
 def selection_document(configuration: ProjectConfiguration) -> dict[str, object]:
     compiled = configuration.compiled
     if compiled is None:
         return {}
-    return {name: {"value": compiled.config.plain_value(name),
-                   "winner": compiled.config.field(name).winner}
-            for name in ("harness", "model", "effort")}
+    return {
+        name: {
+            "value": compiled.config.plain_value(name),
+            "winner": compiled.config.field(name).winner,
+        }
+        for name in ("harness", "model", "effort")
+    }
 
 
 def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
     configuration = load_project_configuration(project)
     holds = intake_prerequisites(configuration)
     document: dict[str, object] = {
-        "project": str(project), "candidates": [], "holds": holds,
-        "external_effects": {"github_reads": 0, "github_mutations": 0,
-                             "hosted_inference_calls": 0}, "local_writes": [],
+        "project": str(project),
+        "candidates": [],
+        "holds": holds,
+        "external_effects": {"github_reads": 0, "github_mutations": 0, "hosted_inference_calls": 0},
+        "local_writes": [],
     }
     if holds:
         return document
     try:
         repository = repository_name(project)
     except InvalidInputError as error:
-        holds.append({"prerequisite": "origin", "detail": str(error),
-                      "resolve": "git remote add origin https://github.com/OWNER/REPO.git"})
+        holds.append(
+            {
+                "prerequisite": "origin",
+                "detail": str(error),
+                "resolve": "git remote add origin https://github.com/OWNER/REPO.git",
+            }
+        )
         return document
     with contextlib.nullcontext() if dry_run else intake_lock(project):
         index = read_index(project)
@@ -173,23 +204,38 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
         assert compiled is not None
         for candidate in adapter.list_candidates(since=intake.last_seen_updated_at):
             row: dict[str, object] = {
-                "external_reference": candidate.external_reference, "title": candidate.title,
-                "eligible": False, "dedup": "new", "classification": {},
+                "external_reference": candidate.external_reference,
+                "title": candidate.title,
+                "eligible": False,
+                "dedup": "new",
+                "classification": {},
                 "workflow_profile": compiled.config.plain_value("profile"),
                 "selection": selection_document(configuration),
                 "runner": compiled.runner.to_state(),
-                "budget": {"time_budget_seconds": compiled.config.plain_value("time_budget_seconds"),
-                           "cost": "unenforced"}, "holds": [],
+                "budget": {
+                    "time_budget_seconds": compiled.config.plain_value("time_budget_seconds"),
+                    "cost": "unenforced",
+                },
+                "holds": [],
             }
             rows.append(row)
-            if intake.last_seen_updated_at is None or candidate.updated_at > intake.last_seen_updated_at:
+            if (
+                intake.last_seen_updated_at is None
+                or candidate.updated_at > intake.last_seen_updated_at
+            ):
                 intake.last_seen_updated_at = candidate.updated_at
             try:
                 kind, risk, _ = declared_classification(candidate.labels)
                 snapshot = adapter.fetch(candidate.external_reference)
             except EngineryError as error:
-                hold = {"prerequisite": "classification", "detail": str(error),
-                        "resolve": f"gh issue edit {candidate.external_reference} --add-label enginery/work-kind/issue --add-label enginery/risk/low"}
+                hold = {
+                    "prerequisite": "classification",
+                    "detail": str(error),
+                    "resolve": (
+                        f"gh issue edit {candidate.external_reference} "
+                        "--add-label enginery/work-kind/issue --add-label enginery/risk/low"
+                    ),
+                }
                 row["classification"] = {"hold": str(error)}
                 row["holds"] = [hold]
                 holds.append(hold)
@@ -199,7 +245,9 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             previous = intake.issues.get(candidate.external_reference)
             digest = str(snapshot.bound_digest)
             if previous is not None:
-                row["dedup"] = ("bound:" if previous.bound_digest == digest else "changed:") + previous.run_id
+                row["dedup"] = (
+                    "bound:" if previous.bound_digest == digest else "changed:"
+                ) + previous.run_id
                 if previous.bound_digest != digest:
                     hold = changed_hold(project, candidate.external_reference, previous.run_id)
                     row["holds"] = [hold]
@@ -207,24 +255,40 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             elif not dry_run:
                 intake.issues[candidate.external_reference] = IntakeEntry(
                     external_reference=candidate.external_reference,
-                    run_id=derive_run_id(project_identity(project), candidate.external_reference, digest),
-                    bound_digest=digest, source_revision=str(snapshot.source_revision),
+                    run_id=derive_run_id(
+                        project_identity(project), candidate.external_reference, digest
+                    ),
+                    bound_digest=digest,
+                    source_revision=str(snapshot.source_revision),
                     recorded_at=datetime.now(UTC).isoformat(),
                 )
         document["candidates"] = rows
-        document["external_effects"] = {"github_reads": adapter.github_reads,
-                                        "github_mutations": 0, "hosted_inference_calls": 0}
+        document["external_effects"] = {
+            "github_reads": adapter.github_reads,
+            "github_mutations": 0,
+            "hosted_inference_calls": 0,
+        }
         if not dry_run:
             write_document(index_path(project), index.to_state())
-            document["local_writes"] = [str(index_path(project)), str(index_path(project).with_suffix(".lock"))]
+            document["local_writes"] = [
+                str(index_path(project)),
+                str(index_path(project).with_suffix(".lock")),
+            ]
     return document
 
 
 def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
     database = private_state_directory(project) / "ledger.sqlite"
-    return {"prerequisite": "bound snapshot",
-            "detail": f"issue changed since run {run_id} was bound",
-            "resolve": f"enginery factory drain --stop --project {project}; enginery stage1 cancel --database {database} --run-id {run_id}; enginery factory run {issue} --supersede --project {project}"}
+    return {
+        "prerequisite": "bound snapshot",
+        "detail": f"issue changed since run {run_id} was bound",
+        "resolve": (
+            f"enginery factory drain --stop --project {project}; "
+            f"enginery stage1 cancel --database {database} --run-id {run_id}; "
+            f"enginery factory run {issue} --supersede --project {project}"
+        ),
+    }
+
 
 def document_lines(document: Mapping[str, object]) -> list[str]:
     """Render all external text with terminal controls escaped, preserving JSON types."""

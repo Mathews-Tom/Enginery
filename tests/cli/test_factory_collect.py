@@ -29,9 +29,14 @@ def adapter(updated: str = "2026-10-16T00:00:00Z") -> GitHubWorkLedger:
 
     def command(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         endpoint = argv[-1]
-        issue = {"number": 1, "title": "Title\x1b[31m", "body": "Bounded change",
-                 "updated_at": updated, "url": "https://api.github.com/repos/owner/repo/issues/1",
-                 "labels": labels}
+        issue = {
+            "number": 1,
+            "title": "Title\x1b[31m",
+            "body": "Bounded change",
+            "updated_at": updated,
+            "url": "https://api.github.com/repos/owner/repo/issues/1",
+            "labels": labels,
+        }
         if "/issues?" in endpoint:
             payload = [issue, {**issue, "number": 2, "labels": labels[:1]}]
         elif "/labels?" in endpoint:
@@ -44,14 +49,17 @@ def adapter(updated: str = "2026-10-16T00:00:00Z") -> GitHubWorkLedger:
 
 
 def test_dry_collect_has_no_local_or_external_mutations(
-    project: Path, monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
     report = collect(project, dry_run=True)
     assert report["local_writes"] == []
     assert not index_path(project).parent.exists()
     assert report["external_effects"] == {
-        "github_reads": 5, "github_mutations": 0, "hosted_inference_calls": 0,
+        "github_reads": 5,
+        "github_mutations": 0,
+        "hosted_inference_calls": 0,
     }
     eligible, held = report["candidates"]
     assert eligible["eligible"] and eligible["dedup"] == "new"
@@ -61,7 +69,8 @@ def test_dry_collect_has_no_local_or_external_mutations(
 
 
 def test_collect_discloses_index_and_cursor_and_detects_changed_snapshot(
-    project: Path, monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
     first = collect(project, dry_run=False)
@@ -71,7 +80,9 @@ def test_collect_discloses_index_and_cursor_and_detects_changed_snapshot(
     run_id = recorded.issues["owner/repo#1"].run_id
     second = collect(project, dry_run=True)
     assert second["candidates"][0]["dedup"] == "bound:" + run_id
-    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter("2026-10-17T00:00:00Z"))
+    monkeypatch.setattr(
+        factory_collect, "github_ledger", lambda *_: adapter("2026-10-17T00:00:00Z")
+    )
     changed = collect(project, dry_run=True)
     assert changed["candidates"][0]["dedup"] == "changed:" + run_id
     assert f"issue changed since run {run_id} was bound" in changed["holds"][0]["detail"]

@@ -19,9 +19,7 @@ def _candidate(number: int) -> dict[str, object]:
     }
 
 
-def _ledger(
-    pages: list[object], calls: list[tuple[str, ...]]
-) -> GitHubWorkLedger:
+def _ledger(pages: list[object], calls: list[tuple[str, ...]]) -> GitHubWorkLedger:
     def runner(arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         calls.append(arguments)
         return subprocess.CompletedProcess(arguments, 0, json.dumps(pages.pop(0)), "")
@@ -39,8 +37,10 @@ def test_listing_paginates_by_raw_page_size_excludes_prs_and_uses_listing_labels
 
     assert len(candidates) == 100
     assert candidates[-1] == IssueCandidate(
-        "o/r#101", "Issue 101",
-        ("enginery/risk/low", "enginery/work-kind/issue"), "2026-10-16T00:00:00Z",
+        "o/r#101",
+        "Issue 101",
+        ("enginery/risk/low", "enginery/work-kind/issue"),
+        "2026-10-16T00:00:00Z",
     )
     assert "o/r#100" not in {candidate.external_reference for candidate in candidates}
     assert [call[-1] for call in calls] == [

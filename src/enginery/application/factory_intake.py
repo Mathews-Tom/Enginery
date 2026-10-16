@@ -74,7 +74,11 @@ def declared_classification(
 
 
 def derive_run_id(project_identity: str, external_reference: str, bound_digest: str) -> str:
-    document = {"project": project_identity, "issue": external_reference, "snapshot": str(bound_digest)}
+    document = {
+        "project": project_identity,
+        "issue": external_reference,
+        "snapshot": str(bound_digest),
+    }
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
     return "fr-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
 
@@ -149,10 +153,12 @@ class IntakeIndex:
         document = _object(state)
         if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
             raise InvalidInputError("Unsupported intake index schema version")
-        return cls({
-            key: RepositoryIntake.from_state(value)
-            for key, value in _object(document.get("repositories")).items()
-        })
+        return cls(
+            {
+                key: RepositoryIntake.from_state(value)
+                for key, value in _object(document.get("repositories")).items()
+            }
+        )
 
 
 def _object(value: object) -> dict[str, object]:
