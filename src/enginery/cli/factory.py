@@ -3,6 +3,10 @@
 * ``init`` previews (default) or, with ``--apply``, performs guided setup: a project policy
   file and a private ownership record, nothing else (see :mod:`enginery.cli.factory_setup`).
 * ``doctor`` reports the prerequisites the project's compiled selection needs, read-only.
+* ``explain`` shows, per compiled field, the winning layer, the shadowed values, the hard
+  constraints and the source files, plus the setup-owned files and the offline holds.
+* ``uninstall`` previews (default) or, with ``--apply``, removes exactly the files setup
+  created that are still as setup wrote them.
 
 Exit codes reuse the CLI contract: 0 when nothing is held, 5 (human action required) when
 a prerequisite or capability is held, 9 (external conflict) when a user-owned file would
@@ -21,6 +25,7 @@ from enginery.application.project_policy import SetupChoices
 from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
+from enginery.cli.factory_explain import explain, explain_lines
 from enginery.cli.factory_setup import (
     SetupPlan,
     apply_plan,
@@ -28,6 +33,7 @@ from enginery.cli.factory_setup import (
     plan_init,
     resolve_project,
 )
+from enginery.cli.factory_uninstall import NEVER_TOUCHED, apply_uninstall, plan_uninstall
 from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.runner import MODEL_ACCESS_MODES
 
@@ -86,6 +92,26 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     )
     _add_project(doctor)
     doctor.add_argument("--json", action="store_true", help="Emit canonical JSON.")
+
+    explain_parser = commands.add_parser(
+        "explain",
+        help="Show where every compiled field comes from, which files setup owns and what "
+        "is held; read-only.",
+    )
+    _add_project(explain_parser)
+    explain_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
+
+    uninstall = commands.add_parser(
+        "uninstall",
+        help="Preview (default) or apply removal of exactly the unmodified files setup created.",
+    )
+    _add_project(uninstall)
+    uninstall.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform exactly the previewed removals; default is to preview and write nothing.",
+    )
+    uninstall.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
 
 def _add_project(parser: argparse.ArgumentParser) -> None:
@@ -204,14 +230,47 @@ def _run_doctor(args: argparse.Namespace) -> int:
     return HOLD_EXIT if report.holds else SUCCESS
 
 
+def _run_explain(args: argparse.Namespace) -> int:
+    project = resolve_project(args.project)
+    document = explain(load_project_configuration(project))
+    _emit(args, document, explain_lines(document))
+    return HOLD_EXIT if document["holds"] else SUCCESS
+
+
+def _run_uninstall(args: argparse.Namespace) -> int:
+    project = resolve_project(args.project)
+    plan = plan_uninstall(project)
+    removed = apply_uninstall(plan) if args.apply else ()
+    lines = [f"{'apply' if args.apply else 'preview'} uninstall for {plan.project}"]
+    if not plan.has_record:
+        lines.append("nothing to uninstall: setup has no ownership record for this project")
+    for item in plan.outcomes:
+        lines.append(f"  {item.action.upper():15} {item.path}\n                  {item.detail}")
+    if plan.has_record:
+        lines.append(f"  REMOVE          {plan.record_path} (the ownership record, last)")
+    lines.append("never touched: " + ", ".join(NEVER_TOUCHED))
+    lines.append(
+        ("removed: " + (", ".join(removed) if removed else "nothing"))
+        if args.apply
+        else "nothing was removed; pass --apply to perform exactly this plan"
+    )
+    _emit(args, plan.to_json(applied=args.apply, removed=removed), lines)
+    return SUCCESS
+
+
 def run_factory(args: argparse.Namespace) -> int:
     command = args.factory_command
     if command == "init":
         return _run_init(args)
     if command == "doctor":
         return _run_doctor(args)
+    if command == "explain":
+        return _run_explain(args)
+    if command == "uninstall":
+        return _run_uninstall(args)
     raise InvalidInputError(
-        "factory requires a subcommand: init or doctor", details={"command": str(command)}
+        "factory requires a subcommand: init, doctor, explain or uninstall",
+        details={"command": str(command)},
     )
 
 

@@ -98,7 +98,10 @@ def test_apply_performs_exactly_the_previewed_plan_and_the_policy_compiles(
     assert set(applied["performed"]) == set(previewed)  # type: ignore[arg-type]
     written = _tree(project, *_xdg())
     for path, digest in previewed.items():
-        assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
+        if digest:  # a directory carries no content digest
+            assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest
+        else:
+            assert Path(path).is_dir()
     assert not [p for p in written if p.endswith(".tmp")]
     configuration = load_project_configuration(project.resolve())
     assert configuration.compiled is not None

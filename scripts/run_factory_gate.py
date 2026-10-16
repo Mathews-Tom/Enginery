@@ -22,6 +22,14 @@ Scenarios:
     (status 2) before anything runs. No usage figures in the harness output, a gateway
     401/403/429 or a deadline in a live run are also a HOLD, never a product failure.
 
+``setup``
+    Guided setup and layered configuration end to end in a disposable HOME: ``factory init``
+    preview/apply/repeat/conflict, the run, project and user layers reaching the argv the real
+    Stage 1 adapter submits to a recording stand-in harness, hard-policy and unknown-key
+    refusals, ``factory doctor`` holds, ``factory uninstall`` ownership, and byte-identical
+    global locations. Local only: no hosted session, container engine or custody; ``--live``,
+    ``--harness``, ``--model`` and the gateway, image and custody flags are rejected for it.
+
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;
 raw artifacts go to ``<evidence stem>.raw/`` beside it. Exit status: 0 only if every required
 assertion ran and passed; 1 if any assertion failed or did not run; 2 for a usage error; 3 when the
@@ -79,7 +87,8 @@ from factory_gate_support import Scrubber  # noqa: E402
 
 SCENARIO_BOUNDARY = "runner-boundary"
 SCENARIO_AUTH = "runner-auth"
-SCENARIO_NAMES = (SCENARIO_BOUNDARY, SCENARIO_AUTH)
+SCENARIO_SETUP = "setup"
+SCENARIO_NAMES = (SCENARIO_BOUNDARY, SCENARIO_AUTH, SCENARIO_SETUP)
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -96,17 +105,27 @@ class ScenarioSpec:
     need_relay: bool
     run: Callable[[Gate], None]
     finalize: Callable[[Gate], None]
+    prepare: PrepareGate | None = None
+    """A scenario that needs no engine builds its own gate instead of the engine-backed one."""
 
 
 def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_auth as auth
     import factory_gate_boundary as boundary
+    import factory_gate_setup as setup
 
     return {
         SCENARIO_BOUNDARY: ScenarioSpec(
             boundary.required_assertions, True, boundary.run, boundary.finalize
         ),
         SCENARIO_AUTH: ScenarioSpec(auth.required_assertions, True, auth.run, auth.finalize),
+        SCENARIO_SETUP: ScenarioSpec(
+            setup.required_assertions,
+            False,
+            setup.run,
+            setup.finalize,
+            prepare=setup.prepare,
+        ),
     }
 
 
@@ -142,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session-deadline-seconds",
         type=int,
-        default=MAX_SESSION_DEADLINE_SECONDS,
+        default=None,
         help=f"runner-auth process-group deadline (1..{MAX_SESSION_DEADLINE_SECONDS})",
     )
     parser.add_argument(
@@ -163,11 +182,32 @@ def parse_options(
 ) -> GateOptions:
     """Parse and validate the command line; a usage error exits with status 2."""
     parser = build_parser()
-    args = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(arguments)
     environment = os.environ if environ is None else environ
     scenario: str = args.scenario
     if scenario == SCENARIO_AUTH and args.harness is None:
         parser.error("--harness {omp,claude} is required for --scenario runner-auth")
+    if scenario == SCENARIO_SETUP:
+        local_only = {
+            "--harness": args.harness,
+            "--model": args.model,
+            "--live": args.live,
+            "--confirm-single-session": args.confirm_single_session,
+            "--custody-receipt": args.custody_receipt,
+            "--gateway-url": args.gateway_url,
+            "--gateway-token-file": args.gateway_token_file,
+            "--docker-context": args.docker_context,
+            "--runner-image": args.runner_image,
+            "--relay-image": args.relay_image,
+            "--session-deadline-seconds": args.session_deadline_seconds is not None,
+        }
+        given = [flag for flag, value in local_only.items() if value]
+        if given:
+            parser.error(
+                f"{', '.join(given)} do not apply to --scenario setup, which runs locally "
+                "with no hosted session, container engine or custody"
+            )
     if scenario == SCENARIO_BOUNDARY and (args.harness or args.model or args.live):
         parser.error("--harness, --model and --live apply only to --scenario runner-auth")
     if scenario == SCENARIO_BOUNDARY and args.custody_receipt is not None:
@@ -187,6 +227,8 @@ def parse_options(
             )
     elif args.confirm_single_session:
         parser.error("--confirm-single-session applies only with --live")
+    if args.session_deadline_seconds is None:
+        args.session_deadline_seconds = MAX_SESSION_DEADLINE_SECONDS
     if not 1 <= args.session_deadline_seconds <= MAX_SESSION_DEADLINE_SECONDS:
         parser.error(f"--session-deadline-seconds must be 1..{MAX_SESSION_DEADLINE_SECONDS}")
     for flag, value in (("--runner-image", args.runner_image), ("--relay-image", args.relay_image)):
@@ -357,7 +399,9 @@ def _execute(
     late: list[str] = []  # termination signals that arrived during cleanup or the final checks
     try:
         _gateway_prerequisites(options)
-        gate = prepare(options, evidence, scrubber, engine_factory, need_relay=spec.need_relay)
+        gate = (spec.prepare or prepare)(
+            options, evidence, scrubber, engine_factory, need_relay=spec.need_relay
+        )
         try:
             spec.run(gate)
         except GateHoldError as hold:
