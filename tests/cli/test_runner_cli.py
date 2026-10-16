@@ -320,7 +320,7 @@ def test_a_trusted_local_request_rejects_isolated_only_flags(
     exit_code = main(argv)
 
     assert exit_code == INVALID_EXIT
-    assert "apply only to --runner isolated-oci" in capsys.readouterr().err
+    assert "applies only to the isolated-oci trust mode" in capsys.readouterr().err
     assert not output.exists()
 
 
@@ -329,11 +329,10 @@ def test_a_request_must_bind_a_trust_mode(
 ) -> None:
     argv, output = _build_argv(tmp_path)
 
-    with pytest.raises(SystemExit) as raised:
-        main(argv)
+    assert main(argv) == INVALID_EXIT
 
-    assert raised.value.code == INVALID_EXIT
-    assert "--runner" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "runner.mode" in error and "--runner" in error
     assert not output.exists()
 
 

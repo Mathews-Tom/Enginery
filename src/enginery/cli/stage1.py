@@ -19,6 +19,7 @@ from enginery.adapters.github import (
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
+from enginery.cli.config_binding import require_bound_configuration
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
 from enginery.cli.stage1_runner import (
@@ -103,6 +104,7 @@ def _runtime_for_run(ledger: LedgerService, *, owner: str, run_id: str) -> Coord
 def _start(args: argparse.Namespace) -> None:
     raw_request = _read_json(args.request)
     request = stage1_request_from_state(raw_request)
+    require_bound_configuration(raw_request, request)
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)

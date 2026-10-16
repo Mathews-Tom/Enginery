@@ -39,3 +39,13 @@ def ledger_service(ledger_path: Path) -> Iterator[LedgerService]:
         yield service
     finally:
         service.close()
+
+
+@pytest.fixture(autouse=True)
+def _private_xdg_directories(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the developer's real user.toml and private state out of every test."""
+    root = tmp_path_factory.mktemp("xdg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))

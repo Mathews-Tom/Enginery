@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.application.effective_config import EffectiveConfig
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import DeclaredWorkClassification
 from enginery.capabilities.serialization import write_lock
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.cli.stage1_request import (
-    _LOCAL_CONFIGURATION_DIGEST,
     _LOCAL_ENVIRONMENT_DIGEST,
     _NO_CAPABILITY_LOCK_DIGEST,
 )
@@ -185,7 +185,11 @@ def test_build_request_defaults_match_documented_example(tmp_path: Path) -> None
     assert request.execution_configuration.harness_executable == "omp"
     assert request.run.capability_lock_digest == _NO_CAPABILITY_LOCK_DIGEST
     assert request.run.environment_manifest_digest == _LOCAL_ENVIRONMENT_DIGEST
-    assert request.run.configuration_snapshot_digest == _LOCAL_CONFIGURATION_DIGEST
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert (
+        request.run.configuration_snapshot_digest
+        == EffectiveConfig.from_state(document["effective_config"]).digest
+    )
     assert request.work_snapshot.work_item.id.value == "github:owner/repo#1"
 
 
@@ -276,25 +280,31 @@ def test_build_request_accepts_explicit_digest_override(tmp_path: Path) -> None:
     assert request.run.environment_manifest_digest == override
 
 
-def test_build_request_accepts_digest_override_from_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "flag", ["--configuration-snapshot-digest", "--configuration-snapshot-file"]
+)
+def test_build_request_has_no_flag_to_supply_the_configuration_digest(
+    tmp_path: Path, flag: str
+) -> None:
     repository, base_revision = _repository(tmp_path)
     output = tmp_path / "request.json"
-    config_file = tmp_path / "configuration.json"
-    config_file.write_text('{"real": "configuration"}', encoding="utf-8")
 
-    main(
-        [
-            *_minimal_argv(
-                tmp_path=tmp_path, repository=repository, base_revision=base_revision, output=output
-            ),
-            "--configuration-snapshot-file",
-            str(config_file),
-        ]
-    )
+    with pytest.raises(SystemExit) as refused:
+        main(
+            [
+                *_minimal_argv(
+                    tmp_path=tmp_path,
+                    repository=repository,
+                    base_revision=base_revision,
+                    output=output,
+                ),
+                flag,
+                "sha256:" + "0" * 64,
+            ]
+        )
 
-    raw = json.loads(output.read_text(encoding="utf-8"))
-    request = stage1_request_from_state(raw)
-    assert request.run.configuration_snapshot_digest == Digest.of_bytes(config_file.read_bytes())
+    assert refused.value.code == exit_code_for(FailureClass.INVALID_INPUT)
+    assert not output.exists()
 
 
 def test_build_request_marks_inapplicable_criteria(tmp_path: Path) -> None:

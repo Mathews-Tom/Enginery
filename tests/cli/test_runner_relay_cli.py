@@ -85,7 +85,7 @@ def test_model_access_through_the_relay_needs_an_isolated_runner(
 
     assert main(argv) == INVALID_EXIT
 
-    assert "--model-access" in capsys.readouterr().err
+    assert "runner.model_access" in capsys.readouterr().err
     assert not output.exists()
 
 
