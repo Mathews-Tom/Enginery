@@ -362,6 +362,18 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, github = bound_project
+    # The worker must still be running when the repair cancels it: an exited worker launched
+    # in-process stays an unreaped child of this test, and signalling a zombie-only process
+    # group fails on macOS, which no real out-of-process operator would see.
+    harness = project.parent / "omp"
+    harness.write_text(
+        f"#!{sys.executable}\nimport json, sys, time\n"
+        "if '--help' in sys.argv:\n print('omp v18.10.3')\n"
+        "else:\n"
+        " print(json.dumps({'type': 'session'}), flush=True)\n"
+        " time.sleep(600)\n",
+        encoding="utf-8",
+    )
     _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
     invoke(capsys, project, "run", "owner/repo#1", "--once")
     github.serve(updated_at="2026-10-17T00:00:00Z")
@@ -374,17 +386,40 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     assert f"node_leases[{original['run_id']}:implement].expires_at=" in held["holds"][0]["detail"]
     assert f"runtime_node[{original['run_id']}:open_pr].status=" in held["holds"][0]["detail"]
     assert len(list(Path(original["request_path"]).parent.parent.glob("*/request.json"))) == 1
-    for command in held["holds"][0]["resolve"].split("; "):
+    try:
+        for command in held["holds"][0]["resolve"].split("; "):
+            capsys.readouterr()
+            assert main(shlex.split(command)[1:]) == 0
+            capsys.readouterr()
+        _, listing = invoke(capsys, project, "status")
+        replacement = next(run for run in listing["runs"] if run["run_id"] != original["run_id"])
+        assert replacement["run_id"] != original["run_id"]
+        _, old = invoke(capsys, project, "status", original["run_id"])
+        assert old["status"] == "created"
+        implementation = next(node for node in old["nodes"] if node["node_id"] == "implement")
+        assert implementation["status"] == "cancelled"
+    finally:
+        _, listing = invoke(capsys, project, "status")
+        for run in listing["runs"]:
+            if any(
+                node["node_id"] == "implement" and node["status"] == "running"
+                for node in run["nodes"]
+            ):
+                main(
+                    [
+                        "stage1",
+                        "cancel",
+                        "--database",
+                        str(listing["database"]),
+                        "--owner",
+                        "factory",
+                        "--run-id",
+                        str(run["run_id"]),
+                        "--node-id",
+                        "implement",
+                    ]
+                )
         capsys.readouterr()
-        assert main(shlex.split(command)[1:]) == 0
-        capsys.readouterr()
-    _, listing = invoke(capsys, project, "status")
-    replacement = next(run for run in listing["runs"] if run["run_id"] != original["run_id"])
-    assert replacement["run_id"] != original["run_id"]
-    _, old = invoke(capsys, project, "status", original["run_id"])
-    assert old["status"] == "created"
-    implementation = next(node for node in old["nodes"] if node["node_id"] == "implement")
-    assert implementation["status"] == "cancelled"
 
 
 def test_unstarted_request_is_rebuilt_when_configuration_changes(
