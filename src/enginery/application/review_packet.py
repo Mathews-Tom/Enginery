@@ -74,7 +74,8 @@ class ReviewPacket:
 
     @property
     def digest(self) -> Digest:
-        return Digest.of_json(self.subject_fields())
+        # Presentation changes get a new immutable file without invalidating authority.
+        return Digest.of_json(self.to_state())
 
     def to_state(self) -> dict[str, object]:
         return {

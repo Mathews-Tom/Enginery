@@ -116,6 +116,15 @@ def test_subject_digest_binds_every_review_input(changes: dict[str, Any]) -> Non
     assert packet.subject_fields()["run_id"] == "run-review"
 
 
+def test_presentation_lifecycle_changes_get_distinct_files_not_distinct_authority() -> None:
+    packet = _packet()
+    registered = replace(packet, sections=(("Risk", '{"publication":{"status":"queued"}}'),))
+    resolved = replace(packet, sections=(("Risk", '{"publication":{"status":"passed"}}'),))
+    assert registered.subject_digest == resolved.subject_digest == packet.subject_digest
+    assert registered.digest != resolved.digest
+    assert render_html(registered) != render_html(resolved)
+
+
 def test_packet_and_expanded_rendering_are_bounded() -> None:
     with pytest.raises(InvalidInputError, match="1 MiB"):
         _packet("x" * (MAX_PACKET_BYTES + 1))
