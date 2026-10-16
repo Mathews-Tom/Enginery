@@ -26,9 +26,7 @@ def _tree(*roots: Path) -> dict[str, str]:
     return snapshot
 
 
-def _explain(
-    capsys: pytest.CaptureFixture[str], project: Path
-) -> tuple[int, dict[str, object]]:
+def _explain(capsys: pytest.CaptureFixture[str], project: Path) -> tuple[int, dict[str, object]]:
     capsys.readouterr()
     code = main(["factory", "explain", "--project", str(project), "--json"])
     return code, json.loads(capsys.readouterr().out)
@@ -66,10 +64,19 @@ def test_every_field_names_its_winning_layer_shadowed_values_and_source_files(
     assert [entry["layer"] for entry in repair["shadowed"]] == ["user", "workflow", "factory"]  # type: ignore[union-attr]
     project_entry = repair["chain"][0]  # type: ignore[index]
     assert project_entry["source"] == str(policy.resolve())
-    assert project_entry["source_digest"] == "sha256:" + hashlib.sha256(policy.read_bytes()).hexdigest()
+    assert (
+        project_entry["source_digest"]
+        == "sha256:" + hashlib.sha256(policy.read_bytes()).hexdigest()
+    )
     assert {c["name"] for c in document["hard_constraints"]} == {"max_repair_limit"}  # type: ignore[union-attr]
     assert _field(document, "profile")["value"] == "careful"
-    assert {s["layer"] for s in document["sources"]} == {"project", "user", "workflow", "factory", "run"}  # type: ignore[union-attr]
+    assert {s["layer"] for s in document["sources"]} == {
+        "project",
+        "user",
+        "workflow",
+        "factory",
+        "run",
+    }  # type: ignore[union-attr]
 
 
 def test_explain_shows_the_same_digest_build_request_binds(
@@ -106,7 +113,10 @@ def test_setup_owned_files_are_reported_owned_modified_or_missing(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    assert main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"]) == 0
+    assert (
+        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
+        == 0
+    )
     policy = project.resolve() / ".enginery" / "project.toml"
 
     _, document = _explain(capsys, project)
@@ -115,18 +125,25 @@ def test_setup_owned_files_are_reported_owned_modified_or_missing(
 
     policy.write_text(policy.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
     _, document = _explain(capsys, project)
-    assert {Path(i["path"]).name: i["status"] for i in document["setup_owned_files"]}["project.toml"] == "user-modified"  # type: ignore[union-attr]
+    assert {Path(i["path"]).name: i["status"] for i in document["setup_owned_files"]}[
+        "project.toml"
+    ] == "user-modified"  # type: ignore[union-attr]
 
     policy.unlink()
     _, document = _explain(capsys, project)
-    assert {Path(i["path"]).name: i["status"] for i in document["setup_owned_files"]}["project.toml"] == "missing"  # type: ignore[union-attr]
+    assert {Path(i["path"]).name: i["status"] for i in document["setup_owned_files"]}[
+        "project.toml"
+    ] == "missing"  # type: ignore[union-attr]
 
 
 def test_a_policy_setup_did_not_create_is_reported_user_owned(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
-    _write(project / ".enginery" / "project.toml", 'schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    _write(
+        project / ".enginery" / "project.toml",
+        'schema_version = 1\n[runner]\nmode = "trusted-local"\n',
+    )
 
     _, document = _explain(capsys, project)
 

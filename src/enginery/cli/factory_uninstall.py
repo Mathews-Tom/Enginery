@@ -132,9 +132,7 @@ def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> Unins
             elif sha256_bytes(current) == owned.sha256:
                 removing_policy = True
                 outcomes.append(
-                    RemovalOutcome(
-                        path, owned.role, "remove", "still exactly what setup wrote"
-                    )
+                    RemovalOutcome(path, owned.role, "remove", "still exactly what setup wrote")
                 )
             else:
                 outcomes.append(
@@ -151,7 +149,9 @@ def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> Unins
                 RemovalOutcome(path, owned.role, "already-removed", "no directory at this path")
             )
             continue
-        remaining = set(os.listdir(path)) - ({PROJECT_POLICY_RELATIVE.name} if removing_policy else set())
+        remaining = set(os.listdir(path)) - (
+            {PROJECT_POLICY_RELATIVE.name} if removing_policy else set()
+        )
         if remaining:
             outcomes.append(
                 RemovalOutcome(

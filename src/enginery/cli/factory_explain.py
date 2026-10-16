@@ -22,6 +22,7 @@ from enginery.application.effective_config import (
     CompiledConfig,
 )
 from enginery.application.project_policy import BUILTIN_CAPABILITIES
+from enginery.capabilities.install import load_owned_manifest
 from enginery.cli.config_locations import (
     PROJECT_POLICY_RELATIVE,
     private_state_directory,
@@ -31,7 +32,6 @@ from enginery.cli.factory_setup import (
     INSTALL_ROOT_RELATIVE,
     ProjectConfiguration,
 )
-from enginery.capabilities.install import load_owned_manifest
 from enginery.cli.setup_files import OWNERSHIP_FILE, load_ownership, read_regular
 
 
@@ -182,7 +182,9 @@ def explain_lines(document: Mapping[str, object]) -> list[str]:
         )
         lines.append(f"  {row['name']} = {row['value']!r}  ({origin})")
         for entry in row["chain"]:
-            marker = "  <- wins" if entry is row["chain"][0] and winner not in {UNSET, MERGED} else ""
+            marker = (
+                "  <- wins" if entry is row["chain"][0] and winner not in {UNSET, MERGED} else ""
+            )
             note = f" [{entry['note']}]" if entry["note"] else ""
             pinned = " [pinned]" if entry["pinned"] else ""
             lines.append(
@@ -197,7 +199,9 @@ def explain_lines(document: Mapping[str, object]) -> list[str]:
     for item in document["setup_owned_files"]:  # type: ignore[attr-defined]
         lines.append(f"  setup file [{item['status']}] {item['path']}: {item['detail']}")
     for hold in document["holds"]:  # type: ignore[attr-defined]
-        lines.append(f"  HOLD {hold['prerequisite']}: {hold['detail']} (resolve: {hold['resolve']})")
+        lines.append(
+            f"  HOLD {hold['prerequisite']}: {hold['detail']} (resolve: {hold['resolve']})"
+        )
     return lines
 
 

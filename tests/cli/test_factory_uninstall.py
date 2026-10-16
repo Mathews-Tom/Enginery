@@ -49,7 +49,10 @@ def project(tmp_path: Path) -> Path:
 @pytest.fixture
 def setup(project: Path, capsys: pytest.CaptureFixture[str]) -> Path:
     capsys.readouterr()
-    assert main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"]) == 0
+    assert (
+        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
+        == 0
+    )
     return project.resolve()
 
 

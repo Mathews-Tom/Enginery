@@ -51,7 +51,9 @@ REQUIRED: dict[str, str] = {
         "factory init without --apply lists every file, install, network access and auth "
         "requirement and writes nothing"
     ),
-    "setup-apply-performs-previewed-plan": "factory init --apply performs exactly the previewed plan",
+    "setup-apply-performs-previewed-plan": (
+        "factory init --apply performs exactly the previewed plan"
+    ),
     "setup-repeat-init-no-change": "repeating factory init with the same choices changes nothing",
     "setup-conflict-user-owned-not-overwritten": (
         "a differing existing project policy is a user-owned conflict and is never overwritten"
@@ -183,9 +185,7 @@ def snapshot(*roots: Path, base: Path) -> dict[str, str]:
 
 
 def _changed(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
-    return sorted(
-        key for key in set(before) | set(after) if before.get(key) != after.get(key)
-    )
+    return sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
 
 
 class SetupGate:
@@ -303,8 +303,10 @@ class SetupGate:
         directory = self.options.raw_dir
         target = directory / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        text = content if isinstance(content, str) else json.dumps(
-            content, indent=2, sort_keys=True, default=str
+        text = (
+            content
+            if isinstance(content, str)
+            else json.dumps(content, indent=2, sort_keys=True, default=str)
         )
         target.write_text(text.replace(str(self.root), "<disposable-root>"), encoding="utf-8")
         return f"{directory.name}/{name}"
@@ -312,7 +314,9 @@ class SetupGate:
     def launches(self) -> list[dict[str, Any]]:
         if not self.launch_log.exists():
             return []
-        return [json.loads(line) for line in self.launch_log.read_text(encoding="utf-8").splitlines()]
+        return [
+            json.loads(line) for line in self.launch_log.read_text(encoding="utf-8").splitlines()
+        ]
 
     def identities(self, required: dict[str, str]) -> dict[str, Any]:
         import enginery.config as packaged
@@ -321,7 +325,9 @@ class SetupGate:
         digests = {
             path.name: "sha256:" + _sha(path.read_bytes())
             for path in sorted(config_dir.glob("*.toml"))
-            if path.name.startswith(("factory-defaults", "workflow-profile", "execution-catalog-v3"))
+            if path.name.startswith(
+                ("factory-defaults", "workflow-profile", "execution-catalog-v3")
+            )
         }
         return {
             "subject": subject_identity(self.options.subject_commit),
@@ -450,7 +456,9 @@ def step_init(gate: SetupGate) -> None:
         },
         expected="exit 0; no path changed; policy tracked create; record private create; "
         "no network access; no installs; github and harness auth requirements",
-        observer={"filesystem_before_after": {"paths": len(before), "changed": _changed(before, after)}},
+        observer={
+            "filesystem_before_after": {"paths": len(before), "changed": _changed(before, after)}
+        },
     )
 
     start = len(gate.commands)
@@ -468,8 +476,12 @@ def step_init(gate: SetupGate) -> None:
         "setup-apply-performs-previewed-plan",
         passed=apply_process.returncode == 0 and written_ok and len(created) >= len(previewed),
         since=start,
-        observed={"exit": apply_process.returncode, "performed": applied.get("performed"),
-                  "previewed": sorted(previewed), "created_paths": created},
+        observed={
+            "exit": apply_process.returncode,
+            "performed": applied.get("performed"),
+            "previewed": sorted(previewed),
+            "created_paths": created,
+        },
         expected="exit 0; performed paths equal the previewed paths; each file's sha256 equals "
         "the preview's",
         observer={"filesystem_before_after": {"created": created}},
@@ -488,8 +500,11 @@ def step_init(gate: SetupGate) -> None:
             and after_repeat == after_apply
         ),
         since=start,
-        observed={"exit": repeat_process.returncode, "performed": repeated.get("performed"),
-                  "changed_paths": _changed(after_apply, after_repeat)},
+        observed={
+            "exit": repeat_process.returncode,
+            "performed": repeated.get("performed"),
+            "changed_paths": _changed(after_apply, after_repeat),
+        },
         expected="exit 0; nothing performed; no path changed",
         observer={"filesystem_before_after": {"changed": _changed(after_apply, after_repeat)}},
     )
@@ -509,11 +524,16 @@ def step_init(gate: SetupGate) -> None:
             and tree() == after_apply
         ),
         since=start,
-        observed={"exit": conflict_process.returncode, "status": conflict.get("status"),
-                  "conflicts": conflict.get("conflicts")},
+        observed={
+            "exit": conflict_process.returncode,
+            "status": conflict.get("status"),
+            "conflicts": conflict.get("conflicts"),
+        },
         expected="exit 9; status conflict; the policy bytes and the whole tree are unchanged",
-        observer={"policy_sha256_before": _sha(original),
-                  "policy_sha256_after": _sha(policy_path.read_bytes())},
+        observer={
+            "policy_sha256_before": _sha(original),
+            "policy_sha256_after": _sha(policy_path.read_bytes()),
+        },
     )
 
 
@@ -535,15 +555,24 @@ def _submit(
     run_dir.mkdir()
     request = run_dir / "request.json"
     build = gate.cli(
-        "stage1", "build-request",
-        "--output", str(request),
-        "--run-id", f"run-{name}",
-        "--repository", "owner/repo",
-        "--external-reference", "owner/repo#1",
-        "--base-revision", gate.git(project, "rev-parse", "HEAD"),
-        "--repository-path", str(project),
-        "--workspace-path", str(run_dir / "workspace"),
-        "--artifact-root", str(run_dir / "artifacts"),
+        "stage1",
+        "build-request",
+        "--output",
+        str(request),
+        "--run-id",
+        f"run-{name}",
+        "--repository",
+        "owner/repo",
+        "--external-reference",
+        "owner/repo#1",
+        "--base-revision",
+        gate.git(project, "rev-parse", "HEAD"),
+        "--repository-path",
+        str(project),
+        "--workspace-path",
+        str(run_dir / "workspace"),
+        "--artifact-root",
+        str(run_dir / "artifacts"),
         *run_flags,
     )
     if build.returncode != 0:
@@ -592,27 +621,27 @@ def step_layers(gate: SetupGate) -> None:
         (
             "layer-user-reaches-submission",
             "user",
-            dict(user="schema_version = 1\n" + _USER, init_extra=(), run_flags=()),
+            {"user": "schema_version = 1\n" + _USER, "init_extra": (), "run_flags": ()},
             ("openai/gpt-user", "low", "user"),
         ),
         (
             "layer-project-over-user-reaches-submission",
             "project",
-            dict(
-                user="schema_version = 1\n" + _USER,
-                init_extra=("--model", "openai/gpt-project", "--effort", "medium"),
-                run_flags=(),
-            ),
+            {
+                "user": "schema_version = 1\n" + _USER,
+                "init_extra": ("--model", "openai/gpt-project", "--effort", "medium"),
+                "run_flags": (),
+            },
             ("openai/gpt-project", "medium", "project"),
         ),
         (
             "layer-run-over-project-reaches-submission",
             "run",
-            dict(
-                user="schema_version = 1\n" + _USER,
-                init_extra=("--model", "openai/gpt-project", "--effort", "medium"),
-                run_flags=("--model", "openai/gpt-run", "--effort", "high"),
-            ),
+            {
+                "user": "schema_version = 1\n" + _USER,
+                "init_extra": ("--model", "openai/gpt-project", "--effort", "medium"),
+                "run_flags": ("--model", "openai/gpt-run", "--effort", "high"),
+            },
             ("openai/gpt-run", "high", "run"),
         ),
     )
@@ -638,8 +667,10 @@ def step_layers(gate: SetupGate) -> None:
             observed=observed,
             expected=f"the harness argv carries --model {model} --thinking {effort}, and both "
             f"compiled fields name the {winner} layer as winner",
-            observer={"recorded_harness_invocation": observed["harness_argv_flags"],
-                      "submitted": observed["submitted"]},
+            observer={
+                "recorded_harness_invocation": observed["harness_argv_flags"],
+                "submitted": observed["submitted"],
+            },
         )
     gate.write_user(None)
 
@@ -652,20 +683,31 @@ def step_refusals(gate: SetupGate) -> None:
         policy.write_text(f"schema_version = 1\n{body}", encoding="utf-8")
         return project
 
-    def build(project: Path, name: str, *extra: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+    def build(
+        project: Path, name: str, *extra: str
+    ) -> tuple[subprocess.CompletedProcess[str], Path]:
         run_dir = gate.runs / name
         run_dir.mkdir()
         request = run_dir / "request.json"
         process = gate.cli(
-            "stage1", "build-request",
-            "--output", str(request),
-            "--run-id", f"run-{name}",
-            "--repository", "owner/repo",
-            "--external-reference", "owner/repo#1",
-            "--base-revision", gate.git(project, "rev-parse", "HEAD"),
-            "--repository-path", str(project),
-            "--workspace-path", str(run_dir / "workspace"),
-            "--artifact-root", str(run_dir / "artifacts"),
+            "stage1",
+            "build-request",
+            "--output",
+            str(request),
+            "--run-id",
+            f"run-{name}",
+            "--repository",
+            "owner/repo",
+            "--external-reference",
+            "owner/repo#1",
+            "--base-revision",
+            gate.git(project, "rev-parse", "HEAD"),
+            "--repository-path",
+            str(project),
+            "--workspace-path",
+            str(run_dir / "workspace"),
+            "--artifact-root",
+            str(run_dir / "artifacts"),
             *extra,
         )
         return process, request
@@ -697,8 +739,11 @@ def step_refusals(gate: SetupGate) -> None:
             and "violates" in refused.stderr
         ),
         since=start,
-        observed={"exit": refused.returncode, "stderr": refused.stderr.strip()[:400],
-                  "request_written": refused_request.exists()},
+        observed={
+            "exit": refused.returncode,
+            "stderr": refused.stderr.strip()[:400],
+            "request_written": refused_request.exists(),
+        },
         expected="exit 2; no request file; the refusal names the project policy file",
         observer={"request_exists_on_disk": refused_request.exists()},
     )
@@ -731,7 +776,11 @@ def step_doctor(gate: SetupGate) -> None:
     tree_before = snapshot(project, gate.xdg_config, gate.xdg_state, base=gate.root)
     ok = gate.cli("factory", "doctor", "--project", str(project), "--json")
     held = gate.cli(
-        "factory", "doctor", "--project", str(project), "--json",
+        "factory",
+        "doctor",
+        "--project",
+        str(project),
+        "--json",
         extra_env={"GATE_GH_AUTH_EXIT": "1"},
     )
     report = _json(held)
@@ -749,9 +798,12 @@ def step_doctor(gate: SetupGate) -> None:
             and tree_before == tree_after
         ),
         since=start,
-        observed={"satisfied_exit": ok.returncode, "unauthenticated_exit": held.returncode,
-                  "holds": [{"name": k, "resolve": v.get("resolve")} for k, v in holds.items()],
-                  "changed_paths": _changed(tree_before, tree_after)},
+        observed={
+            "satisfied_exit": ok.returncode,
+            "unauthenticated_exit": held.returncode,
+            "holds": [{"name": k, "resolve": v.get("resolve")} for k, v in holds.items()],
+            "changed_paths": _changed(tree_before, tree_after),
+        },
         expected="exit 0 when satisfied; exit 5 with a github-auth hold whose resolving command "
         "is `gh auth login` when unauthenticated; nothing changed",
         observer={"stand_in_gh_calls": [c for c in gate.commands if "doctor" in c]},
@@ -769,7 +821,9 @@ def step_uninstall(gate: SetupGate) -> None:
         bystander.write_text('{"entries": []}', encoding="utf-8")
         (project / "ledger.db").write_bytes(b"ledger")
     policy_modified = modified / ".enginery" / "project.toml"
-    policy_modified.write_text(policy_modified.read_text(encoding="utf-8") + "# mine\n", encoding="utf-8")
+    policy_modified.write_text(
+        policy_modified.read_text(encoding="utf-8") + "# mine\n", encoding="utf-8"
+    )
     edited = policy_modified.read_bytes()
     bystanders = {
         path: path.read_bytes()
@@ -786,10 +840,15 @@ def step_uninstall(gate: SetupGate) -> None:
     _record(
         gate,
         "uninstall-preview-writes-nothing",
-        passed=preview.returncode == 0 and tree() == before and _json(preview).get("mode") == "preview",
+        passed=preview.returncode == 0
+        and tree() == before
+        and _json(preview).get("mode") == "preview",
         since=start,
-        observed={"exit": preview.returncode, "changed_paths": _changed(before, tree()),
-                  "files": _json(preview).get("files")},
+        observed={
+            "exit": preview.returncode,
+            "changed_paths": _changed(before, tree()),
+            "files": _json(preview).get("files"),
+        },
         expected="exit 0; mode preview; no path changed",
         observer={"filesystem_before_after": {"changed": _changed(before, tree())}},
     )
@@ -804,18 +863,31 @@ def step_uninstall(gate: SetupGate) -> None:
         passed=(
             applied.returncode == 0
             and not policy_clean.exists()
-            and all(path.read_bytes() == content for path, content in bystanders.items() if path.exists())
+            and all(
+                path.read_bytes() == content
+                for path, content in bystanders.items()
+                if path.exists()
+            )
             and all(path.exists() for path in bystanders)
             and gate.user_file().read_bytes() == user_bytes
             and plan.get("ownership_record", {}).get("action") == "remove"
         ),
         since=start,
-        observed={"exit": applied.returncode, "removed": plan.get("removed"),
-                  "bystanders_intact": all(p.read_bytes() == c for p, c in bystanders.items() if p.exists())},
+        observed={
+            "exit": applied.returncode,
+            "removed": plan.get("removed"),
+            "bystanders_intact": all(
+                p.read_bytes() == c for p, c in bystanders.items() if p.exists()
+            ),
+        },
         expected="exit 0; the unmodified policy and the record are removed; the capability "
         "lockfile, ledger and user.toml are byte-identical",
-        observer={"policy_exists": policy_clean.exists(),
-                  "bystander_sha256": {str(p.relative_to(gate.root)): _sha(c) for p, c in bystanders.items()}},
+        observer={
+            "policy_exists": policy_clean.exists(),
+            "bystander_sha256": {
+                str(p.relative_to(gate.root)): _sha(c) for p, c in bystanders.items()
+            },
+        },
     )
 
     start = len(gate.commands)
@@ -823,7 +895,9 @@ def step_uninstall(gate: SetupGate) -> None:
     kept_plan = _json(kept)
     after_first = tree()
     again_clean = gate.cli("factory", "uninstall", "--project", str(clean), "--apply", "--json")
-    again_modified = gate.cli("factory", "uninstall", "--project", str(modified), "--apply", "--json")
+    again_modified = gate.cli(
+        "factory", "uninstall", "--project", str(modified), "--apply", "--json"
+    )
     _record(
         gate,
         "uninstall-keeps-user-modified-and-is-idempotent",
@@ -838,27 +912,35 @@ def step_uninstall(gate: SetupGate) -> None:
             and tree() == after_first
         ),
         since=start,
-        observed={"kept_exit": kept.returncode, "kept_user_owned": kept_plan.get("kept_user_owned"),
-                  "second_run_status": [_json(again_clean).get("status"),
-                                        _json(again_modified).get("status")],
-                  "changed_by_second_run": _changed(after_first, tree())},
+        observed={
+            "kept_exit": kept.returncode,
+            "kept_user_owned": kept_plan.get("kept_user_owned"),
+            "second_run_status": [
+                _json(again_clean).get("status"),
+                _json(again_modified).get("status"),
+            ],
+            "changed_by_second_run": _changed(after_first, tree()),
+        },
         expected="the edited policy is kept byte-identical and reported user-owned; a second "
         "uninstall of either project is a no-op",
-        observer={"policy_sha256": _sha(policy_modified.read_bytes()), "edited_sha256": _sha(edited)},
+        observer={
+            "policy_sha256": _sha(policy_modified.read_bytes()),
+            "edited_sha256": _sha(edited),
+        },
     )
     gate.write_user(None)
 
 
-def step_boundaries(gate: SetupGate, globals_before: dict[str, str], home_before: dict[str, str]) -> None:
+def step_boundaries(
+    gate: SetupGate, globals_before: dict[str, str], home_before: dict[str, str]
+) -> None:
     start = len(gate.commands)
     globals_after = gate.global_snapshot()
     home_after = gate.home_snapshot()
     outside = [
         key
         for key in _changed(home_before, home_after)
-        if not any(
-            key.startswith(f"home/{prefix}") for prefix in _PRIVATE_PREFIXES
-        )
+        if not any(key.startswith(f"home/{prefix}") for prefix in _PRIVATE_PREFIXES)
     ]
     gate.effects["global_location_changes"] = len(_changed(globals_before, globals_after))
     _record(
@@ -866,13 +948,17 @@ def step_boundaries(gate: SetupGate, globals_before: dict[str, str], home_before
         "global-locations-byte-identical",
         passed=globals_before == globals_after and not outside,
         since=start,
-        observed={"global_paths_checked": len(globals_before),
-                  "global_changes": _changed(globals_before, globals_after),
-                  "changed_outside_private_locations": outside},
+        observed={
+            "global_paths_checked": len(globals_before),
+            "global_changes": _changed(globals_before, globals_after),
+            "changed_outside_private_locations": outside,
+        },
         expected="every global location is byte-identical; every changed path is inside "
         "Enginery's private config or state directory",
-        observer={"checked_roots": list(_GLOBAL_ROOTS),
-                  "private_prefixes": list(_PRIVATE_PREFIXES)},
+        observer={
+            "checked_roots": list(_GLOBAL_ROOTS),
+            "private_prefixes": list(_PRIVATE_PREFIXES),
+        },
     )
     launches = gate.launches()
     resolved = shutil.which("omp", path=gate.environment()["PATH"])
@@ -882,8 +968,11 @@ def step_boundaries(gate: SetupGate, globals_before: dict[str, str], home_before
         "no-hosted-session",
         passed=resolved == str(gate.bin / "omp") and len(launches) >= 3,
         since=start,
-        observed={"omp_resolves_to_stand_in": resolved == str(gate.bin / "omp"),
-                  "recorded_stand_in_launches": len(launches), "hosted_sessions": 0},
+        observed={
+            "omp_resolves_to_stand_in": resolved == str(gate.bin / "omp"),
+            "recorded_stand_in_launches": len(launches),
+            "hosted_sessions": 0,
+        },
         expected="`omp` resolves to the local recording stand-in and every harness launch was "
         "recorded by it",
         observer={"stand_in_launch_count": len(launches)},
