@@ -241,13 +241,19 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
         "github_mutations": 0,
         "hosted_inference_calls": 0,
     }
+    ledger = database_path(project)
+    sidecars = [ledger.with_name(ledger.name + suffix) for suffix in ("-wal", "-shm")]
+    existing_sidecars = {path for path in sidecars if path.exists()}
     holds = intake_prerequisites(configuration, effects)
+    local_writes = [
+        str(path) for path in sidecars if path not in existing_sidecars and path.exists()
+    ]
     document: dict[str, object] = {
         "project": str(project),
         "candidates": [],
         "holds": holds,
         "external_effects": effects,
-        "local_writes": [],
+        "local_writes": local_writes,
     }
     if holds:
         return document
@@ -262,7 +268,12 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             }
         )
         return document
+    intake_directory_existed = index_path(project).parent.exists()
     with contextlib.nullcontext() if dry_run else intake_lock(project):
+        if not dry_run:
+            if not intake_directory_existed:
+                local_writes.append(str(index_path(project).parent))
+            local_writes.append(str(index_path(project).with_suffix(".lock")))
         index = read_index(project)
         intake = index.repositories.setdefault(repository, RepositoryIntake())
         adapter = github_ledger(configuration, repository)
@@ -279,7 +290,8 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                     "prerequisite": "issue intake",
                     "detail": str(error),
                     "resolve": (
-                        "gh auth status; enginery factory collect --project "
+                        shlex.quote(compiled.config.text("github_executable"))
+                        + " auth status; enginery factory collect --project "
                         + shlex.quote(str(project))
                     ),
                 }
@@ -325,8 +337,9 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                     "prerequisite": "issue intake",
                     "detail": str(error),
                     "resolve": (
-                        "gh auth status; enginery factory collect --project "
-                        f"{shlex.quote(str(project))}"
+                        shlex.quote(compiled.config.text("github_executable"))
+                        + " auth status; enginery factory collect --project "
+                        + shlex.quote(str(project))
                     ),
                 }
                 row["classification"] = {"hold": str(error)}
@@ -353,10 +366,7 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
         effects["github_reads"] = adapter.github_reads
         if not dry_run:
             write_document(index_path(project), index.to_state())
-            document["local_writes"] = [
-                str(index_path(project)),
-                str(index_path(project).with_suffix(".lock")),
-            ]
+            local_writes.append(str(index_path(project)))
     return document
 
 

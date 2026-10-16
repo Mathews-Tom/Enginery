@@ -37,7 +37,9 @@ only a project policy file and a private ownership record, and never install
 capabilities, sign in, or touch services, MCP servers or global configuration.
 
 `enginery factory collect --dry-run` previews canonical issue classification, deduplication,
-workflow selection and budgets without mutations. `collect` updates only the private
+workflow selection and budgets without GitHub mutations. Read-only inspection of a WAL
+ledger may create SQLite sidecars, disclosed in `local_writes`, without changing the
+ledger's content. `collect` updates only the private
 repository cursor, never issue-to-run bindings, and never skips held issues. JSON
 reports GitHub authentication probes separately from issue reads; neither form calls
 a model or changes GitHub.

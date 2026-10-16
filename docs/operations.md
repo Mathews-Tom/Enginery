@@ -721,14 +721,17 @@ allowed work-kind/risk values. No risk is chosen automatically. Authentication o
 transient intake failures instead report an `issue intake` hold with authentication
 and retry commands. A listing exceeding 100 pages fails loudly rather than truncating.
 The preview includes deduplication, selected workflow, harness/model/effort and winning
-layers, runner, time budget and the unenforced cost basis. It makes no local writes,
-GitHub mutations or hosted inference calls; JSON counts `github_auth_probes` separately
-from issue API `github_reads`. An existing project ledger is opened read-only without
-migration; the 1 MiB document limit applies to the intake index and request documents,
-not the ledger.
+layers, runner, time budget and the unenforced cost basis. It makes no GitHub mutations
+or hosted inference calls; JSON counts `github_auth_probes` separately from issue API
+`github_reads`. An existing project ledger is opened read-only without migration.
+Read-only inspection of a WAL ledger may create SQLite `ledger.sqlite-wal` and
+`ledger.sqlite-shm` sidecar files without changing the ledger's content; any newly
+created sidecars are disclosed in `local_writes`, including during a dry run.
+The 1 MiB document limit applies to the intake index and request documents, not the ledger.
 
-Without `--dry-run`, collection records only the private `intake/index.json` and its
-lock file. Only the repository `last_seen_updated_at` cursor changes: it cannot advance
+Without `--dry-run`, collection also records the private `intake/index.json`, its
+lock file and, when newly created, the `intake/` directory. Only the repository
+`last_seen_updated_at` cursor changes: it cannot advance
 past the earliest held or errored issue. Collection never creates issue-to-run bindings;
 it reads existing bindings to report `new`, `bound:<run-id>` or `changed:<run-id>`.
 The JSON `local_writes` list discloses these paths. Collection never comments, labels,

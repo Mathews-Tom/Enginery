@@ -17,12 +17,14 @@ from enginery.application.factory_intake import IntakeEntry
 from enginery.cli import factory_collect
 from enginery.cli.factory_collect import collect, index_path, intake_prerequisites, read_index
 from enginery.cli.main import _build_parser
+from enginery.cli.operator import _build_parser as _build_operator_parser
 from enginery.domain.errors import (
     AuthenticationFailureError,
     EngineryError,
     InvalidInputError,
     TransientProviderFailureError,
 )
+from enginery.ledger.service import LedgerService
 
 
 @pytest.fixture
@@ -119,13 +121,15 @@ def assert_repair(command: str) -> None:
         argv = shlex.split(part)
         if argv[0] == "enginery":
             _build_parser().parse_args(argv[1:])
+        elif argv[0] == "enginery-operator":
+            _build_operator_parser().parse_args(argv[1:])
         elif argv[:3] == ["gh", "issue", "edit"]:
             assert argv[3].isascii() and argv[3].isdigit()
             assert argv[4:6] == ["--repo", "owner/repo"]
             assert len(argv[6:]) >= 2 and len(argv[6:]) % 2 == 0
             assert set(argv[6::2]) <= {"--add-label", "--remove-label"}
         else:
-            assert argv[0] in {"gh", "git", "enginery-operator"}
+            assert argv[0] in {"gh", "git"}
 
 
 @pytest.mark.parametrize(
@@ -156,14 +160,19 @@ def test_classification_repairs_name_allowed_values_and_remove_offenders(
 def test_paused_large_ledger_is_read_only(project: Path) -> None:
     path = factory_collect.database_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with LedgerService.open(path) as ledger:
+        connection = ledger.connection
         connection.execute(
-            "CREATE TABLE process_manager_state "
-            "(process_manager_name TEXT, state_key TEXT, state_json TEXT)"
-        )
-        connection.execute(
-            "INSERT INTO process_manager_state VALUES (?, ?, ?)",
-            ("operator-control", "control", json.dumps({"paused": True, "padding": "x" * 1100000})),
+            "INSERT INTO process_manager_state "
+            "(process_manager_name, state_key, state_json, state_version, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "operator-control",
+                "control",
+                json.dumps({"paused": True, "padding": "x" * 1100000}),
+                1,
+                "2026-10-16T00:00:00Z",
+            ),
         )
     before = path.read_bytes()
     holds = factory_collect.paused_hold(project)
@@ -178,7 +187,6 @@ def test_paused_large_ledger_is_read_only(project: Path) -> None:
     finally:
         connection.close()
     assert path.read_bytes() == before
-    assert not path.with_name(path.name + "-wal").exists()
 
 
 @pytest.mark.parametrize(
@@ -259,6 +267,64 @@ def test_intake_failure_has_separate_hold_and_parsable_retry(
     assert read_index(project).repositories["owner/repo"].last_seen_updated_at is None
 
 
+@pytest.mark.parametrize("intake_directory_exists", [True, False])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_listing_failure_discloses_lock_and_new_directory(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    intake_directory_exists: bool,
+    dry_run: bool,
+) -> None:
+    path = index_path(project)
+    if intake_directory_exists:
+        path.parent.mkdir(parents=True)
+    ledger = adapter()
+
+    def command(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        raise TransientProviderFailureError("listing unavailable")
+
+    ledger.command_runner = command
+    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: ledger)
+    report = collect(project, dry_run=dry_run)
+    assert report["holds"][0]["prerequisite"] == "issue intake"
+    assert_repair(report["holds"][0]["resolve"])
+    expected = [] if dry_run else [str(path.with_suffix(".lock"))]
+    if not dry_run and not intake_directory_exists:
+        expected.insert(0, str(path.parent))
+    assert report["local_writes"] == expected
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("listing_fails", [True, False])
+def test_intake_failure_repair_uses_configured_github(
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    listing_fails: bool,
+) -> None:
+    config = tmp_path / "config"
+    user = config / "enginery" / "user.toml"
+    user.parent.mkdir(parents=True)
+    executable = str(tmp_path / "alternate gh")
+    user.write_text(f"schema_version = 1\n[executables]\ngithub = {json.dumps(executable)}\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    ledger = adapter()
+    original = ledger.command_runner
+
+    def command(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if listing_fails or "/issues?" not in argv[-1]:
+            raise TransientProviderFailureError("issue intake unavailable")
+        return original(argv)
+
+    ledger.command_runner = command
+    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: ledger)
+    report = collect(project, dry_run=True)
+    repair = report["holds"][0]["resolve"]
+    auth, retry = repair.split("; ")
+    assert shlex.split(auth) == [executable, "auth", "status"]
+    assert_repair(retry)
+
+
 def test_prerequisite_auth_probe_count_and_repairs(
     project: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,23 +348,29 @@ def test_prerequisite_auth_probe_count_and_repairs(
         assert_repair(hold["resolve"])
 
 
-def test_dry_collect_reports_pause_without_changing_private_files(
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("paused", [True, False])
+def test_collect_inspects_wal_ledger_without_changing_content(
     project: Path,
     monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+    paused: bool,
 ) -> None:
     from enginery.cli import factory_diagnostics
 
     path = factory_collect.database_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE process_manager_state "
-            "(process_manager_name TEXT, state_key TEXT, state_json TEXT)"
+    with LedgerService.open(path) as ledger:
+        ledger.connection.execute(
+            "INSERT INTO process_manager_state "
+            "(process_manager_name, state_key, state_json, state_version, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("operator-control", "control", json.dumps({"paused": paused}), 1, "now"),
         )
-        connection.execute(
-            "INSERT INTO process_manager_state VALUES (?, ?, ?)",
-            ("operator-control", "control", '{"paused":true}'),
-        )
+        schema_before = [
+            tuple(row) for row in ledger.connection.execute("SELECT * FROM sqlite_schema")
+        ]
+        assert ledger.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     monkeypatch.setattr(factory_collect, "intake_prerequisites", intake_prerequisites)
     monkeypatch.setattr(factory_diagnostics, "_executable", lambda value: value)
     monkeypatch.setattr(
@@ -306,14 +378,27 @@ def test_dry_collect_reports_pause_without_changing_private_files(
         "_run",
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
     )
+    monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
     before = {file.name: file.read_bytes() for file in path.parent.iterdir() if file.is_file()}
-    report = collect(project, dry_run=True)
-    assert report["local_writes"] == []
-    assert report["candidates"] == []
-    assert report["holds"][0]["prerequisite"] == "dispatch"
-    assert_repair(report["holds"][0]["resolve"])
-    after = {file.name: file.read_bytes() for file in path.parent.iterdir() if file.is_file()}
-    assert before == after
+    report = collect(project, dry_run=dry_run)
+    assert path.read_bytes() == before[path.name]
+    for suffix in ("-wal", "-shm"):
+        sidecar = path.with_name(path.name + suffix)
+        assert (str(sidecar) in report["local_writes"]) == (
+            sidecar.exists() and sidecar.name not in before
+        )
+    if paused:
+        assert report["candidates"] == []
+        assert report["holds"][0]["prerequisite"] == "dispatch"
+        assert_repair(report["holds"][0]["resolve"])
+    connection = factory_collect.read_ledger(project)
+    assert connection is not None
+    try:
+        assert [tuple(row) for row in connection.execute("SELECT * FROM sqlite_schema")] == (
+            schema_before
+        )
+    finally:
+        connection.close()
 
 
 def test_missing_github_has_no_auth_probe(
