@@ -46,6 +46,19 @@ def dispatch(
     return project, run
 
 
+def test_collect_paused_project_reports_factory_pause_repair(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    code, paused = invoke(capsys, project, "pause")
+    assert code == 0 and paused["paused"]
+    code, held = invoke(capsys, project, "collect")
+    assert code == 5
+    dispatch_hold = next(hold for hold in held["holds"] if hold["prerequisite"] == "dispatch")
+    assert dispatch_hold["resolve"] == f"enginery factory pause --lift --project {project}"
+
+
 def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],

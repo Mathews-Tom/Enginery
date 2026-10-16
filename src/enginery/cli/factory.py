@@ -19,6 +19,7 @@ import argparse
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from enginery.application.layered_config import RUNNER_MODES
 from enginery.application.project_policy import SetupChoices
@@ -28,7 +29,13 @@ from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_control import drain, pause
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
-from enginery.cli.factory_run import nonnegative_seconds, resume_run, run_issue, status
+from enginery.cli.factory_run import (
+    factory_repairs,
+    nonnegative_seconds,
+    resume_run,
+    run_issue,
+    status,
+)
 from enginery.cli.factory_setup import (
     SetupPlan,
     apply_plan,
@@ -322,7 +329,10 @@ def run_factory(args: argparse.Namespace) -> int:
     if command == "doctor":
         return _run_doctor(args)
     if command == "collect":
-        document = collect(resolve_project(args.project), dry_run=args.dry_run)
+        project = resolve_project(args.project)
+        collected = collect(project, dry_run=args.dry_run)
+        holds = cast(list[dict[str, str]], collected["holds"])
+        document = {**collected, "holds": factory_repairs(project, holds)}
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document["holds"] else SUCCESS
     if command == "resume":

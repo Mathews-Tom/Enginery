@@ -23,8 +23,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from enginery.cli.config_locations import private_state_directory, project_identity
+from enginery.cli.factory_collect import database_path
 from enginery.engine.operator_control import live_workers
 from enginery.engine.recovery import assess_worker
 from enginery.ledger.service import LedgerService
@@ -279,7 +281,8 @@ class ManualPathGate(SetupGate):
         self.request_bytes = b""
         self.workspace: Path | None = None
         self.workspace_identity: tuple[int, int] | None = None
-        self.database = self.state / "ledger.sqlite"
+        with patch.dict(os.environ, self.environment(), clear=True):
+            self.database = database_path(self.project)
 
     def _write_stand_ins(self) -> None:
         for name, body in (
@@ -464,7 +467,8 @@ def step_prepare(gate: ManualPathGate) -> None:
     policy = project / ".enginery" / "project.toml"
     policy_text = policy.read_text(encoding="utf-8") if policy.exists() else ""
     gate.state = private_state_directory(project, gate.environment())
-    gate.database = gate.state / "ledger.sqlite"
+    with patch.dict(os.environ, gate.environment(), clear=True):
+        gate.database = database_path(project)
     gate.record(
         "init-policy-and-user-executables",
         code == 0

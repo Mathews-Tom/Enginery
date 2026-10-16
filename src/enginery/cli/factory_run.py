@@ -513,6 +513,7 @@ def workspace_documents(project: Path, ledger: LedgerService) -> list[dict[str, 
         )
     return rows
 
+
 def _enrich(
     project: Path, ledger: LedgerService, report: dict[str, object], run_id: str
 ) -> dict[str, object]:

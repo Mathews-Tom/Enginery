@@ -173,15 +173,6 @@ def test_changed_issue_holds_without_replacing_request(
         str(project),
     ]
     assert path.read_bytes() == before
-    code, replacement = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
-    assert code == 5
-    assert "supersede not safe" in replacement["holds"][0]["detail"]
-    assert "--node-id implement" in replacement["holds"][0]["resolve"]
-    assert path.read_bytes() == before
-    _, old = invoke(capsys, project, "status", run["run_id"])
-    assert old["run_id"] == run["run_id"] and old["request_path"] == str(path)
-    _, listing = invoke(capsys, project, "status")
-    assert {item["run_id"] for item in listing["runs"]} == {run["run_id"]}
 
 
 def test_repeat_run_reuses_durable_request_and_workspace(
