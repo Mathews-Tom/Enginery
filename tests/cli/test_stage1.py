@@ -10,7 +10,7 @@ import pytest
 
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli.main import main
-from enginery.cli.stage1 import _lease_window
+from enginery.cli.stage1_composition import lease_window
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
@@ -56,7 +56,7 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
 def test_stage1_cli_lease_window_exceeds_the_omp_time_budget(tmp_path: Path) -> None:
     request = _request(tmp_path)
 
-    assert _lease_window(request) == timedelta(seconds=120)
+    assert lease_window(request) == timedelta(seconds=120)
 
 
 def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
@@ -469,28 +469,28 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
 def test_harness_for_selects_the_configured_provider_without_a_fallback(tmp_path: Path) -> None:
     from enginery.adapters.claude_code import ClaudeCodeHarness
     from enginery.adapters.omp import OmpHarness
-    from enginery.cli.stage1 import _harness_for
+    from enginery.cli.stage1_composition import harness_for
 
     omp_config = replace(_request(tmp_path).execution_configuration, harness_provider="omp")
     claude_config = replace(
         _request(tmp_path).execution_configuration, harness_provider="claude-code"
     )
 
-    assert isinstance(_harness_for(omp_config), OmpHarness)
-    assert isinstance(_harness_for(claude_config), ClaudeCodeHarness)
+    assert isinstance(harness_for(omp_config), OmpHarness)
+    assert isinstance(harness_for(claude_config), ClaudeCodeHarness)
 
 
 def test_harness_for_rejects_an_unconfigured_provider_instead_of_falling_back(
     tmp_path: Path,
 ) -> None:
-    from enginery.cli.stage1 import _harness_for
+    from enginery.cli.stage1_composition import harness_for
 
     configuration = replace(
         _request(tmp_path).execution_configuration, harness_provider="unknown-harness"
     )
 
     with pytest.raises(InvalidInputError, match="harness_provider"):
-        _harness_for(configuration)
+        harness_for(configuration)
 
 
 def _readonly_request(

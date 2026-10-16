@@ -21,7 +21,7 @@ import pytest
 
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
-from enginery.cli.stage1 import _harness_for, _worker_report
+from enginery.cli.stage1_composition import harness_for, worker_report
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.supervisor import probe_host
@@ -219,7 +219,7 @@ def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledg
                 ledger=ledger,
                 work_ledger=cast(WorkLedgerPort, TerminalWorkLedger(request.work_snapshot)),
                 pull_requests=cast(PullRequestPort, RecordingPullRequests()),
-                harness=_harness_for(request.execution_configuration),
+                harness=harness_for(request.execution_configuration),
             )
             now = datetime.now(UTC)
             service.qualify(
@@ -331,7 +331,7 @@ def test_worker_report_tells_a_live_worker_from_a_dead_one_with_identity_evidenc
         requests=(_occupier(tmp_path),),
     ).dispatched
 
-    alive = _worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
+    alive = worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
     assert alive is not None
     assert alive["liveness"] == "alive"
     assert alive["pid"] == running.identity.pid
@@ -348,7 +348,7 @@ def test_worker_report_tells_a_live_worker_from_a_dead_one_with_identity_evidenc
     os.killpg(running.identity.process_group_id, signal.SIGKILL)
     os.waitpid(running.identity.pid, 0)
 
-    dead = _worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
+    dead = worker_report(ledger_service, runtime, run_id="run-occupier", node_id="hold")
     assert dead is not None
     assert dead["liveness"] == "exited"
     assert dead["lease_epoch_active"] is True

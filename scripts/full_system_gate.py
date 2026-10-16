@@ -2,7 +2,7 @@
 """Cumulative Stage-1/Stage-2 restart/replay gate.
 
 Drives the real ``Stage1RunService`` composition the ``enginery`` CLI uses
-(``enginery.cli.stage1._advancing_service``) through two independent local
+(``enginery.cli.stage1_composition.advancing_service``) through two independent local
 work items on one durable SQLite ledger, injecting a coordinator restart --
 closing the ledger handle and every in-memory ``CoordinatorRuntime`` /
 ``Stage1RunService`` object, then reopening a brand-new set against the same

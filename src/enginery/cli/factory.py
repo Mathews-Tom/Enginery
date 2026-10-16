@@ -27,6 +27,7 @@ from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
+from enginery.cli.factory_run import nonnegative_seconds, run_issue, status
 from enginery.cli.factory_setup import (
     SetupPlan,
     apply_plan,
@@ -99,12 +100,35 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     collect_parser.add_argument("--dry-run", action="store_true")
     collect_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
+    run = commands.add_parser("run", help="Bind an issue and advance its durable Stage 1 run.")
+    _add_project(run)
+    run.add_argument("issue", metavar="OWNER/REPO#N")
+    run.add_argument("--once", action="store_true")
+    run.add_argument("--wait-seconds", type=nonnegative_seconds, default=0)
+    run.add_argument("--supersede", action="store_true")
+    run.add_argument("--base-branch", default=None)
+    run.add_argument("--model", default=None)
+    run.add_argument("--effort", default=None)
+    run.add_argument("--runner", choices=RUNNER_MODES, default=None)
+    run.add_argument("--profile", default=None)
+    run.add_argument("--validation-command", dest="validation_commands", action="append")
+    run.add_argument("--required-check", dest="required_checks", action="append")
+    run.add_argument("--protected-path", dest="protected_paths", action="append")
+    run.add_argument("--time-budget-seconds", type=int, default=None)
+    run.add_argument("--json", action="store_true")
+
+    status_parser = commands.add_parser("status", help="Inspect durable runs without advancing.")
+    _add_project(status_parser)
+    status_parser.add_argument("run_id", nargs="?")
+    status_parser.add_argument("--json", action="store_true")
+
     explain_parser = commands.add_parser(
         "explain",
         help="Show where every compiled field comes from, which files setup owns and what "
         "is held; read-only.",
     )
     _add_project(explain_parser)
+    explain_parser.add_argument("run_id", nargs="?")
     explain_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
     uninstall = commands.add_parser(
@@ -238,6 +262,10 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 def _run_explain(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
+    if args.run_id is not None:
+        document = status(project, args.run_id)
+        _emit(args, document, document_lines(document))
+        return HOLD_EXIT if document["holds"] else SUCCESS
     document = explain(load_project_configuration(project))
     _emit(args, document, explain_lines(document))
     return HOLD_EXIT if document["holds"] else SUCCESS
@@ -274,12 +302,17 @@ def run_factory(args: argparse.Namespace) -> int:
         document = collect(resolve_project(args.project), dry_run=args.dry_run)
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document["holds"] else SUCCESS
+    if command in {"run", "status"}:
+        project = resolve_project(args.project)
+        document = run_issue(project, args) if command == "run" else status(project, args.run_id)
+        _emit(args, document, document_lines(document))
+        return HOLD_EXIT if document.get("holds") else SUCCESS
     if command == "explain":
         return _run_explain(args)
     if command == "uninstall":
         return _run_uninstall(args)
     raise InvalidInputError(
-        "factory requires a subcommand: init, doctor, explain or uninstall",
+        "factory requires a subcommand; see enginery factory --help",
         details={"command": str(command)},
     )
 

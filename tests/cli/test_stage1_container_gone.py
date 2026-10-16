@@ -8,7 +8,7 @@ from typing import ClassVar
 import pytest
 
 from enginery.adapters.oci.launch import container_name_for
-from enginery.cli import stage1, stage1_runner
+from enginery.cli import stage1_composition, stage1_runner
 from enginery.domain.runner import RunnerSelection
 from enginery.ledger.service import LedgerService
 from tests.workflows.test_stage1_isolated import (
@@ -55,7 +55,7 @@ def test_the_runtime_for_an_isolated_run_is_wired_with_the_engine_lookup(
     built = _build(ledger_service, tmp_path, runner=_isolated(), admission=ScriptedAdmission())
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
 
-    runtime = stage1._runtime_for_run(
+    runtime = stage1_composition.runtime_for_run(
         ledger_service, owner="coordinator", run_id=str(built.request.run.id)
     )
 
@@ -67,6 +67,8 @@ def test_the_runtime_for_an_isolated_run_is_wired_with_the_engine_lookup(
 def test_a_run_that_is_not_a_stage1_run_gets_the_plain_runtime(
     ledger_service: LedgerService,
 ) -> None:
-    runtime = stage1._runtime_for_run(ledger_service, owner="coordinator", run_id="unknown")
+    runtime = stage1_composition.runtime_for_run(
+        ledger_service, owner="coordinator", run_id="unknown"
+    )
 
     assert runtime._container_gone is None
