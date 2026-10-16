@@ -64,9 +64,9 @@ for scripting.
 
 ## Configuration
 
-Enginery does not read a project- or user-level configuration file in this
-release. Every run's provider configuration is an explicit, versioned
-`--request` document passed to `enginery stage1 start` (see
+Enginery reads layered configuration (below) when it builds a Stage 1 request. Every
+run's provider configuration is an explicit, versioned `--request` document passed to
+`enginery stage1 start` (see
 [Running a Stage 1 workflow](#running-a-stage-1-workflow) below): work-item
 identity, acceptance criteria, validation commands, and an
 `execution_configuration` block naming the GitHub repository, an opaque
@@ -93,17 +93,115 @@ from the one a run was bound to (for example after upgrading Enginery),
 `enginery stage1 watch` reports the diagnostic as `hold` and refuses to
 advance the run; the run's original binding is retained, never rebound.
 
-The layered repository/user/workflow-profile TOML configuration model
-described in the system design is a forward design target for a later
-milestone, not present-state behavior. Do not write a `.toml` configuration
-file expecting Enginery to read it today.
-
 The `--database` flag on every mutating command names the SQLite ledger
 file. There is no default location; an operator chooses and tracks this
 path per project or environment. The ledger file is the single source of
 durable truth: deleting or corrupting it discards every run, node, policy
 decision, and evidence record it contains, so back it up (see
 [Backup and restore](#backup-and-restore)) before any risky operation.
+
+### Layered configuration
+
+`stage1 build-request` compiles one effective configuration from five layers,
+highest precedence first: **run** (the command-line flags), **project**
+(`<repository>/.enginery/project.toml`, tracked, and inside the protected
+`.enginery/**` set so a worker cannot change its own policy without an operator
+decision), **user** (`$XDG_CONFIG_HOME/enginery/user.toml`, default
+`~/.config/enginery/user.toml`, private and user-authored; Enginery never creates
+or edits it), **workflow** (a packaged, versioned profile: `standard` or
+`careful`, chosen with `profile = "..."` in project or user policy or with
+`--profile`) and **factory** (packaged defaults). The highest layer that specifies a
+field wins; protected paths are additive across layers and never remove a built-in
+protected path. A file that is absent is simply not a layer. The request snapshot also
+records which layer files were absent and where the user preferences file is looked up,
+so creating either file, or starting under a different `XDG_CONFIG_HOME`/`HOME` than the
+build, makes `stage1 start` refuse the request until it is rebuilt. A file that is present
+is validated strictly: an unknown key or section, a wrong type, an unsupported
+`schema_version`, an unknown workflow profile, or, in project policy only, a
+credential-shaped key or value is refused with exit code 2 and a message that names
+the file, the key and the allowed values. Nothing is ignored or coerced.
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME`, when set, must be absolute paths; a relative
+value is refused. Private machine state lives under `$XDG_STATE_HOME/enginery/`
+(default `~/.local/state/enginery/`).
+
+A layer file has this shape (every key is optional except `schema_version`):
+
+```toml
+schema_version = 1
+profile = "standard"              # project and user only
+
+[execution]
+harness = "omp"                   # omp | claude-code
+model = "provider/id"             # a model or effort is a default unless pinned
+effort = "high"
+model_pinned = false              # true makes the model an exact pin
+effort_pinned = false
+strict_effective = false
+
+[runner]
+mode = "trusted-local"            # trusted-local | isolated-oci; never defaulted
+image = "sha256:<image id>"       # isolated-oci only
+docker_context = "colima"         # isolated-oci only; user preferences / run flags only
+model_access = "none"             # none | relay; isolated-oci only for relay
+
+[validation]
+commands = ["uv run pytest -q"]   # shell-split; an isolated run must name its own
+required_checks = ["CI"]
+repair_limit = 1
+
+[implementation]
+time_budget_seconds = 1800
+permitted_capabilities = ["git"]
+evidence_requirements = ["redacted harness transcript"]
+
+[protection]
+paths = ["infra/**"]              # additive: only adds to the built-in protected set
+
+[credentials]                     # opaque reference names, never secrets
+github = "operator-gh-cli"
+harness = "operator-harness-session"
+
+[executables]                     # user preferences / run flags only; never project policy
+github = "gh"
+harness = "omp"                   # the executable of whichever harness resolves
+
+[constraints]                     # hard policy: binds every layer, including the run layer
+allowed_harnesses = ["omp"]
+allowed_models = ["provider/id"]
+allowed_efforts = ["low", "medium"]
+allowed_runner_modes = ["isolated-oci"]
+allowed_capabilities = ["git"]
+max_time_budget_seconds = 3600
+max_repair_limit = 2
+```
+
+Repository content must not choose host programs: `[executables]` is refused in project
+policy. Configure host executable paths in user preferences or explicit run flags instead.
+Likewise, project policy cannot select `runner.docker_context`; set it in user preferences
+or with `--docker-context`.
+
+A higher-layer `trusted-local` mode shadows lower-layer image, Docker context and model
+access settings; image, context or `relay` stated at or above the mode-winning layer are
+refused, while `model_access = "none"` is always allowed.
+
+A hard constraint is conjunctive: the compiled value must satisfy the constraints of
+every layer, so a lower layer cannot loosen what a higher one forbids, and a run flag
+that violates a project constraint is refused before any request is written. The trust
+mode is never defaulted: some layer (a `--runner` flag or `[runner] mode`) must choose
+`trusted-local` or `isolated-oci`, and an isolated run must name validation commands
+and an exact image.
+
+The compiled result records, for every field, the value, the winning layer and each
+shadowed lower-layer value with its source file and sha256. Its canonical JSON is the
+configuration snapshot; the snapshot's sha256 is the request's
+`configuration_snapshot_digest`, and `build-request` writes the snapshot into the request
+document next to the request. `stage1 start` verifies the digest, agreement with every
+carried field, the snapshot's recorded hard constraints and all recorded source digests
+(including packaged defaults and workflow profiles). It refuses inconsistent,
+policy-violating or drifted requests, or documents without a snapshot; rebuild them with
+`enginery stage1 build-request`. Already-started runs are read from the ledger unchanged.
+Building a `Stage1RunRequest` directly through the Python API stays supported; a document
+submitted to `stage1 start` must carry a consistent, current compiled snapshot.
 
 ## Command surface
 
@@ -574,24 +672,30 @@ criterion of the issue as not applicable to this run (`0` for the issue body).
 `--constraint`, and `--risk-class` no longer exist; a command line that passes one is
 rejected as an unrecognized argument.
 
-Every field not shown above defaults to the same values
-`docs/examples.md` documents (`policy-v1`, `uv run pytest -q` for trusted-local
+Every flag other than the run's identity and paths is a run-layer override of the
+[layered configuration](#layered-configuration): omitted, the project, user, workflow
+and factory layers decide, and the factory layer carries the defaults
+`docs/examples.md` documents (`uv run pytest -q` for trusted-local
 runs only: an isolated run must pass `--validation-command`,
 `repair-limit 1`, a 1800-second OMP implementation attempt with no cost budget
 (see [Authority separation](#authority-separation)), `operator-gh-cli`/`operator-harness-session` credential
-references). `--capability-lockfile` (default
+references). The trust mode has no default: pass `--runner` or set `[runner] mode` in
+project policy. `--profile` selects the packaged workflow profile. `--capability-lockfile` (default
 `.enginery/capabilities.lock.json`) binds the request's
 `capability_lock_digest` to the real lockfile `enginery capability
 lock` already reads when one exists, and to the documented
 no-capabilities-locked sentinel otherwise.
-`--environment-manifest-digest`/`--environment-manifest-file` and
-`--configuration-snapshot-digest`/`--configuration-snapshot-file`
-bind the two remaining opaque `Run` digests to real bytes when a real
-environment manifest or configuration snapshot exists; omitted, they
-fall back to the same fixed local-environment/local-configuration
-sentinels the documented manual script uses. The only provider the command
-contacts is GitHub, through `gh`, to read the issue (after it has validated the
-pins, so a rejected `--model` or `--effort` never reaches GitHub); it never runs
+The policy-set version `policy-v1` is a `build-request` argparse default, not a
+factory configuration value.
+`--environment-manifest-digest`/`--environment-manifest-file` bind the opaque
+environment `Run` digest to real bytes when a real environment manifest exists; omitted,
+it falls back to the fixed local-environment sentinel the documented manual script uses.
+The configuration digest is never supplied: it is always the sha256 of the compiled
+snapshot, and `--configuration-snapshot-digest`/`--configuration-snapshot-file` no
+longer exist. The only provider the command
+contacts is GitHub, through `gh`, to read the issue (after it has compiled the
+configuration and validated the pins, so a rejected `--model` or `--effort` never
+reaches GitHub); it never runs
 OMP or Claude Code, and it writes only the local request file.
 
 A new `stage1 start` accepts only a request whose manifest binds the current check

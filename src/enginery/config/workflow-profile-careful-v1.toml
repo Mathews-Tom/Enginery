@@ -1,0 +1,10 @@
+# Workflow profile "careful": the issue-to-pull-request workflow with more room to
+# repair and a longer implementation time budget than the factory defaults.
+
+schema_version = 1
+
+[validation]
+repair_limit = 2
+
+[implementation]
+time_budget_seconds = 3600

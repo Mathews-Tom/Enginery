@@ -28,7 +28,7 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     stage1_request_from_state,
 )
-from tests.support.execution import selection_for
+from tests.support.execution import bound_document, selection_for
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -36,7 +36,7 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
 ) -> None:
     database = tmp_path / "ledger.db"
     request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(_request(tmp_path).initial_state()), encoding="utf-8")
+    request_path.write_text(json.dumps(bound_document(_request(tmp_path))), encoding="utf-8")
 
     assert _start(database, request_path) == 0
     assert json.loads(capsys.readouterr().out) == {"run_id": "run-stage1", "status": "created"}
@@ -49,7 +49,7 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
 
     assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
     evidence = json.loads(capsys.readouterr().out)
-    assert evidence["request_digest"] == str(_request(tmp_path).digest)
+    assert evidence["request_digest"] == bound_document(_request(tmp_path))["request_digest"]
     assert evidence["source_revision"] == "issue-revision-1"
 
 
@@ -65,7 +65,7 @@ def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
     database = tmp_path / "ledger.db"
     request = _request(tmp_path)
     request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+    request_path.write_text(json.dumps(bound_document(request)), encoding="utf-8")
 
     assert _start(database, request_path) == 0
     capsys.readouterr()
@@ -77,7 +77,7 @@ def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
         validation_commands=(("uv", "run", "pytest", "tests/cli/test_stage1.py", "-q"),),
     )
     request_path.write_text(
-        json.dumps(changed_request.initial_state()),
+        json.dumps(bound_document(changed_request)),
         encoding="utf-8",
     )
     assert _start(database, request_path) != 0
@@ -249,7 +249,7 @@ def test_stage1_rejects_human_wait_and_invalid_request(
         run=replace(_request(tmp_path).run, id=RunId("run-stage1-reject")),
     )
     request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+    request_path.write_text(json.dumps(bound_document(request)), encoding="utf-8")
     assert _start(database, request_path) == 0
     capsys.readouterr()
     _register_qualify_and_human_node(database, request, node_id="plan_approval")
@@ -282,7 +282,7 @@ def _start_request(
     if selection is not None:
         request = replace(request, execution_selection=selection)
     request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+    request_path.write_text(json.dumps(bound_document(request)), encoding="utf-8")
     assert _start(database, request_path) == 0
     return request
 
@@ -507,7 +507,7 @@ def _readonly_request(
         ),
     )
     path = tmp_path / "request.json"
-    path.write_text(json.dumps(request.initial_state()), encoding="utf-8")
+    path.write_text(json.dumps(bound_document(request)), encoding="utf-8")
     return path
 
 
@@ -593,7 +593,7 @@ def test_watch_reports_a_new_runs_absent_cost_budget_as_unenforced(
 ) -> None:
     database = tmp_path / "ledger.db"
     request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(_request(tmp_path).initial_state()), encoding="utf-8")
+    request_path.write_text(json.dumps(bound_document(_request(tmp_path))), encoding="utf-8")
     assert _start(database, request_path) == 0
     capsys.readouterr()
 

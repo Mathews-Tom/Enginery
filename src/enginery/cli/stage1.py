@@ -19,6 +19,7 @@ from enginery.adapters.github import (
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
+from enginery.cli.config_binding import require_bound_configuration
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_request import run_build_request
 from enginery.cli.stage1_runner import (
@@ -31,7 +32,11 @@ from enginery.domain.errors import InternalInvariantViolationError, InvalidInput
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
 from enginery.engine.recovery import assess_worker
-from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.engine.runtime import (
+    RUN_AGGREGATE_TYPE,
+    RUNTIME_NODE_AGGREGATE_TYPE,
+    CoordinatorRuntime,
+)
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.task_repository import intake_path_for
 from enginery.evaluation.outcomes import OutcomeCaptureService
@@ -105,6 +110,13 @@ def _start(args: argparse.Namespace) -> None:
     request = stage1_request_from_state(raw_request)
     ledger = LedgerService.open(args.database)
     try:
+        if (
+            ledger.read_projection(
+                aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=str(request.run.id)
+            )
+            is None
+        ):
+            require_bound_configuration(raw_request, request)
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
         run = _read_only_service(runtime=runtime, ledger=ledger, request=request).start(
             request,

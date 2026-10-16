@@ -128,10 +128,11 @@ whenever you are unsure of a ledger's state.
 Enginery has no CLI command that accepts a hand-written "friendly" JSON
 document for a new work item in this release: `enginery stage1 start
 --request request.json` expects the exact internal serialization of a
-`Stage1RunRequest` (bound run/work-item/manifest digests included), which
-is not something to hand-author as raw JSON. Instead, write a short Python
-script per ticket (or a small family of them) using Enginery's own request
-type directly, and let it emit the JSON:
+`Stage1RunRequest` (bound run/work-item/manifest digests included) plus the
+compiled configuration snapshot it was built from, which is not something to
+hand-author as raw JSON. Instead, write a short Python script per ticket (or a
+small family of them) that compiles the configuration with Enginery's own
+compiler, builds the request type directly, and emits both:
 
 ```python
 # build_request.py -- adapt per ticket; run with `uv run python build_request.py`
@@ -140,18 +141,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.effective_config import compile_effective_config
+from enginery.application.layered_config import run_layer
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.execution_selection import (
-    LayerControls,
-    SelectionLayer,
-    resolve_execution_selection,
-)
 from enginery.domain.ids import RunId, WorkItemId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
 from enginery.workflows.stage1 import (
@@ -184,6 +180,24 @@ work_item = WorkItem(
 )
 snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="manual-migration")
 
+# This manual migration deliberately skips project policy and user preferences (project=None,
+# user=None), unlike `stage1 build-request`, which reads both through config_locations.
+# Unspecified choices fall through to the packaged workflow and factory layers; no host
+# probe is supplied, so installed-harness model/effort observations are also skipped.
+compiled = compile_effective_config(
+    project=None,
+    user=None,
+    run=run_layer(
+        {
+            "harness": "omp",  # or "claude-code"
+            "runner_mode": "trusted-local",
+            "validation_commands": ["<real project validation command>"],
+            "required_checks": ["<real required CI check name>"],
+        }
+    ),
+)
+config = compiled.config
+
 run = Run(
     id=RunId(run_id),
     work_item_id=work_item.id,
@@ -197,12 +211,12 @@ run = Run(
     adapter_fingerprints={},
     capability_lock_digest=Digest.of_bytes(b"no-capabilities-locked"),
     environment_manifest_digest=Digest.of_bytes(b"sage-dev-migration-environment"),
-    configuration_snapshot_digest=Digest.of_bytes(b"sage-dev-migration-configuration"),
+    configuration_snapshot_digest=config.digest,  # the compiled snapshot is the only binding
     state=RunState.CREATED,
 )
 
 request = Stage1RunRequest(
-    runner=RunnerSelection.trusted_local(),
+    runner=compiled.runner,
     run=run,
     work_snapshot=snapshot,
     manifest=manifest,
@@ -211,34 +225,35 @@ request = Stage1RunRequest(
     workspace_path=Path("<absolute path to a fresh workspace directory>"),
     base_branch="main",
     head_branch=f"enginery/{run_id}",
-    validation_commands=(("<real project validation command>",),),
+    validation_commands=config.commands(),
     applicable_criteria=(True, True),  # must align 1:1 with acceptance_criteria
-    required_checks=("<real required CI check name>",),
-    repair_limit=1,
+    required_checks=config.strings("required_checks"),
+    repair_limit=config.integer("repair_limit"),
     implementation=Stage1ImplementationRequest(
         attempt_id=f"{run_id}-implement-0",
         operation_id=f"implement:{run_id}",
-        time_budget_seconds=1800,
+        time_budget_seconds=config.integer("time_budget_seconds"),
         cost_budget=None,  # no supported harness enforces a dollar budget; the time budget does
-        permitted_capabilities=("git",),
-        evidence_requirements=("redacted harness transcript",),
+        permitted_capabilities=config.strings("permitted_capabilities"),
+        evidence_requirements=config.strings("evidence_requirements"),
     ),
-    execution_selection=resolve_execution_selection(
-        (LayerControls(layer=SelectionLayer.RUN, harness="omp"),),  # same harness as below
-        catalog=load_execution_catalog(),
-    ),
+    execution_selection=compiled.selection,
     execution_configuration=Stage1ExecutionConfiguration(
         github_repository="<owner>/<repository>",
-        github_credential_reference="operator-gh-cli",
-        github_executable="gh",
-        harness_provider="omp",  # or "claude-code"
-        harness_credential_reference="operator-harness-session",
-        harness_executable="omp",
+        github_credential_reference=config.text("github_credential_reference"),
+        github_executable=config.text("github_executable"),
+        harness_provider=compiled.selection.harness,
+        harness_credential_reference=config.text("harness_credential_reference"),
+        harness_executable=config.text("harness_executable"),
         artifact_root=Path("<absolute path to an artifact directory>"),
     ),
+    protected_paths=config.strings("protected_paths"),
 )
 
-Path("request.json").write_text(json.dumps(request.initial_state(), indent=2), encoding="utf-8")
+# `stage1 start` verifies the request against the snapshot it was compiled from, so the
+# document carries both.
+document = {**request.initial_state(), "effective_config": config.to_state()}
+Path("request.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
 ```
 
 Then, having already completed the mandatory backup in Step 2:

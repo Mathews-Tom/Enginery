@@ -11,51 +11,52 @@ recomputes from the labelled issue. An issue whose labels are missing,
 ambiguous, or outside the declared vocabulary is refused with the adapter's own
 error and nothing is written.
 
-Flags only choose how the run is executed. Their defaults are
-`policy-v1`, `("uv", "run", "pytest", "-q")` (trusted-local only: an isolated run must name its
-validation commands, because its validation runs offline in the pinned runner image),
-`time_budget_seconds=1800`,
-`cost_budget=None` (no supported harness enforces a hard-dollar budget, so one is refused
-rather than carried), `permitted_capabilities=("git",)`,
-`evidence_requirements=("redacted harness transcript",)`,
-`required_checks=("CI",)`, `repair_limit=1`, `operator-gh-cli` /
-`operator-harness-session` credential references, and the
-`no-capabilities-locked` / `local-environment` / `local-configuration`
-digest sentinels for a run with no bound capability lock, environment
-manifest, or configuration snapshot.
+Flags are the run layer of the layered configuration: omitted, the project
+(``.enginery/project.toml``), user (``user.toml``), workflow-profile and factory layers
+decide, and :mod:`enginery.application.effective_config` compiles them. The sha256 of the
+compiled snapshot is the request's ``configuration_snapshot_digest`` (never supplied by
+the operator) and the snapshot travels in the request document so ``stage1 start`` can
+verify the request against it. ``cost_budget=None`` (no supported harness enforces a
+hard-dollar budget, so one is refused rather than carried). The ``no-capabilities-locked``
+and ``local-environment`` digest sentinels stand for a run with no bound capability lock
+or environment manifest.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from enginery.adapters.claude_code import probe_installed_host as probe_installed_claude
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
-from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.effective_config import (
+    CompiledConfig,
+    compile_effective_config,
+)
+from enginery.application.layered_config import (
+    DEFAULT_PROFILE,
+    RUNNER_MODES,
+    LayerDocument,
+    run_layer,
+)
 from enginery.capabilities.serialization import read_lock
+from enginery.cli.config_binding import EFFECTIVE_CONFIG_KEY
+from enginery.cli.config_locations import (
+    read_project_layer,
+    read_user_layer,
+    record_absent_sources,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
-from enginery.domain.execution_selection import (
-    LayerControls,
-    SelectionLayer,
-    resolve_execution_selection,
-)
 from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import (
-    MODEL_ACCESS_MODES,
-    MODEL_ACCESS_NONE,
-    RunnerProfile,
-    RunnerSelection,
-)
+from enginery.domain.runner import MODEL_ACCESS_MODES
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
-    DEFAULT_VALIDATION_COMMAND,
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
@@ -66,9 +67,7 @@ from enginery.workflows.stage1 import (
 
 _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
 _LOCAL_ENVIRONMENT_DIGEST = Digest.of_bytes(b"local-environment")
-_LOCAL_CONFIGURATION_DIGEST = Digest.of_bytes(b"local-configuration")
 _DEFAULT_CAPABILITY_LOCKFILE = Path(".enginery/capabilities.lock.json")
-_FACTORY_DEFAULT_HARNESS = "omp"
 
 
 def add_build_request_parser(
@@ -113,7 +112,6 @@ def add_build_request_parser(
         "documented no-capabilities-locked sentinel otherwise.",
     )
     _add_digest_override(parser, flag="environment_manifest")
-    _add_digest_override(parser, flag="configuration_snapshot")
     parser.add_argument("--repository-path", required=True, type=Path)
     parser.add_argument("--workspace-path", required=True, type=Path)
     parser.add_argument("--base-branch", default="main")
@@ -129,7 +127,7 @@ def add_build_request_parser(
         "(python3, node, git, uv, sh) and so cannot resolve a project's test dependencies.",
     )
     parser.add_argument("--required-check", dest="required_checks", action="append", default=None)
-    parser.add_argument("--repair-limit", type=int, default=1)
+    parser.add_argument("--repair-limit", type=int, default=None)
     parser.add_argument(
         "--protected-path",
         dest="protected_paths",
@@ -149,7 +147,7 @@ def add_build_request_parser(
     parser.add_argument(
         "--implementation-operation-id", default=None, help="Defaults to implement:<run-id>."
     )
-    parser.add_argument("--implementation-time-budget-seconds", type=int, default=1800)
+    parser.add_argument("--implementation-time-budget-seconds", type=int, default=None)
     parser.add_argument(
         "--implementation-cost-budget",
         default=None,
@@ -163,16 +161,16 @@ def add_build_request_parser(
         "--evidence-requirement", dest="evidence_requirements", action="append", default=None
     )
     parser.add_argument("--github-repository", default=None, help="Defaults to --repository.")
-    parser.add_argument("--github-credential-reference", default="operator-gh-cli")
-    parser.add_argument("--github-executable", default="gh")
+    parser.add_argument("--github-credential-reference", default=None)
+    parser.add_argument("--github-executable", default=None)
     parser.add_argument(
         "--harness-provider",
         choices=("omp", "claude-code"),
         default=None,
-        help=f"The harness to run. Omitted, the built-in default ({_FACTORY_DEFAULT_HARNESS}) "
-        "is recorded as a factory-layer choice rather than an explicit run-layer one.",
+        help="The harness to run. Omitted, the project, user, workflow and factory layers "
+        "decide (the factory default is omp).",
     )
-    parser.add_argument("--harness-credential-reference", default="operator-harness-session")
+    parser.add_argument("--harness-credential-reference", default=None)
     parser.add_argument(
         "--harness-executable", default=None, help="Defaults to omp/claude by provider."
     )
@@ -196,9 +194,15 @@ def add_build_request_parser(
     )
     parser.add_argument("--artifact-root", required=True, type=Path)
     parser.add_argument(
+        "--profile",
+        default=None,
+        help="The packaged workflow profile to compile against. Omitted, the project or user "
+        f"layer decides, else the factory default ({DEFAULT_PROFILE}).",
+    )
+    parser.add_argument(
         "--runner",
-        required=True,
-        choices=("trusted-local", "isolated-oci"),
+        default=None,
+        choices=RUNNER_MODES,
         help="The trust mode the worker runs in. trusted-local runs the worker as you, with "
         "your filesystem and environment, and is not containment. isolated-oci runs it in a "
         "hardened task-local container; a run bound to it is held, never run as trusted-local, "
@@ -218,7 +222,7 @@ def add_build_request_parser(
     )
     parser.add_argument(
         "--model-access",
-        default=MODEL_ACCESS_NONE,
+        default=None,
         choices=MODEL_ACCESS_MODES,
         help="With isolated-oci: how the worker reaches a model. none gives it no route to any "
         "model. relay lets it reach only the operator's model-access relay (see `enginery "
@@ -267,21 +271,8 @@ def _reject_cost_budget(args: argparse.Namespace) -> None:
         )
 
 
-def _validation_commands(values: list[str] | None) -> tuple[tuple[str, ...], ...]:
-    if values is None:
-        return (DEFAULT_VALIDATION_COMMAND,)
-    return tuple(tuple(shlex.split(value)) for value in values)
-
-
-def _harness_executable(args: argparse.Namespace, harness: str) -> str:
-    if args.harness_executable is not None:
-        return str(args.harness_executable)
-    return "claude" if harness == "claude-code" else "omp"
-
-
-def _probe_host(args: argparse.Namespace, harness: str) -> InstalledHost | None:
+def _probe_host(harness: str, executable: str) -> InstalledHost | None:
     """Observe the installed host the run will use, only when its controls are pinned."""
-    executable = _harness_executable(args, harness)
     if harness == "claude-code":
         return probe_installed_claude(executable)
     if harness == "omp":
@@ -291,44 +282,70 @@ def _probe_host(args: argparse.Namespace, harness: str) -> InstalledHost | None:
     )
 
 
-def _runner_selection(args: argparse.Namespace) -> RunnerSelection:
-    """Bind the explicitly requested trust mode; isolation needs an exact pinned image."""
-    if args.runner == "trusted-local":
-        if (
-            args.runner_image is not None
-            or args.docker_context is not None
-            or args.model_access != MODEL_ACCESS_NONE
-        ):
-            raise InvalidInputError(
-                "--runner-image, --docker-context and --model-access apply only to "
-                "--runner isolated-oci"
-            )
-        return RunnerSelection.trusted_local()
-    if args.runner_image is None:
-        raise InvalidInputError(
-            "--runner isolated-oci requires --runner-image sha256:<image id> "
-            "(build one with `enginery runner build-image`)"
-        )
-    return RunnerSelection.isolated(
-        image=args.runner_image,
-        profile=RunnerProfile(),
-        docker_context=args.docker_context,
-        model_access=args.model_access,
-    )
+def _run_layer(args: argparse.Namespace) -> LayerDocument:
+    """The run layer: exactly the choices the operator made on the command line."""
+    values: dict[str, object] = {}
+    for name, flag in (
+        ("profile", args.profile),
+        ("harness", args.harness_provider),
+        ("runner_mode", args.runner),
+        ("runner_image", args.runner_image),
+        ("docker_context", args.docker_context),
+        ("model_access", args.model_access),
+        ("validation_commands", args.validation_commands),
+        ("required_checks", args.required_checks),
+        ("repair_limit", args.repair_limit),
+        ("time_budget_seconds", args.implementation_time_budget_seconds),
+        ("permitted_capabilities", args.permitted_capabilities),
+        ("evidence_requirements", args.evidence_requirements),
+        ("protected_paths", args.protected_paths),
+        ("github_credential_reference", args.github_credential_reference),
+        ("harness_credential_reference", args.harness_credential_reference),
+        ("github_executable", args.github_executable),
+        ("harness_executable", args.harness_executable),
+    ):
+        if flag is not None:
+            values[name] = str(flag) if name.endswith("executable") else flag
+    # A model or effort named on the command line is a manual pin: exact, never substituted.
+    for name, flag in (("model", args.model), ("effort", args.effort)):
+        if flag is not None:
+            values[name] = flag
+            values[f"{name}_pinned"] = True
+    if args.strict_effective:
+        values["strict_effective"] = True
+    return run_layer(values)
 
 
-def build_request(args: argparse.Namespace) -> Stage1RunRequest:
+@dataclass(frozen=True, slots=True)
+class BuiltRequest:
+    """A compiled request: the request and the configuration snapshot it is bound to."""
+
+    request: Stage1RunRequest
+    compiled: CompiledConfig
+
+    def document(self) -> dict[str, object]:
+        """The ``--request`` document: the request plus the snapshot ``stage1 start`` verifies."""
+        return {
+            **self.request.initial_state(),
+            EFFECTIVE_CONFIG_KEY: self.compiled.config.to_state(),
+        }
+
+
+def build_request(args: argparse.Namespace) -> BuiltRequest:
     """Construct one durable Stage 1 request for the GitHub issue named by
-    ``--external-reference``.
+    ``--external-reference``, compiled from the layered configuration.
     """
     _reject_cost_budget(args)
-    runner_selection = _runner_selection(args)
-    if args.runner == "isolated-oci" and args.validation_commands is None:
-        raise InvalidInputError(
-            "--runner isolated-oci requires --validation-command: isolated validation runs "
-            "offline in the pinned runner image, which has python3, node, git, uv and sh but "
-            "not the project's test dependencies, so there is no default that can run there"
-        )
+    compiled = compile_effective_config(
+        project=read_project_layer(args.repository_path.resolve()),
+        user=read_user_layer(),
+        run=_run_layer(args),
+        probe_host=_probe_host,
+    )
+    compiled = record_absent_sources(compiled, args.repository_path)
+    config = compiled.config
+    selection = compiled.selection
+    repair_limit = config.integer("repair_limit")
     run_id = args.run_id
     if args.implementation_attempt_id is None:
         try:
@@ -340,45 +357,22 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
     else:
         attempt_id = args.implementation_attempt_id
     first_generation = first_attempt_generation(attempt_id)
-    if args.repair_limit > 0:
+    if repair_limit > 0:
         # Repair attempt ids are always derived from the run id, whatever the first attempt's
         # id is, so the last one the run may need must be valid for it to be able to repair.
-        implementation_attempt_id(run_id, first_generation + args.repair_limit)
+        implementation_attempt_id(run_id, first_generation + repair_limit)
     head_branch = args.head_branch or f"enginery/{run_id}"
     implementation_operation_id = OperationId(
         args.implementation_operation_id or f"implement:{run_id}"
     )
     manifest = stage1_work_manifest()
 
-    # The built-in default harness is a factory-layer input; only a harness the operator named
-    # on the command line is a run-layer input, so the recorded source says which it was.
-    selection = resolve_execution_selection(
-        (
-            LayerControls(layer=SelectionLayer.FACTORY, harness=_FACTORY_DEFAULT_HARNESS),
-            LayerControls(
-                layer=SelectionLayer.RUN,
-                harness=args.harness_provider,
-                model=args.model,
-                effort=args.effort,
-                model_pinned=args.model is not None,
-                effort_pinned=args.effort is not None,
-                strict_effective=True if args.strict_effective else None,
-            ),
-        ),
-        catalog=load_execution_catalog(),
-        # An isolated run executes the image's pinned harness, never the operator's binary, so
-        # the host binary is neither consulted nor recorded as observed at bind time.
-        probe_host=None
-        if runner_selection.isolated_mode
-        else lambda harness: _probe_host(args, harness),
-    )
-
     # Everything the source decides is read once the operator's own flags are valid, and is
     # bound exactly as the adapter returns it.
     github = GitHubAdapterConfig(
         repository=args.github_repository or args.repository,
-        credential_reference=args.github_credential_reference,
-        executable=args.github_executable,
+        credential_reference=config.text("github_credential_reference"),
+        executable=config.text("github_executable"),
     )
     snapshot = GitHubWorkLedger(github).fetch(args.external_reference)
     work_item = snapshot.work_item
@@ -411,9 +405,9 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         environment_manifest_digest=_digest_override(
             args, flag="environment_manifest", default=_LOCAL_ENVIRONMENT_DIGEST
         ),
-        configuration_snapshot_digest=_digest_override(
-            args, flag="configuration_snapshot", default=_LOCAL_CONFIGURATION_DIGEST
-        ),
+        # The digest of the compiled snapshot is the only configuration binding: an
+        # operator-supplied digest would be a bypass of the compiler.
+        configuration_snapshot_digest=config.digest,
         state=RunState.CREATED,
     )
 
@@ -426,49 +420,40 @@ def build_request(args: argparse.Namespace) -> Stage1RunRequest:
         workspace_path=args.workspace_path.resolve(),
         base_branch=args.base_branch,
         head_branch=head_branch,
-        validation_commands=_validation_commands(args.validation_commands),
+        validation_commands=config.commands(),
         applicable_criteria=applicable_criteria,
-        required_checks=tuple(args.required_checks)
-        if args.required_checks is not None
-        else ("CI",),
-        repair_limit=args.repair_limit,
+        required_checks=config.strings("required_checks"),
+        repair_limit=repair_limit,
         implementation=Stage1ImplementationRequest(
             attempt_id=attempt_id,
             operation_id=implementation_operation_id,
-            time_budget_seconds=args.implementation_time_budget_seconds,
+            time_budget_seconds=config.integer("time_budget_seconds"),
             cost_budget=None,
-            permitted_capabilities=(
-                tuple(args.permitted_capabilities)
-                if args.permitted_capabilities is not None
-                else ("git",)
-            ),
-            evidence_requirements=(
-                tuple(args.evidence_requirements)
-                if args.evidence_requirements is not None
-                else ("redacted harness transcript",)
-            ),
+            permitted_capabilities=config.strings("permitted_capabilities"),
+            evidence_requirements=config.strings("evidence_requirements"),
         ),
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository=github.repository,
             github_credential_reference=github.credential_reference,
             github_executable=github.executable,
             harness_provider=selection.harness,
-            harness_credential_reference=args.harness_credential_reference,
-            harness_executable=_harness_executable(args, selection.harness),
+            harness_credential_reference=config.text("harness_credential_reference"),
+            harness_executable=config.text("harness_executable"),
             artifact_root=args.artifact_root.resolve(),
         ),
         execution_selection=selection,
-        runner=runner_selection,
-        protected_paths=tuple(args.protected_paths or ()),
+        runner=compiled.runner,
+        protected_paths=config.strings("protected_paths"),
     )
     require_explicit_isolated_validation(request)
-    return request
+    return BuiltRequest(request=request, compiled=compiled)
 
 
 def run_build_request(args: argparse.Namespace) -> int:
-    request = build_request(args)
+    built = build_request(args)
+    request = built.request
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(request.initial_state(), indent=2), encoding="utf-8")
+    args.output.write_text(json.dumps(built.document(), indent=2), encoding="utf-8")
     print(
         json.dumps(
             {
@@ -482,4 +467,4 @@ def run_build_request(args: argparse.Namespace) -> int:
     return 0
 
 
-__all__ = ["add_build_request_parser", "build_request", "run_build_request"]
+__all__ = ["BuiltRequest", "add_build_request_parser", "build_request", "run_build_request"]

@@ -61,7 +61,18 @@ class ConsumerSmokeError(RuntimeError):
 
 
 def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "XDG_CONFIG_HOME": str(cwd / "xdg-config"),
+            "XDG_STATE_HOME": str(cwd / "xdg-state"),
+        },
+    )
 
 
 def _describe(command: list[str], result: subprocess.CompletedProcess[str]) -> str:

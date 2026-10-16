@@ -62,7 +62,9 @@ classification come from the issue, not from flags) — see
 below is for inspection only: it shows the exact domain objects a request is
 made of. It types the work item by hand, so the snapshot it binds carries no
 declared classification and is not what `stage1 watch --advance` re-reads from
-a labelled GitHub issue; a request it writes does not qualify. It is the
+a labelled GitHub issue; a request it writes does not qualify, and because it is
+built through the library rather than compiled from layered configuration it carries
+no configuration snapshot, so `stage1 start` refuses its `request.json`. It is the
 shape [`docs/migration-sage-dev.md`](migration-sage-dev.md#step-3-build-one-enginery-request-per-active-ticket)
 adapts for a migrated ticket.
 

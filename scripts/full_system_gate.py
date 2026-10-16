@@ -116,8 +116,9 @@ from enginery.application.branch_publication import (
     PublishedBranch,
 )
 from enginery.application.delivery_ports import DeploymentRequest
-from enginery.application.execution_catalog import load_execution_catalog
+from enginery.application.effective_config import compile_effective_config
 from enginery.application.git_environment import repository_isolated_environment
+from enginery.application.layered_config import run_layer
 from enginery.application.work_ports import (
     LifecycleProjection,
     PullRequestCheck,
@@ -131,11 +132,6 @@ from enginery.application.work_ports import (
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
-from enginery.domain.execution_selection import (
-    LayerControls,
-    SelectionLayer,
-    resolve_execution_selection,
-)
 from enginery.domain.ids import (
     NodeId,
     OperationId,
@@ -157,7 +153,6 @@ from enginery.domain.node_attempt import ReconciliationResult
 from enginery.domain.policy_decision import PolicyAction, PolicyResult
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.fixture_build import FixtureBuilder
@@ -345,8 +340,32 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
         },
     )
     snapshot = _snapshot(run_index)
+    # The fixture's request is compiled like any production request: every control below is a
+    # run-layer choice, and the request's selection, runner and configuration digest are what
+    # the compiler resolved from them.
+    compiled = compile_effective_config(
+        project=None,
+        user=None,
+        run=run_layer(
+            {
+                "harness": "omp",
+                "runner_mode": "trusted-local",
+                "validation_commands": ["true"],
+                "required_checks": ["CI"],
+                "repair_limit": 1,
+                "time_budget_seconds": 60,
+                "permitted_capabilities": ["git"],
+                "evidence_requirements": ["redacted harness transcript"],
+                "github_credential_reference": "unused-local-fixture",
+                "harness_credential_reference": "unused-local-fixture",
+                "github_executable": "true",
+                "harness_executable": "true",
+            }
+        ),
+    )
+    config = compiled.config
     request = Stage1RunRequest(
-        runner=RunnerSelection.trusted_local(),
+        runner=compiled.runner,
         run=Run(
             id=RunId(run_id),
             work_item_id=snapshot.work_item.id,
@@ -360,7 +379,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
             adapter_fingerprints={},
             capability_lock_digest=Digest.of_bytes(b"capability-lock"),
             environment_manifest_digest=Digest.of_bytes(b"environment"),
-            configuration_snapshot_digest=Digest.of_bytes(b"configuration"),
+            configuration_snapshot_digest=config.digest,
             state=RunState.CREATED,
         ),
         work_snapshot=snapshot,
@@ -370,31 +389,29 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
         workspace_path=(artifact_root / f"workspace-{run_index}").resolve(),
         base_branch="main",
         head_branch=f"enginery/{run_id}",
-        validation_commands=(("true",),),
+        validation_commands=config.commands(),
         applicable_criteria=(True,),
-        required_checks=("CI",),
-        repair_limit=1,
+        required_checks=config.strings("required_checks"),
+        repair_limit=config.integer("repair_limit"),
         implementation=Stage1ImplementationRequest(
             attempt_id="implement-0",
             operation_id=OperationId(f"implement:{run_id}"),
-            time_budget_seconds=60,
+            time_budget_seconds=config.integer("time_budget_seconds"),
             cost_budget=None,
-            permitted_capabilities=("git",),
-            evidence_requirements=("redacted harness transcript",),
+            permitted_capabilities=config.strings("permitted_capabilities"),
+            evidence_requirements=config.strings("evidence_requirements"),
         ),
-        execution_selection=resolve_execution_selection(
-            (LayerControls(layer=SelectionLayer.RUN, harness="omp"),),
-            catalog=load_execution_catalog(),
-        ),
+        execution_selection=compiled.selection,
         execution_configuration=Stage1ExecutionConfiguration(
             github_repository="local/full-system-gate-fixture",
-            github_credential_reference="unused-local-fixture",
-            github_executable="true",
-            harness_provider="omp",
-            harness_credential_reference="unused-local-fixture",
-            harness_executable="true",
+            github_credential_reference=config.text("github_credential_reference"),
+            github_executable=config.text("github_executable"),
+            harness_provider=compiled.selection.harness,
+            harness_credential_reference=config.text("harness_credential_reference"),
+            harness_executable=config.text("harness_executable"),
             artifact_root=(artifact_root / f"artifacts-{run_index}").resolve(),
         ),
+        protected_paths=config.strings("protected_paths"),
     )
     return _RunFixture(
         request=request,
