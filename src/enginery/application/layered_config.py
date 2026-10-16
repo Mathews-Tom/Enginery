@@ -355,9 +355,7 @@ def parse_layer_document(
     if "acceptance" in data:
         acceptance = data["acceptance"]
         if not isinstance(acceptance, dict) or set(acceptance) != {"checks"}:
-            raise ConfigError(
-                "must contain exactly the checks key", file=source, key="acceptance"
-            )
+            raise ConfigError("must contain exactly the checks key", file=source, key="acceptance")
         try:
             behavioral_checks = checks_from_state(acceptance["checks"])
         except InvalidInputError as error:

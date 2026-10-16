@@ -60,13 +60,18 @@ def _policy(repository: Path, *, expected: str = "persisted") -> Path:
     return path
 
 
-def _build(tmp_path: Path, repository: Path, base: str) -> tuple[Stage1RunRequest, dict[str, object]]:
+def _build(
+    tmp_path: Path, repository: Path, base: str
+) -> tuple[Stage1RunRequest, dict[str, object]]:
     output = tmp_path / "request.json"
-    assert main(
-        _minimal_argv(
-            tmp_path=tmp_path, repository=repository, base_revision=base, output=output
+    assert (
+        main(
+            _minimal_argv(
+                tmp_path=tmp_path, repository=repository, base_revision=base, output=output
+            )
         )
-    ) == 0
+        == 0
+    )
     document = json.loads(output.read_text(encoding="utf-8"))
     return stage1_request_from_state(document), document
 
@@ -262,9 +267,7 @@ def test_a_hand_edited_request_cannot_bind_worker_selected_assertions(tmp_path: 
         bind_behavioral_checks(forged)
 
 
-def test_custody_refuses_symbolic_links(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_custody_refuses_symbolic_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     repository, base = _repository(tmp_path)
     request, _ = _build(tmp_path, repository, base)

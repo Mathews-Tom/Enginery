@@ -91,7 +91,7 @@ def _git_bytes(repository: Path, *arguments: str) -> bytes:
                     raise InvalidInputError("base project policy exceeds the 1 MiB limit")
                 if process.wait() != 0:
                     raise InvalidInputError("cannot read behavioral checks from the base revision")
-                return raw
+                return bytes(raw)
             finally:
                 timer.cancel()
     except OSError as error:
@@ -147,7 +147,9 @@ def behavioral_checks_path(request: Stage1RunRequest) -> Path | None:
         return None
     path = (
         private_state_directory(request.repository_path)
-        / "evaluator" / "checks" / f"{binding.digest.hex_value}.json"
+        / "evaluator"
+        / "checks"
+        / f"{binding.digest.hex_value}.json"
     )
     for worker_root in (request.repository_path, request.workspace_path):
         if path.is_relative_to(worker_root.resolve()):
@@ -169,7 +171,9 @@ def _read_binding(path: Path) -> BehavioralChecksBinding:
                 or metadata.st_nlink != 1
                 or metadata.st_mode & 0o077
             ):
-                raise InvalidInputError("behavioral evaluator custody requires a private regular file")
+                raise InvalidInputError(
+                    "behavioral evaluator custody requires a private regular file"
+                )
             raw = stream.read(MAX_CONFIG_BYTES + 1)
     except OSError as error:
         raise InvalidInputError(
@@ -301,9 +305,11 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
         raise InvalidInputError(
             f"request behavioral checks disagree with its configuration snapshot; {_REBUILD}"
         )
-    if request.behavioral_checks is not None and checks_at_base(
-        request.repository_path, request.run.base_revision
-    ) != request.behavioral_checks:
+    if (
+        request.behavioral_checks is not None
+        and checks_at_base(request.repository_path, request.run.base_revision)
+        != request.behavioral_checks
+    ):
         raise InvalidInputError(
             f"behavioral checks do not match project policy at the base revision; {_REBUILD}"
         )

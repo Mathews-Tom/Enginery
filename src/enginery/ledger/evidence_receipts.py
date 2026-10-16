@@ -63,10 +63,8 @@ class EvidenceReceiptRepository:
             descriptor = os.dup(root)
             try:
                 for part in relative.parts[:-1]:
-                    try:
+                    with contextlib.suppress(FileExistsError):
                         os.mkdir(part, mode=0o700, dir_fd=descriptor)
-                    except FileExistsError:
-                        pass
                     next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
                     os.close(descriptor)
                     descriptor = next_descriptor
@@ -76,7 +74,9 @@ class EvidenceReceiptRepository:
                 except FileNotFoundError:
                     return
                 if not stat.S_ISREG(metadata.st_mode):
-                    raise InvalidInputError("evidence artifact path must be a regular, non-link file")
+                    raise InvalidInputError(
+                        "evidence artifact path must be a regular, non-link file"
+                    )
             finally:
                 os.close(descriptor)
 
@@ -85,13 +85,16 @@ class EvidenceReceiptRepository:
         try:
             with _directory(path.parent) as parent:
                 descriptor = os.open(
-                    path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK,
+                    path.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK,
                     dir_fd=parent,
                 )
                 try:
                     metadata = os.fstat(descriptor)
                     if not stat.S_ISREG(metadata.st_mode):
-                        raise InvalidInputError("evidence artifact must be a regular, non-link file")
+                        raise InvalidInputError(
+                            "evidence artifact must be a regular, non-link file"
+                        )
                     if metadata.st_size > MAX_EVIDENCE_BYTES:
                         raise InvalidInputError("evidence artifact exceeds the 1 MiB limit")
                     with os.fdopen(os.dup(descriptor), "rb") as handle:
@@ -100,13 +103,15 @@ class EvidenceReceiptRepository:
                     os.close(descriptor)
         except FileNotFoundError as error:
             raise ArtifactMissingError(
-                "evidence references missing artifact bytes", details={"digest": str(digest)},
+                "evidence references missing artifact bytes",
+                details={"digest": str(digest)},
             ) from error
         if len(data) > MAX_EVIDENCE_BYTES:
             raise InvalidInputError("evidence artifact exceeds the 1 MiB limit")
         if Digest.of_bytes(data) != digest:
             raise ArtifactDigestMismatchError(
-                "evidence artifact bytes do not match their digest", details={"digest": str(digest)},
+                "evidence artifact bytes do not match their digest",
+                details={"digest": str(digest)},
             )
         return data
 
@@ -124,7 +129,10 @@ class EvidenceReceiptRepository:
         if not isinstance(data, bytes) or len(data) > MAX_EVIDENCE_BYTES:
             raise InvalidInputError("raw capture requires bytes within the 1 MiB limit")
         capture = CaptureArtifact(
-            Digest.of_bytes(data), media_type, len(data), self._media_validator(data, media_type),
+            Digest.of_bytes(data),
+            media_type,
+            len(data),
+            self._media_validator(data, media_type),
         )
         self._publish(data, media_type=media_type)
         return capture
@@ -135,17 +143,24 @@ class EvidenceReceiptRepository:
             if len(data) != capture.size_bytes:
                 raise InvalidInputError("capture size does not match its retained raw bytes")
             if self._media_validator(data, capture.media_type) != capture.decode:
-                raise InvalidInputError("capture decode result does not match its retained raw bytes")
+                raise InvalidInputError(
+                    "capture decode result does not match its retained raw bytes"
+                )
 
     def publish(self, receipt: EvidenceReceipt) -> Digest:
         """Publish only after every raw reference is retained and digest-verified."""
         self._verify_captures(receipt)
         data = json.dumps(
-            receipt.to_state(), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            receipt.to_state(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
         ).encode("utf-8")
         digest = self._publish(data, media_type="application/json")
         if digest != receipt.digest:
-            raise ArtifactDigestMismatchError("receipt artifact does not match its canonical digest")
+            raise ArtifactDigestMismatchError(
+                "receipt artifact does not match its canonical digest"
+            )
         return digest
 
     def load(self, digest: Digest) -> EvidenceReceipt:
@@ -154,7 +169,9 @@ class EvidenceReceiptRepository:
         try:
             state: object = json.loads(raw)
         except (ValueError, UnicodeError, RecursionError) as error:
-            raise InvalidInputError("evidence receipt artifact is not valid bounded JSON") from error
+            raise InvalidInputError(
+                "evidence receipt artifact is not valid bounded JSON"
+            ) from error
         receipt = EvidenceReceipt.from_state(state)
         if receipt.digest != digest:
             raise ArtifactDigestMismatchError("evidence receipt artifact is not canonical")

@@ -149,7 +149,7 @@ class BehavioralAssertion:
         return cls(
             kind=cast(AssertionKind, kind),
             operator=cast(Literal["equals", "contains", "exists"], operator),
-            expected=cast(str | int | bool, expected),
+            expected=expected,
             path=path,
             selector=selector,
         )

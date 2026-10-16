@@ -219,9 +219,7 @@ class EffectiveConfig:
             "fields": {item.name: item.to_state() for item in self.fields},
         }
         if self.behavioral_checks is not None:
-            state["acceptance"] = {
-                "checks": [check.to_state() for check in self.behavioral_checks]
-            }
+            state["acceptance"] = {"checks": [check.to_state() for check in self.behavioral_checks]}
         if self.operator_executables is not None:
             state["operator_executables"] = self.operator_executables.to_state()
         return state

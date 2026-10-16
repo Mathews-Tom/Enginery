@@ -7,7 +7,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TypeVar
 
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -16,7 +15,6 @@ from enginery.domain.node_attempt import EvidenceResult
 MAX_EVIDENCE_BYTES = 1024 * 1024
 RECEIPT_SCHEMA_VERSION = 1
 _MEDIA_TYPE = re.compile(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+\Z")
-_E = TypeVar("_E", bound=enum.Enum)
 
 
 class ReceiptCategory(enum.Enum):
@@ -74,7 +72,7 @@ def _digest(value: object) -> Digest:
     return Digest("sha256", value[7:])
 
 
-def _enum(expected: type[_E], value: object) -> _E:
+def _enum[E: enum.Enum](expected: type[E], value: object) -> E:
     try:
         return expected(value)
     except (TypeError, ValueError) as error:
@@ -165,7 +163,9 @@ class EnvironmentFingerprint:
         if not names or len(set(names)) != len(names):
             raise InvalidInputError("environment requires nonempty, uniquely named tool versions")
         object.__setattr__(
-            self, "tool_versions", tuple(sorted(self.tool_versions, key=lambda x: x.name)),
+            self,
+            "tool_versions",
+            tuple(sorted(self.tool_versions, key=lambda x: x.name)),
         )
 
     def to_state(self) -> dict[str, object]:
@@ -199,8 +199,10 @@ class ObserverIdentity:
 
     def to_state(self) -> dict[str, object]:
         return {
-            "identity": self.identity, "kind": self.kind.value,
-            "version": self.version, "mock": self.mock,
+            "identity": self.identity,
+            "kind": self.kind.value,
+            "version": self.version,
+            "mock": self.mock,
         }
 
     @classmethod
@@ -210,8 +212,10 @@ class ObserverIdentity:
         if type(mock) is not bool:
             raise InvalidInputError("observer mock marker must be boolean")
         return cls(
-            _text(data["identity"], "identity"), _enum(ObserverKind, data["kind"]),
-            _text(data["version"], "version"), mock,
+            _text(data["identity"], "identity"),
+            _enum(ObserverKind, data["kind"]),
+            _text(data["version"], "version"),
+            mock,
         )
 
 
@@ -242,8 +246,11 @@ class MediaDecodeResult:
 
     def to_state(self) -> dict[str, object]:
         return {
-            "status": self.status.value, "decoder": self.decoder,
-            "width": self.width, "height": self.height, "reason": self.reason,
+            "status": self.status.value,
+            "decoder": self.decoder,
+            "width": self.width,
+            "height": self.height,
+            "reason": self.reason,
         }
 
     @classmethod
@@ -255,8 +262,11 @@ class MediaDecodeResult:
         if height is not None and type(height) is not int:
             raise InvalidInputError("decode height must be an integer")
         return cls(
-            _enum(DecodeStatus, data["status"]), _text(data["decoder"], "decoder"),
-            width, height, None if reason is None else _text(reason, "reason"),
+            _enum(DecodeStatus, data["status"]),
+            _text(data["decoder"], "decoder"),
+            width,
+            height,
+            None if reason is None else _text(reason, "reason"),
         )
 
 
@@ -276,14 +286,19 @@ class CaptureArtifact:
         _instance(self.decode, MediaDecodeResult, "capture decode result")
         if self.media_type == "image/png" and self.decode.status is DecodeStatus.NOT_APPLICABLE:
             raise InvalidInputError("PNG captures require a decode result")
-        if self.media_type == "image/png" and self.decode.status is DecodeStatus.DECODABLE:
-            if self.decode.width is None:
-                raise InvalidInputError("decoded PNG captures require dimensions")
+        if (
+            self.media_type == "image/png"
+            and self.decode.status is DecodeStatus.DECODABLE
+            and self.decode.width is None
+        ):
+            raise InvalidInputError("decoded PNG captures require dimensions")
 
     def to_state(self) -> dict[str, object]:
         return {
-            "digest": str(self.digest), "media_type": self.media_type,
-            "size_bytes": self.size_bytes, "decode": self.decode.to_state(),
+            "digest": str(self.digest),
+            "media_type": self.media_type,
+            "size_bytes": self.size_bytes,
+            "decode": self.decode.to_state(),
         }
 
     @classmethod
@@ -293,7 +308,9 @@ class CaptureArtifact:
         if type(size) is not int:
             raise InvalidInputError("capture size must be an integer")
         return cls(
-            _digest(data["digest"]), _text(data["media_type"], "media type"), size,
+            _digest(data["digest"]),
+            _text(data["media_type"], "media type"),
+            size,
             MediaDecodeResult.from_state(data["decode"]),
         )
 
@@ -333,8 +350,10 @@ class AssertionOutcome:
 
     def to_state(self) -> dict[str, object]:
         return {
-            "assertion_id": self.assertion_id, "result": self.result.value,
-            "ran": self.ran, "skipped": self.skipped,
+            "assertion_id": self.assertion_id,
+            "result": self.result.value,
+            "ran": self.ran,
+            "skipped": self.skipped,
         }
 
     @classmethod
@@ -345,7 +364,9 @@ class AssertionOutcome:
             raise InvalidInputError("assertion execution markers must be boolean")
         return cls(
             _text(data["assertion_id"], "assertion identity"),
-            _enum(EvidenceResult, data["result"]), ran, skipped,
+            _enum(EvidenceResult, data["result"]),
+            ran,
+            skipped,
         )
 
 
@@ -401,29 +422,41 @@ class EvidenceReceipt:
             if self.observer.kind is not ObserverKind.EVALUATOR or not self.input_receipt_digests:
                 raise InvalidInputError("evaluated verdict requires evaluator and input receipts")
             if self.result is EvidenceResult.PASS and (
-                self.observer.mock or not self.assertion_outcomes
+                self.observer.mock
+                or not self.assertion_outcomes
                 or any(item.result is not EvidenceResult.PASS for item in self.assertion_outcomes)
             ):
-                raise InvalidInputError("passing verdict requires real, executed passing assertions")
+                raise InvalidInputError(
+                    "passing verdict requires real, executed passing assertions"
+                )
         elif self.result is not None:
-            raise InvalidInputError("claims and observations cannot carry an evaluated verdict result")
+            raise InvalidInputError(
+                "claims and observations cannot carry an evaluated verdict result"
+            )
         if self.category is ReceiptCategory.WORKER_CLAIM:
             if self.observer.kind is not ObserverKind.WORKER:
                 raise InvalidInputError("worker claim requires a worker observer identity")
-        elif self.category is ReceiptCategory.INSTRUMENT_OBSERVATION:
-            if self.observer.kind in (ObserverKind.WORKER, ObserverKind.EVALUATOR):
-                raise InvalidInputError("instrument observation requires an instrument observer")
+        elif self.category is ReceiptCategory.INSTRUMENT_OBSERVATION and self.observer.kind in (
+            ObserverKind.WORKER,
+            ObserverKind.EVALUATOR,
+        ):
+            raise InvalidInputError("instrument observation requires an instrument observer")
 
     def to_state(self) -> dict[str, object]:
         return {
             "schema_version": RECEIPT_SCHEMA_VERSION,
-            "source_revision": self.source_revision, "base_revision": self.base_revision,
-            "head_revision": self.head_revision, "build": self.build.to_state(),
+            "source_revision": self.source_revision,
+            "base_revision": self.base_revision,
+            "head_revision": self.head_revision,
+            "build": self.build.to_state(),
             "configuration_snapshot_digest": str(self.configuration_snapshot_digest),
-            "evaluator": self.evaluator.to_state(), "environment": self.environment.to_state(),
-            "observer": self.observer.to_state(), "capture_manifest": self.capture_manifest.to_state(),
+            "evaluator": self.evaluator.to_state(),
+            "environment": self.environment.to_state(),
+            "observer": self.observer.to_state(),
+            "capture_manifest": self.capture_manifest.to_state(),
             "started_at": self.started_at.astimezone(UTC).isoformat(),
-            "ended_at": self.ended_at.astimezone(UTC).isoformat(), "category": self.category.value,
+            "ended_at": self.ended_at.astimezone(UTC).isoformat(),
+            "category": self.category.value,
             "result": None if self.result is None else self.result.value,
             "input_receipt_digests": [str(item) for item in self.input_receipt_digests],
             "assertion_outcomes": [item.to_state() for item in self.assertion_outcomes],
@@ -436,11 +469,15 @@ class EvidenceReceipt:
     @classmethod
     def from_state(cls, state: object) -> EvidenceReceipt:
         data = _state(
-            state, "schema_version source_revision base_revision head_revision build "
+            state,
+            "schema_version source_revision base_revision head_revision build "
             "configuration_snapshot_digest evaluator environment observer capture_manifest "
             "started_at ended_at category result input_receipt_digests assertion_outcomes",
         )
-        if type(data["schema_version"]) is not int or data["schema_version"] != RECEIPT_SCHEMA_VERSION:
+        if (
+            type(data["schema_version"]) is not int
+            or data["schema_version"] != RECEIPT_SCHEMA_VERSION
+        ):
             raise InvalidInputError("unsupported evidence receipt schema version")
         return cls(
             source_revision=_text(data["source_revision"], "source revision"),
@@ -452,10 +489,13 @@ class EvidenceReceipt:
             environment=EnvironmentFingerprint.from_state(data["environment"]),
             observer=ObserverIdentity.from_state(data["observer"]),
             capture_manifest=CaptureManifest.from_state(data["capture_manifest"]),
-            started_at=_time(data["started_at"]), ended_at=_time(data["ended_at"]),
+            started_at=_time(data["started_at"]),
+            ended_at=_time(data["ended_at"]),
             category=_enum(ReceiptCategory, data["category"]),
             result=None if data["result"] is None else _enum(EvidenceResult, data["result"]),
-            input_receipt_digests=tuple(_digest(item) for item in _items(data["input_receipt_digests"])),
+            input_receipt_digests=tuple(
+                _digest(item) for item in _items(data["input_receipt_digests"])
+            ),
             assertion_outcomes=tuple(
                 AssertionOutcome.from_state(item) for item in _items(data["assertion_outcomes"])
             ),
@@ -463,8 +503,20 @@ class EvidenceReceipt:
 
 
 __all__ = [
-    "MAX_EVIDENCE_BYTES", "RECEIPT_SCHEMA_VERSION", "AssertionOutcome", "BuildIdentity",
-    "BuildKind", "CaptureArtifact", "CaptureManifest", "DecodeStatus", "EnvironmentFingerprint",
-    "EvaluatorIdentity", "EvidenceReceipt", "MediaDecodeResult", "ObserverIdentity", "ObserverKind",
-    "ReceiptCategory", "ToolVersion",
+    "MAX_EVIDENCE_BYTES",
+    "RECEIPT_SCHEMA_VERSION",
+    "AssertionOutcome",
+    "BuildIdentity",
+    "BuildKind",
+    "CaptureArtifact",
+    "CaptureManifest",
+    "DecodeStatus",
+    "EnvironmentFingerprint",
+    "EvaluatorIdentity",
+    "EvidenceReceipt",
+    "MediaDecodeResult",
+    "ObserverIdentity",
+    "ObserverKind",
+    "ReceiptCategory",
+    "ToolVersion",
 ]

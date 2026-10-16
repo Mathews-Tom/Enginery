@@ -17,12 +17,22 @@ MAX_DECODED_PNG_BYTES = 64 * 1024 * 1024
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 _DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
-_ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
-          (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+_ADAM7 = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
 
 
 def _scanlines(
-    width: int, height: int, bits_per_pixel: int, interlace: int,
+    width: int,
+    height: int,
+    bits_per_pixel: int,
+    interlace: int,
 ) -> tuple[tuple[int, int], ...]:
     passes = _ADAM7 if interlace else ((0, 0, 1, 1),)
     rows: list[tuple[int, int]] = []
@@ -62,15 +72,15 @@ def decode_png(data: bytes) -> MediaDecodeResult:
             return invalid("png_chunk_limit")
         if len(data) - offset < 12:
             return invalid("png_truncated_chunk")
-        length = int.from_bytes(data[offset:offset + 4], "big")
-        kind = data[offset + 4:offset + 8]
+        length = int.from_bytes(data[offset : offset + 4], "big")
+        kind = data[offset + 4 : offset + 8]
         end = offset + 12 + length
         if end > len(data):
             return invalid("png_truncated_chunk")
         if any(not (65 <= char <= 90 or 97 <= char <= 122) for char in kind) or kind[2] > 90:
             return invalid("png_chunk_type")
-        payload = data[offset + 8:end - 4]
-        checksum = int.from_bytes(data[end - 4:end], "big")
+        payload = data[offset + 8 : end - 4]
+        checksum = int.from_bytes(data[end - 4 : end], "big")
         if zlib.crc32(payload, zlib.crc32(kind)) & 0xFFFFFFFF != checksum:
             return invalid("png_chunk_crc")
         if not seen_header and kind != b"IHDR":
@@ -81,21 +91,30 @@ def decode_png(data: bytes) -> MediaDecodeResult:
             if seen_header or length != 13:
                 return invalid("png_ihdr")
             w, h, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
-                ">IIBBBBB", payload,
+                ">IIBBBBB",
+                payload,
             )
             if not 0 < w <= MAX_PNG_DIMENSION or not 0 < h <= MAX_PNG_DIMENSION:
                 return invalid("png_dimensions")
             width, height = w, h
             if (
-                color_type not in _DEPTHS or bit_depth not in _DEPTHS[color_type]
-                or compression != 0 or filtering != 0 or interlace not in (0, 1)
+                color_type not in _DEPTHS
+                or bit_depth not in _DEPTHS[color_type]
+                or compression != 0
+                or filtering != 0
+                or interlace not in (0, 1)
             ):
                 return invalid("png_ihdr")
             seen_header = True
         elif kind == b"PLTE":
             if (
-                seen_palette or seen_idat or not length or length % 3 or length > 768
-                or color_type in (0, 4) or (color_type == 3 and length // 3 > 2 ** bit_depth)
+                seen_palette
+                or seen_idat
+                or not length
+                or length % 3
+                or length > 768
+                or color_type in (0, 4)
+                or (color_type == 3 and length // 3 > 2**bit_depth)
             ):
                 return invalid("png_palette")
             seen_palette = True
@@ -124,7 +143,9 @@ def decode_png(data: bytes) -> MediaDecodeResult:
     except zlib.error:
         return invalid("png_zlib")
     if (
-        not inflater.eof or inflater.unused_data or inflater.unconsumed_tail
+        not inflater.eof
+        or inflater.unused_data
+        or inflater.unconsumed_tail
         or len(pixels) != expected
     ):
         return invalid("png_scanline_bytes")
@@ -142,15 +163,22 @@ def validate_media(data: bytes, media_type: str) -> MediaDecodeResult:
     if media_type == "image/png":
         return decode_png(data)
     if len(data) > MAX_EVIDENCE_BYTES:
-        return MediaDecodeResult(DecodeStatus.INVALID, "enginery-media/1", reason="media_input_limit")
+        return MediaDecodeResult(
+            DecodeStatus.INVALID, "enginery-media/1", reason="media_input_limit"
+        )
     if media_type.startswith(("image/", "audio/", "video/")):
         return MediaDecodeResult(
-            DecodeStatus.INVALID, "enginery-media/1", reason="unsupported_media_type",
+            DecodeStatus.INVALID,
+            "enginery-media/1",
+            reason="unsupported_media_type",
         )
     return MediaDecodeResult(DecodeStatus.NOT_APPLICABLE, "enginery-media/1")
 
 
 __all__ = [
-    "MAX_DECODED_PNG_BYTES", "MAX_PNG_DIMENSION", "PNG_DECODER_VERSION", "decode_png",
+    "MAX_DECODED_PNG_BYTES",
+    "MAX_PNG_DIMENSION",
+    "PNG_DECODER_VERSION",
+    "decode_png",
     "validate_media",
 ]

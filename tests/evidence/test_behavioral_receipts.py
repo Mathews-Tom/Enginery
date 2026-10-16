@@ -45,13 +45,21 @@ def _chunk(kind: bytes, data: bytes, *, bad_crc: bool = False) -> bytes:
 
 
 def _png(
-    *, width: int = 1, height: int = 1, pixels: bytes = b"\x00\x12\x34\x56\xff",
-    compressed: bytes | None = None, bad_crc: bool = False, interlace: int = 0,
+    *,
+    width: int = 1,
+    height: int = 1,
+    pixels: bytes = b"\x00\x12\x34\x56\xff",
+    compressed: bytes | None = None,
+    bad_crc: bool = False,
+    interlace: int = 0,
 ) -> bytes:
     header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, interlace)
     return (
-        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", header)
-        + _chunk(b"IDAT", zlib.compress(pixels) if compressed is None else compressed, bad_crc=bad_crc)
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", header)
+        + _chunk(
+            b"IDAT", zlib.compress(pixels) if compressed is None else compressed, bad_crc=bad_crc
+        )
         + _chunk(b"IEND", b"")
     )
 
@@ -61,11 +69,15 @@ def _receipt(capture: CaptureArtifact | None = None) -> EvidenceReceipt:
         data = _png()
         capture = CaptureArtifact(_digest_bytes(data), "image/png", len(data), decode_png(data))
     return EvidenceReceipt(
-        source_revision="issue-revision-1", base_revision="a" * 40, head_revision="b" * 40,
+        source_revision="issue-revision-1",
+        base_revision="a" * 40,
+        head_revision="b" * 40,
         build=BuildIdentity(BuildKind.SOURCE_TREE, _digest("verified head tree")),
         configuration_snapshot_digest=_digest("compiled configuration"),
         evaluator=EvaluatorIdentity(_digest("protected assertions"), "1.0"),
-        environment=EnvironmentFingerprint(_digest("host receipt"), (ToolVersion("python", "3.12"),)),
+        environment=EnvironmentFingerprint(
+            _digest("host receipt"), (ToolVersion("python", "3.12"),)
+        ),
         observer=ObserverIdentity("host-command-observer", ObserverKind.COMMAND, "1.0"),
         capture_manifest=CaptureManifest((capture,)),
         started_at=datetime(2026, 1, 2, 12, tzinfo=UTC),
@@ -81,14 +93,18 @@ def _digest_bytes(data: bytes) -> Digest:
 def _verdict() -> EvidenceReceipt:
     observation = _receipt()
     return replace(
-        observation, observer=ObserverIdentity("trusted-evaluator", ObserverKind.EVALUATOR, "1.0"),
-        category=ReceiptCategory.EVALUATED_VERDICT, result=EvidenceResult.PASS,
+        observation,
+        observer=ObserverIdentity("trusted-evaluator", ObserverKind.EVALUATOR, "1.0"),
+        category=ReceiptCategory.EVALUATED_VERDICT,
+        result=EvidenceResult.PASS,
         input_receipt_digests=(observation.digest,),
         assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.PASS, ran=True),),
     )
 
 
-def _change(state: dict[str, object], path: tuple[str | int, ...], value: object) -> dict[str, object]:
+def _change(
+    state: dict[str, object], path: tuple[str | int, ...], value: object
+) -> dict[str, object]:
     changed = deepcopy(state)
     cursor: object = changed
     for key in path[:-1]:
@@ -139,7 +155,8 @@ def _change(state: dict[str, object], path: tuple[str | int, ...], value: object
     ],
 )
 def test_each_bound_provenance_field_changes_receipt_digest(
-    path: tuple[str | int, ...], value: object,
+    path: tuple[str | int, ...],
+    value: object,
 ) -> None:
     original = _receipt()
     changed = EvidenceReceipt.from_state(_change(original.to_state(), path, value))
@@ -150,12 +167,18 @@ def test_decode_status_reason_and_category_are_bound() -> None:
     original = _receipt()
     capture = original.capture_manifest.artifacts[0]
     invalid = replace(capture.decode, status=DecodeStatus.INVALID, reason="corrupted")
-    failed = replace(original, capture_manifest=CaptureManifest((replace(capture, decode=invalid),)))
+    failed = replace(
+        original, capture_manifest=CaptureManifest((replace(capture, decode=invalid),))
+    )
     other_reason = replace(invalid, reason="truncated")
     assert failed.digest != original.digest
-    assert replace(
-        failed, capture_manifest=CaptureManifest((replace(capture, decode=other_reason),)),
-    ).digest != failed.digest
+    assert (
+        replace(
+            failed,
+            capture_manifest=CaptureManifest((replace(capture, decode=other_reason),)),
+        ).digest
+        != failed.digest
+    )
     worker_observer = ObserverIdentity("worker", ObserverKind.WORKER, "1.0")
     worker = replace(original, category=ReceiptCategory.WORKER_CLAIM, observer=worker_observer)
     assert worker.digest != original.digest
@@ -169,21 +192,36 @@ def test_decode_status_reason_and_category_are_bound() -> None:
 def test_evaluated_verdict_binds_result_input_receipts_and_assertion_outcomes() -> None:
     verdict = _verdict()
     assert replace(verdict, result=EvidenceResult.INDETERMINATE).digest != verdict.digest
-    assert replace(verdict, input_receipt_digests=(_digest("other input"),)).digest != verdict.digest
-    assert replace(
-        verdict, assertion_outcomes=(AssertionOutcome("other-assertion", EvidenceResult.PASS, True),),
-    ).digest != verdict.digest
+    assert (
+        replace(verdict, input_receipt_digests=(_digest("other input"),)).digest != verdict.digest
+    )
+    assert (
+        replace(
+            verdict,
+            assertion_outcomes=(AssertionOutcome("other-assertion", EvidenceResult.PASS, True),),
+        ).digest
+        != verdict.digest
+    )
     failed = replace(
-        verdict, result=EvidenceResult.FAIL,
+        verdict,
+        result=EvidenceResult.FAIL,
         assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.FAIL, True),),
     )
     assert failed.digest != verdict.digest
-    assert replace(
-        failed, assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.FAIL, False),),
-    ).digest != failed.digest
-    assert replace(
-        failed, assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.FAIL, True, True),),
-    ).digest != failed.digest
+    assert (
+        replace(
+            failed,
+            assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.FAIL, False),),
+        ).digest
+        != failed.digest
+    )
+    assert (
+        replace(
+            failed,
+            assertion_outcomes=(AssertionOutcome("changed-path", EvidenceResult.FAIL, True, True),),
+        ).digest
+        != failed.digest
+    )
 
 
 def test_receipt_serialization_is_canonical_and_immutable() -> None:
@@ -193,7 +231,7 @@ def test_receipt_serialization_is_canonical_and_immutable() -> None:
     assert receipt.digest == Digest.of_json(state)
     assert receipt.digest == Digest.of_json(dict(reversed(list(state.items()))))
     with pytest.raises(FrozenInstanceError):
-        setattr(receipt, "head_revision", "changed")
+        receipt.head_revision = "changed"
     state["head_revision"] = "changed"
     assert receipt.head_revision == "b" * 40
     with pytest.raises(InvalidInputError, match="immutable tuple"):
@@ -243,9 +281,11 @@ def test_valid_png_records_dimensions_without_semantic_success(interlace: int) -
     assert observation.result is None
     with pytest.raises(InvalidInputError):
         replace(
-            observation, category=ReceiptCategory.EVALUATED_VERDICT,
+            observation,
+            category=ReceiptCategory.EVALUATED_VERDICT,
             observer=ObserverIdentity("evaluator", ObserverKind.EVALUATOR, "1"),
-            input_receipt_digests=(observation.digest,), result=EvidenceResult.PASS,
+            input_receipt_digests=(observation.digest,),
+            result=EvidenceResult.PASS,
         )
 
 
@@ -268,7 +308,8 @@ def test_valid_png_records_dimensions_without_semantic_success(interlace: int) -
     ],
 )
 def test_png_rejects_bad_structure_compression_dimensions_and_scanlines(
-    data: bytes, reason: str,
+    data: bytes,
+    reason: str,
 ) -> None:
     decoded = decode_png(data)
     assert decoded.status is DecodeStatus.INVALID
@@ -299,7 +340,8 @@ def test_receipt_and_raw_media_survive_repository_restart(tmp_path: Path) -> Non
     receipt = _receipt(capture)
     digest = repository.publish(receipt)
     restarted = EvidenceReceiptRepository(
-        ArtifactStore(store.root), media_validator=validate_media,
+        ArtifactStore(store.root),
+        media_validator=validate_media,
     )
     assert restarted.load(digest) == receipt
     assert store.read_bytes(capture.digest) == raw
@@ -311,7 +353,8 @@ def test_receipt_and_raw_media_survive_repository_restart(tmp_path: Path) -> Non
 
 def test_invalid_media_is_retained_as_failure_not_silently_dropped(tmp_path: Path) -> None:
     repository = EvidenceReceiptRepository(
-        ArtifactStore(tmp_path / "artifacts"), media_validator=validate_media,
+        ArtifactStore(tmp_path / "artifacts"),
+        media_validator=validate_media,
     )
     capture = repository.publish_capture(_png(bad_crc=True), media_type="image/png")
     receipt = _receipt(capture)
@@ -340,7 +383,9 @@ def test_receipt_requires_retained_raw_bytes_and_true_decode_metadata(tmp_path: 
         repository.load(digest)
 
 
-def test_receipt_load_rechecks_decode_metadata_even_with_valid_artifact_digest(tmp_path: Path) -> None:
+def test_receipt_load_rechecks_decode_metadata_even_with_valid_artifact_digest(
+    tmp_path: Path,
+) -> None:
     store = ArtifactStore(tmp_path / "artifacts")
     repository = EvidenceReceiptRepository(store, media_validator=validate_media)
     capture = repository.publish_capture(_png(), media_type="image/png")

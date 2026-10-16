@@ -378,6 +378,9 @@ def test_build_request_claude_code_provider_defaults_executable(tmp_path: Path) 
 
 def _built(tmp_path: Path, *extra: str, github: StandInGitHub | None = None) -> tuple[int, Path]:
     repository, base_revision = _repository(tmp_path)
+    from tests.support.behavioral import declare_behavioral_policy
+
+    base_revision = declare_behavioral_policy(repository)
     output = tmp_path / "request.json"
     argv = _minimal_argv(
         tmp_path=tmp_path,

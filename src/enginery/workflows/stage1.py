@@ -2341,7 +2341,9 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         runner=_runner_from_state(state),
         protected_paths=_protected_paths_from_state(state),
         behavioral_checks=(
-            None if "behavioral_checks" not in state else checks_from_state(state["behavioral_checks"])
+            None
+            if "behavioral_checks" not in state
+            else checks_from_state(state["behavioral_checks"])
         ),
     )
     if str(run.id) != _string(state, "run_id"):
