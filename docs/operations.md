@@ -710,6 +710,35 @@ Ownership entries are validated before any are reported as owned: the recorded r
 match setup's project-relative path, with no traversal or symbolic links. A tampered
 ownership record is invalid input, not evidence of ownership.
 
+### Issue intake
+
+`enginery factory collect --dry-run --project . --json` lists open issues from the
+repository's `origin`, excluding pull requests. Exactly one canonical
+`enginery/work-kind/issue|plan` and one `enginery/risk/low|medium` label are required.
+Missing, duplicated or unknown labels hold the issue with an explicit `gh issue edit N
+--repo OWNER/REPO` repair: remove offending labels and choose one of the displayed
+allowed work-kind/risk values. No risk is chosen automatically. Authentication or
+transient intake failures instead report an `issue intake` hold with authentication
+and retry commands. A listing exceeding 100 pages fails loudly rather than truncating.
+The preview includes deduplication, selected workflow, harness/model/effort and winning
+layers, runner, time budget and the unenforced cost basis. It makes no GitHub mutations
+or hosted inference calls; JSON counts `github_auth_probes` separately from issue API
+`github_reads`. An existing project ledger is opened read-only without migration.
+Read-only inspection of a WAL ledger may create SQLite `ledger.sqlite-wal` and
+`ledger.sqlite-shm` sidecar files without changing the ledger's content; any newly
+created sidecars are disclosed in `local_writes`, including during a dry run.
+The 1 MiB document limit applies to the intake index and request documents, not the ledger.
+
+Without `--dry-run`, collection also records the private `intake/index.json`, its
+lock file and every newly created directory from `$XDG_STATE_HOME` (or its default)
+through `intake/`, disclosed outermost first before the lock and index paths. Only the repository
+`last_seen_updated_at` cursor changes: it cannot advance
+past the earliest held or errored issue. Collection never creates issue-to-run bindings;
+it reads existing bindings to report `new`, `bound:<run-id>` or `changed:<run-id>`.
+The JSON `local_writes` list discloses these paths. Collection never comments, labels,
+opens a pull request, merges, deploys, installs a capability or starts a worker.
+
+
 `factory uninstall` previews by default and, with `--apply`, undoes exactly what
 `init` did, using only the private ownership record. It removes the policy file only
 while its sha256 still equals the one setup recorded; a file you edited is kept and
@@ -2327,16 +2356,16 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ### Proposed factory commands (not shipped)
 
-`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
-[Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
+`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped (see
+[Guided project setup](#guided-project-setup) and issue intake above). `enginery --help` lists exactly
 `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `runner`, `capability`, and `factory`; `factory` provides those four
+`workspace`, `runner`, `capability`, and `factory`; `factory` provides those five
 subcommands only. `gate status` accepts `--gate G4` only, and `stage1` provides
 `start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
 and `build-request`.
 
 The rest of a manual-first factory layer is proposed with this command family:
-`factory collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
+`factory run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
 and `evidence`. Do not script against these names;
 they are a proposal, not a compatibility promise. The proposed boundary:
 

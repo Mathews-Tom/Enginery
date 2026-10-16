@@ -29,16 +29,24 @@ are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 
 ### Guided setup shipped; the rest of the factory direction proposed
 
-`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped: guided,
+`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped: guided,
 preview-first project setup, read-only prerequisite diagnostics, an explanation of where
 every configured value comes from, and reversible removal of exactly what setup created,
 described in [Guided project setup](docs/operations.md#guided-project-setup). They write
 only a project policy file and a private ownership record, and never install
 capabilities, sign in, or touch services, MCP servers or global configuration.
 
+`enginery factory collect --dry-run` previews canonical issue classification, deduplication,
+workflow selection and budgets without GitHub mutations. Read-only inspection of a WAL
+ledger may create SQLite sidecars, disclosed in `local_writes`, without changing the
+ledger's content. `collect` updates only the private
+repository cursor, never issue-to-run bindings, and never skips held issues. JSON
+reports GitHub authentication probes separately from issue reads; neither form calls
+a model or changes GitHub.
+
 A manual-first software-factory layer on top of the shipped substrate is
 otherwise **proposed and not shipped**: the remaining proposed command family
-(`collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
+(`run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
 `evidence`) does not exist yet and must not be scripted against. The
 proposal keeps the same boundary the shipped substrate already has: control is
 manual-first, local-first, and deterministic. Models never poll, schedule, keep
