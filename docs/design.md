@@ -155,9 +155,19 @@ Every public claim must name its boundary. "Reconciliation before retry" applies
 
 ### Shipped manual factory path and proposed controls
 
-The operator guide lists the shipped CLI surface. Guided configuration ships as `enginery factory init`, `doctor`, `explain`, and `uninstall`; manual intake and execution ship as `collect`, `run`, `status`, `explain RUN`, `resume`, `pause`, and `drain`. Only factory `review`, `watch`, and `evidence` remain proposed; scheduled collection/watch is not shipped.
+The operator guide lists the shipped CLI surface. Guided configuration ships as
+`enginery factory init`, `doctor`, `explain`, and `uninstall`; manual intake and
+execution ship as `collect`, `run`, `status`, `explain RUN`, `resume`, `pause`, and
+`drain`. `calibrate`/`check` perform independent behavioral verification.
+`review RUN` renders one safe terminal/HTML packet from durable truth, and
+`feedback RUN` queues repairs without granting authority. Only factory `watch`
+and `evidence` remain proposed; scheduled collection/watch is not shipped.
 
-Factory and Stage 1 commands share one composition boundary for bound start, read-only inspection, runtime selection and advancing services. The coordinator owns progression through `Stage1RunService.advance`; the CLI adds neither a second scheduler nor another state store. The private project `ledger.sqlite` has owner `factory` and is also accessible to Stage 1 commands with `--database`. Terminal review remains `stage1 review`, with unchanged Stage 1 flags and output.
+Factory and Stage 1 commands share one composition boundary for bound start,
+inspection, runtime selection and advancing services. The coordinator owns
+progression through `Stage1RunService.advance`; the CLI adds neither a second
+scheduler nor another state store. The private project ledger has owner `factory`
+and is also accessible to Stage 1 commands with `--database`.
 
 `factory resume RUN` reconciles exited workers and pending broker operations from the durable ledger before continuing that same run, without creating another request or workspace. This differs from `stage1 resume`, which requeues a human-wait node and retains its existing flags and semantics. `factory pause` pauses dispatch for the project ledger only, leaving running workers untouched; `factory pause --lift` lifts it. `factory drain --wait-seconds N` pauses and waits, leaving exited-worker result and lease reconciliation to the subsequent `factory resume` after the pause is lifted. Successful implementation workspaces remain retained until explicit `enginery workspace release`; status/drain report the retention state, and a blocked new run names that release command as its hold repair. `factory drain --stop` uses the existing operator stop callbacks to stop live workers, release their leases/reservations and remove isolated containers; previously exited workers still require resume/reconciliation. Neither form reverses an external effect. The factory ends at a verified open PR and outcome observation; merge, release and deploy are separate human actions, never automatic factory actions.
 

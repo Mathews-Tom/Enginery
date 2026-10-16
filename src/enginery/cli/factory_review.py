@@ -1,0 +1,379 @@
+"""Private review packets and repair-only feedback over the existing Stage 1 ledger."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import selectors
+import subprocess
+import time
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+
+from enginery.adapters.review_presenters import LavishPresenter, PresenterError
+from enginery.application.git_environment import repository_isolated_environment
+from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
+from enginery.cli.config_locations import private_state_directory, read_user_layer
+from enginery.cli.factory_collect import (
+    database_path,
+    ensure_private_directory,
+    read_ledger,
+    require_state_path,
+)
+from enginery.cli.setup_files import read_regular, refuse_links, write_private_atomically
+from enginery.cli.stage1_composition import HEARTBEAT_WINDOW, read_only_service, runtime_for_run
+from enginery.domain.digests import Digest
+from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
+from enginery.domain.ids import RunId
+from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.evidence.review_rendering import render_html, render_terminal
+from enginery.ledger.redaction import assert_no_raw_credentials, redact_credential_shaped_text
+from enginery.ledger.service import LedgerService
+from enginery.workflows.review import ReviewFinding, ReviewReport
+from enginery.workflows.stage1 import Stage1RunRequest, Stage1RunService, first_attempt_generation
+
+
+def _json(value: object) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if len(raw.encode()) > MAX_PACKET_BYTES:
+        raise InvalidInputError("review input exceeds the 1 MiB limit")
+    return raw
+
+
+def _projection(ledger: LedgerService, aggregate_type: str, aggregate_id: str) -> dict[str, object]:
+    record = ledger.read_projection(aggregate_type=aggregate_type, aggregate_id=aggregate_id)
+    state = {} if record is None else dict(record.state)
+    _json(state)
+    return state
+
+
+def _git(path: Path, *arguments: str) -> str:
+    """Read Git output with a hard byte bound and wall-clock deadline, never a shell."""
+    command = ("git", "--no-pager", "-C", str(path), *arguments)
+    with subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=repository_isolated_environment(),
+    ) as process:
+        assert process.stdout is not None
+        os.set_blocking(process.stdout.fileno(), False)
+        output = bytearray()
+        deadline = time.monotonic() + 15
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise InvalidInputError("review Git read timed out")
+                    if not selector.select(remaining):
+                        raise InvalidInputError("review Git read timed out")
+                    chunk = os.read(
+                        process.stdout.fileno(), min(65536, MAX_PACKET_BYTES + 1 - len(output))
+                    )
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > MAX_PACKET_BYTES:
+                        raise InvalidInputError("review Git output exceeds the 1 MiB limit")
+            if process.wait(timeout=max(0.01, deadline - time.monotonic())):
+                raise MissingPrerequisiteError("review requires locally available base and verified head")
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+    return output.decode("utf-8", errors="replace")
+
+
+def _revision(path: Path, revision: str) -> str:
+    resolved = _git(path, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}").strip()
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", resolved) is None:
+        raise InvalidInputError("review revision is not a full Git commit identity")
+    return resolved
+
+
+def _receipt_document(root: Path, digest_text: str) -> dict[str, object]:
+    algorithm, separator, hexadecimal = digest_text.partition(":")
+    if not separator:
+        raise InvalidInputError("review receipt reference is not a digest")
+    digest = Digest(algorithm, hexadecimal)
+    path = root / "objects" / digest.algorithm / digest.hex_value[:2] / digest.hex_value
+    refuse_links(root.parent, path.relative_to(root.parent), what="review receipt artifact")
+    if path.exists() and path.stat().st_nlink != 1:
+        raise InvalidInputError("review receipt artifact must not be hard-linked")
+    raw = read_regular(path, what="review receipt artifact")
+    if raw is None:
+        return {"digest": digest_text, "availability": "missing"}
+    if Digest.of_bytes(raw) != digest:
+        raise InvalidInputError("review receipt artifact digest mismatch")
+    try:
+        document: object = json.loads(raw)
+    except (ValueError, UnicodeError) as error:
+        raise InvalidInputError("review receipt artifact is not JSON") from error
+    return {"digest": digest_text, "availability": "digest_verified", "document": document}
+
+
+def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest) -> ReviewPacket:
+    """Assemble one immutable subject from the run, not worker presentation documents."""
+    run_id = str(request.run.id)
+    runtime = CoordinatorRuntime(ledger, owner="factory")
+    states = {
+        name: _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:{name}")
+        for name in ("implement", "validate", "review", "open_pr", "verify")
+    }
+    implementation = states["implement"]
+    attempt_id = implementation.get("attempt_id")
+    if not isinstance(attempt_id, str):
+        raise MissingPrerequisiteError("review requires a collected implementation with a verified head")
+    attempt = _projection(ledger, "node_attempt", attempt_id)
+    result = attempt.get("result")
+    result = dict(result) if isinstance(result, Mapping) else {}
+    head = result.get("head_revision")
+    if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
+        raise MissingPrerequisiteError("review requires the host-verified implementation head")
+    # Inspect committed objects only: no external diff/textconv and no untracked worker content.
+    repository = request.workspace_path
+    if _revision(repository, "HEAD") != head:
+        raise InvalidInputError("review head changed; collect and validate the current implementation")
+    bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
+    base = _revision(repository, bound_base)
+    diff = _git(repository, "diff", "--no-ext-diff", "--no-textconv", "--binary", base, head, "--")
+    observed = _projection(ledger, "behavioral_acceptance", run_id)
+    receipts: list[str] = []
+    receipt = observed.get("receipt_digest")
+    if isinstance(receipt, str):
+        receipts.append(receipt)
+    observations = observed.get("observation_receipt_digests")
+    if isinstance(observations, list):
+        receipts.extend(value for value in observations if isinstance(value, str))
+    calibration = observed.get("calibration_receipt_digest")
+    if isinstance(calibration, str):
+        receipts.append(calibration)
+    raw = request.initial_state()
+    findings = states["review"].get("finding_ids", [])
+    ci = states["verify"]
+    ci_head = ci.get("head_revision")
+    ci_view: dict[str, object] = {
+        "availability": "current_head" if ci and ci_head == head else "not_persisted_for_current_head",
+        "persisted": ci,
+    }
+    sections = (
+        ("Intent", _json({
+            "work_item": raw["work_item"],
+            "source_revision": raw["source_revision"],
+            "request_reference": str(
+                private_state_directory(project) / "runs" / run_id / "request.json"
+            ),
+        })),
+        ("Reproduction evidence", _json({
+            "artifact_root": str(request.execution_configuration.artifact_root),
+            "implementation_result": result,
+            "validation": states["validate"],
+        })),
+        ("Observed result", _json({
+            "availability": "persisted" if observed else "not_persisted",
+            "display_only": True,
+            "behavioral_acceptance": observed,
+            "receipts": [
+                _receipt_document(request.execution_configuration.artifact_root, value)
+                for value in receipts
+            ],
+        })),
+        ("Risk", _json({
+            "classification_provenance": raw.get("classification_provenance"),
+            "protected_paths": list(request.protected_paths),
+            "publication": states["open_pr"],
+        })),
+        ("Routing and cost basis", _json({
+            "execution_selection": request.execution_selection.to_state(),
+            "implementation": raw["implementation"],
+            "runner": request.runner.to_state(),
+        })),
+    )
+    packet = ReviewPacket(
+        run_id=run_id,
+        request_digest=str(request.digest),
+        configuration_snapshot_digest=str(request.run.configuration_snapshot_digest),
+        base_revision=base,
+        head_revision=head,
+        diff=diff,
+        evidence_receipt_digests=tuple(receipts),
+        ci_evidence_json=_json(ci_view),
+        findings_json=_json(findings),
+        sections=sections,
+    )
+    # No packet, even a display-only one, may leak credential-shaped worker text.
+    assert_no_raw_credentials(_json(packet.to_state()))
+    return packet
+
+
+def _open(
+    project: Path, run_id: str, *, writable: bool = False
+) -> tuple[LedgerService, Stage1RunRequest]:
+    RunId(run_id)
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", run_id) is None or run_id in {".", ".."}:
+        raise InvalidInputError("review run id must be a plain identifier")
+    connection = read_ledger(project)
+    if connection is None:
+        raise MissingPrerequisiteError("factory review requires an existing project run")
+    if writable:
+        connection.close()
+        path = database_path(project)
+        require_state_path(path, what="project ledger")
+        ledger = LedgerService.open(path)
+    else:
+        ledger = LedgerService(connection)
+    try:
+        runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
+        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+        return ledger, request
+    except BaseException:
+        ledger.close()
+        raise
+
+
+def read_packet(project: Path, run_id: str) -> ReviewPacket:
+    """Rebuild the CURRENT subject; never trust a previously rendered packet."""
+    ledger, request = _open(project, run_id)
+    try:
+        return build_packet(project, ledger, request)
+    finally:
+        ledger.close()
+
+
+def _packet_path(project: Path, packet: ReviewPacket) -> Path:
+    return (
+        private_state_directory(project) / "review" / packet.run_id
+        / packet.digest.hex_value / "packet.html"
+    )
+
+
+def review(project: Path, run_id: str) -> dict[str, object]:
+    packet = read_packet(project, run_id)
+    lines = render_terminal(packet)
+    document = render_html(packet).encode()
+    path = _packet_path(project, packet)
+    ensure_private_directory(path.parent, what="review packet directory")
+    require_state_path(path, what="review packet")
+    existing = read_regular(path, what="review packet")
+    if existing is not None and existing != document:
+        raise InvalidInputError("immutable review packet path contains different bytes")
+    if existing is None:
+        write_private_atomically(path, document, what="review packet")
+    return {
+        "run_id": run_id,
+        "packet_path": str(path),
+        "subject_digest": packet.subject_digest,
+        "lines": list(lines),
+    }
+
+
+def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> dict[str, object]:
+    """Queue an actionable finding only; an empty/non-actionable report is impossible."""
+    if not text.strip() or len(text.encode()) > MAX_PACKET_BYTES:
+        raise InvalidInputError("feedback must be non-blank and at most 1 MiB")
+    ledger, request = _open(project, run_id, writable=True)
+    try:
+        packet = build_packet(project, ledger, request)
+        payload = {
+            "kind": "packet_feedback", "subject_digest": subject_digest,
+            "text": redact_credential_shaped_text(text),
+        }
+        finding_id = _json(payload)
+        previous: object = json.loads(packet.findings_json)
+        prior_ids = (
+            [value for value in previous if isinstance(value, str)]
+            if isinstance(previous, list)
+            else []
+        )
+        if finding_id in prior_ids:
+            return {
+                "run_id": run_id,
+                "subject_digest": subject_digest,
+                "feedback_queued": True,
+                "already_queued": True,
+                "authority_granted": False,
+                "finding_id": str(Digest.of_json(payload)),
+            }
+        if subject_digest != packet.subject_digest:
+            raise InvalidInputError("feedback subject is stale; run factory review again")
+        finding_ids = tuple(dict.fromkeys((*prior_ids, finding_id)))
+        _json(list(finding_ids))
+        runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
+        implementation = _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:implement")
+        attempt = implementation.get("attempt_id")
+        if not isinstance(attempt, str):
+            raise MissingPrerequisiteError("feedback requires a collected implementation")
+        repair_attempt = first_attempt_generation(attempt) - first_attempt_generation(
+            request.implementation.attempt_id
+        )
+        service = read_only_service(runtime=runtime, ledger=ledger, request=request)
+        result = service.review_implementation(
+            request,
+            ReviewReport(
+                producer="implementation_worker",
+                reviewer="packet_feedback",
+                findings=tuple(
+                    ReviewFinding(value, actionable=True, blocking=False) for value in finding_ids
+                ),
+            ),
+            repair_attempt=repair_attempt,
+            packet_feedback_digest=Digest.of_json(payload).hex_value,
+            now=datetime.now(UTC),
+            heartbeat_window=HEARTBEAT_WINDOW,
+        )
+        return {"run_id": run_id, "subject_digest": subject_digest,
+                "review_outcome": result.outcome.value, "feedback_queued": True,
+                "authority_granted": False, "finding_id": str(Digest.of_json(payload))}
+    finally:
+        ledger.close()
+
+
+def _presenter(project: Path, *, port: int, no_open: bool) -> LavishPresenter:
+    user = read_user_layer()
+    programs = None if user is None else user.operator_executables
+    if programs is None or programs.lavish is None:
+        raise InvalidInputError(
+            "Lavish is not configured; set [executables].lavish in user preferences "
+            "or use the terminal packet"
+        )
+    state = private_state_directory(project)
+    ensure_private_directory(state, what="private review presenter state")
+    try:
+        return LavishPresenter(programs.lavish, state, port, no_open=no_open)
+    except PresenterError as error:
+        raise InvalidInputError(str(error)) from error
+
+
+def present_review(
+    project: Path, report: Mapping[str, object], *, port: int, no_open: bool
+) -> None:
+    try:
+        _presenter(project, port=port, no_open=no_open).open(Path(str(report["packet_path"])))
+    except PresenterError as error:
+        raise InvalidInputError(str(error)) from error
+
+
+def lavish_feedback(
+    project: Path, run_id: str, *, subject_digest: str, port: int
+) -> dict[str, object]:
+    presenter = _presenter(project, port=port, no_open=True)
+    packet = read_packet(project, run_id)
+    if packet.subject_digest != subject_digest:
+        raise InvalidInputError("feedback subject is stale; run factory review again")
+    path = _packet_path(project, packet)
+    try:
+        findings = presenter.poll(path)
+        if not findings:
+            return {
+                "run_id": run_id, "subject_digest": subject_digest,
+                "feedback_queued": False, "authority_granted": False,
+            }
+        return feedback(
+            project, run_id, subject_digest=subject_digest, text="\n".join(findings)
+        )
+    except PresenterError as error:
+        raise InvalidInputError(str(error)) from error
+    finally:
+        presenter.end(path)

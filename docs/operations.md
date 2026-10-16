@@ -1008,6 +1008,34 @@ resume/reconciliation. Partial cleanup is reported explicitly, never called comp
 Neither form cancels or reverses external effects, and the pause remains until
 explicitly lifted.
 
+### Safe local review packets and repair feedback
+
+`enginery factory review RUN --project PROJECT` renders the same packet as
+terminal text and as a private HTML file. The packet contains intent, scoped diff,
+reproduction evidence, observed receipts/verdict, available current-head CI, risk,
+routing/cost basis, unresolved findings, and a canonical subject digest.
+Repository and worker strings are HTML-escaped; terminal output escapes C0, C1,
+DEL and bidi controls. The HTML has a restrictive CSP with scripts and remote
+loads disabled. Worker HTML is never served as executable packet content.
+Packets and captures stay local; nothing is uploaded or shared.
+
+Queue terminal repair feedback with
+`enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
+The digest must match the current packet. Feedback enters the existing bounded
+repair path as actionable findings, not approval. Empty feedback and stale
+subjects are refused; exact replays are idempotent. Reports, annotations, scores
+and queued prompts cannot acquire authority through these new commands.
+
+To use optional Lavish presentation, configure `[executables].lavish` in private
+user preferences (project policy cannot choose it), then run
+`enginery factory review RUN --project PROJECT --lavish --port PORT --no-open`.
+`--no-open` suppresses browser launch. Collect annotations with
+`enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --lavish-poll --port PORT`;
+Enginery polls and ends that session. Only Enginery-rendered safe packets are
+passed to the presenter. Every invocation sets telemetry off, a private state
+directory and an explicit port; no share, export or update command is invoked.
+The fully usable terminal packet requires no presenter.
+
 Terminal review remains `enginery stage1 review` against the returned database and
 run ID. The independent review gate reports `next_decision` with
 `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
@@ -1019,7 +1047,7 @@ its failure as a hold with an `enginery factory resume RUN --project P` repair u
 the bound run rather than suggesting an inapplicable review. A `blocked` action instead
 reports a hold with its recorded reason and matching repair; it is not an approval
 or a successful validation. The other Stage 1 commands retain their flags and output.
-There is no factory review UI. This path ends at a verified open PR plus outcome
+The factory packet is a display and feedback surface only. This path ends at a verified open PR plus outcome
 observation. Merge, release and deployment are separate human actions, never actions
 performed by this factory path.
 
@@ -1055,8 +1083,8 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | Catalog, host fingerprint or runner drift | Run `enginery factory doctor --project .`; restore the run's bound configuration, then `enginery factory resume RUN --project .`. Resume never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
 | Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
 
-Only factory `review`, `watch` and `evidence` remain proposed and must not be
-scripted against. Scheduled collection/watch is not shipped.
+Only factory `watch` and `evidence` remain proposed and must not be scripted
+against. Scheduled collection/watch is not shipped.
 
 ## Running a Stage 1 workflow
 
@@ -2679,9 +2707,9 @@ with RUN it explains the durable binding. Terminal review stays on `stage1 revie
 `gate status` accepts `--gate G4` only, and `stage1` retains `start`, `watch`,
 `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`, and `build-request`.
 
-Only `factory review`, `watch`, and `evidence` remain proposed. Do not script
+Only `factory watch` and `factory evidence` remain proposed. Do not script
 against those names: they are not a compatibility promise. Scheduled collection
-and factory watch are not shipped. The manual factory boundary is:
+is not shipped. The manual factory boundary is:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;
   nothing is scheduled implicitly.

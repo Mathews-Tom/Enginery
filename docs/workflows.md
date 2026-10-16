@@ -1,6 +1,11 @@
 # Enginery Workflow Examples: Using Existing Coding Agents and Models
 
-- **Status:** Operating examples. Stages 1, 2, and 3 (issue-to-PR, plan-to-release, incident-to-hotfix-and-rollback) are shipped in `v0.1.0` through `v0.3.0`; `v0.4.0`, `v0.5.0`, and `v0.6.0` add operator commands, gate evidence, execution selection, and recovery behavior, not a workflow stage. The concrete command output, revisions, and evidence in each worked example below still illustrate intended usage rather than a literal transcript. Stage 4 (governed factory self-improvement) is not implemented and is gate-deferred — examples referencing it (Example 4's roles, the safety-scope narrative) describe intended, not shipped, behavior. `enginery factory init`, `doctor`, `explain` and `uninstall` are shipped setup commands; manual execution ships as `collect`, `run`, `status`, `explain RUN`, `resume`, `pause`, and `drain`. Only factory `review`, `watch`, and `evidence` remain proposed; scheduled collection/watch is not shipped.
+- **Status:** Operating examples. Stages 1–3 are shipped; Stage 4 remains
+  gate-deferred. Worked output illustrates intended usage rather than a literal
+  transcript. Guided setup, manual execution/recovery, behavioral `calibrate`/
+  `check`, safe `review` packets and repair-only `feedback` are shipped factory
+  commands. Only factory `watch` and `evidence` remain proposed; scheduled
+  collection/watch is not shipped.
 - **Audience:** Engineers choosing how existing coding agents and models participate in an Enginery workflow.
 
 > **Core rule:** Users choose their preferred coding agents and models. Enginery coordinates the workflow around them; it does not replace their reasoning loop or silently select a different worker.
@@ -374,9 +379,22 @@ Current supported behavior is frozen in a versioned, digest-verified acceptance 
 
 ### Manual factory path and proposed controls
 
-The shipped `enginery factory collect --dry-run` previews issue eligibility, deduplication and compiled execution selection without writes except disclosed SQLite sidecars, and without GitHub mutations. `factory collect` records only private intake state. `factory run OWNER/REPO#N` starts or continues the bound issue through the existing Stage 1 coordinator; `factory status [RUN]` reads progress. `factory explain RUN` reads the immutable run binding, whereas `factory explain` without RUN still explains current configuration. Review stays on the terminal `stage1 review` path. See the [Manual factory path](operations.md#manual-factory-path) for the journey and holds.
+The shipped `enginery factory collect --dry-run` previews issue eligibility
+without GitHub mutations or writes except disclosed SQLite sidecars. `collect`
+records private intake; `run`, `status`, `explain RUN` and `resume` share the
+existing coordinator and immutable binding. `explain` without RUN still explains
+current configuration. `pause` and `drain` control project dispatch; lift the pause
+with `factory pause --lift`. Unlike factory recovery, `stage1 resume` requeues a
+human-wait node.
 
-Factory `resume`, `pause`, and `drain` are shipped: resume reconciles durable workers and pending external operations before continuing the same run, pause stops project-ledger dispatch without touching running workers, and drain waits for or stops workers through the existing cleanup path. Lift the pause with `factory pause --lift`. Unlike factory recovery, `stage1 resume` requeues a human-wait node. Only factory `review`, `watch`, and `evidence` remain proposed and not shipped; scheduled collection/watch is not shipped. The manual path ends at a verified open PR plus outcome observation; merge, release and deploy are separate human actions, never automatic factory actions. Harness, model, session and worker machine are separate axes. Shipped control is deterministic and local: models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. No upstream skills or code are vendored; reference projects inform independently re-implemented patterns only, and trusted-local operation is not containment.
+`factory calibrate RUN` qualifies deliberate-fault sensitivity; `factory check RUN`
+observes the verified candidate and requires semantic assertions. `factory review
+RUN` renders a safe local packet, and `factory feedback RUN --subject-digest DIGEST
+--text TEXT` queues repairs, never approval. See the [operator guide](operations.md#manual-factory-path)
+for the journey and holds. Only factory `watch` and `evidence` remain proposed.
+The manual path ends at a verified open PR and outcome observation, never automatic
+merge, release or deployment. Control is deterministic and local; models never
+schedule or decide completion. Trusted-local operation is not containment.
 
 ## 8. Source grounding
 
