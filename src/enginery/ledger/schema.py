@@ -185,12 +185,61 @@ _MIGRATION_0005_NODE_LEASE_ATTEMPTS = Migration(
     ),
 )
 
+_MIGRATION_0006_HUMAN_DECISIONS = Migration(
+    version=6,
+    description="hashed terminal challenges and durable subject-bound human decisions",
+    statements=(
+        """
+        CREATE TABLE human_decision_challenges (
+            challenge_hash TEXT PRIMARY KEY CHECK (length(challenge_hash) = 64),
+            run_id TEXT NOT NULL,
+            principal_json TEXT NOT NULL,
+            os_uid INTEGER NOT NULL,
+            tty_name TEXT NOT NULL,
+            actions_json TEXT NOT NULL,
+            subject_digest TEXT NOT NULL,
+            subject_fields_json TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            decision_id TEXT,
+            superseded_by TEXT
+        )
+        """,
+        "CREATE INDEX human_challenges_run_idx ON human_decision_challenges (run_id)",
+        """
+        CREATE TABLE human_decisions (
+            decision_id TEXT PRIMARY KEY,
+            challenge_hash TEXT NOT NULL UNIQUE
+                REFERENCES human_decision_challenges(challenge_hash),
+            run_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            principal_json TEXT NOT NULL,
+            action TEXT NOT NULL,
+            subject_digest TEXT NOT NULL,
+            subject_fields_json TEXT NOT NULL,
+            os_uid INTEGER NOT NULL,
+            tty_name TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            superseded_by TEXT,
+            schema_digest TEXT NOT NULL,
+            normalized_inputs_json TEXT NOT NULL,
+            reason TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX human_decisions_run_action_idx ON human_decisions (run_id, action)",
+    ),
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     _MIGRATION_0001_LEDGER_CORE,
     _MIGRATION_0002_INBOX_OUTBOX_PROCESS_MANAGER,
     _MIGRATION_0003_PROJECTIONS_AND_CURSORS,
     _MIGRATION_0004_ARTIFACTS,
     _MIGRATION_0005_NODE_LEASE_ATTEMPTS,
+    _MIGRATION_0006_HUMAN_DECISIONS,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]

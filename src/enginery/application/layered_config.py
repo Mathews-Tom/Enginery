@@ -28,6 +28,7 @@ from enginery.application.behavioral_checks import (
     OperatorExecutables,
     checks_from_state,
 )
+from enginery.application.human_decisions import ReviewAuthority
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
@@ -176,6 +177,7 @@ class LayerDocument:
     provider_executables: Mapping[str, str] = field(default_factory=dict)
     behavioral_checks: tuple[BehavioralCheck, ...] | None = None
     operator_executables: OperatorExecutables | None = None
+    review_authority: ReviewAuthority | None = None
 
 
 class _ProblemError(Exception):
@@ -315,6 +317,12 @@ def parse_layer_document(
             key="schema_version",
             allowed=(str(LAYER_SCHEMA_VERSION),),
         )
+    if "review_authority" in data and layer is not SelectionLayer.USER:
+        raise ConfigError(
+            "human authority registration belongs in user preferences only",
+            file=source,
+            key="review_authority",
+        )
     if layer is SelectionLayer.PROJECT and "executables" in data:
         raise ConfigError(
             "repository content must not choose host programs; set executables in user "
@@ -339,6 +347,8 @@ def parse_layer_document(
         top_level.add("profile")
     if layer is SelectionLayer.PROJECT:
         top_level.add("acceptance")
+    if layer is SelectionLayer.USER:
+        top_level.add("review_authority")
     if layer is SelectionLayer.FACTORY:
         top_level.add(_PROVIDER_EXECUTABLES)
     for key in data:
@@ -352,6 +362,31 @@ def parse_layer_document(
     provider_executables: dict[str, str] = {}
     behavioral_checks: tuple[BehavioralCheck, ...] | None = None
     operator_executables: OperatorExecutables | None = None
+    review_authority: ReviewAuthority | None = None
+    if "review_authority" in data:
+        registration = data["review_authority"]
+        required = {"principal_id", "os_user", "os_uid"}
+        allowed = required | {"ttl_seconds"}
+        if not isinstance(registration, dict) or not required <= set(registration):
+            raise ConfigError(
+                "must be a table containing principal_id, os_user and os_uid",
+                file=source, key="review_authority", allowed=tuple(sorted(allowed)),
+            )
+        unknown = sorted(set(registration) - allowed)
+        if unknown:
+            raise ConfigError(
+                "unknown key", file=source, key=f"review_authority.{unknown[0]}",
+                allowed=tuple(sorted(allowed)),
+            )
+        try:
+            review_authority = ReviewAuthority(
+                principal_id=registration["principal_id"],
+                os_user=registration["os_user"],
+                os_uid=registration["os_uid"],
+                ttl_seconds=registration.get("ttl_seconds", 1800),
+            )
+        except InvalidInputError as error:
+            raise ConfigError(str(error), file=source, key="review_authority") from error
     if "acceptance" in data:
         acceptance = data["acceptance"]
         if not isinstance(acceptance, dict) or set(acceptance) != {"checks"}:
@@ -435,6 +470,7 @@ def parse_layer_document(
         provider_executables=provider_executables,
         behavioral_checks=behavioral_checks,
         operator_executables=operator_executables,
+        review_authority=review_authority,
     )
 
 
