@@ -51,8 +51,10 @@ binding, while `factory explain` without RUN still explains current configuratio
 See the [Manual factory path](docs/operations.md#manual-factory-path) for private
 state, run identity, overrides and holds. Terminal review remains `stage1 review`.
 
-Factory `resume`, `pause`, `drain`, `review`, `watch`, and `evidence` remain
-**proposed and not shipped**; scheduled collection is not shipped either.
+Factory `resume`, `pause`, and `drain` are shipped: reconcile and continue the
+same durable run, pause project-ledger dispatch, or drain supervised workers.
+Lift a pause with `factory pause --lift`. Only factory `review`, `watch`, and
+`evidence` remain **proposed and not shipped**; scheduled collection/watch is not shipped.
 The shipped boundary is manual-first, local-first, and deterministic: models never
 poll, schedule, keep books, or decide whether a check is complete; routine control
 uses no model. Harness, model, session, and worker machine are separate axes.

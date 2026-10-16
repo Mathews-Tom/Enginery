@@ -100,6 +100,17 @@ def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     )
     _, listing = invoke(capsys, project, "status")
     assert [item["run_id"] for item in listing["runs"]] == [run["run_id"]]
+    rebuilt = project.parent / "stage1-request.json"
+    assert main([
+        "stage1", "build-request", "--output", str(rebuilt),
+        "--run-id", run["run_id"], "--repository", "owner/repo",
+        "--external-reference", "owner/repo#1", "--repository-path", str(project),
+        "--workspace-path", str(request.workspace_path),
+        "--artifact-root", str(request.execution_configuration.artifact_root),
+        "--base-branch", request.base_branch, "--base-revision", request.run.base_revision,
+        "--capability-lockfile", str(project / ".enginery" / "capabilities.lock.json"),
+    ]) == 0
+    assert json.loads(rebuilt.read_text()) == raw
 
 
 def test_changed_issue_holds_without_replacing_request(
@@ -125,6 +136,17 @@ def test_changed_issue_holds_without_replacing_request(
         str(project),
     ]
     assert path.read_bytes() == before
+    code, replacement = invoke(
+        capsys, project, "run", "owner/repo#1", "--supersede", "--once"
+    )
+    assert code == 0 and replacement["run_id"] != run["run_id"]
+    assert path.read_bytes() == before
+    _, old = invoke(capsys, project, "status", run["run_id"])
+    assert old["run_id"] == run["run_id"] and old["request_path"] == str(path)
+    _, listing = invoke(capsys, project, "status")
+    assert {item["run_id"] for item in listing["runs"]} == {
+        run["run_id"], replacement["run_id"]
+    }
 
 
 def test_repeat_run_reuses_durable_request_and_workspace(
