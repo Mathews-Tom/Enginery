@@ -154,13 +154,17 @@ def read_only_service(
     wiring = isolated_wiring(request, create_directories=False)
     pull_requests = GitHubPullRequests(
         _github_config(request.execution_configuration),
-        artifact_store=ledger.artifact_store or ArtifactStore(
-            request.execution_configuration.artifact_root, create_directories=False,
+        artifact_store=ledger.artifact_store
+        or ArtifactStore(
+            request.execution_configuration.artifact_root,
+            create_directories=False,
         ),
     )
     if isinstance(wiring, DriftedRunnerWiring):
         return Stage1RunService(
-            runtime=runtime, ledger=ledger, runner_admission=wiring.admission,
+            runtime=runtime,
+            ledger=ledger,
+            runner_admission=wiring.admission,
             pull_requests=pull_requests,
         )
     return Stage1RunService(
@@ -179,7 +183,8 @@ def advancing_service(
     wiring = isolated_wiring(request, create_directories=True)
     github = _github_config(configuration)
     pull_requests = GitHubPullRequests(
-        github, artifact_store=ledger.artifact_store or ArtifactStore(configuration.artifact_root),
+        github,
+        artifact_store=ledger.artifact_store or ArtifactStore(configuration.artifact_root),
     )
     # A run bound to a profile that is no longer current gets no harness and no validation
     # runner: it can only report its hold, and nothing can launch under other restrictions.

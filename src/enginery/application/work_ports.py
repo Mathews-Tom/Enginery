@@ -403,10 +403,13 @@ class PullRequestStatus:
     created_at: str
 
     def __post_init__(self) -> None:
-        if any(
-            not value.strip()
-            for value in (self.context, self.state, self.head_revision, self.created_at)
-        ) or self.status_id < 1:
+        if (
+            any(
+                not value.strip()
+                for value in (self.context, self.state, self.head_revision, self.created_at)
+            )
+            or self.status_id < 1
+        ):
             raise ValueError("pull request status identity fields must be present")
 
 
@@ -466,7 +469,9 @@ class PullRequestEvidence:
         # Old normalized fixtures predate raw API captures. A live adapter always supplies
         # proofs; adding any new evidence metadata opts out of historical fixture decoding.
         if self.completeness is None:
-            return not self.raw_artifact_digests and not self.statuses and self.combined_status is None
+            return (
+                not self.raw_artifact_digests and not self.statuses and self.combined_status is None
+            )
         required = {"reviews", "check_runs", "combined_status", "statuses"}
         return (
             {proof.collection for proof in self.completeness} == required
@@ -491,7 +496,9 @@ class PullRequestEvidence:
             "combined_status": self.combined_status,
             "complete": self.complete,
             "raw_artifact_digests": [str(digest) for digest in self.raw_artifact_digests],
-            "completeness": None if self.completeness is None else [
+            "completeness": None
+            if self.completeness is None
+            else [
                 {
                     **asdict(proof),
                     "raw_artifact_digests": [str(digest) for digest in proof.raw_artifact_digests],

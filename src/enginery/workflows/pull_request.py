@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from enginery.application.work_ports import PullRequestEvidence, PullRequestReview
 from enginery.domain.errors import InvalidInputError
@@ -60,7 +60,8 @@ def evaluate_pull_request(
         try:
             timestamp = (
                 datetime.fromisoformat(review.submitted_at.replace("Z", "+00:00"))
-                if review.submitted_at else datetime.min.replace(tzinfo=timezone.utc)
+                if review.submitted_at
+                else datetime.min.replace(tzinfo=UTC)
             )
         except ValueError:
             return PullRequestOutcome.BLOCKED
@@ -74,9 +75,8 @@ def evaluate_pull_request(
     if any(review.state.upper() == "CHANGES_REQUESTED" for _, review in latest_reviews.values()):
         return PullRequestOutcome.BLOCKED
     if any(
-        check.conclusion in {
-            "failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure"
-        }
+        check.conclusion
+        in {"failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure"}
         for check in evidence.checks
     ):
         return PullRequestOutcome.BLOCKED

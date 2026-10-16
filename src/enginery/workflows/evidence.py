@@ -1,8 +1,8 @@
 """Source-bound terminal evidence for a Stage 1 merge-ready claim."""
 
 from __future__ import annotations
-import json
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -45,7 +45,9 @@ class Stage1EvidenceBundle:
         for document in self.github_evidence_json:
             value: object = json.loads(document)
             if not isinstance(value, dict) or value.get("complete") is not True:
-                raise InvalidInputError("terminal GitHub evidence requires complete retained observations")
+                raise InvalidInputError(
+                    "terminal GitHub evidence requires complete retained observations"
+                )
 
     def _subject_fields(self) -> dict[str, object]:
         payload: dict[str, object] = {

@@ -541,15 +541,15 @@ class GitHubPullRequests:
             re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
             for revision in (snapshot.head_revision, snapshot.base_revision)
         ):
-            raise TransientProviderFailureError("GitHub evidence revisions must be exact commit SHAs")
+            raise TransientProviderFailureError(
+                "GitHub evidence revisions must be exact commit SHAs"
+            )
         if snapshot.number != number:
             raise StaleEvidenceError("GitHub returned a different pull request")
         mergeable = payload.get("mergeable")
         if mergeable is not None and not isinstance(mergeable, bool):
             raise TransientProviderFailureError("GitHub mergeability must be boolean or null")
-        reviews_raw = self._evidence_pages(
-            f"{endpoint}/reviews", "reviews", raw, proofs
-        )
+        reviews_raw = self._evidence_pages(f"{endpoint}/reviews", "reviews", raw, proofs)
         reviews = tuple(_evidence_review(review) for review in reviews_raw)
         commit = f"repos/{self.config.repository}/commits/{snapshot.head_revision}"
         runs = self._evidence_pages(
@@ -558,8 +558,12 @@ class GitHubPullRequests:
         checks = tuple(_evidence_check(run, snapshot.head_revision) for run in runs)
         combined_states: list[str] = []
         combined = self._evidence_pages(
-            f"{commit}/status", "combined_status", raw, proofs,
-            array_field="statuses", expected_head=snapshot.head_revision,
+            f"{commit}/status",
+            "combined_status",
+            raw,
+            proofs,
+            array_field="statuses",
+            expected_head=snapshot.head_revision,
             combined_states=combined_states,
         )
         history = self._evidence_pages(f"{commit}/statuses", "statuses", raw, proofs)
@@ -572,8 +576,14 @@ class GitHubPullRequests:
         if latest != snapshot or latest_payload.get("mergeable") != mergeable:
             raise StaleEvidenceError("GitHub pull request changed while evidence was collected")
         return PullRequestEvidence(
-            snapshot, reviews, checks, mergeable, current_statuses, combined_states[0],
-            tuple(proofs), tuple(raw),
+            snapshot,
+            reviews,
+            checks,
+            mergeable,
+            current_statuses,
+            combined_states[0],
+            tuple(proofs),
+            tuple(raw),
         )
 
     def _evidence_object(self, endpoint: str, raw: list[Digest]) -> Mapping[str, object]:
@@ -607,9 +617,7 @@ class GitHubPullRequests:
         total: int | None = None
         identities: set[int] = set()
         for page in range(1, self.evidence_page_cap + 1):
-            payload = self._evidence_request(
-                f"{endpoint}?per_page={_PAGE_SIZE}&page={page}", raw
-            )
+            payload = self._evidence_request(f"{endpoint}?per_page={_PAGE_SIZE}&page={page}", raw)
             digests.append(raw[-1])
             if array_field is not None:
                 if not isinstance(payload, Mapping):
@@ -633,10 +641,14 @@ class GitHubPullRequests:
             else:
                 items = payload
             if not isinstance(items, list) or len(items) > _PAGE_SIZE:
-                raise TransientProviderFailureError("GitHub collection page must be a bounded array")
+                raise TransientProviderFailureError(
+                    "GitHub collection page must be a bounded array"
+                )
             for item in items:
                 if not isinstance(item, Mapping):
-                    raise TransientProviderFailureError("GitHub collection element must be an object")
+                    raise TransientProviderFailureError(
+                        "GitHub collection element must be an object"
+                    )
                 identity = _required_positive_int(item, "id")
                 if identity in identities:
                     raise StaleEvidenceError("GitHub pagination repeated an element")
@@ -650,10 +662,17 @@ class GitHubPullRequests:
             if page == self.evidence_page_cap:
                 raise TransientProviderFailureError("GitHub evidence pagination cap reached")
             if len(items) < _PAGE_SIZE:
-                proofs.append(EvidenceCompleteness(
-                    collection, page, self.evidence_page_cap, len(records), total,
-                    True, tuple(digests),
-                ))
+                proofs.append(
+                    EvidenceCompleteness(
+                        collection,
+                        page,
+                        self.evidence_page_cap,
+                        len(records),
+                        total,
+                        True,
+                        tuple(digests),
+                    )
+                )
                 return tuple(records)
         raise TransientProviderFailureError("GitHub evidence pagination did not terminate")
 
@@ -1121,8 +1140,11 @@ def _evidence_review(payload: Mapping[str, object]) -> PullRequestReview:
     if re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
         raise TransientProviderFailureError("GitHub review commit_id must be an exact commit SHA")
     return PullRequestReview(
-        _required_string(_required_object(payload, "user"), "login"), state,
-        revision, _required_positive_int(payload, "id"), timestamp,
+        _required_string(_required_object(payload, "user"), "login"),
+        state,
+        revision,
+        _required_positive_int(payload, "id"),
+        timestamp,
     )
 
 
@@ -1136,15 +1158,23 @@ def _evidence_check(payload: Mapping[str, object], head: str) -> PullRequestChec
     if not isinstance(conclusion, str) and conclusion is not None:
         raise TransientProviderFailureError("GitHub check-run conclusion must be a string or null")
     if conclusion is not None and conclusion not in {
-        "success", "failure", "neutral", "cancelled", "skipped", "timed_out",
-        "action_required", "stale", "startup_failure",
+        "success",
+        "failure",
+        "neutral",
+        "cancelled",
+        "skipped",
+        "timed_out",
+        "action_required",
+        "stale",
+        "startup_failure",
     }:
         raise TransientProviderFailureError("GitHub check-run conclusion is malformed")
     return PullRequestCheck(_required_string(payload, "name"), status, conclusion, head)
 
 
 def _latest_statuses(
-    payloads: tuple[Mapping[str, object], ...], head: str,
+    payloads: tuple[Mapping[str, object], ...],
+    head: str,
 ) -> tuple[PullRequestStatus, ...]:
     latest: dict[str, PullRequestStatus] = {}
     for payload in payloads:
@@ -1156,8 +1186,11 @@ def _latest_statuses(
         if "sha" in payload and payload["sha"] != head:
             raise StaleEvidenceError("GitHub commit status is bound to a stale head revision")
         status = PullRequestStatus(
-            _required_string(payload, "context"), state, head,
-            _required_positive_int(payload, "id"), _evidence_timestamp(payload, "created_at"),
+            _required_string(payload, "context"),
+            state,
+            head,
+            _required_positive_int(payload, "id"),
+            _evidence_timestamp(payload, "created_at"),
         )
         previous = latest.get(status.context)
         if previous is None or status.status_id > previous.status_id:

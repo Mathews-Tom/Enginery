@@ -161,17 +161,24 @@ def test_evidence_binds_checks_and_reviews_to_current_head(tmp_path: Path) -> No
         "head_sha": "a" * 40,
     }
     review = {
-        "id": 1, "submitted_at": "2026-10-17T10:00:00Z",
-        "user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": "a" * 40,
+        "id": 1,
+        "submitted_at": "2026-10-17T10:00:00Z",
+        "user": {"login": "reviewer"},
+        "state": "APPROVED",
+        "commit_id": "a" * 40,
     }
     responses: list[object] = [
-        pull, [review], {"total_count": 1, "check_runs": [check]},
+        pull,
+        [review],
+        {"total_count": 1, "check_runs": [check]},
         {"sha": "a" * 40, "state": "pending", "total_count": 0, "statuses": []},
-        [], pull,
+        [],
+        pull,
     ]
     calls: list[tuple[str, ...]] = []
     adapter = GitHubPullRequests(
-        _config(), command_runner=_runner(responses, calls),
+        _config(),
+        command_runner=_runner(responses, calls),
         artifact_store=ArtifactStore(tmp_path / "artifacts"),
     )
 
@@ -200,7 +207,8 @@ def test_evidence_rejects_stale_check_head(tmp_path: Path) -> None:
     responses: list[object] = [pull, [], {"total_count": 1, "check_runs": [stale_check]}]
     calls: list[tuple[str, ...]] = []
     adapter = GitHubPullRequests(
-        _config(), command_runner=_runner(responses, calls),
+        _config(),
+        command_runner=_runner(responses, calls),
         artifact_store=ArtifactStore(tmp_path / "artifacts"),
     )
 

@@ -18,8 +18,13 @@ from run_factory_gate import default_scenarios, main, parse_options
 
 
 def _argv(tmp_path: Path, *extra: str) -> list[str]:
-    return ["--scenario", "review-authority", "--evidence-out", str(tmp_path / "evidence.json"),
-            *extra]
+    return [
+        "--scenario",
+        "review-authority",
+        "--evidence-out",
+        str(tmp_path / "evidence.json"),
+        *extra,
+    ]
 
 
 def _document(tmp_path: Path) -> dict[str, Any]:
@@ -27,7 +32,9 @@ def _document(tmp_path: Path) -> dict[str, Any]:
 
 
 def test_review_authority_exercises_real_cli_and_every_required_assertion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # The unconfigured terminal path is mandatory and never needs an optional host presenter.
     monkeypatch.setattr(authority, "operator_lavish", lambda: None)
@@ -40,8 +47,10 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
     assertions = {item["id"]: item for item in document["assertions"]}
     assert set(assertions) == set(authority.REQUIRED)
     assert all(item["ran"] and item["status"] == "pass" for item in assertions.values())
-    assert all(item["commands"] and item["observer"] and item["raw_artifacts"]
-               for item in assertions.values())
+    assert all(
+        item["commands"] and item["observer"] and item["raw_artifacts"]
+        for item in assertions.values()
+    )
     fresh = assertions["fresh-decision-once"]["observed"]["decisions"]
     assert len(fresh) == 1
     assert fresh[0]["principal_id"] == authority.OPERATOR_PRINCIPAL
@@ -59,7 +68,9 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
     assert len(history["decisions"]) == 2
     assert (tmp_path / "evidence.raw" / history["retained_ledger"]).is_file()
     effects = document["external_effect_counts"]
-    assert effects["pull_request_creations"] == 5  # Main authority run plus four isolated CI probes.
+    assert (
+        effects["pull_request_creations"] == 5
+    )  # Main authority run plus four isolated CI probes.
     assert effects["review_requests"] == effects["hosted_sessions"] == 0
     assert effects["container_engine_calls"] == effects["hosted_inference_calls"] == 0
     for key, reason in (
@@ -74,8 +85,7 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
         assert reason in probe["packet"]
         assert reason in json.dumps(probe["status"]) + probe["resume_stderr"] + probe["review"]
     late_calls = assertions["github-late-check-held"]["observed"]["calls"]
-    assert any("check-runs?" in arg and "page=2" in arg
-               for call in late_calls for arg in call)
+    assert any("check-runs?" in arg and "page=2" in arg for call in late_calls for arg in call)
     binding = assertions["github-raw-binding"]["observed"]
     assert binding["bundle_count"] > 0
     assert binding["raw_artifact_digests"]
@@ -84,7 +94,10 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
     for observation in binding["observations"]:
         assert observation["complete"] is True
         assert {proof["collection"] for proof in observation["completeness"]} == {
-            "reviews", "check_runs", "combined_status", "statuses",
+            "reviews",
+            "check_runs",
+            "combined_status",
+            "statuses",
         }
         assert all(proof["complete"] for proof in observation["completeness"])
     assert binding["no_second_collection"] is True
@@ -93,7 +106,8 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
 
 
 def test_review_authority_dispatch_requires_active_github_pagination_assertions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(authority, "operator_lavish", lambda: None)
     options = parse_options(_argv(tmp_path))
@@ -102,15 +116,19 @@ def test_review_authority_dispatch_requires_active_github_pagination_assertions(
     assert spec.prepare is authority.prepare and not spec.need_relay
     assert spec.required(options) == authority.REQUIRED
     assert {
-        "github-late-check-held", "github-status-held", "github-changes-requested-held",
-        "github-cap-held", "github-raw-binding",
+        "github-late-check-held",
+        "github-status-held",
+        "github-changes-requested-held",
+        "github-cap-held",
+        "github-raw-binding",
     } <= set(spec.required(options))
     monkeypatch.setattr(authority, "operator_lavish", lambda: "/operator/lavish-axi")
     assert set(spec.required(options)) == set(authority.REQUIRED) | set(authority.LAVISH_REQUIRED)
 
 
 def test_unrun_authority_assertions_never_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(authority, "operator_lavish", lambda: None)
     monkeypatch.setattr(authority, "run", lambda gate: None)
@@ -123,7 +141,8 @@ def test_unrun_authority_assertions_never_pass(
 
 
 def test_failed_authority_prerequisite_does_not_pass_unreachable_steps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_fixture(gate: authority.ReviewAuthorityGate) -> None:
         raise RuntimeError("candidate fixture deliberately unavailable")
@@ -162,16 +181,28 @@ def test_terminal_session_uses_same_real_tty_and_scrubs_the_only_secret(tmp_path
         terminal.close()
 
 
-@pytest.mark.parametrize("extra", [
-    ["--live"], ["--harness", "omp"], ["--harness", "claude"], ["--model", "example/model"],
-    ["--confirm-single-session"], ["--custody-receipt", "receipt.json"],
-    ["--gateway-url", "http://127.0.0.1:1"], ["--gateway-token-file", "token"],
-    ["--docker-context", "fixture"], ["--runner-image", "sha256:" + "a" * 64],
-    ["--relay-image", "sha256:" + "a" * 64], ["--session-deadline-seconds", "120"],
-    ["--session-deadline-seconds=120"], ["--session-dead=120"],
-])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--live"],
+        ["--harness", "omp"],
+        ["--harness", "claude"],
+        ["--model", "example/model"],
+        ["--confirm-single-session"],
+        ["--custody-receipt", "receipt.json"],
+        ["--gateway-url", "http://127.0.0.1:1"],
+        ["--gateway-token-file", "token"],
+        ["--docker-context", "fixture"],
+        ["--runner-image", "sha256:" + "a" * 64],
+        ["--relay-image", "sha256:" + "a" * 64],
+        ["--session-deadline-seconds", "120"],
+        ["--session-deadline-seconds=120"],
+        ["--session-dead=120"],
+    ],
+)
 def test_review_authority_rejects_hosted_engine_and_custody_flags(
-    tmp_path: Path, extra: list[str],
+    tmp_path: Path,
+    extra: list[str],
 ) -> None:
     with pytest.raises(SystemExit) as refused:
         parse_options(_argv(tmp_path, *extra))

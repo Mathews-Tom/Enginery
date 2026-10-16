@@ -41,24 +41,37 @@ def _pull() -> dict[str, object]:
 
 def _check(identity: int = 1, *, conclusion: object = "success") -> dict[str, object]:
     return {
-        "id": identity, "name": "CI", "status": "completed",
-        "conclusion": conclusion, "head_sha": _HEAD,
+        "id": identity,
+        "name": "CI",
+        "status": "completed",
+        "conclusion": conclusion,
+        "head_sha": _HEAD,
     }
 
 
 def _review(
-    identity: int = 1, *, state: str = "APPROVED", reviewer: str = "alice",
-    submitted_at: str = _TIME, head: str = _HEAD,
+    identity: int = 1,
+    *,
+    state: str = "APPROVED",
+    reviewer: str = "alice",
+    submitted_at: str = _TIME,
+    head: str = _HEAD,
 ) -> dict[str, object]:
     return {
-        "id": identity, "user": {"login": reviewer}, "state": state,
-        "commit_id": head, "submitted_at": submitted_at,
+        "id": identity,
+        "user": {"login": reviewer},
+        "state": state,
+        "commit_id": head,
+        "submitted_at": submitted_at,
     }
 
 
 def _status(identity: int = 1, *, state: str = "success") -> dict[str, object]:
     return {
-        "id": identity, "state": state, "context": "legacy-ci", "created_at": _TIME,
+        "id": identity,
+        "state": state,
+        "context": "legacy-ci",
+        "created_at": _TIME,
     }
 
 
@@ -67,20 +80,29 @@ def _combined(statuses: list[object], *, state: str = "success") -> dict[str, ob
 
 
 def _responses(
-    *, reviews: list[object] | None = None, checks: list[object] | None = None,
-    statuses: list[object] | None = None, combined_state: str = "success",
+    *,
+    reviews: list[object] | None = None,
+    checks: list[object] | None = None,
+    statuses: list[object] | None = None,
+    combined_state: str = "success",
 ) -> list[object]:
     statuses = [] if statuses is None else statuses
     checks = [_check()] if checks is None else checks
     return [
-        _pull(), [_review()] if reviews is None else reviews,
+        _pull(),
+        [_review()] if reviews is None else reviews,
         {"total_count": len(checks), "check_runs": checks},
-        _combined(statuses, state=combined_state), statuses, _pull(),
+        _combined(statuses, state=combined_state),
+        statuses,
+        _pull(),
     ]
 
 
 def _adapter(
-    tmp_path: Path, responses: list[object], *, cap: int = 100,
+    tmp_path: Path,
+    responses: list[object],
+    *,
+    cap: int = 100,
 ) -> tuple[GitHubPullRequests, ArtifactStore, list[tuple[str, ...]], list[bytes]]:
     calls: list[tuple[str, ...]] = []
     bodies: list[bytes] = []
@@ -95,9 +117,14 @@ def _adapter(
     store = ArtifactStore(tmp_path / "artifacts")
     return (
         GitHubPullRequests(
-            GitHubAdapterConfig("owner/project", "keyring:github"), run, store, cap,
+            GitHubAdapterConfig("owner/project", "keyring:github"),
+            run,
+            store,
+            cap,
         ),
-        store, calls, bodies,
+        store,
+        calls,
+        bodies,
     )
 
 
@@ -114,11 +141,16 @@ def test_retains_original_raw_bytes_and_collection_proofs_without_writes(tmp_pat
 
     assert evidence.complete
     assert _outcome(evidence) is PullRequestOutcome.MERGE_READY
-    assert tuple(store.read_bytes(digest) for digest in evidence.raw_artifact_digests) == tuple(bodies)
+    assert tuple(store.read_bytes(digest) for digest in evidence.raw_artifact_digests) == tuple(
+        bodies
+    )
     assert evidence.raw_artifact_digests[0] == Digest.of_bytes(bodies[0])
     assert evidence.completeness is not None
     assert {proof.collection for proof in evidence.completeness} == {
-        "reviews", "check_runs", "combined_status", "statuses",
+        "reviews",
+        "check_runs",
+        "combined_status",
+        "statuses",
     }
     assert all(proof.proven and proof.page_count == 1 for proof in evidence.completeness)
     assert all(arguments[1:4] == ("api", "--method", "GET") for arguments in calls)
@@ -146,7 +178,8 @@ def test_failing_check_after_first_full_page_blocks(tmp_path: Path) -> None:
 @pytest.mark.parametrize("state", ["failure", "error"])
 def test_failing_commit_status_vetoes_successful_checks(tmp_path: Path, state: str) -> None:
     adapter, _, _, _ = _adapter(
-        tmp_path, _responses(statuses=[_status(state=state)], combined_state=state),
+        tmp_path,
+        _responses(statuses=[_status(state=state)], combined_state=state),
     )
     assert _outcome(adapter.evidence(11)) is PullRequestOutcome.BLOCKED
 
@@ -219,7 +252,8 @@ def test_terminal_page_at_cap_is_not_a_complete_prefix(tmp_path: Path, collectio
     elif collection == "combined_status":
         page = [_status(i) for i in range(1, 101)]
         responses[3:4] = [
-            _combined(page), {"sha": _HEAD, "state": "success", "total_count": 100, "statuses": []},
+            _combined(page),
+            {"sha": _HEAD, "state": "success", "total_count": 100, "statuses": []},
         ]
     else:
         responses[4:5] = [[_status(i) for i in range(1, 101)], []]
@@ -250,7 +284,9 @@ def test_total_count_change_across_pages_holds(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("index,field", [(1, None), (2, "check_runs"), (3, "statuses"), (4, None)])
 def test_malformed_element_anywhere_fails_closed(
-    tmp_path: Path, index: int, field: str | None,
+    tmp_path: Path,
+    index: int,
+    field: str | None,
 ) -> None:
     responses = _responses()
     if field is None:
@@ -325,22 +361,23 @@ def test_oversized_evidence_is_refused_without_retaining_prefix(tmp_path: Path) 
 
 def test_pending_status_is_not_merge_ready(tmp_path: Path) -> None:
     adapter, _, _, _ = _adapter(
-        tmp_path, _responses(statuses=[_status(state="pending")], combined_state="pending"),
+        tmp_path,
+        _responses(statuses=[_status(state="pending")], combined_state="pending"),
     )
     assert _outcome(adapter.evidence(11)) is PullRequestOutcome.WAITING
 
 
 def test_late_status_context_failure_is_not_a_successful_prefix(tmp_path: Path) -> None:
     statuses = [
-        {**_status(identity), "context": f"context-{identity}"}
-        for identity in range(1, 102)
+        {**_status(identity), "context": f"context-{identity}"} for identity in range(1, 102)
     ]
     statuses[-1]["state"] = "failure"
     responses = _responses()
     responses[3:5] = [
         {"sha": _HEAD, "state": "failure", "total_count": 101, "statuses": statuses[:100]},
         {"sha": _HEAD, "state": "failure", "total_count": 101, "statuses": statuses[100:]},
-        statuses[:100], statuses[100:],
+        statuses[:100],
+        statuses[100:],
     ]
     adapter, _, _, _ = _adapter(tmp_path, responses)
     evidence = adapter.evidence(11)
@@ -349,7 +386,7 @@ def test_late_status_context_failure_is_not_a_successful_prefix(tmp_path: Path) 
 
 
 def test_invalid_json_is_retained_but_never_decoded_as_evidence(tmp_path: Path) -> None:
-    adapter, store, _, bodies = _adapter(tmp_path, ["{\"number\":"])
+    adapter, store, _, bodies = _adapter(tmp_path, ['{"number":'])
     with pytest.raises(TransientProviderFailureError, match="invalid JSON"):
         adapter.evidence(11)
     assert store.read_bytes(Digest.of_bytes(bodies[0])) == bodies[0]

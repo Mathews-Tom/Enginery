@@ -1,8 +1,8 @@
 """Double-read verification for a Stage 1 merge-ready claim."""
 
 from __future__ import annotations
-import json
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -96,12 +96,16 @@ class Stage1VerificationExecutor:
             request, terminal_issue, terminal_evidence.pull_request.base_revision
         ):
             return Stage1VerificationResult(
-                PullRequestOutcome.SUPERSEDED, None, (first_evidence, terminal_evidence),
+                PullRequestOutcome.SUPERSEDED,
+                None,
+                (first_evidence, terminal_evidence),
             )
         terminal_outcome = evaluate_pull_request(terminal_evidence, request.requirements)
         if terminal_outcome is not PullRequestOutcome.MERGE_READY:
             return Stage1VerificationResult(
-                terminal_outcome, None, (first_evidence, terminal_evidence),
+                terminal_outcome,
+                None,
+                (first_evidence, terminal_evidence),
             )
 
         bundle = Stage1EvidenceBundle(
@@ -132,7 +136,9 @@ class Stage1VerificationExecutor:
         if published is not ReconciliationResult.FOUND_MATCHING:
             raise ExternalConflictError("terminal lifecycle projection was not reconciled")
         return Stage1VerificationResult(
-            PullRequestOutcome.MERGE_READY, bundle, (first_evidence, terminal_evidence),
+            PullRequestOutcome.MERGE_READY,
+            bundle,
+            (first_evidence, terminal_evidence),
         )
 
 
