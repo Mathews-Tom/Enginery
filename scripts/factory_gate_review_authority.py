@@ -615,6 +615,14 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
                 "factory", "resume", probe.run_id, "--wait-seconds", "0",
                 "--project", str(probe.project), "--json",
             )
+            if resumed.returncode != 0:
+                raise RuntimeError("GitHub probe publication did not complete: " + resumed.stderr)
+            # Zero wait publishes first, then stops before the first CI poll. Advance that
+            # existing node once more; this is the sole machine evidence collection.
+            resumed = probe.cli(
+                "factory", "resume", probe.run_id, "--wait-seconds", "0",
+                "--project", str(probe.project), "--json",
+            )
             status_code, status = probe.factory("status", probe.run_id)
             calls = probe.gh_calls()[before:]
             read_count = len(probe.gh_calls())
@@ -625,7 +633,7 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
             late_page = any("check-runs?" in arg and "page=2" in arg
                             for call in calls for arg in call)
             passed = (
-                status_code == 0 and reason in text and bool(calls)
+                status_code == 5 and reason in text and bool(calls)
                 and no_second_collection and reason in packet
                 and (mode != "late-check" or late_page)
                 and (mode != "cap" or "cap" in text.lower())

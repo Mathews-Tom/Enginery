@@ -597,14 +597,19 @@ def _enrich(
             ),
             **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
         }
-    if hold is None and report["next_action"] in {"wait_for_ci", "verify"}:
-        ci_observation = ledger.read_projection(
-            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
-            aggregate_id=f"{run_id}:{report['next_action']}",
-        )
-        state = {} if ci_observation is None else ci_observation.state
-        if state.get("reason") in {"github_evidence_incomplete", "github_evidence_waiting"}:
-            hold = {key: state[key] for key in ("reason", "message", "repair") if key in state}
+    if hold is None and report["next_action"] in {
+        "wait_for_ci", "verify", "await_human_review", "blocked",
+    }:
+        for name in ("verify", "wait_for_ci"):
+            ci_observation = ledger.read_projection(
+                aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{name}",
+            )
+            state = {} if ci_observation is None else ci_observation.state
+            if isinstance(state.get("reason"), str) and str(state["reason"]).startswith(
+                "github_evidence_",
+            ):
+                hold = {key: state[key] for key in ("reason", "message", "repair") if key in state}
+                break
     node_states = cast(list[dict[str, object]], report["nodes"])
     awaiting = next((node for node in node_states if node["status"] == "awaiting_human"), None)
     prefix = (
