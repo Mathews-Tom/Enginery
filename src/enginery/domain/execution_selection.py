@@ -73,6 +73,7 @@ class HoldReason(enum.Enum):
     WORKER_IDENTITY_UNPROVABLE = "worker_identity_unprovable"
     RUNNER_UNQUALIFIED = "runner_unqualified"
     RUNNER_FINGERPRINT_DRIFT = "runner_fingerprint_drift"
+    NO_BEHAVIORAL_CHECKS = "no_behavioral_checks"
 
 
 @dataclass(frozen=True, slots=True)

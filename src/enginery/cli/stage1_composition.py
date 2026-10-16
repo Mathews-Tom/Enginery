@@ -15,7 +15,7 @@ from enginery.adapters.github import (
 )
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
-from enginery.cli.config_binding import require_bound_configuration
+from enginery.cli.config_binding import bind_behavioral_checks, require_bound_configuration
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_runner import (
     DriftedRunnerWiring,
@@ -297,6 +297,7 @@ def start_bound_run(
         is None
     ):
         require_bound_configuration(raw_request, request)
+        bind_behavioral_checks(request)
     runtime = CoordinatorRuntime(ledger, owner=owner)
     return read_only_service(runtime=runtime, ledger=ledger, request=request).start(
         request, now=_now(), heartbeat_window=HEARTBEAT_WINDOW

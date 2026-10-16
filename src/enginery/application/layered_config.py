@@ -22,6 +22,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from enginery.application.behavioral_checks import (
+    OPERATOR_EXECUTABLE_KEYS,
+    BehavioralCheck,
+    OperatorExecutables,
+    checks_from_state,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
@@ -55,7 +61,11 @@ class ConfigError(InvalidInputError):
         details: Mapping[str, object] | None = None,
     ) -> None:
         def escape_controls(value: str) -> str:
-            return re.sub(r"[\x00-\x1f\x7f]", lambda match: repr(match[0])[1:-1], value)
+            return re.sub(
+                r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]",
+                lambda match: match[0].encode("unicode_escape").decode("ascii"),
+                value,
+            )
 
         suffix = f" (allowed: {', '.join(allowed)})" if allowed else ""
         super().__init__(
@@ -164,6 +174,8 @@ class LayerDocument:
     values: Mapping[str, Value] = field(default_factory=dict)
     constraints: Mapping[str, Value] = field(default_factory=dict)
     provider_executables: Mapping[str, str] = field(default_factory=dict)
+    behavioral_checks: tuple[BehavioralCheck, ...] | None = None
+    operator_executables: OperatorExecutables | None = None
 
 
 class _ProblemError(Exception):
@@ -278,6 +290,8 @@ def parse_layer_document(
     reject_credentials: bool = False,
 ) -> LayerDocument:
     """Strictly parse one layer file; nothing is ignored, defaulted or coerced."""
+    if len(raw) > 1024 * 1024:
+        raise ConfigError("exceeds the 1 MiB limit", file=source, key="<document>")
     try:
         data = tomllib.loads(raw.decode("utf-8"))
     except UnicodeDecodeError as error:
@@ -323,6 +337,8 @@ def parse_layer_document(
     top_level = {"schema_version", *_SECTIONS}
     if not packaged:
         top_level.add("profile")
+    if layer is SelectionLayer.PROJECT:
+        top_level.add("acceptance")
     if layer is SelectionLayer.FACTORY:
         top_level.add(_PROVIDER_EXECUTABLES)
     for key in data:
@@ -334,6 +350,36 @@ def parse_layer_document(
     values: dict[str, Value] = {}
     constraints: dict[str, Value] = {}
     provider_executables: dict[str, str] = {}
+    behavioral_checks: tuple[BehavioralCheck, ...] | None = None
+    operator_executables: OperatorExecutables | None = None
+    if "acceptance" in data:
+        acceptance = data["acceptance"]
+        if not isinstance(acceptance, dict) or set(acceptance) != {"checks"}:
+            raise ConfigError(
+                "must contain exactly the checks key", file=source, key="acceptance"
+            )
+        try:
+            behavioral_checks = checks_from_state(acceptance["checks"])
+        except InvalidInputError as error:
+            raise ConfigError(
+                str(error), file=source, key="acceptance.checks", details=error.details
+            ) from error
+    executables = data.get("executables")
+    if isinstance(executables, dict):
+        operator_values = {
+            key: value for key, value in executables.items() if key in OPERATOR_EXECUTABLE_KEYS
+        }
+        if operator_values:
+            if layer is not SelectionLayer.USER:
+                raise ConfigError(
+                    "observer and presenter executables belong in user preferences only",
+                    file=source,
+                    key="executables",
+                )
+            try:
+                operator_executables = OperatorExecutables.from_state(operator_values)
+            except InvalidInputError as error:
+                raise ConfigError(str(error), file=source, key="executables") from error
     for spec in _ALL_SPECS:
         raw_value: object
         if spec.section is None:
@@ -348,13 +394,16 @@ def parse_layer_document(
                 raise ConfigError(
                     f"[{spec.section}] must be a table", file=source, key=spec.section
                 )
-            unknown = sorted(set(table) - set(_SECTIONS[spec.section]))
+            allowed_keys = set(_SECTIONS[spec.section])
+            if spec.section == "executables" and layer is SelectionLayer.USER:
+                allowed_keys.update(OPERATOR_EXECUTABLE_KEYS)
+            unknown = sorted(set(table) - allowed_keys)
             if unknown:
                 raise ConfigError(
                     "unknown key",
                     file=source,
                     key=f"{spec.section}.{unknown[0]}",
-                    allowed=tuple(sorted(_SECTIONS[spec.section])),
+                    allowed=tuple(sorted(allowed_keys)),
                 )
             if spec.key not in table:
                 continue
@@ -386,6 +435,8 @@ def parse_layer_document(
         values=values,
         constraints=constraints,
         provider_executables=provider_executables,
+        behavioral_checks=behavioral_checks,
+        operator_executables=operator_executables,
     )
 
 

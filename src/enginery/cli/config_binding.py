@@ -11,19 +11,228 @@ pass through this check.
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import stat
+import subprocess
+import threading
+from pathlib import Path
+
+from enginery.application.behavioral_checks import (
+    BehavioralCheck,
+    BehavioralChecksBinding,
+    require_base_revision,
+)
 from enginery.application.effective_config import EffectiveConfig, enforce_snapshot_constraints
-from enginery.application.layered_config import load_factory_layer, load_workflow_layer
+from enginery.application.layered_config import (
+    LayerDocument,
+    load_factory_layer,
+    load_workflow_layer,
+    parse_layer_document,
+)
+from enginery.capabilities.atomic import fsync_directory
 from enginery.cli.config_locations import (
+    MAX_CONFIG_BYTES,
+    PROJECT_POLICY_RELATIVE,
+    private_state_directory,
     project_policy_path,
     read_project_layer,
     read_user_layer,
+    state_home,
     user_config_path,
 )
+from enginery.cli.setup_files import refuse_links, require_private_path
 from enginery.domain.errors import InvalidInputError
+from enginery.domain.execution_selection import SelectionLayer
 from enginery.workflows.stage1 import Stage1RunRequest
 
 EFFECTIVE_CONFIG_KEY = "effective_config"
 _REBUILD = "rebuild it with `enginery stage1 build-request`"
+
+_CUSTODY_WHAT = "behavioral evaluator custody"
+
+
+def _git_bytes(repository: Path, *arguments: str) -> bytes:
+    """Read bounded plumbing output without hooks, replacement objects or ambient Git config."""
+    environment = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "LC_ALL": "C",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        with subprocess.Popen(
+            [
+                "git",
+                "--no-replace-objects",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                *arguments,
+            ],
+            cwd=repository,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        ) as process:
+            timer = threading.Timer(15, process.kill)
+            timer.start()
+            try:
+                assert process.stdout is not None
+                raw = process.stdout.read(MAX_CONFIG_BYTES + 1)
+                if len(raw) > MAX_CONFIG_BYTES:
+                    process.kill()
+                    raise InvalidInputError("base project policy exceeds the 1 MiB limit")
+                if process.wait() != 0:
+                    raise InvalidInputError("cannot read behavioral checks from the base revision")
+                return raw
+            finally:
+                timer.cancel()
+    except OSError as error:
+        raise InvalidInputError("cannot read behavioral checks from the base revision") from error
+
+
+def read_base_project_layer(repository: Path, base_revision: str) -> LayerDocument | None:
+    """Read the tracked policy blob at the immutable base, never the workspace or worker head."""
+    require_base_revision(base_revision)
+    if _git_bytes(repository, "cat-file", "-t", base_revision) != b"commit\n":
+        raise InvalidInputError("behavioral checks base revision must identify a commit")
+    listing = _git_bytes(
+        repository, "ls-tree", "-z", base_revision, "--", PROJECT_POLICY_RELATIVE.as_posix()
+    )
+    if not listing:
+        return None
+    match = re.fullmatch(
+        rb"100(?:644|755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t"
+        + re.escape(PROJECT_POLICY_RELATIVE.as_posix().encode())
+        + rb"\x00",
+        listing,
+    )
+    if match is None:
+        raise InvalidInputError("base project policy must be a tracked regular file, not a link")
+    raw = _git_bytes(repository, "cat-file", "blob", match[1].decode("ascii"))
+    return parse_layer_document(
+        SelectionLayer.PROJECT,
+        raw,
+        source=f"{base_revision}:{PROJECT_POLICY_RELATIVE.as_posix()}",
+        reject_credentials=True,
+    )
+
+
+def checks_at_base(repository: Path, base_revision: str) -> tuple[BehavioralCheck, ...]:
+    layer = read_base_project_layer(repository, base_revision)
+    return () if layer is None else layer.behavioral_checks or ()
+
+
+def _expected_binding(request: Stage1RunRequest) -> BehavioralChecksBinding | None:
+    if request.behavioral_checks is None:
+        return None
+    return BehavioralChecksBinding(
+        base_revision=request.run.base_revision,
+        configuration_snapshot_digest=str(request.run.configuration_snapshot_digest),
+        checks=request.behavioral_checks,
+    )
+
+
+def behavioral_checks_path(request: Stage1RunRequest) -> Path | None:
+    """The content-addressed private evaluator document, outside every worker source mount."""
+    binding = _expected_binding(request)
+    if binding is None:
+        return None
+    path = (
+        private_state_directory(request.repository_path)
+        / "evaluator" / "checks" / f"{binding.digest.hex_value}.json"
+    )
+    for worker_root in (request.repository_path, request.workspace_path):
+        if path.is_relative_to(worker_root.resolve()):
+            raise InvalidInputError("behavioral evaluator custody must be outside worker mounts")
+    root = state_home()
+    refuse_links(root.parent, Path(root.name) / path.relative_to(root), what=_CUSTODY_WHAT)
+    require_private_path(path, what=_CUSTODY_WHAT)
+    return path
+
+
+def _read_binding(path: Path) -> BehavioralChecksBinding:
+    require_private_path(path, what=_CUSTODY_WHAT)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_mode & 0o077
+            ):
+                raise InvalidInputError("behavioral evaluator custody requires a private regular file")
+            raw = stream.read(MAX_CONFIG_BYTES + 1)
+    except OSError as error:
+        raise InvalidInputError(
+            f"behavioral evaluator custody is unavailable; {_REBUILD}"
+        ) from error
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise InvalidInputError("behavioral evaluator custody exceeds the 1 MiB limit")
+    try:
+        return BehavioralChecksBinding.from_state(json.loads(raw))
+    except (ValueError, UnicodeError) as error:
+        raise InvalidInputError("behavioral evaluator custody is not valid JSON") from error
+
+
+def read_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding | None:
+    """Load the evaluator's copy and verify all identity fields against the bound request."""
+    expected = _expected_binding(request)
+    path = behavioral_checks_path(request)
+    if expected is None or path is None:
+        return None
+    actual = _read_binding(path)
+    if actual != expected:
+        raise InvalidInputError("behavioral evaluator custody does not match the bound request")
+    return actual
+
+
+def bind_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding | None:
+    """Freeze base-owned assertions before a worker starts; never overwrite an existing copy."""
+    expected = _expected_binding(request)
+    path = behavioral_checks_path(request)
+    if expected is None or path is None:
+        return None
+    if checks_at_base(request.repository_path, request.run.base_revision) != expected.checks:
+        raise InvalidInputError(
+            f"behavioral checks do not match project policy at the base revision; {_REBUILD}"
+        )
+    raw = (json.dumps(expected.to_state(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise InvalidInputError("behavioral evaluator custody exceeds the 1 MiB limit")
+    # Deferred to keep factory composition's request-compiler import acyclic.
+    from enginery.cli.factory_collect import ensure_private_directory
+
+    ensure_private_directory(path.parent, what=_CUSTODY_WHAT)
+    for directory in (path.parent.parent, path.parent):
+        if directory.stat().st_mode & 0o077:
+            raise InvalidInputError("behavioral evaluator custody directories must have mode 0700")
+    require_private_path(path, what=_CUSTODY_WHAT)
+    try:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
+    except FileExistsError:
+        return read_behavioral_checks(request)
+    except OSError as error:
+        raise InvalidInputError("cannot create behavioral evaluator custody") from error
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        fsync_directory(path.parent)
+    except OSError as error:
+        raise InvalidInputError("cannot persist behavioral evaluator custody") from error
+    return expected
 
 
 def request_values(request: Stage1RunRequest) -> dict[str, object]:
@@ -88,6 +297,16 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
                 f"(request {carried!r}, snapshot {compiled!r}); {_REBUILD}",
                 details={"run_id": str(request.run.id), "field": name},
             )
+    if config.behavioral_checks != request.behavioral_checks:
+        raise InvalidInputError(
+            f"request behavioral checks disagree with its configuration snapshot; {_REBUILD}"
+        )
+    if request.behavioral_checks is not None and checks_at_base(
+        request.repository_path, request.run.base_revision
+    ) != request.behavioral_checks:
+        raise InvalidInputError(
+            f"behavioral checks do not match project policy at the base revision; {_REBUILD}"
+        )
     enforce_snapshot_constraints(config)
     project_path = project_policy_path(request.repository_path.resolve())
     user_path = user_config_path()
@@ -133,4 +352,13 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
     return config
 
 
-__all__ = ["EFFECTIVE_CONFIG_KEY", "request_values", "require_bound_configuration"]
+__all__ = [
+    "EFFECTIVE_CONFIG_KEY",
+    "behavioral_checks_path",
+    "bind_behavioral_checks",
+    "checks_at_base",
+    "read_base_project_layer",
+    "read_behavioral_checks",
+    "request_values",
+    "require_bound_configuration",
+]

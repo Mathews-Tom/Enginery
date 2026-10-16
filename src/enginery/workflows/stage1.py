@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
+from enginery.application.behavioral_checks import BehavioralCheck, checks_from_state
 from enginery.application.branch_publication import (
     BranchPublicationPort,
     BranchPublicationRequest,
@@ -129,6 +130,7 @@ class Stage1RunRequest:
     execution_selection: ExecutionSelection
     runner: RunnerSelection = LEGACY_RUNNER_SELECTION
     protected_paths: tuple[str, ...] = ()
+    behavioral_checks: tuple[BehavioralCheck, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.run.state is not RunState.CREATED:
@@ -245,6 +247,8 @@ class Stage1RunRequest:
             # no key, so every earlier run keeps the state and request digest it was persisted
             # with.
             state["protected_paths"] = list(self.protected_paths)
+        if self.behavioral_checks is not None:
+            state["behavioral_checks"] = [check.to_state() for check in self.behavioral_checks]
         return state
 
 
@@ -507,6 +511,18 @@ class Stage1RunService:
         probe observed is returned with the verdict instead of being discarded, so a
         diagnostic can show it.
         """
+        if request.behavioral_checks == ():
+            return _BindingCheck(
+                ExecutionHold(
+                    reason=HoldReason.NO_BEHAVIORAL_CHECKS,
+                    message=(
+                        "no behavioral checks were bound; add [acceptance] checks to "
+                        ".enginery/project.toml, commit the project policy on the base branch, "
+                        "then rebuild with enginery stage1 build-request and start a new run "
+                        "with enginery factory run ISSUE --project PROJECT"
+                    ),
+                )
+            )
         hold = self._catalog_hold(request)
         if hold is not None:
             return _BindingCheck(hold)
@@ -2324,6 +2340,9 @@ def _run_from_state(state: object, *, aggregate_version: int) -> Stage1Run:
         implementation=implementation,
         runner=_runner_from_state(state),
         protected_paths=_protected_paths_from_state(state),
+        behavioral_checks=(
+            None if "behavioral_checks" not in state else checks_from_state(state["behavioral_checks"])
+        ),
     )
     if str(run.id) != _string(state, "run_id"):
         raise InvalidInputError("Stage 1 run projection has a mismatched run_id")

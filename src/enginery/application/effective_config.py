@@ -21,6 +21,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
+from enginery.application.behavioral_checks import (
+    BehavioralCheck,
+    OperatorExecutables,
+    checks_from_state,
+)
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.layered_config import (
     DEFAULT_PROFILE,
@@ -160,6 +165,8 @@ class EffectiveConfig:
     catalog_digest: str
     selection_digest: str
     schema_version: int = LAYER_SCHEMA_VERSION
+    behavioral_checks: tuple[BehavioralCheck, ...] | None = None
+    operator_executables: OperatorExecutables | None = None
 
     def field(self, name: str) -> CompiledField:
         for item in self.fields:
@@ -203,7 +210,7 @@ class EffectiveConfig:
         )
 
     def to_state(self) -> dict[str, object]:
-        return {
+        state: dict[str, object] = {
             "schema_version": self.schema_version,
             "catalog": {"version": self.catalog_version, "digest": self.catalog_digest},
             "selection_digest": self.selection_digest,
@@ -211,6 +218,13 @@ class EffectiveConfig:
             "constraints": [constraint.to_state() for constraint in self.constraints],
             "fields": {item.name: item.to_state() for item in self.fields},
         }
+        if self.behavioral_checks is not None:
+            state["acceptance"] = {
+                "checks": [check.to_state() for check in self.behavioral_checks]
+            }
+        if self.operator_executables is not None:
+            state["operator_executables"] = self.operator_executables.to_state()
+        return state
 
     @property
     def digest(self) -> Digest:
@@ -222,7 +236,8 @@ class EffectiveConfig:
         mapping = _mapping(state, "configuration snapshot")
         _exact_keys(
             mapping,
-            {"schema_version", "catalog", "selection_digest", "sources", "constraints", "fields"},
+            {"schema_version", "catalog", "selection_digest", "sources", "constraints", "fields"}
+            | (set(mapping) & {"acceptance", "operator_executables"}),
             "configuration snapshot",
         )
         if mapping["schema_version"] != LAYER_SCHEMA_VERSION:
@@ -247,6 +262,16 @@ class EffectiveConfig:
         sources = tuple(
             _source_from_state(item) for item in _sequence(mapping["sources"], "sources")
         )
+        behavioral_checks = None
+        if "acceptance" in mapping:
+            acceptance = _mapping(mapping["acceptance"], "snapshot acceptance")
+            _exact_keys(acceptance, {"checks"}, "snapshot acceptance")
+            behavioral_checks = checks_from_state(acceptance["checks"])
+        operator_executables = (
+            OperatorExecutables.from_state(mapping["operator_executables"])
+            if "operator_executables" in mapping
+            else None
+        )
         return cls(
             fields=fields,
             constraints=constraints,
@@ -254,6 +279,8 @@ class EffectiveConfig:
             catalog_version=_string(catalog["version"], "catalog version"),
             catalog_digest=_string(catalog["digest"], "catalog digest"),
             selection_digest=_string(mapping["selection_digest"], "selection digest"),
+            behavioral_checks=behavioral_checks,
+            operator_executables=operator_executables,
         )
 
 
@@ -486,6 +513,7 @@ def compile_effective_config(
     run: LayerDocument | None,
     catalog: ExecutionCatalog | None = None,
     probe_host: HostProbe | None = None,
+    behavioral_checks: tuple[BehavioralCheck, ...] | None = None,
 ) -> CompiledConfig:
     """Resolve the layers into one effective configuration, or refuse with file/key context.
 
@@ -710,6 +738,12 @@ def compile_effective_config(
         catalog_version=catalog.version,
         catalog_digest=str(catalog.digest),
         selection_digest=str(selection.digest),
+        behavioral_checks=(
+            behavioral_checks
+            if behavioral_checks is not None
+            else (() if project is None else project.behavioral_checks or ())
+        ),
+        operator_executables=None if user is None else user.operator_executables,
     )
     return CompiledConfig(config=config, selection=selection, runner=runner)
 

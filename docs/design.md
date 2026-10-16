@@ -135,6 +135,16 @@ Every coordinator lease carries a monotonically increasing epoch. Node leases an
 | **Workspace honesty** | Worktrees isolate repository changes, not hostile processes. |
 | **Factory changes are production changes** | Active workflow assets are immutable; candidates are independently evaluated before activation. |
 
+Behavioral evidence has three non-interchangeable categories: worker claims,
+instrument observations and evaluated verdicts. A receipt's canonical digest binds
+source/base/head, build, configuration, evaluator/assertion set, environment,
+observer, capture manifests and capture interval. Raw bytes are retained in the
+existing artifact store and checked against their declared digest and decode
+metadata when a receipt is published or read. Media decode success is not a
+semantic verdict. Operator behavioral checks are compiled from the committed base
+policy and copied into private evaluator custody, never read from the worker's
+branch to evaluate that worker.
+
 These ten invariants are what "workflow integrity" means in practice: durable, evidence-gated, policy-governed execution that survives crashes and rejects stale claims. The next subsection states precisely where that guarantee ends.
 
 ### Safety scope and claim boundary

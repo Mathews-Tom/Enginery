@@ -94,6 +94,41 @@ from the one a run was bound to (for example after upgrading Enginery),
 `enginery stage1 watch` reports the diagnostic as `hold` and refuses to
 advance the run; the run's original binding is retained, never rebound.
 
+### Behavioral check custody and receipts
+
+Newly compiled runs bind operator-declared `[acceptance]` checks from the committed
+base revision of `.enginery/project.toml`. The worker's branch cannot replace its
+own evaluator assertions. Starting the run copies the assertion set into private
+evaluator custody outside the worker workspace; the request, configuration snapshot
+and assertion-set digest must agree. Historical requests without this field keep
+their original serialization and resume binding.
+
+```toml
+[acceptance]
+checks = [
+  { name = "cli-result", observer = "command", argv = ["python3", "-m", "example"], assertions = [{ kind = "stdout", equals = "expected\n" }], fault_classes = ["constant_result"] },
+]
+```
+
+Checks use trusted argv, not shell strings. Command assertions can inspect exit
+status, stdout, stderr and relative produced files; loopback service checks inspect
+the response body, and qualified browser checks inspect DOM targets. Unknown keys
+and assertion kinds are refused. Declaring a check is not evidence that it ran.
+
+An evidence receipt binds source, base and head revisions, candidate build identity,
+configuration snapshot, evaluator assertion-set identity and version, host/runner
+environment and tool versions, observer identity, raw capture digests, media types,
+decode results, and start/end timestamps. Its SHA-256 is over canonical JSON of
+every bound field. Receipts and their raw bytes use the existing content-addressed
+artifact store. `worker_claim`, `instrument_observation`, and `evaluated_verdict`
+are distinct categories: a claim or a decodable screenshot is never acceptance.
+PNG validation checks signatures, chunk CRCs, dimensions and the decoded zlib
+stream; successful decoding alone says nothing about semantic behavior.
+
+| Hold | Repair |
+|---|---|
+| `no_behavioral_checks` | Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, rebuild with `enginery stage1 build-request`, and start a new run with `enginery factory run ISSUE --project PROJECT`. Existing immutable runs are never rebound. |
+
 Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
 commands use the project's private `ledger.sqlite` and report its path; pass that
 path to Stage 1 commands to act on the same runs. The ledger is the single source of

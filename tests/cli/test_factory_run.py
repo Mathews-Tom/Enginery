@@ -50,9 +50,21 @@ def bound_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     )
     harness.chmod(0o755)
     (project / ".enginery").mkdir()
+    readme_command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; print(Path('README').read_text().strip())",
+    ]
     (project / ".enginery" / "project.toml").write_text(
-        'schema_version = 1\n[runner]\nmode = "trusted-local"\n', encoding="utf-8"
+        'schema_version = 1\n[runner]\nmode = "trusted-local"\n'
+        '[[acceptance.checks]]\nname = "fixture.readme"\nobserver = "command"\n'
+        f"argv = {json.dumps(readme_command)}\n"
+        'fault_classes = ["constant_result", "wrong_build"]\n'
+        '[[acceptance.checks.assertions]]\nkind = "stdout"\nequals = "fixture\\n"\n',
+        encoding="utf-8",
     )
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "configure operator acceptance", cwd=project)
     user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
     user.parent.mkdir(parents=True, exist_ok=True)
     user.write_text(
