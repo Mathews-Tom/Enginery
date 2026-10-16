@@ -37,8 +37,10 @@ only a project policy file and a private ownership record, and never install
 capabilities, sign in, or touch services, MCP servers or global configuration.
 
 `enginery factory collect --dry-run` previews canonical issue classification, deduplication,
-workflow selection and budgets without mutations. `collect` records only the private
-intake index and cursor; neither form calls a model or changes GitHub.
+workflow selection and budgets without mutations. `collect` updates only the private
+repository cursor, never issue-to-run bindings, and never skips held issues. JSON
+reports GitHub authentication probes separately from issue reads; neither form calls
+a model or changes GitHub.
 
 A manual-first software-factory layer on top of the shipped substrate is
 otherwise **proposed and not shipped**: the remaining proposed command family

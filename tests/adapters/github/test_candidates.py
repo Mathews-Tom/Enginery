@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
-from enginery.application.factory_intake import IssueCandidate, declared_classification
+from enginery.application.work_classification import IssueCandidate, declared_classification
 from enginery.domain.errors import InvalidInputError, TransientProviderFailureError
 
 
@@ -82,3 +82,21 @@ def test_malformed_listing_fails_without_silently_omitting_an_issue(record: obje
     with pytest.raises(TransientProviderFailureError):
         ledger.list_candidates(since=None)
     assert ledger.github_reads == 1
+
+
+@pytest.mark.parametrize(
+    "number", ["01", "0", "-1", "\u0661", "\uff11", "1 ", "+1"]
+)  # Arabic-Indic and fullwidth ones are decimal digits but not canonical references.
+def test_issue_reference_requires_canonical_ascii_number(number: str) -> None:
+    ledger = _ledger([], [])
+    with pytest.raises(InvalidInputError, match="positive issue number"):
+        ledger.fetch(f"o/r#{number}")
+    assert ledger.github_reads == 0
+
+
+def test_candidate_listing_page_cap_is_loud() -> None:
+    calls: list[tuple[str, ...]] = []
+    ledger = _ledger([[{"pull_request": {}}] * 100 for _ in range(100)], calls)
+    with pytest.raises(TransientProviderFailureError, match="100-page limit"):
+        ledger.list_candidates(since=None)
+    assert len(calls) == 100

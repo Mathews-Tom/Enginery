@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from enginery.application.adapter_types import (
     ProviderKind,
 )
 from enginery.application.delivery_ports import PublicationReceipt, PublicationRequest
-from enginery.application.factory_intake import (
+from enginery.application.work_classification import (
     IssueCandidate,
     declared_classification,
     label_names,
@@ -52,6 +53,7 @@ from enginery.domain.work_item import WorkItem, WorkItemState
 
 _GITHUB_API_VERSION = "2026-03-10"
 _PAGE_SIZE = 100
+_MAX_PAGES = 100
 _LIFECYCLE_MARKER_PREFIX = "<!-- enginery:lifecycle:"
 _PULL_REQUEST_MARKER_PREFIX = "<!-- enginery:pull-request:"
 _MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
@@ -158,7 +160,7 @@ class GitHubWorkLedger:
         """List open issue metadata, retaining labels from the paginated listing."""
         candidates: list[IssueCandidate] = []
         page = 1
-        while True:
+        while page <= _MAX_PAGES:
             endpoint = (
                 f"repos/{self.config.repository}/issues"
                 f"?state=open&per_page={_PAGE_SIZE}&page={page}"
@@ -187,6 +189,7 @@ class GitHubWorkLedger:
             if len(records) < _PAGE_SIZE:
                 return tuple(candidates)
             page += 1
+        raise TransientProviderFailureError("GitHub candidate listing exceeded the 100-page limit")
 
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
         issue_number = self._issue_number(external_reference)
@@ -344,7 +347,7 @@ class GitHubWorkLedger:
                 "GitHub issue reference does not belong to the configured repository"
             )
         number = external_reference.removeprefix(prefix)
-        if not number.isdecimal() or int(number) < 1:
+        if not re.fullmatch(r"[1-9][0-9]*", number):
             raise InvalidInputError("GitHub issue reference must end with a positive issue number")
         return int(number)
 

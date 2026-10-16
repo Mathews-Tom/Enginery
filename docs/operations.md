@@ -715,14 +715,22 @@ ownership record is invalid input, not evidence of ownership.
 `enginery factory collect --dry-run --project . --json` lists open issues from the
 repository's `origin`, excluding pull requests. Exactly one canonical
 `enginery/work-kind/issue|plan` and one `enginery/risk/low|medium` label are required.
-Missing, duplicated or unknown labels hold the issue with an explicit repair command.
+Missing, duplicated or unknown labels hold the issue with an explicit `gh issue edit N
+--repo OWNER/REPO` repair: remove offending labels and choose one of the displayed
+allowed work-kind/risk values. No risk is chosen automatically. Authentication or
+transient intake failures instead report an `issue intake` hold with authentication
+and retry commands. A listing exceeding 100 pages fails loudly rather than truncating.
 The preview includes deduplication, selected workflow, harness/model/effort and winning
 layers, runner, time budget and the unenforced cost basis. It makes no local writes,
-GitHub mutations or hosted inference calls; effect counts are explicit in JSON.
+GitHub mutations or hosted inference calls; JSON counts `github_auth_probes` separately
+from issue API `github_reads`. An existing project ledger is opened read-only without
+migration; the 1 MiB document limit applies to the intake index and request documents,
+not the ledger.
 
 Without `--dry-run`, collection records only the private `intake/index.json` and its
-lock file. The index retains a repository `last_seen_updated_at` cursor and immutable
-issue snapshot bindings; changed snapshots hold rather than silently rebinding a run.
+lock file. Only the repository `last_seen_updated_at` cursor changes: it cannot advance
+past the earliest held or errored issue. Collection never creates issue-to-run bindings;
+it reads existing bindings to report `new`, `bound:<run-id>` or `changed:<run-id>`.
 The JSON `local_writes` list discloses these paths. Collection never comments, labels,
 opens a pull request, merges, deploys, installs a capability or starts a worker.
 

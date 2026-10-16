@@ -7,27 +7,32 @@ import fcntl
 import json
 import os
 import re
+import shlex
+import sqlite3
 import subprocess
-from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
-from enginery.application.factory_intake import (
-    IntakeEntry,
-    IntakeIndex,
-    RepositoryIntake,
+from enginery.application.factory_intake import IntakeIndex, RepositoryIntake
+from enginery.application.work_classification import (
+    CLASSIFICATION_PREFIXES,
+    RISK_LABELS,
+    WORK_KIND_LABELS,
     declared_classification,
-    derive_run_id,
 )
-from enginery.cli.config_locations import private_state_directory, project_identity
+from enginery.cli.config_locations import private_state_directory
 from enginery.cli.factory_diagnostics import _check_github, _run
 from enginery.cli.factory_explain import offline_holds
 from enginery.cli.factory_setup import ProjectConfiguration, load_project_configuration
-from enginery.cli.setup_files import read_regular, require_private_path, write_private_atomically
+from enginery.cli.setup_files import (
+    read_regular,
+    refuse_links,
+    require_private_path,
+    write_private_atomically,
+)
 from enginery.domain.errors import EngineryError, InvalidInputError
-from enginery.engine.operator_control import read_control_state
-from enginery.ledger.service import LedgerService
+from enginery.engine.operator_control import CONTROL_STATE_KEY, OPERATOR_CONTROL_MANAGER
 
 MAX_DOCUMENT_BYTES = 1024 * 1024
 
@@ -46,7 +51,8 @@ def repository_name(project: Path) -> str:
     )
     remote = result.stdout.strip()
     match = re.fullmatch(
-        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+        r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?/?",
         remote,
     )
     # A local bare origin is supported for offline operation when its basename is owner/repo.git.
@@ -54,11 +60,16 @@ def repository_name(project: Path) -> str:
         path = Path(remote)
         if path.suffix == ".git":
             remote = f"{path.parent.name}/{path.stem}"
-            match = re.fullmatch(r"([\w.-]+/[\w.-]+)", remote)
-    if result.returncode or match is None:
+            match = re.fullmatch(r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)", remote)
+    if (
+        result.returncode
+        or match is None
+        or any(part in {".", ".."} for part in match[1].split("/"))
+    ):
+        operation = "add" if result.returncode else "set-url"
         raise InvalidInputError(
             "origin must identify a GitHub owner/repository; repair: "
-            "git remote add origin https://github.com/OWNER/REPO.git"
+            f"git remote {operation} origin https://github.com/OWNER/REPO.git"
         )
     return match[1]
 
@@ -107,16 +118,41 @@ def intake_lock(project: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+def database_path(project: Path) -> Path:
+    return private_state_directory(project) / "ledger.sqlite"
+
+
+def require_state_path(path: Path, *, what: str) -> None:
+    root = path.parents[3]
+    refuse_links(root, path.relative_to(root), what=what)
+    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+        raise InvalidInputError(f"{what} must be a regular file with no hard links")
+
+
+def read_ledger(project: Path) -> sqlite3.Connection | None:
+    path = database_path(project)
+    require_state_path(path, what="project ledger")
+    if not path.exists():
+        return None
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=1")
+    return connection
+
+
 def paused_hold(project: Path) -> list[dict[str, str]]:
-    database = private_state_directory(project) / "ledger.sqlite"
-    require_private_path(database, what="project ledger")
-    if not database.exists():
+    connection = read_ledger(project)
+    if connection is None:
         return []
-    ledger = LedgerService.open(database)
     try:
-        paused = read_control_state(ledger).paused
+        record = connection.execute(
+            "SELECT state_json FROM process_manager_state "
+            "WHERE process_manager_name = ? AND state_key = ?",
+            (OPERATOR_CONTROL_MANAGER, CONTROL_STATE_KEY),
+        ).fetchone()
+        paused = record is not None and json.loads(record["state_json"]).get("paused") is True
     finally:
-        ledger.close()
+        connection.close()
     return (
         []
         if not paused
@@ -124,15 +160,26 @@ def paused_hold(project: Path) -> list[dict[str, str]]:
             {
                 "prerequisite": "dispatch",
                 "detail": "dispatch is paused by the operator",
-                "resolve": f"enginery factory pause --lift --project {project}",
+                "resolve": (
+                    "enginery-operator resume --database "
+                    + shlex.quote(str(database_path(project)))
+                ),
             }
         ]
     )
 
 
-def intake_prerequisites(configuration: ProjectConfiguration) -> list[dict[str, str]]:
+def intake_prerequisites(
+    configuration: ProjectConfiguration, effects: dict[str, int] | None = None
+) -> list[dict[str, str]]:
     holds = offline_holds(configuration)
     compiled = configuration.compiled
+
+    def probe(arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if effects is not None and tuple(arguments[1:]) == ("auth", "status"):
+            effects["github_auth_probes"] += 1
+        return _run(arguments)
+
     if compiled is not None:
         holds.extend(
             {
@@ -140,7 +187,7 @@ def intake_prerequisites(configuration: ProjectConfiguration) -> list[dict[str, 
                 "detail": item.detail,
                 "resolve": item.resolve or "enginery factory doctor",
             }
-            for item in _check_github(compiled.config.text("github_executable"), _run)
+            for item in _check_github(compiled.config.text("github_executable"), probe)
             if item.status == "hold"
         )
     return [*holds, *paused_hold(configuration.project)]
@@ -172,14 +219,34 @@ def selection_document(configuration: ProjectConfiguration) -> dict[str, object]
     }
 
 
+def classification_repair(repository: str, reference: str, labels: Sequence[str]) -> str:
+    command = ["gh", "issue", "edit", reference.rsplit("#", 1)[1], "--repo", repository]
+    for prefix, allowed, placeholder in (
+        (CLASSIFICATION_PREFIXES[0], WORK_KIND_LABELS, "enginery/work-kind/<issue|plan>"),
+        (CLASSIFICATION_PREFIXES[1], RISK_LABELS, "enginery/risk/<low|medium>"),
+    ):
+        present = [label for label in labels if label.casefold().startswith(prefix)]
+        if len(present) != 1 or present[0] not in allowed:
+            for label in dict.fromkeys(present):
+                command.extend(("--remove-label", label))
+            command.extend(("--add-label", placeholder))
+    return shlex.join(command)
+
+
 def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
     configuration = load_project_configuration(project)
-    holds = intake_prerequisites(configuration)
+    effects = {
+        "github_auth_probes": 0,
+        "github_reads": 0,
+        "github_mutations": 0,
+        "hosted_inference_calls": 0,
+    }
+    holds = intake_prerequisites(configuration, effects)
     document: dict[str, object] = {
         "project": str(project),
         "candidates": [],
         "holds": holds,
-        "external_effects": {"github_reads": 0, "github_mutations": 0, "hosted_inference_calls": 0},
+        "external_effects": effects,
         "local_writes": [],
     }
     if holds:
@@ -191,7 +258,7 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             {
                 "prerequisite": "origin",
                 "detail": str(error),
-                "resolve": "git remote add origin https://github.com/OWNER/REPO.git",
+                "resolve": str(error).split("repair: ", 1)[1],
             }
         )
         return document
@@ -202,7 +269,24 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
         rows: list[dict[str, object]] = []
         compiled = configuration.compiled
         assert compiled is not None
-        for candidate in adapter.list_candidates(since=intake.last_seen_updated_at):
+        evaluated: list[str] = []
+        held_at: list[str] = []
+        try:
+            candidates = adapter.list_candidates(since=intake.last_seen_updated_at)
+        except EngineryError as error:
+            holds.append(
+                {
+                    "prerequisite": "issue intake",
+                    "detail": str(error),
+                    "resolve": (
+                        "gh auth status; enginery factory collect --project "
+                        + shlex.quote(str(project))
+                    ),
+                }
+            )
+            effects["github_reads"] = adapter.github_reads
+            return document
+        for candidate in candidates:
             row: dict[str, object] = {
                 "external_reference": candidate.external_reference,
                 "title": candidate.title,
@@ -219,55 +303,54 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                 "holds": [],
             }
             rows.append(row)
-            if (
-                intake.last_seen_updated_at is None
-                or candidate.updated_at > intake.last_seen_updated_at
-            ):
-                intake.last_seen_updated_at = candidate.updated_at
             try:
                 kind, risk, _ = declared_classification(candidate.labels)
-                snapshot = adapter.fetch(candidate.external_reference)
-            except EngineryError as error:
+            except InvalidInputError as error:
                 hold = {
                     "prerequisite": "classification",
                     "detail": str(error),
-                    "resolve": (
-                        f"gh issue edit {candidate.external_reference} "
-                        "--add-label enginery/work-kind/issue --add-label enginery/risk/low"
+                    "resolve": classification_repair(
+                        repository, candidate.external_reference, candidate.labels
                     ),
                 }
                 row["classification"] = {"hold": str(error)}
                 row["holds"] = [hold]
                 holds.append(hold)
+                held_at.append(candidate.updated_at)
+                continue
+            try:
+                snapshot = adapter.fetch(candidate.external_reference)
+            except EngineryError as error:
+                hold = {
+                    "prerequisite": "issue intake",
+                    "detail": str(error),
+                    "resolve": (
+                        "gh auth status; enginery factory collect --project "
+                        f"{shlex.quote(str(project))}"
+                    ),
+                }
+                row["classification"] = {"hold": str(error)}
+                row["holds"] = [hold]
+                holds.append(hold)
+                held_at.append(candidate.updated_at)
                 continue
             row["eligible"] = True
             row["classification"] = {"work_kind": kind.value, "risk": risk.value}
-            previous = intake.issues.get(candidate.external_reference)
             digest = str(snapshot.bound_digest)
+            evaluated.append(candidate.updated_at)
+            reference = snapshot.work_item.external_reference
+            row["external_reference"] = reference
+            previous = intake.issues.get(reference)
             if previous is not None:
                 row["dedup"] = (
                     "bound:" if previous.bound_digest == digest else "changed:"
                 ) + previous.run_id
-                if previous.bound_digest != digest:
-                    hold = changed_hold(project, candidate.external_reference, previous.run_id)
-                    row["holds"] = [hold]
-                    holds.append(hold)
-            elif not dry_run:
-                intake.issues[candidate.external_reference] = IntakeEntry(
-                    external_reference=candidate.external_reference,
-                    run_id=derive_run_id(
-                        project_identity(project), candidate.external_reference, digest
-                    ),
-                    bound_digest=digest,
-                    source_revision=str(snapshot.source_revision),
-                    recorded_at=datetime.now(UTC).isoformat(),
-                )
+        ceiling = min(held_at) if held_at else None
+        safe = [updated for updated in evaluated if ceiling is None or updated <= ceiling]
+        if safe:
+            intake.last_seen_updated_at = max(safe)
         document["candidates"] = rows
-        document["external_effects"] = {
-            "github_reads": adapter.github_reads,
-            "github_mutations": 0,
-            "hosted_inference_calls": 0,
-        }
+        effects["github_reads"] = adapter.github_reads
         if not dry_run:
             write_document(index_path(project), index.to_state())
             document["local_writes"] = [
@@ -275,19 +358,6 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                 str(index_path(project).with_suffix(".lock")),
             ]
     return document
-
-
-def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
-    database = private_state_directory(project) / "ledger.sqlite"
-    return {
-        "prerequisite": "bound snapshot",
-        "detail": f"issue changed since run {run_id} was bound",
-        "resolve": (
-            f"enginery factory drain --stop --project {project}; "
-            f"enginery stage1 cancel --database {database} --run-id {run_id}; "
-            f"enginery factory run {issue} --supersede --project {project}"
-        ),
-    }
 
 
 def document_lines(document: Mapping[str, object]) -> list[str]:

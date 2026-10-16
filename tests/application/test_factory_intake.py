@@ -9,10 +9,9 @@ from enginery.application.factory_intake import (
     IntakeEntry,
     IntakeIndex,
     RepositoryIntake,
-    declared_classification,
     derive_run_id,
-    label_names,
 )
+from enginery.application.work_classification import declared_classification, label_names
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError, TransientProviderFailureError
 
