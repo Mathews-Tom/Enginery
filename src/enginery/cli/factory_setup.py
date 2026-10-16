@@ -43,6 +43,7 @@ from enginery.cli.config_locations import (
     private_state_directory,
     read_project_layer,
     read_user_layer,
+    record_absent_sources,
     require_plain_path,
 )
 from enginery.cli.setup_files import (
@@ -58,7 +59,7 @@ from enginery.cli.setup_files import (
     write_private_atomically,
 )
 from enginery.cli.stage1_request import _probe_host
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_selection import SelectionLayer
 
 PROJECT_POLICY_ROLE = "project-policy"
@@ -75,6 +76,7 @@ class ProjectConfiguration:
     user_layer: LayerDocument | None
     compiled: CompiledConfig | None
     undeclared: ConfigError | None
+    harness_probe_failure: str | None = None
 
 
 def resolve_project(path: Path | None) -> Path:
@@ -97,15 +99,28 @@ def load_project_configuration(
     """
     project_layer = read_project_layer(project)
     user_layer = read_user_layer(env)
+    harness_probe_failure: str | None = None
     try:
         compiled = compile_effective_config(
             project=project_layer, user=user_layer, run=run_layer({}), probe_host=_probe_host
+        )
+    except MissingPrerequisiteError as error:
+        harness_probe_failure = str(error)
+        compiled = compile_effective_config(
+            project=project_layer, user=user_layer, run=run_layer({}), probe_host=None
         )
     except ConfigError as error:
         if error.key == "runner.mode" and error.file == "<all layers>":
             return ProjectConfiguration(project, project_layer, user_layer, None, error)
         raise
-    return ProjectConfiguration(project, project_layer, user_layer, compiled, None)
+    return ProjectConfiguration(
+        project,
+        project_layer,
+        user_layer,
+        record_absent_sources(compiled, project, env),
+        None,
+        harness_probe_failure,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +174,7 @@ class SetupPlan:
     auth: tuple[Mapping[str, str], ...]
     configuration_digest: str
     ownership_record: OwnershipRecord | None
+    harness_probe_failure: str | None = None
 
     @property
     def conflicts(self) -> tuple[FileAction, ...]:
@@ -182,10 +198,21 @@ class SetupPlan:
             "network_access": list(self.network),
             "auth_requirements": [dict(item) for item in self.auth],
             "effective_configuration_digest": self.configuration_digest,
-            "holds": [item.to_json() for item in self.installs],
+            "holds": [item.to_json() for item in self.installs]
+            + (
+                [{"name": "harness", "detail": self.harness_probe_failure}]
+                if self.harness_probe_failure is not None
+                else []
+            ),
             "conflicts": [str(item.path) for item in self.conflicts],
             "performed": list(performed),
-            "status": ("conflict" if self.conflicts else "hold" if self.installs else "ok"),
+            "status": (
+                "conflict"
+                if self.conflicts
+                else "hold"
+                if self.installs or self.harness_probe_failure
+                else "ok"
+            ),
         }
 
 
@@ -261,7 +288,11 @@ def plan_init(
     capability_versions: Mapping[str, str],
     env: Mapping[str, str] | None = None,
 ) -> SetupPlan:
-    """Compute what ``init`` would do for ``choices``; writes nothing and runs nothing."""
+    """Preview setup without writes.
+
+    With a model or effort configured under trusted-local, run only the selected harness's
+    read-only version probe, the same probe build-request runs.
+    """
     for name in choices.capabilities:
         validate_name(name)
     for name, version in capability_versions.items():
@@ -275,9 +306,17 @@ def plan_init(
         SelectionLayer.PROJECT, rendered, source=str(policy_path), reject_credentials=True
     )
     user_layer = read_user_layer(env)
-    compiled = compile_effective_config(
-        project=document, user=user_layer, run=run_layer({}), probe_host=_probe_host
-    )
+    harness_probe_failure: str | None = None
+    try:
+        compiled = compile_effective_config(
+            project=document, user=user_layer, run=run_layer({}), probe_host=_probe_host
+        )
+    except MissingPrerequisiteError as error:
+        harness_probe_failure = str(error)
+        compiled = compile_effective_config(
+            project=document, user=user_layer, run=run_layer({}), probe_host=None
+        )
+    compiled = record_absent_sources(compiled, project, env)
 
     require_plain_path(project, PROJECT_POLICY_RELATIVE, what="the project policy path")
     refuse_links(project, PROJECT_POLICY_RELATIVE, what="the project policy path")
@@ -356,12 +395,13 @@ def plan_init(
         auth=_auth_requirements(compiled),
         configuration_digest=str(compiled.config.digest),
         ownership_record=updated,
+        harness_probe_failure=harness_probe_failure,
     )
 
 
 def apply_plan(plan: SetupPlan) -> tuple[str, ...]:
     """Persist ownership before tracked files and roll it back on a tracked-write failure."""
-    if plan.conflicts:
+    if plan.conflicts or plan.harness_probe_failure is not None:
         return ()
     performed: list[str] = []
     records = [

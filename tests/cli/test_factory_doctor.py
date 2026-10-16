@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -284,7 +285,6 @@ def test_existing_policy_trust_hold_names_edit_and_edit_clears_it(
     assert code == HOLD
     (hold,) = report["holds"]  # type: ignore[misc]
     assert str(policy) in hold["resolve"]
-    assert "edit" in hold["resolve"]
     assert "[runner]" in hold["resolve"]
     policy.write_text('schema_version = 1\n[runner]\nmode = "trusted-local"\n')
     assert _doctor(capsys, project)[0] == 0
@@ -349,3 +349,96 @@ def test_doctor_digest_matches_build_request_without_run_overrides(
     assert report["effective_configuration_digest"] == str(
         request.run.configuration_snapshot_digest
     )
+
+
+@pytest.mark.parametrize(
+    ("binary", "key", "check"),
+    [
+        ("gh", "github", "github-cli"),
+        ("omp", "harness", "harness-omp"),
+    ],
+)
+def test_executable_hold_resolves_through_user_preferences(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    binary: str,
+    key: str,
+    check: str,
+) -> None:
+    original = toolbox / binary
+    alternate = toolbox / f"alternate-{binary}"
+    original.rename(alternate)
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    holds = cast(list[dict[str, str]], report["holds"])
+    hold = next(item for item in holds if item["name"] == check)
+    assert "$XDG_CONFIG_HOME/enginery/user.toml" in hold["resolve"]
+    assert ".enginery/project.toml" not in hold["resolve"]
+    user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f'schema_version = 1\n[executables]\n{key} = "{alternate}"\n')
+    code, report = _doctor(capsys, project)
+    assert _statuses(report)[check] == "ok"
+    assert code == 0
+
+
+def test_model_default_with_old_harness_is_reported_as_hold(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _script(toolbox, "omp", 'echo "omp v1.0.0"')
+    policy = project / ".enginery" / "project.toml"
+    policy.write_text(policy.read_text() + '\n[execution]\nmodel = "openai/gpt-5"\n')
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    assert _statuses(report)["harness-omp"] == "hold"
+    assert _statuses(report)["git"] == "ok"
+    assert _statuses(report)["github-auth"] == "ok"
+    assert "version" in str(report["holds"])
+
+
+def test_invalid_capability_name_is_not_rendered_as_command(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = project / ".enginery" / "project.toml"
+    policy.write_text(
+        policy.read_text() + '\n[implementation]\npermitted_capabilities = ["$(id)"]\n'
+    )
+    assert main(["factory", "doctor", "--project", str(project), "--json"]) == 2
+    output = capsys.readouterr()
+    assert "implementation.permitted_capabilities" in output.err
+    assert "enginery capability preview" not in output.out
+
+
+def test_existing_runner_table_resolution_does_not_add_duplicate_table(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = project / ".enginery" / "project.toml"
+    policy.write_text("schema_version = 1\n[runner]\n")
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    assert "add the table if it is absent" in str(report["holds"])
+    policy.write_text(policy.read_text() + 'mode = "trusted-local"\n')
+    assert _doctor(capsys, project)[0] == 0
+
+
+def test_relay_resolution_flags_exist_on_real_parser() -> None:
+    import argparse
+
+    from enginery.cli.main import _build_parser
+
+    def child(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+        action = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        return action.choices[name]
+
+    parser = child(child(child(_build_parser(), "runner"), "relay"), "up")
+    options = {option for action in parser._actions for option in action.option_strings}
+    assert {"--relay-image", "--upstream", "--token-file"} <= options

@@ -16,7 +16,9 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 
 from enginery.capabilities.atomic import fsync_directory
@@ -27,10 +29,31 @@ OWNERSHIP_FILE = "setup-ownership.json"
 CREATED_BY = "enginery factory init"
 
 
+def _typed_file_errors[**P, T](function: Callable[P, T]) -> Callable[P, T]:
+    """Translate filesystem failures after the operation has completed its rollback."""
+
+    @wraps(function)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return function(*args, **kwargs)
+        except OSError as error:
+            path = error.filename or (str(args[0]) if args else "<unknown>")
+            failure = (
+                ExternalConflictError if isinstance(error, FileExistsError) else InvalidInputError
+            )
+            raise failure(
+                f"setup could not access {path}: {error.strerror or error}",
+                details={"path": str(path)},
+            ) from error
+
+    return guarded
+
+
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+@_typed_file_errors
 def refuse_links(root: Path, relative: Path, *, what: str) -> None:
     """Refuse a symbolic link on any existing component of ``relative`` below ``root``."""
     if ".." in relative.parts or relative.is_absolute():
@@ -55,6 +78,7 @@ def refuse_links(root: Path, relative: Path, *, what: str) -> None:
             )
 
 
+@_typed_file_errors
 def read_regular(path: Path, *, what: str) -> bytes | None:
     """The bytes of ``path``, ``None`` when absent; a link or non-file is refused."""
     if not os.path.lexists(path):
@@ -66,6 +90,7 @@ def read_regular(path: Path, *, what: str) -> bytes | None:
     return path.read_bytes()
 
 
+@_typed_file_errors
 def create_exclusive(root: Path, relative: Path, payload: bytes, *, what: str) -> Path:
     """Create ``root/relative`` with ``payload``; refuse links and never replace a file."""
     refuse_links(root, relative, what=what)
@@ -91,12 +116,14 @@ def create_exclusive(root: Path, relative: Path, payload: bytes, *, what: str) -
     return target
 
 
+@_typed_file_errors
 def remove_regular(root: Path, relative: Path, *, what: str) -> None:
     """Remove one regular file below ``root``; links anywhere on its path are refused."""
     refuse_links(root, relative, what=what)
     (root / relative).unlink()
 
 
+@_typed_file_errors
 def require_private_path(path: Path, *, what: str) -> None:
     """Inspect every owned component below the private state root with lstat."""
     root = path.parents[3]
@@ -104,6 +131,7 @@ def require_private_path(path: Path, *, what: str) -> None:
     read_regular(path, what=what)
 
 
+@_typed_file_errors
 def write_private_atomically(path: Path, payload: bytes, *, what: str) -> None:
     """Replace one private record atomically (mode 0600) in its private directory."""
     require_private_path(path, what=what)

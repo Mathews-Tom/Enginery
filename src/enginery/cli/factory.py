@@ -135,6 +135,8 @@ def _plan_lines(plan: SetupPlan, *, apply: bool, performed: tuple[str, ...]) -> 
     for hold in plan.installs:
         lines.append(f"  HOLD {hold.name}: {hold.detail}")
         lines.extend(f"    run: {command}" for command in hold.commands)
+    if plan.harness_probe_failure is not None:
+        lines.append(f"  HOLD harness: {plan.harness_probe_failure}")
     lines.append("  network access: " + ("; ".join(plan.network) if plan.network else "none"))
     for requirement in plan.auth:
         lines.append(
@@ -144,7 +146,7 @@ def _plan_lines(plan: SetupPlan, *, apply: bool, performed: tuple[str, ...]) -> 
     lines.append(f"  effective configuration {plan.configuration_digest}")
     if plan.conflicts:
         lines.append("conflict: a user-owned file would be overwritten; nothing was written")
-    elif apply:
+    elif apply and plan.harness_probe_failure is None:
         lines.append(
             "wrote: " + (", ".join(performed) if performed else "nothing (already set up)")
         )
@@ -179,7 +181,7 @@ def _run_init(args: argparse.Namespace) -> int:
     )
     if plan.conflicts:
         return CONFLICT_EXIT
-    return HOLD_EXIT if plan.installs else SUCCESS
+    return HOLD_EXIT if plan.installs or plan.harness_probe_failure else SUCCESS
 
 
 def _doctor_lines(report: DoctorReport) -> list[str]:

@@ -11,7 +11,7 @@ from enginery.application.project_policy import SetupChoices, render_project_pol
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.factory_setup import load_project_configuration
 from enginery.cli.main import main
-from enginery.domain.errors import FailureClass
+from enginery.domain.errors import FailureClass, InvalidInputError
 
 INVALID = exit_code_for(FailureClass.INVALID_INPUT)
 HOLD = exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
@@ -370,7 +370,7 @@ def test_failed_record_sync_leaves_project_and_state_unchanged(
         raise OSError("record sync failed")
 
     monkeypatch.setattr(setup_files, "fsync_directory", fail)
-    with pytest.raises(OSError, match="record sync failed"):
+    with pytest.raises(InvalidInputError, match="record sync failed"):
         factory_setup.apply_plan(plan)
     assert _tree(project, *_xdg()) == before
 
@@ -396,3 +396,58 @@ def test_apply_rechecks_private_state_links_after_preview(
         factory_setup.apply_plan(plan)
     assert not (project / ".enginery").exists()
     assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_old_harness_model_preview_and_apply_are_nonwriting_holds(
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    apply: bool,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    harness = bin_dir / "omp"
+    harness.write_text('#!/bin/sh\necho "omp v1.0.0"\n')
+    harness.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    before = _tree(project, *_xdg())
+    code, plan = _init(
+        capsys, project, "--model", "openai/gpt-5.4", *(["--apply"] if apply else [])
+    )
+    assert code == HOLD
+    assert plan["status"] == "hold"
+    assert "native controls are unsupported" in str(plan["holds"])
+    assert plan["performed"] == []
+    assert _tree(project, *_xdg()) == before
+
+
+def test_regular_file_state_home_is_a_typed_nonwriting_refusal(
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = tmp_path / "state-file"
+    state.write_bytes(b"user-owned")
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    before = _tree(project)
+    code, _ = _init(capsys, project, "--apply")
+    assert code == INVALID
+    assert state.read_bytes() == b"user-owned"
+    assert _tree(project) == before
+
+
+def test_read_only_project_apply_is_a_typed_nonwriting_refusal(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    before = _tree(project, *_xdg())
+    project.chmod(0o555)
+    try:
+        code, _ = _init(capsys, project, "--apply")
+        assert code == INVALID
+        assert _tree(project, *_xdg()) == before
+    finally:
+        project.chmod(0o755)

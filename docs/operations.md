@@ -636,6 +636,11 @@ uv run enginery factory doctor
 NAME[@VERSION]`; `--project PATH` defaults to the current directory. `--json` emits
 canonical JSON.
 
+When a model or effort is configured under `trusted-local`, the preview runs only the
+selected harness's read-only version probe (the same probe `build-request` runs).
+An unprobeable or unsupported harness is a hold (exit 5); applying that plan writes
+nothing until the harness is resolved.
+
 Without `--apply`, `init` previews and writes nothing. The preview lists every file it
 would create (path, `tracked` or `private`, and the action `create`, `update`,
 `unchanged` or `conflict`), every capability install (init performs none), every
@@ -2267,7 +2272,7 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 `enginery factory init` and `enginery factory doctor` are shipped (see
 [Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
 `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `capability`, `runner`, and `factory`; `factory` provides `init` and
+`workspace`, `runner`, `capability`, and `factory`; `factory` provides `init` and
 `doctor` only. `gate status` accepts `--gate G4` only, and `stage1` provides
 `start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
 and `build-request`.

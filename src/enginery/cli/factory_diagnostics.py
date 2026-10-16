@@ -24,13 +24,14 @@ from enginery.application.effective_config import CompiledConfig
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.project_policy import BUILTIN_CAPABILITIES
 from enginery.capabilities.install import load_owned_manifest
+from enginery.capabilities.manifest import validate_name
 from enginery.capabilities.serialization import is_legacy_lock, lock_from_json, read_lock_document
 from enginery.cli.factory_setup import (
     INSTALL_ROOT_RELATIVE,
     LOCKFILE_RELATIVE,
     ProjectConfiguration,
 )
-from enginery.domain.errors import EngineryError, MissingPrerequisiteError
+from enginery.domain.errors import EngineryError, InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import HoldReason
 from enginery.domain.runner import RunnerProfile
@@ -134,8 +135,9 @@ def _check_github(executable: str, run: Runner) -> list[Check]:
                 "hold",
                 f"the GitHub CLI `{executable}` is not on PATH; Stage 1 reads issues and "
                 "opens pull requests through it",
-                "install the GitHub CLI (https://cli.github.com), or point [executables] github "
-                "at it in .enginery/project.toml",
+                "install the GitHub CLI (https://cli.github.com), or set github in "
+                "[executables] in $XDG_CONFIG_HOME/enginery/user.toml "
+                "(or pass --github-executable for the run)",
             )
         ]
     checks = [Check("github-cli", "ok", f"`{executable}` is on PATH")]
@@ -147,7 +149,9 @@ def _check_github(executable: str, run: Runner) -> list[Check]:
                 "github-auth",
                 "hold",
                 f"`{executable} auth status` could not run: {error}",
-                f"{executable} auth login",
+                "install the GitHub CLI, or set github in [executables] in "
+                "$XDG_CONFIG_HOME/enginery/user.toml "
+                "(or pass --github-executable for the run)",
             )
         )
         return checks
@@ -176,8 +180,8 @@ def _check_harness(compiled: CompiledConfig, probe: HostProbe | None) -> Check:
     harness = compiled.selection.harness
     executable = compiled.config.text("harness_executable")
     resolve = (
-        f"install the {harness} CLI and sign in, or point [executables] harness at it "
-        "in .enginery/project.toml"
+        f"install the {harness} CLI and sign in, or set harness in [executables] in "
+        "$XDG_CONFIG_HOME/enginery/user.toml (or pass --harness-executable for the run)"
     )
     if compiled.runner.isolated_mode:
         return Check(
@@ -206,8 +210,8 @@ def trust_mode_resolution(policy_path: Path) -> str:
     """Give an actionable trust-mode choice without overwriting an existing policy."""
     if policy_path.exists():
         return (
-            f"edit {policy_path} (or the user preferences file): add [runner] with "
-            'mode = "trusted-local" or mode = "isolated-oci"'
+            f'set mode = "trusted-local" or "isolated-oci" in the [runner] table of '
+            f"{policy_path} (add the table if it is absent)"
         )
     return "enginery factory init --runner <trusted-local|isolated-oci> --apply"
 
@@ -220,7 +224,8 @@ def _check_runner(compiled: CompiledConfig) -> Check:
     if "relay" in message:
         resolve = (
             "enginery runner build-relay-image, then enginery runner relay up "
-            "--image <relay image id>, then enginery runner relay status"
+            "--relay-image sha256:<relay image id> --upstream <gateway URL> "
+            "--token-file <absolute token file>, then enginery runner relay status"
         )
     elif decision.hold.reason is HoldReason.RUNNER_FINGERPRINT_DRIFT or "image" in message:
         resolve = "enginery runner build-image, then `enginery runner status --image <id>`"
@@ -237,7 +242,7 @@ def _check_runner(compiled: CompiledConfig) -> Check:
     )
 
 
-def _locked_versions(project: Path) -> Mapping[str, str]:
+def locked_versions(project: Path) -> Mapping[str, str]:
     path = project / LOCKFILE_RELATIVE
     try:
         document = read_lock_document(path)
@@ -248,7 +253,40 @@ def _locked_versions(project: Path) -> Mapping[str, str]:
         return {}
 
 
+def capability_resolution(name: str, version: str | None) -> str:
+    """The preview-then-install command for a validated capability selection."""
+    validate_name(name)
+    request = f"{name}@{version or '<version>'}"
+    sources = "--project-source <REPOSITORY>@<COMMIT> --project-subdir <DIR>"
+    return (
+        f"enginery capability preview {request} {sources} && "
+        f"enginery capability install {request} {sources}"
+    )
+
+
+def harness_probe_resolution(configuration: ProjectConfiguration) -> str:
+    """Resolve a native-control host hold without changing project-owned configuration."""
+    assert configuration.compiled is not None
+    harness = configuration.compiled.selection.harness
+    expectation = load_execution_catalog().host(harness).version.expectation
+    return (
+        f"install a {harness} harness version matching {expectation}; set harness in "
+        "[executables] in $XDG_CONFIG_HOME/enginery/user.toml "
+        "(or pass --harness-executable for the run)"
+    )
+
+
 def _check_capabilities(project: Path, compiled: CompiledConfig) -> list[Check]:
+    for name in compiled.config.strings("permitted_capabilities"):
+        try:
+            validate_name(name)
+        except InvalidInputError as error:
+            raise InvalidInputError(
+                "invalid implementation.permitted_capabilities in "
+                f"{project / '.enginery' / 'project.toml'} or "
+                "$XDG_CONFIG_HOME/enginery/user.toml",
+                details={"name": name},
+            ) from error
     names = [
         name
         for name in compiled.config.strings("permitted_capabilities")
@@ -257,14 +295,12 @@ def _check_capabilities(project: Path, compiled: CompiledConfig) -> list[Check]:
     if not names:
         return []
     manifest = load_owned_manifest(project / INSTALL_ROOT_RELATIVE)
-    versions = _locked_versions(project)
+    versions = locked_versions(project)
     checks: list[Check] = []
     for name in names:
         if manifest is not None and manifest.package(name) is not None:
             checks.append(Check(f"capability-{name}", "ok", f"{name} is installed"))
             continue
-        request = f"{name}@{versions.get(name, '<version>')}"
-        sources = "--project-source <REPOSITORY>@<COMMIT> --project-subdir <DIR>"
         checks.append(
             Check(
                 f"capability-{name}",
@@ -272,8 +308,7 @@ def _check_capabilities(project: Path, compiled: CompiledConfig) -> list[Check]:
                 f"capability {name} is permitted but not installed under {INSTALL_ROOT_RELATIVE}; "
                 "an install that needs approval stays held until an owner approves the exact "
                 "closure and lock digest",
-                f"enginery capability preview {request} {sources} && "
-                f"enginery capability install {request} {sources}",
+                capability_resolution(name, versions.get(name)),
             )
         )
     return checks
@@ -303,7 +338,17 @@ def run_doctor(
             configuration_digest=None,
         )
     checks = [_check_git(run), *_check_github(compiled.config.text("github_executable"), run)]
-    checks.append(_check_harness(compiled, probe))
+    if configuration.harness_probe_failure is not None:
+        checks.append(
+            Check(
+                f"harness-{compiled.selection.harness}",
+                "hold",
+                configuration.harness_probe_failure,
+                harness_probe_resolution(configuration),
+            )
+        )
+    else:
+        checks.append(_check_harness(compiled, probe))
     if compiled.runner.isolated_mode:
         checks.append(_check_runner(compiled))
     checks.extend(_check_capabilities(configuration.project, compiled))
@@ -317,4 +362,12 @@ def run_doctor(
     )
 
 
-__all__ = ["Check", "DoctorReport", "run_doctor", "trust_mode_resolution"]
+__all__ = [
+    "Check",
+    "DoctorReport",
+    "capability_resolution",
+    "harness_probe_resolution",
+    "locked_versions",
+    "run_doctor",
+    "trust_mode_resolution",
+]
