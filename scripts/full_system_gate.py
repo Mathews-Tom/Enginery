@@ -34,6 +34,13 @@ port implemented by a deterministic in-script fixture (no live GitHub
 credentials; live-provider Stage 1 recovery was already independently
 proven and retained at issue #84 -> PR #90 in this repository).
 
+Stage 1 publication also records a real packet-bound challenge and durable
+human decision after review, then reconstructs the production effect
+authorizer on each ledger reopen. Only the local operator/terminal identity
+is simulated for this deterministic, credential-free gate; policy, nonce
+consumption, subject binding and effect-time authorization are not replaced.
+The committed base/head and diff come from a disposable real Git repository.
+
 ``--stages`` accepts any combination of ``1``, ``2``, and ``3`` (for
 example ``1``, ``1,2``, or ``1,2,3``). The Stage 2 leg drives the
 real ``Stage2ReleaseWorkflow`` (``enginery.workflows.plan_to_release``)
@@ -83,6 +90,7 @@ caveat above.
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -121,6 +129,7 @@ from enginery.application.branch_publication import (
 from enginery.application.delivery_ports import DeploymentRequest
 from enginery.application.effective_config import compile_effective_config
 from enginery.application.git_environment import repository_isolated_environment
+from enginery.application.human_decisions import AuthenticatedDecisionContext, ReviewAuthority
 from enginery.application.layered_config import run_layer
 from enginery.application.work_ports import (
     LifecycleProjection,
@@ -135,6 +144,7 @@ from enginery.application.work_ports import (
 from enginery.cli.config_binding import bind_behavioral_checks
 from enginery.cli.config_locations import private_state_directory
 from enginery.cli.factory_behavioral import verify_for_stage1
+from enginery.cli import factory_decisions
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
@@ -176,6 +186,7 @@ from enginery.incidents.hotfix import (
 )
 from enginery.incidents.service import IncidentService
 from enginery.ledger.events import AppendCommand, EventWrite
+from enginery.ledger.human_decisions import issue_challenge, list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.policy.approval import ApprovalRegistry
 from enginery.policy.evaluator import PolicyEvaluator, PolicyRule
@@ -475,6 +486,56 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _GateDecisions:
+    """Simulate local ingress identity only; all durable authority checks remain real."""
+
+    ledger: LedgerService
+
+    @property
+    def registration(self) -> ReviewAuthority:
+        return ReviewAuthority("full-system-gate-operator", getpass.getuser(), os.getuid())
+
+    def approve_publication(self, request: Stage1RunRequest) -> None:
+        registration = self.registration
+        context = AuthenticatedDecisionContext(
+            registration.principal, registration.os_uid, "/dev/ttys-full-system-gate"
+        )
+        packet = factory_decisions.build_packet(request.repository_path, self.ledger, request)
+        issued = issue_challenge(
+            self.ledger.connection,
+            run_id=str(request.run.id),
+            subject_fields=packet.subject_fields(),
+            actions=factory_decisions._actions(self.ledger, request),
+            context=context,
+            registered_humans=registration.registered_humans,
+            lifetime=timedelta(seconds=registration.ttl_seconds),
+        )
+        # This in-process local gate has no interactive operator. Replace only the
+        # verified ingress identity, never policy, challenge consumption or authorization.
+        with (
+            patch.object(factory_decisions, "_authenticate", return_value=(registration, context)),
+            patch.object(factory_decisions, "_registered_identity", return_value=registration),
+        ):
+            factory_decisions.decide_in_ledger(
+                self.ledger,
+                request,
+                action=PolicyAction.PULL_REQUEST_OPEN.value,
+                subject_digest=issued.subject_digest,
+                challenge=issued.challenge,
+                reason="Approve the exact cumulative gate implementation and review evidence",
+                owner="full-system-gate",
+            )
+
+    def authorize_publication(self, request: Stage1RunRequest) -> str:
+        with patch.object(
+            factory_decisions, "_registered_identity", return_value=self.registration
+        ):
+            return factory_decisions.require_for_effect(
+                self.ledger, request, PolicyAction.PULL_REQUEST_OPEN.value
+            ).id
+
+
 def _service(
     database: Path, *, work_ledger: WorkLedgerPort, pull_requests: PullRequestPort
 ) -> tuple[LedgerService, Stage1RunService]:
@@ -497,6 +558,7 @@ def _service(
         behavioral_verifier=lambda bound, head: verify_for_stage1(
             ledger, bound, head, owner=runtime.coordinator.owner
         ),
+        publication_authorizer=_GateDecisions(ledger).authorize_publication,
     )
     return ledger, service
 
@@ -618,6 +680,8 @@ def _drive_to_terminal(
         if review_result.outcome.value != "approved":
             raise AssertionError(f"expected approved review, got {review_result.outcome.value}")
 
+        _GateDecisions(ledger).approve_publication(fixture.request)
+
         if restart_between_stages:
             ledger.close()
             ledger, service = reopen()
@@ -648,12 +712,24 @@ def _drive_to_terminal(
 
         run = service.read(run_id)
         pull_requests = cast(_TerminalPullRequests, fixture.pull_requests)
+        decisions = list_decisions(ledger.connection, str(run_id))
+        publication = ledger.read_projection(
+            aggregate_type="runtime_node", aggregate_id=f"{run_id}:open_pr"
+        )
+        if (
+            len(decisions) != 1
+            or publication is None
+            or publication.state.get("decision_id") != decisions[0].id
+        ):
+            raise AssertionError("publication must retain its one durable authenticated decision")
         evidence: dict[str, object] = {
             "run_id": str(run_id),
             "status": run.status.value,
             "aggregate_version": run.aggregate_version,
             "request_digest": str(run.request.digest),
             "pull_request_requests": len(pull_requests.requests),
+            "publication_decision_id": decisions[0].id,
+            "publication_decision_count": len(decisions),
         }
     finally:
         ledger.close()

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.execution import selection_for
@@ -177,11 +178,12 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             ledger=ledger,
             work_ledger=cast(WorkLedgerPort, work_ledger),
             pull_requests=cast(PullRequestPort, pull_requests),
-            branch_publisher=RecordingBranchPublisher(),
+            branch_publisher=RecordingBranchPublisher(changed=("tracked.txt",)),
             outcomes=outcomes,
             behavioral_verifier=lambda bound, head: verify_for_stage1(
                 ledger, bound, head, owner=runtime.coordinator.owner
             ),
+            publication_authorizer=AuthenticatedDecisions(ledger).authorize_publication,
         )
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -248,6 +250,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             now=now,
             heartbeat_window=timedelta(seconds=60),
         )
+        AuthenticatedDecisions(ledger).approve(request)
         service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
         assert (
             service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
