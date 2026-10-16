@@ -21,6 +21,7 @@ from enginery.application.adapter_types import AdapterAvailability
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.capability import add_capability_parser, run_capability
 from enginery.cli.doctor import run_doctor
+from enginery.cli.factory import add_factory_parser, run_factory
 from enginery.cli.gate import run_gate
 from enginery.cli.ledger import (
     run_backup,
@@ -250,6 +251,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_runner_parser(subparsers)
 
     add_capability_parser(subparsers)
+    add_factory_parser(subparsers)
 
     explain_parser.add_argument("--json", action="store_true")
 
@@ -418,6 +420,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_policy(args)
         if args.command == "capability":
             return run_capability(args)
+        if args.command == "factory":
+            return run_factory(args)
         if args.command == "stage1":
             return run_stage1(args)
         if args.command == "stage2":
