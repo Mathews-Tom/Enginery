@@ -125,6 +125,24 @@ def create_exclusive(root: Path, relative: Path, payload: bytes, *, what: str) -
 
 
 @_typed_file_errors
+def create_directory(root: Path, relative: Path, *, what: str) -> None:
+    """Create one directory below ``root``; a link on its path is refused."""
+    refuse_links(root, relative, what=what)
+    (root / relative).mkdir(exist_ok=True)
+    refuse_links(root, relative, what=what)
+
+
+def remove_empty_directory(root: Path, relative: Path, *, what: str) -> bool:
+    """Remove ``root/relative`` only if it is an empty real directory; ``False`` if it is not."""
+    refuse_links(root, relative, what=what)
+    try:
+        (root / relative).rmdir()
+    except OSError:
+        return False
+    return True
+
+
+@_typed_file_errors
 def remove_regular(root: Path, relative: Path, *, what: str) -> None:
     """Remove one regular file below ``root``; links anywhere on its path are refused."""
     refuse_links(root, relative, what=what)
@@ -290,10 +308,12 @@ __all__ = [
     "OWNERSHIP_FILE",
     "OwnedFile",
     "OwnershipRecord",
+    "create_directory",
     "create_exclusive",
     "load_ownership",
     "read_regular",
     "refuse_links",
+    "remove_empty_directory",
     "remove_regular",
     "sha256_bytes",
     "write_private_atomically",

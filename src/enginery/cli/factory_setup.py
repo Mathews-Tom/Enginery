@@ -20,6 +20,7 @@ preview, which writes nothing.
 
 from __future__ import annotations
 
+import os
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from enginery.cli.setup_files import (
     OWNERSHIP_FILE,
     OwnedFile,
     OwnershipRecord,
+    create_directory,
     create_exclusive,
     load_ownership,
     read_regular,
@@ -65,6 +67,9 @@ from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_selection import SelectionLayer
 
 PROJECT_POLICY_ROLE = "project-policy"
+DIRECTORY_ROLE = "directory"
+OWNERSHIP_ROLE = "ownership-record"
+POLICY_DIRECTORY_RELATIVE = Path(".enginery")
 INSTALL_ROOT_RELATIVE = Path(".enginery") / "installed"
 LOCKFILE_RELATIVE = Path(".enginery") / "capabilities.lock.json"
 
@@ -392,11 +397,26 @@ def plan_init(
     updated: OwnershipRecord | None = record
     if policy.action == "create":
         base = record or OwnershipRecord(project=str(project), files=())
+        policy_directory = project / POLICY_DIRECTORY_RELATIVE
+        if not os.path.lexists(policy_directory):
+            files.insert(
+                0,
+                FileAction(
+                    policy_directory,
+                    DIRECTORY_ROLE,
+                    "tracked",
+                    "create",
+                    "",
+                    "directory created by setup; removed by uninstall only while it is empty",
+                    b"",
+                ),
+            )
+            base = base.with_file(OwnedFile(str(policy_directory), "", DIRECTORY_ROLE))
         updated = base.with_file(OwnedFile(str(policy_path), digest, PROJECT_POLICY_ROLE))
         files.append(
             FileAction(
                 ownership_path,
-                "ownership-record",
+                OWNERSHIP_ROLE,
                 "private",
                 "create" if record is None else "update",
                 sha256_bytes(updated.to_bytes()),
@@ -408,7 +428,7 @@ def plan_init(
         files.append(
             FileAction(
                 ownership_path,
-                "ownership-record",
+                OWNERSHIP_ROLE,
                 "private",
                 "unchanged",
                 sha256_bytes(record.to_bytes()),
@@ -458,11 +478,19 @@ def apply_plan(plan: SetupPlan) -> tuple[str, ...]:
         for item in plan.files:
             if item.tracking != "tracked" or item.action != "create":
                 continue
-            created.append(
-                create_exclusive(
-                    plan.project, PROJECT_POLICY_RELATIVE, item.payload, what="the project policy"
+            if item.role == DIRECTORY_ROLE:
+                create_directory(
+                    plan.project, POLICY_DIRECTORY_RELATIVE, what="the policy directory"
                 )
-            )
+            else:
+                created.append(
+                    create_exclusive(
+                        plan.project,
+                        PROJECT_POLICY_RELATIVE,
+                        item.payload,
+                        what="the project policy",
+                    )
+                )
             performed.append(str(item.path))
     except BaseException:
         for path in created:
@@ -487,8 +515,12 @@ def apply_plan(plan: SetupPlan) -> tuple[str, ...]:
 
 
 __all__ = [
+    "DIRECTORY_ROLE",
     "INSTALL_ROOT_RELATIVE",
     "LOCKFILE_RELATIVE",
+    "OWNERSHIP_ROLE",
+    "POLICY_DIRECTORY_RELATIVE",
+    "PROJECT_POLICY_ROLE",
     "CapabilityHold",
     "FileAction",
     "ProjectConfiguration",
