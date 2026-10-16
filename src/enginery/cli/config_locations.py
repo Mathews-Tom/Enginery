@@ -105,10 +105,12 @@ def read_project_layer(project: Path) -> LayerDocument | None:
 
 
 def read_user_layer(env: Mapping[str, str] | None = None) -> LayerDocument | None:
-    """The private user layer, absent when the file does not exist, strict when it does."""
+    """Read user preferences, following symlinks; refuse dangling or non-regular targets."""
     path = user_config_path(env)
-    if not path.exists():
+    if not os.path.lexists(path):
         return None
+    if not path.is_file():
+        raise ConfigError("must resolve to a regular file", file=str(path), key="<document>")
     try:
         raw = path.read_bytes()
     except OSError as error:

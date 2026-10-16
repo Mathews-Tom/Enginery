@@ -298,6 +298,13 @@ def parse_layer_document(
             key="schema_version",
             allowed=(str(LAYER_SCHEMA_VERSION),),
         )
+    if layer is SelectionLayer.PROJECT and "executables" in data:
+        raise ConfigError(
+            "repository content must not choose host programs; set executables in user "
+            "preferences or run flags instead",
+            file=source,
+            key="executables",
+        )
     if reject_credentials:
         _scan_credentials(data, path="", source=source)
 

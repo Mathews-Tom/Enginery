@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.layered_config import (
@@ -526,11 +527,20 @@ def compile_effective_config(
     assert isinstance(mode, str)
     runner = _runner(mode, value_of, winner_of)
 
-    executable_override = value_of("harness_executable")
-
     def executable_for(harness: str) -> str:
-        if isinstance(executable_override, str):
-            return executable_override
+        executable_document = next(
+            (
+                document
+                for document in documents
+                if "harness_executable" in document.values
+                and document.values.get("harness", harness) == harness
+            ),
+            None,
+        )
+        if executable_document is not None:
+            executable = executable_document.values["harness_executable"]
+            assert isinstance(executable, str)
+            return executable
         try:
             return factory.provider_executables[harness]
         except KeyError as error:
@@ -615,9 +625,21 @@ def compile_effective_config(
         strict_chain,
     )
     record("runner_mode", mode, mode_winner.layer.value, _chain(documents, "runner_mode"))
-    for name in ("runner_image", "docker_context"):
-        generic(name)
-    generic("model_access", fallback=MODEL_ACCESS_NONE)
+    for name in ("runner_image", "docker_context", "model_access"):
+        if mode == "trusted-local":
+            chain = tuple(
+                ChainEntry(
+                    layer=entry.layer,
+                    value=entry.value,
+                    source=entry.source,
+                    source_digest=entry.source_digest,
+                    note="shadowed by the higher-precedence trusted-local runner mode",
+                )
+                for entry in _chain(documents, name)
+            )
+            record(name, MODEL_ACCESS_NONE if name == "model_access" else None, UNSET, chain)
+        else:
+            generic(name, fallback=MODEL_ACCESS_NONE if name == "model_access" else None)
     generic("validation_commands")
     for name in (
         "required_checks",
@@ -630,9 +652,10 @@ def compile_effective_config(
         "github_executable",
     ):
         generic(name)
-    chain = _chain(documents, "harness_executable")
-    if chain:
-        record("harness_executable", chain[0].value, chain[0].layer, chain)
+    chain = _chain(documents, "harness_executable", ineligible=ineligible)
+    eligible = next((entry for entry in chain if entry.note is None), None)
+    if eligible is not None:
+        record("harness_executable", eligible.value, eligible.layer, chain)
     else:
         record(
             "harness_executable",
@@ -646,6 +669,7 @@ def compile_effective_config(
                     source_digest=None if factory.digest is None else str(factory.digest),
                     note=f"default executable of harness {harness}",
                 ),
+                *chain,
             ),
         )
     protected_chain = _chain(documents, "protected_paths")
@@ -688,10 +712,16 @@ def _runner(
         for name, key, present in (
             ("runner_image", "runner.image", image is not None),
             ("docker_context", "runner.docker_context", context is not None),
-            ("model_access", "runner.model_access", access != MODEL_ACCESS_NONE),
+            ("model_access", "runner.model_access", value_of("model_access") is not None),
         ):
-            if present:
-                document = winner_of(name)
+            document = winner_of(name)
+            mode_document = winner_of("runner_mode")
+            if (
+                present
+                and document is not None
+                and mode_document is not None
+                and PRECEDENCE.index(document.layer) <= PRECEDENCE.index(mode_document.layer)
+            ):
                 raise ConfigError(
                     "applies only to the isolated-oci trust mode, but the run resolves "
                     "trusted-local; remove it or choose --runner isolated-oci",
@@ -750,7 +780,8 @@ def _enforce_constraints(
                     value=_freeze(value),
                 )
             )
-            _check_constraint(document, name, value, fields)
+            if name not in {"allowed_harnesses", "allowed_models", "allowed_efforts"}:
+                _check_constraint(document, name, value, fields)
     return tuple(applied)
 
 
@@ -770,6 +801,16 @@ def _violation(
 def _check_constraint(
     document: LayerDocument, name: str, value: Value, fields: Mapping[str, CompiledField]
 ) -> None:
+    if name in {"allowed_harnesses", "allowed_models", "allowed_efforts"}:
+        field = {
+            "allowed_harnesses": "harness",
+            "allowed_models": "model",
+            "allowed_efforts": "effort",
+        }[name]
+        subject = fields[field]
+        assert isinstance(value, list)
+        if subject.value not in value:
+            raise _violation(document, name, subject, subject.value, f"one of {value!r}")
     if name == "allowed_runner_modes":
         subject = fields["runner_mode"]
         assert isinstance(value, list)
@@ -798,6 +839,30 @@ def _check_constraint(
             raise _violation(document, name, subject, subject.value, f"at most {value}")
 
 
+def enforce_snapshot_constraints(config: EffectiveConfig) -> None:
+    """Reapply the recorded hard policy to a snapshot's effective field values."""
+    fields = {field.name: field for field in config.fields}
+    for constraint in config.constraints:
+        if constraint.name in {"allowed_models", "allowed_efforts"}:
+            layer_harness = next(
+                (
+                    entry.value
+                    for entry in fields["harness"].chain
+                    if entry.layer == constraint.layer
+                ),
+                fields["harness"].value,
+            )
+            if layer_harness != fields["harness"].value:
+                continue
+        document = LayerDocument(
+            layer=SelectionLayer(constraint.layer),
+            source=constraint.source,
+            digest=None,
+        )
+        value = _thaw(constraint.value)
+        _check_constraint(document, constraint.name, cast(Value, value), fields)
+
+
 __all__ = [
     "MERGED",
     "UNSET",
@@ -809,4 +874,5 @@ __all__ = [
     "HostProbe",
     "SourceRecord",
     "compile_effective_config",
+    "enforce_snapshot_constraints",
 ]

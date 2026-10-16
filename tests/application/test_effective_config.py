@@ -220,7 +220,38 @@ def test_isolated_runs_need_validation_commands_from_a_layer_above_the_factory()
 
 def test_isolation_only_settings_are_refused_under_trusted_local() -> None:
     with pytest.raises(ConfigError, match="applies only to the isolated-oci"):
-        _compile(user='[runner]\nmodel_access = "relay"\n')
+        _compile(run={"model_access": "relay"})
+
+
+def test_trusted_local_run_shadows_lower_isolated_configuration() -> None:
+    isolated = (
+        '[runner]\nmode = "isolated-oci"\nimage = "sha256:' + "a" * 64 + '"\n'
+        'docker_context = "private"\nmodel_access = "relay"\n'
+    )
+    compiled = _compile(project=isolated, user=isolated)
+    assert not compiled.runner.isolated_mode
+    for name in ("runner_image", "docker_context", "model_access"):
+        field = compiled.config.field(name)
+        assert field.winner == UNSET
+        assert all(entry.note is not None for entry in field.chain)
+
+
+def test_another_harness_executable_is_ineligible() -> None:
+    config = _compile(
+        user='[execution]\nharness = "claude-code"\n[executables]\nharness = "/private/claude"\n',
+        run={"harness": "omp"},
+    ).config
+    assert config.value("harness_executable") == "omp"
+    assert any(
+        entry.layer == "user" and entry.note for entry in config.field("harness_executable").chain
+    )
+
+
+def test_project_executables_are_refused_with_source_and_key() -> None:
+    with pytest.raises(ConfigError) as refused:
+        _doc(SelectionLayer.PROJECT, '[executables]\nharness = "/tmp/hostile"\n')
+    assert refused.value.file == "project.toml"
+    assert refused.value.key == "executables"
 
 
 def test_the_snapshot_round_trips_and_its_digest_names_every_source() -> None:
