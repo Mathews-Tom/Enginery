@@ -427,8 +427,9 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     github.serve(updated_at="2026-10-17T00:00:00Z")
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
     assert code == 5
-    assert f"--run-id {original['run_id']}" in held["holds"][0]["resolve"]
-    assert "--node-id implement" in held["holds"][0]["resolve"]
+    assert held["holds"][0]["resolve"].startswith(
+        f"enginery factory drain --stop --project {shlex.quote(str(project))}; "
+    )
     assert "run.status=" in held["holds"][0]["detail"]
     assert f"runtime_node[{original['run_id']}:implement].status=" in held["holds"][0]["detail"]
     assert f"node_leases[{original['run_id']}:implement].expires_at=" in held["holds"][0]["detail"]
@@ -605,7 +606,7 @@ def test_status_preserves_service_hold_diagnostics_and_matching_repairs(
         == {
             "restore": (
                 f"{doctor}; restore the run's bound configuration; "
-                f"enginery factory run {shlex.quote(original['issue'])} "
+                f"enginery factory resume {shlex.quote(original['run_id'])} "
                 f"--project {shlex.quote(str(project))}"
             ),
             "message": f"{doctor}; {hold['message']}",
@@ -716,6 +717,34 @@ def test_status_never_opens_the_migrating_ledger(
     monkeypatch.setattr(LedgerService, "open", unexpected_open)
     code, report = invoke(capsys, project, "status", original["run_id"])
     assert code == 0 and report["run_id"] == original["run_id"]
+
+
+@pytest.mark.parametrize("single_run", (False, True))
+def test_status_discloses_only_new_wal_sidecars(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    single_run: bool,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    path = Path(original["database"])
+    with LedgerService.open(path) as ledger:
+        assert ledger.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
+    existing = {sidecar for sidecar in sidecars if sidecar.exists()}
+    content = path.read_bytes()
+    arguments = ("status", original["run_id"]) if single_run else ("status",)
+    code, report = invoke(capsys, project, *arguments)
+    assert code == 0
+    assert path.with_name(path.name + "-shm").exists()
+    assert report["local_writes"] == [
+        str(sidecar) for sidecar in sidecars if sidecar not in existing and sidecar.exists()
+    ]
+    assert report["local_writes"]
+    assert path.read_bytes() == content
+    code, repeated = invoke(capsys, project, *arguments)
+    assert code == 0 and repeated["local_writes"] == []
+    assert path.read_bytes() == content
 
 
 def test_base_branch_cannot_be_interpreted_as_a_git_option(
@@ -953,9 +982,11 @@ def test_medium_risk_wait_names_approve_and_reject(
         assert argv[argv.index("--database") + 1] == report["database"]
 
 
+@pytest.mark.parametrize("repair", ("service repair --exact", None))
 def test_failed_implementation_without_wait_reports_service_failure(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],
+    repair: str | None,
 ) -> None:
     project, _ = bound_project
     _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
@@ -975,7 +1006,7 @@ def test_failed_implementation_without_wait_reports_service_failure(
                             "status": "failed",
                             "attempt_id": "implement-0",
                             "message": "Implementation exceeded its time limit",
-                            "repair": "service repair --exact",
+                            **({"repair": repair} if repair is not None else {}),
                         },
                     ),
                 ),
@@ -987,7 +1018,13 @@ def test_failed_implementation_without_wait_reports_service_failure(
     assert code == 5
     assert "next_decision" not in report
     assert report["holds"][0]["message"] == "Implementation exceeded its time limit"
-    assert report["holds"][0]["resolve"] == "service repair --exact"
+    assert report["holds"][0]["resolve"] == (
+        repair
+        or (
+            f"enginery factory resume {shlex.quote(original['run_id'])} "
+            f"--project {shlex.quote(str(project))}"
+        )
+    )
 
 
 @pytest.mark.parametrize(

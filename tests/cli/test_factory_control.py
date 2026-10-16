@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import signal
 import sys
 import time
@@ -44,6 +45,30 @@ def dispatch(
     code, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 0 and run["worker"]["pid"] > 0
     return project, run
+
+
+def test_changed_snapshot_repairs_execute_with_live_implementation(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, run = dispatch(bound_project, capsys)
+    _, github = bound_project
+    try:
+        github.serve(updated_at="2026-10-17T00:00:00Z")
+        code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+        assert code == 5
+        commands = held["holds"][0]["resolve"].split("; ")
+        assert commands[0].startswith("enginery factory drain --stop ")
+        assert all("--node-id implement" not in command for command in commands)
+        assert all("--node-id qualify" not in command for command in commands)
+        for command in commands:
+            capsys.readouterr()
+            assert main(shlex.split(command)[1:]) == 0
+            capsys.readouterr()
+        _, old = invoke(capsys, project, "status", run["run_id"])
+        assert old["superseded_by"] is not None
+    finally:
+        invoke(capsys, project, "drain", "--stop")
 
 
 def test_collect_paused_project_reports_factory_pause_repair(

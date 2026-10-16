@@ -100,12 +100,16 @@ def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
             ledger = LedgerService(connection)
             runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
             request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+            live_node_ids = {
+                worker.node_id for worker in live_workers(ledger) if worker.run_id == run_id
+            }
             for node in ledger.list_projections(aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE):
                 node_id = node.aggregate_id.removeprefix(f"{run_id}:")
                 if (
                     node.aggregate_id.startswith(f"{run_id}:")
                     and node.state.get("status") in {"queued", "running"}
                     and request.manifest.nodes[NodeId(node_id)].actor_type is ActorType.AGENT
+                    and node_id not in live_node_ids
                 ):
                     repairs.append(
                         f"enginery stage1 cancel "
@@ -643,12 +647,10 @@ def _enrich(
                 supplied_repair = supplied_repair or details.get("repair") or details.get("resolve")
             if not supplied_repair:
                 hold["resolve"] = (
-                    f"enginery factory run "
-                    f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
+                    f"enginery factory resume {shlex.quote(run_id)} "
                     f"--project {shlex.quote(str(project))}"
                 )
-    issue = request.work_snapshot.work_item.external_reference
-    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, issue)]
+    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, run_id)]
     node_index = {str(node["node_id"]): node for node in node_states}
     graph = [
         {
@@ -758,7 +760,7 @@ def _enrich(
     return report
 
 
-def _hold_with_repair(project: Path, hold: Mapping[str, object], issue: str) -> dict[str, object]:
+def _hold_with_repair(project: Path, hold: Mapping[str, object], run_id: str) -> dict[str, object]:
     details = hold.get("details")
     repair = hold.get("resolve") or hold.get("repair")
     if not repair and isinstance(details, Mapping):
@@ -784,7 +786,7 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object], issue: str) -> 
             repair = f"{doctor}; {message}"
             if message == "restore the run's bound configuration":
                 repair += (
-                    f"; enginery factory run {shlex.quote(issue)} "
+                    f"; enginery factory resume {shlex.quote(run_id)} "
                     f"--project {shlex.quote(str(project))}"
                 )
     return {**hold, "resolve": repair}
@@ -800,13 +802,18 @@ def _superseded_by(project: Path, request: Stage1RunRequest, run_id: str) -> str
     return binding.run_id if binding is not None and binding.run_id != run_id else None
 
 
+def _created_sidecars(sidecars: list[Path], existing: set[Path]) -> list[str]:
+    return [str(path) for path in sidecars if path not in existing and path.exists()]
+
 def status(project: Path, run_id: str | None = None) -> dict[str, object]:
     path = database_path(project)
+    sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
+    existing_sidecars = {sidecar for sidecar in sidecars if sidecar.exists()}
     connection = read_ledger(project)
     if connection is None:
         if run_id is not None:
             raise InvalidInputError(f"unknown factory run: {run_id}")
-        return {"database": str(path), "runs": [], "paused": False}
+        return {"database": str(path), "runs": [], "paused": False, "local_writes": []}
     ledger = LedgerService(connection)
     try:
         if run_id is None:
@@ -818,6 +825,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                 "database": str(path),
                 "paused": read_control_state(ledger).paused,
                 "runs": [status(project, identity) for identity in identities],
+                "local_writes": _created_sidecars(sidecars, existing_sidecars),
             }
         runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
         try:
@@ -845,6 +853,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                     ),
                 }
             )
+        report["local_writes"] = _created_sidecars(sidecars, existing_sidecars)
         return report
     finally:
         ledger.close()
