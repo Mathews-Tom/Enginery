@@ -56,6 +56,12 @@ records authenticated, expiring action-specific authority; publication uses
 `pull_request.open`. Feedback and Stage 1 review reports record findings only.
 See [terminal decisions](docs/operations.md#authenticated-terminal-decisions)
 for registration, node-scoped waits, supersession and trusted-local limitations.
+GitHub readiness uses fully paginated, exact-head API evidence retained in the
+private artifact store and bound into the terminal evidence bundle; incomplete
+collections hold rather than accepting a prefix. Review/status reuse that evidence.
+Optional `factory status RUN --github-view` uses user-configured `gh-axi` only
+for escaped, read-only display, never evidence or approval. See
+[GitHub evidence and display](docs/operations.md#authoritative-github-evidence-and-optional-display).
 
 Factory `resume`, `pause`, and `drain` are shipped: reconcile and continue the
 same durable run, pause project-ledger dispatch, or drain supervised workers.

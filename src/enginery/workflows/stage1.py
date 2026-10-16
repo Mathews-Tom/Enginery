@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from collections.abc import Callable, Mapping
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
+from typing import NoReturn
 
 from enginery.application.behavioral_checks import BehavioralCheck, checks_from_state
 from enginery.application.branch_publication import (
@@ -49,6 +51,7 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
     OperationTimeoutError,
     StaleEvidenceError,
+    TransientProviderFailureError,
 )
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
@@ -90,6 +93,7 @@ from enginery.engine.task_repository import out_path_for, resolve_commit, verifi
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
+from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
@@ -1677,11 +1681,25 @@ class Stage1RunService:
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        evidence = self._require_pull_requests().evidence(pull_request_number)
+        try:
+            evidence = self._require_pull_requests().evidence(pull_request_number)
+        except (TransientProviderFailureError, StaleEvidenceError) as error:
+            self._github_evidence_hold(request, "wait_for_ci", epoch.epoch, now, error)
         outcome = evaluate_pull_request(evidence, requirements)
+        extra: dict[str, object] = {
+            "pull_request_outcome": outcome.value,
+            "head_revision": expected_head_revision,
+            "github_evidence": evidence.to_state(),
+            "github_evidence_digest": str(evidence.digest),
+            "reason": None,
+            "repair": None,
+            "message": None,
+        }
         if outcome is PullRequestOutcome.WAITING:
+            self._github_pending(request, "wait_for_ci", epoch.epoch, now, extra)
             return outcome
-        extra: dict[str, object] = {"pull_request_outcome": outcome.value}
+        if outcome is PullRequestOutcome.BLOCKED:
+            extra.update(self._github_blocked_repair(request))
         failed_checks = _failed_checks(evidence, request.required_checks)
         if failed_checks:
             extra["failed_checks"] = list(failed_checks)
@@ -1694,6 +1712,74 @@ class Stage1RunService:
             extra=extra,
         )
         return outcome
+
+    @staticmethod
+    def _github_blocked_repair(request: Stage1RunRequest) -> dict[str, object]:
+        repair = (
+            f"enginery factory review {request.run.id} --project "
+            f"{shlex.quote(str(request.repository_path))}; repair the failing current-head "
+            "checks/statuses or current requested review changes, then run "
+            f"enginery factory resume {request.run.id} --project "
+            f"{shlex.quote(str(request.repository_path))}"
+        )
+        return {
+            "reason": "github_evidence_blocked",
+            "repair": repair,
+            "message": "complete current-head GitHub evidence blocks readiness",
+        }
+
+    def _github_pending(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        evidence: Mapping[str, object],
+    ) -> None:
+        repair = (
+            "wait for all required current-head checks/statuses and configured reviews, then "
+            f"run enginery factory resume {request.run.id} --project "
+            f"{shlex.quote(str(request.repository_path))}"
+        )
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_waiting",
+            repair=repair,
+            message="current-head GitHub evidence is complete but not ready",
+            extra=evidence,
+        )
+
+    def _github_evidence_hold(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        error: Exception,
+    ) -> NoReturn:
+        repair = (
+            "repair the incomplete GitHub API collection (page cap, changing total_count, "
+            "or malformed records); never accept a prefix. Retry "
+            f"enginery factory resume {request.run.id} --project "
+            f"{shlex.quote(str(request.repository_path))}"
+        )
+        message = f"github_evidence_incomplete: {error}; repair: {repair}"
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_incomplete",
+            repair=repair,
+            message=message,
+        )
+        raise HumanActionRequiredError(
+            message,
+            details={"reason": "github_evidence_incomplete", "repair": repair},
+        ) from error
 
     def verify_merge_ready(
         self,
@@ -1826,19 +1912,47 @@ class Stage1RunService:
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        result = Stage1VerificationExecutor(
-            work_ledger=self._require_work_ledger(),
-            pull_requests=self._require_pull_requests(),
-        ).verify(request=verification_request, observed_at=now)
-        if result.outcome is PullRequestOutcome.WAITING:
-            return result
+        try:
+            result = Stage1VerificationExecutor(
+                work_ledger=self._require_work_ledger(),
+                pull_requests=self._require_pull_requests(),
+            ).verify(request=verification_request, observed_at=now)
+        except (TransientProviderFailureError, StaleEvidenceError) as error:
+            self._github_evidence_hold(request, "verify", epoch.epoch, now, error)
         extra: dict[str, object] = {
             "pull_request_outcome": result.outcome.value,
             "head_revision": verification_request.requirements.expected_head_revision,
             "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+            "reason": None,
+            "repair": None,
+            "message": None,
         }
+        if result.github_evidence:
+            extra["github_evidence"] = result.github_evidence[-1].to_state()
+            extra["github_evidence_observations"] = [
+                observation.to_state() for observation in result.github_evidence
+            ]
+            extra["github_evidence_digest"] = str(
+                Digest.of_json(
+                    extra["github_evidence_observations"],
+                )
+            )
+        if result.outcome is PullRequestOutcome.WAITING:
+            self._github_pending(request, "verify", epoch.epoch, now, extra)
+            return result
+        if result.outcome is PullRequestOutcome.BLOCKED:
+            extra.update(self._github_blocked_repair(request))
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
+            store = self.ledger.artifact_store or ArtifactStore(
+                request.execution_configuration.artifact_root,
+            )
+            extra["evidence_artifact_digest"] = str(
+                store.publish_bytes(
+                    json.dumps(result.evidence.to_state(), sort_keys=True).encode(),
+                    media_type="application/json",
+                )
+            )
         if not request.execution_selection.legacy:
             extra["execution_selection_digest"] = str(request.execution_selection.digest)
         self.runtime.complete_node(

@@ -9,7 +9,7 @@ import pytest
 
 from enginery.adapters import review_presenters as presenters
 from enginery.adapters import subprocess_output
-from enginery.adapters.review_presenters import LavishPresenter, PresenterError
+from enginery.adapters.review_presenters import GhAxiView, LavishPresenter, PresenterError
 from enginery.evidence.review_rendering import PACKET_MARKER, REVIEW_CSP
 
 
@@ -232,3 +232,26 @@ def test_missing_executable_has_explicit_redacted_error(
     with pytest.raises(PresenterError, match="could not be started") as failure:
         presenters._execute(("missing", "poll"), {})
     assert "sensitive" not in str(failure.value)
+
+
+def test_gh_views_are_read_only_display_and_do_not_inherit_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
+        calls.append(argv)
+        assert "GH_TOKEN" not in environment
+        return '{"decision":"approve"}\x1b[31m\u202e'
+
+    monkeypatch.setenv("GH_TOKEN", "secret")
+    monkeypatch.setattr(presenters, "_execute", execute)
+    view = GhAxiView("/operator/gh-axi")
+    assert "\x1b" not in view.pr_view("owner/repo", 7)
+    assert "\u202e" not in view.checks("owner/repo", 7)
+    assert calls == [
+        ("/operator/gh-axi", "pr", "view", "7", "--repo", "owner/repo"),
+        ("/operator/gh-axi", "pr", "checks", "7", "--repo", "owner/repo"),
+    ]
+    with pytest.raises(PresenterError):
+        view.pr_view("--evil/repo", 7)

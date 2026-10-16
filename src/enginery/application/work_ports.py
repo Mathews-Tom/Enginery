@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
@@ -479,6 +479,30 @@ class PullRequestEvidence:
                 for digest in proof.raw_artifact_digests
             )
         )
+
+    def to_state(self) -> dict[str, object]:
+        """Retain the exact normalized observation alongside its original API bodies."""
+        return {
+            "pull_request": asdict(self.pull_request),
+            "reviews": [asdict(review) for review in self.reviews],
+            "checks": [asdict(check) for check in self.checks],
+            "statuses": [asdict(status) for status in self.statuses],
+            "mergeable": self.mergeable,
+            "combined_status": self.combined_status,
+            "complete": self.complete,
+            "raw_artifact_digests": [str(digest) for digest in self.raw_artifact_digests],
+            "completeness": None if self.completeness is None else [
+                {
+                    **asdict(proof),
+                    "raw_artifact_digests": [str(digest) for digest in proof.raw_artifact_digests],
+                }
+                for proof in self.completeness
+            ],
+        }
+
+    @property
+    def digest(self) -> Digest:
+        return Digest.of_json(self.to_state())
 
 
 class PullRequestPort(Protocol):

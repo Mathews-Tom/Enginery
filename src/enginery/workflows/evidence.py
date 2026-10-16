@@ -1,6 +1,7 @@
 """Source-bound terminal evidence for a Stage 1 merge-ready claim."""
 
 from __future__ import annotations
+import json
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +24,7 @@ class Stage1EvidenceBundle:
     outcome: PullRequestOutcome
     observed_at: datetime
     execution_selection_digest: Digest | None = None
+    github_evidence_json: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if any(
@@ -40,9 +42,12 @@ class Stage1EvidenceBundle:
             )
         if self.observed_at.tzinfo is None:
             raise InvalidInputError("Stage 1 evidence observation must be timezone-aware")
+        for document in self.github_evidence_json:
+            value: object = json.loads(document)
+            if not isinstance(value, dict) or value.get("complete") is not True:
+                raise InvalidInputError("terminal GitHub evidence requires complete retained observations")
 
-    @property
-    def digest(self) -> Digest:
+    def _subject_fields(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "base_revision": self.base_revision,
             "head_revision": self.head_revision,
@@ -56,7 +61,23 @@ class Stage1EvidenceBundle:
             # Evidence produced under a bound execution selection is superseded by any
             # change to it. Evidence from a run that predates selections keeps its digest.
             payload["execution_selection_digest"] = str(self.execution_selection_digest)
-        return Digest.of_json(payload)
+        if self.github_evidence_json:
+            payload["github_evidence"] = [
+                json.loads(document) for document in self.github_evidence_json
+            ]
+        return payload
+
+    @property
+    def digest(self) -> Digest:
+        return Digest.of_json(self._subject_fields())
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            **self._subject_fields(),
+            "observed_at": self.observed_at.isoformat(),
+            "evidence_digest": str(self.digest),
+            "github_evidence_json": list(self.github_evidence_json),
+        }
 
     def current_for(
         self,

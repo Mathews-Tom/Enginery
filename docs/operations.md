@@ -1021,6 +1021,44 @@ DEL and bidi controls. The HTML has a restrictive CSP with scripts and remote
 loads disabled. Worker HTML is never served as executable packet content.
 Packets and captures stay local; nothing is uploaded or shared.
 
+### Authoritative GitHub evidence and optional display
+
+The active Stage 1 `evidence()` call collects GitHub API evidence through `gh`
+and retains the full raw responses in the existing private `ArtifactStore`.
+The terminal `Stage1EvidenceBundle` binds their content digests and collection
+completeness to the exact PR head; review and status display that recorded
+evidence, including CI, rather than performing a second evidence collection.
+The PR is read before and after collection: changed head/base or PR metadata
+cannot be accepted as one consistent observation.
+
+Reviews, check runs, combined commit status and per-context status history are
+fully paginated, not truncated to the first page. Each collection records its
+page count, explicit page cap, record count, available API total and raw-response
+digests. The adapter accepts a page cap from 2 through 100 (default 100), and
+must establish completion before reaching it. Reaching the cap, inconsistent
+totals, malformed responses or conflicting status observations holds the run;
+even an apparently terminal page at the cap is not accepted as complete.
+Failures on later pages count: a failed check or current failed/error commit
+status blocks readiness, and a current `CHANGES_REQUESTED` review blocks it.
+Earlier approvals or a successful prefix cannot override those observations.
+
+For an optional, non-authoritative GitHub display, set the executable in private
+user preferences, never project policy:
+
+```toml
+[executables]
+gh_axi = "/absolute/path/to/gh-axi"
+```
+
+Then run `enginery factory status RUN --project PROJECT --github-view`.
+This display runs only read-only `pr view` and `pr checks`; its outputs are
+escaped and never become evidence, completeness proofs or approval. If no
+executable is configured, status reports an optional-display note, not an
+evidence failure. The authoritative evidence remains the active Stage 1
+collection and its retained bundle, regardless of whether this display is used.
+No remote preview, share or export is involved.
+
+### Review feedback and optional local presentation
 Queue terminal repair feedback with
 `enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
 The digest must match the current packet. Feedback enters the existing bounded
@@ -1172,6 +1210,9 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
 | `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
 | `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
+| `github_evidence_incomplete` | Read the exact collection failure detail. Fix incomplete/malformed API collection or inconsistent totals; if the configured page cap is below 100, increase it to a valid cap, or reduce the excess collection when already at the maximum. Then retry the same run with `enginery factory resume RUN --project PROJECT`. Never accept a collected prefix or start a replacement run to bypass completeness. |
+| `github_evidence_blocked` | Inspect the recorded CI/status/review detail in `enginery factory review RUN --project PROJECT`. Repair the failing check or current commit status, or resolve the current `CHANGES_REQUESTED` review with the reviewer, then run `enginery factory resume RUN --project PROJECT`. A display command, earlier approval or successful prefix cannot clear the block. |
+| `github_evidence_waiting` | Wait for the required current-head checks/statuses and configured reviews, then run `enginery factory resume RUN --project PROJECT` to recollect complete evidence; pending or skipped checks do not count as success. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
 | Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
 | `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |

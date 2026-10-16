@@ -1,12 +1,14 @@
 """Double-read verification for a Stage 1 merge-ready claim."""
 
 from __future__ import annotations
+import json
 
 from dataclasses import dataclass
 from datetime import datetime
 
 from enginery.application.work_ports import (
     LifecycleProjection,
+    PullRequestEvidence,
     PullRequestPort,
     WorkLedgerPort,
     WorkLedgerSnapshot,
@@ -60,6 +62,7 @@ class Stage1VerificationResult:
 
     outcome: PullRequestOutcome
     evidence: Stage1EvidenceBundle | None
+    github_evidence: tuple[PullRequestEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if self.outcome is PullRequestOutcome.MERGE_READY and self.evidence is None:
@@ -82,20 +85,24 @@ class Stage1VerificationExecutor:
         first_issue = self.work_ledger.fetch(request.external_reference)
         first_evidence = self.pull_requests.evidence(request.pull_request_number)
         if not _matches_request(request, first_issue, first_evidence.pull_request.base_revision):
-            return Stage1VerificationResult(PullRequestOutcome.SUPERSEDED, None)
+            return Stage1VerificationResult(PullRequestOutcome.SUPERSEDED, None, (first_evidence,))
         first_outcome = evaluate_pull_request(first_evidence, request.requirements)
         if first_outcome is not PullRequestOutcome.MERGE_READY:
-            return Stage1VerificationResult(first_outcome, None)
+            return Stage1VerificationResult(first_outcome, None, (first_evidence,))
 
         terminal_issue = self.work_ledger.fetch(request.external_reference)
         terminal_evidence = self.pull_requests.evidence(request.pull_request_number)
         if not _matches_request(
             request, terminal_issue, terminal_evidence.pull_request.base_revision
         ):
-            return Stage1VerificationResult(PullRequestOutcome.SUPERSEDED, None)
+            return Stage1VerificationResult(
+                PullRequestOutcome.SUPERSEDED, None, (first_evidence, terminal_evidence),
+            )
         terminal_outcome = evaluate_pull_request(terminal_evidence, request.requirements)
         if terminal_outcome is not PullRequestOutcome.MERGE_READY:
-            return Stage1VerificationResult(terminal_outcome, None)
+            return Stage1VerificationResult(
+                terminal_outcome, None, (first_evidence, terminal_evidence),
+            )
 
         bundle = Stage1EvidenceBundle(
             issue_revision=request.issue_revision,
@@ -107,6 +114,11 @@ class Stage1VerificationExecutor:
             outcome=PullRequestOutcome.MERGE_READY,
             observed_at=observed_at,
             execution_selection_digest=request.execution_selection_digest,
+            github_evidence_json=tuple(
+                json.dumps(evidence.to_state(), sort_keys=True, separators=(",", ":"))
+                for evidence in (first_evidence, terminal_evidence)
+                if evidence.completeness is not None
+            ),
         )
         published = self.work_ledger.publish_lifecycle(
             LifecycleProjection(
@@ -119,7 +131,9 @@ class Stage1VerificationExecutor:
         )
         if published is not ReconciliationResult.FOUND_MATCHING:
             raise ExternalConflictError("terminal lifecycle projection was not reconciled")
-        return Stage1VerificationResult(PullRequestOutcome.MERGE_READY, bundle)
+        return Stage1VerificationResult(
+            PullRequestOutcome.MERGE_READY, bundle, (first_evidence, terminal_evidence),
+        )
 
 
 def _matches_request(

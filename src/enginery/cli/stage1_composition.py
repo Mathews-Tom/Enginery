@@ -139,18 +139,36 @@ def host_probe_for(
     )
 
 
+def _github_config(configuration: Stage1ExecutionConfiguration) -> GitHubAdapterConfig:
+    return GitHubAdapterConfig(
+        repository=configuration.github_repository,
+        credential_reference=configuration.github_credential_reference,
+        executable=configuration.github_executable,
+    )
+
+
 def read_only_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
     """A service for diagnostics and decisions that must never create harness state."""
     wiring = isolated_wiring(request, create_directories=False)
+    pull_requests = GitHubPullRequests(
+        _github_config(request.execution_configuration),
+        artifact_store=ledger.artifact_store or ArtifactStore(
+            request.execution_configuration.artifact_root, create_directories=False,
+        ),
+    )
     if isinstance(wiring, DriftedRunnerWiring):
-        return Stage1RunService(runtime=runtime, ledger=ledger, runner_admission=wiring.admission)
+        return Stage1RunService(
+            runtime=runtime, ledger=ledger, runner_admission=wiring.admission,
+            pull_requests=pull_requests,
+        )
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
         host_probe=host_probe_for(request.execution_configuration, wiring),
         runner_admission=None if wiring is None else wiring.admission,
+        pull_requests=pull_requests,
     )
 
 
@@ -159,12 +177,10 @@ def advancing_service(
 ) -> Stage1RunService:
     configuration = request.execution_configuration
     wiring = isolated_wiring(request, create_directories=True)
-    github = GitHubAdapterConfig(
-        repository=configuration.github_repository,
-        credential_reference=configuration.github_credential_reference,
-        executable=configuration.github_executable,
+    github = _github_config(configuration)
+    pull_requests = GitHubPullRequests(
+        github, artifact_store=ledger.artifact_store or ArtifactStore(configuration.artifact_root),
     )
-    pull_requests = GitHubPullRequests(github)
     # A run bound to a profile that is no longer current gets no harness and no validation
     # runner: it can only report its hold, and nothing can launch under other restrictions.
     harness = (

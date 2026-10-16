@@ -402,7 +402,7 @@ def advance_run(
         while True:
             before = _node_digest(nodes(ledger, runtime, run_id=run_id))
             report = _enrich(project, ledger, watch_document(ledger, runtime, progression), run_id)
-            if _finished(report):
+            if _finished(report) and not _retryable_github_hold(report):
                 return report
             previous = progression
             if _superseded_by(project, run.request, run_id) is not None:
@@ -476,6 +476,16 @@ def _node_digest(node_states: list[dict[str, object]]) -> tuple[tuple[str, ...],
         )
         for node in node_states
         for worker in (node.get("worker"),)
+    )
+
+
+def _retryable_github_hold(report: Mapping[str, object]) -> bool:
+    holds = report.get("holds")
+    return (
+        report.get("next_action") in {"wait_for_ci", "verify"}
+        and isinstance(holds, list) and len(holds) == 1
+        and isinstance(holds[0], Mapping)
+        and holds[0].get("reason") in {"github_evidence_incomplete", "github_evidence_waiting"}
     )
 
 
@@ -587,6 +597,14 @@ def _enrich(
             ),
             **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
         }
+    if hold is None and report["next_action"] in {"wait_for_ci", "verify"}:
+        ci_observation = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:{report['next_action']}",
+        )
+        state = {} if ci_observation is None else ci_observation.state
+        if state.get("reason") in {"github_evidence_incomplete", "github_evidence_waiting"}:
+            hold = {key: state[key] for key in ("reason", "message", "repair") if key in state}
     node_states = cast(list[dict[str, object]], report["nodes"])
     awaiting = next((node for node in node_states if node["status"] == "awaiting_human"), None)
     prefix = (

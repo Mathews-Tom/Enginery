@@ -461,6 +461,21 @@ class CoordinatorRuntime:
             extra=details,
         )
 
+    def record_evidence_hold(
+        self, *, run_id: str, node_id: str, epoch: int, now: datetime,
+        reason: str, repair: str, message: str,
+        extra: Mapping[str, object] | None = None,
+    ) -> None:
+        """Keep a read-only collection retryable without releasing any dependent effect."""
+        request = self._request_for(run_id, node_id)
+        if _runtime_state(self._ledger, request).get("status") != "queued":
+            raise ExternalConflictError("only a queued observation can record an evidence hold")
+        self._set_status(
+            request=request, status="queued", event_type="runtime_node.evidence_held",
+            epoch=epoch, now=now,
+            extra={**(extra or {}), "reason": reason, "repair": repair, "message": message},
+        )
+
     def resolve_human_wait(
         self,
         *,

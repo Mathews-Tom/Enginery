@@ -200,13 +200,22 @@ if method == "GET" and pr is not None:
     if parts[3:] == ["pulls", str(pr["number"])]:
         answer(pr)
     if parts[3:] == ["pulls", str(pr["number"]), "reviews"]:
-        review = {"user": {"login": "independent-reviewer"}, "state": "APPROVED",
-                  "commit_id": pr["head"]["sha"]}
+        review = {"id": 1, "user": {"login": "independent-reviewer"}, "state": "APPROVED",
+                  "commit_id": pr["head"]["sha"], "submitted_at": "2026-10-17T00:00:00Z"}
         answer([review] if page == 1 else [])
     if parts[3:] == ["commits", pr["head"]["sha"], "check-runs"]:
-        check = {"name": "CI", "status": "completed", "conclusion": "success",
-                 "head_sha": pr["head"]["sha"]}
-        answer({"check_runs": [check] if page == 1 else []})
+        check = {"id": 1, "name": "CI", "status": "completed", "conclusion": "success",
+                 "head_sha": pr["head"]["sha"], "started_at": "2026-10-17T00:00:00Z",
+                 "completed_at": "2026-10-17T00:01:00Z"}
+        answer({"total_count": 1, "check_runs": [check] if page == 1 else []})
+    if parts[3:] in (["commits", pr["head"]["sha"], "status"],
+                     ["commits", pr["head"]["sha"], "statuses"]):
+        status = {"id": 1, "context": "legacy-CI", "state": "success",
+                  "sha": pr["head"]["sha"], "created_at": "2026-10-17T00:00:00Z",
+                  "updated_at": "2026-10-17T00:01:00Z"}
+        statuses = [status] if page == 1 else []
+        answer({"sha": pr["head"]["sha"], "state": "success", "total_count": 1,
+                "statuses": statuses} if parts[-1] == "status" else statuses)
 sys.stderr.write("unsupported stand-in endpoint: " + method + " " + endpoint + "\n")
 raise SystemExit(1)
 """

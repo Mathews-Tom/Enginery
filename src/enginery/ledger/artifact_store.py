@@ -28,12 +28,13 @@ _TEXT_MEDIA_TYPE_PREFIXES = ("text/", "application/json")
 class ArtifactStore:
     """A filesystem-backed, content-addressed store rooted at one directory."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, create_directories: bool = True) -> None:
         self._root = root
         self._objects_dir = root / "objects"
         self._tmp_dir = root / "tmp"
-        self._objects_dir.mkdir(parents=True, exist_ok=True)
-        self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        if create_directories:
+            self._objects_dir.mkdir(parents=True, exist_ok=True)
+            self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def root(self) -> Path:
@@ -61,6 +62,7 @@ class ArtifactStore:
             return digest
 
         final_path.parent.mkdir(parents=True, exist_ok=True)
+        self._tmp_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=self._tmp_dir, prefix="artifact-")
         tmp_path = Path(tmp_name)
         try:
