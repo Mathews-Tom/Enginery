@@ -21,6 +21,7 @@ from enginery.cli.factory_collect import (
     index_path,
     intake_lock,
     intake_prerequisites,
+    ledger_sidecars,
     paused_hold,
     read_document,
     read_index,
@@ -802,13 +803,14 @@ def _superseded_by(project: Path, request: Stage1RunRequest, run_id: str) -> str
     return binding.run_id if binding is not None and binding.run_id != run_id else None
 
 
-def _created_sidecars(sidecars: list[Path], existing: set[Path]) -> list[str]:
-    return [str(path) for path in sidecars if path not in existing and path.exists()]
+def _created_sidecars(project: Path, existing: frozenset[Path]) -> list[str]:
+    created = ledger_sidecars(project) - existing
+    return [str(path) for path in sorted(created, key=lambda path: not path.name.endswith("-wal"))]
+
 
 def status(project: Path, run_id: str | None = None) -> dict[str, object]:
     path = database_path(project)
-    sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
-    existing_sidecars = {sidecar for sidecar in sidecars if sidecar.exists()}
+    existing_sidecars = ledger_sidecars(project)
     connection = read_ledger(project)
     if connection is None:
         if run_id is not None:
@@ -825,7 +827,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                 "database": str(path),
                 "paused": read_control_state(ledger).paused,
                 "runs": [status(project, identity) for identity in identities],
-                "local_writes": _created_sidecars(sidecars, existing_sidecars),
+                "local_writes": _created_sidecars(project, existing_sidecars),
             }
         runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
         try:
@@ -853,7 +855,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                     ),
                 }
             )
-        report["local_writes"] = _created_sidecars(sidecars, existing_sidecars)
+        report["local_writes"] = _created_sidecars(project, existing_sidecars)
         return report
     finally:
         ledger.close()

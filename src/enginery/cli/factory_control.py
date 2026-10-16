@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from enginery.adapters.oci.engine import OciEngine
-from enginery.cli.factory_collect import database_path, require_state_path
+from enginery.cli.factory_collect import (
+    database_path,
+    ensure_private_directory,
+    require_state_path,
+)
 from enginery.cli.factory_run import workspace_documents
 from enginery.cli.operator import _drain_exit_code, _stop_workers
 from enginery.domain.ids import RunId
@@ -26,7 +30,7 @@ def _now() -> datetime:
 def _open_ledger(project: Path) -> LedgerService:
     path = database_path(project)
     require_state_path(path, what="project ledger")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_private_directory(path.parent, what="project ledger")
     require_state_path(path, what="project ledger")
     return LedgerService.open(path)
 
