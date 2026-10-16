@@ -62,6 +62,27 @@ def test_an_invalid_document_is_refused_naming_file_key_and_allowed_values(
         assert allowed in error.allowed
 
 
+def test_configuration_error_escapes_controls_in_quoted_toml_key() -> None:
+    with pytest.raises(ConfigError) as refused:
+        _project('schema_version = 1\n"untrusted\\n\\u001bkey" = 1\n')
+
+    message = str(refused.value)
+    assert "\n" not in message
+    assert "\x1b" not in message
+    assert r"untrusted\n\x1bkey" in message
+    assert refused.value.key == "untrusted\n\x1bkey"
+
+
+def test_configuration_error_escapes_controls_in_all_message_components() -> None:
+    error = ConfigError(
+        "invalid\nvalue", file="/repo/\x1bpolicy.toml", key="key", allowed=("value\x7f",)
+    )
+
+    message = str(error)
+    assert not any(ord(character) < 32 or ord(character) == 127 for character in message)
+    assert message == r"/repo/\x1bpolicy.toml: key: invalid\nvalue (allowed: value\x7f)"
+
+
 @pytest.mark.parametrize(
     "text",
     [

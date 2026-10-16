@@ -359,7 +359,10 @@ def test_start_refuses_configuration_source_drift(
         path.write_text(path.read_text() + "\n# changed\n")
     assert _start(tmp_path, tmp_path / "request.json") == INVALID
     error = capsys.readouterr().err
-    assert str(path) in error and "configuration changed since" in error
+    assert (
+        f"configuration changed since the request was built: {path}; "
+        "rebuild it with `enginery stage1 build-request`"
+    ) in error
 
 
 def test_restart_accepts_already_started_request_without_snapshot(tmp_path: Path) -> None:
@@ -431,13 +434,14 @@ def test_trusted_local_allows_explicit_model_access_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: str
 ) -> None:
     repository, base = _repository(tmp_path)
-    extra = ["--runner", "trusted-local"]
+    text = '[runner]\nmode = "trusted-local"\nmodel_access = "none"\n'
+    extra: list[str] = []
     if layer == "run":
-        extra += ["--model-access", "none"]
+        extra = ["--runner", "trusted-local", "--model-access", "none"]
     elif layer == "project":
-        _write_project(repository, '[runner]\nmodel_access = "none"\n')
+        _write_project(repository, text)
     else:
-        _write_user(monkeypatch, tmp_path, 'schema_version = 1\n[runner]\nmodel_access = "none"\n')
+        _write_user(monkeypatch, tmp_path, f"schema_version = 1\n{text}")
     code, output = _build(tmp_path, repository, base, *extra)
     assert code == 0
     assert stage1_request_from_state(json.loads(output.read_text())).runner.model_access == "none"
@@ -488,7 +492,12 @@ def test_start_refuses_changed_user_configuration_location(
     assert code == 0
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "second"))
     assert _start(tmp_path, output) == INVALID
-    assert str(tmp_path / "second" / "enginery" / "user.toml") in capsys.readouterr().err
+    current = tmp_path / "second" / "enginery" / "user.toml"
+    previous = tmp_path / "first" / "enginery" / "user.toml"
+    assert (
+        f"configuration changed since the request was built: {current} "
+        f"(previously {previous}); rebuild it with `enginery stage1 build-request`"
+    ) in capsys.readouterr().err
 
 
 def test_start_accepts_unchanged_absent_configuration(

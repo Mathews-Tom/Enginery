@@ -23,7 +23,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.workflows.stage1 import Stage1RunRequest
 
 EFFECTIVE_CONFIG_KEY = "effective_config"
-_REBUILD = "rebuild the request with the current `enginery stage1 build-request`"
+_REBUILD = "rebuild it with `enginery stage1 build-request`"
 
 
 def request_values(request: Stage1RunRequest) -> dict[str, object]:
@@ -127,8 +127,7 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
             continue
         if (None if current is None else str(current)) != source.digest:
             raise InvalidInputError(
-                f"configuration changed since the request was built: {source.source}; "
-                "rebuild with enginery stage1 build-request",
+                f"configuration changed since the request was built: {source.source}; {_REBUILD}",
                 details={"file": source.source},
             )
     return config

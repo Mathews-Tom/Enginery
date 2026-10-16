@@ -112,7 +112,10 @@ or edits it), **workflow** (a packaged, versioned profile: `standard` or
 `careful`, chosen with `profile = "..."` in project or user policy or with
 `--profile`) and **factory** (packaged defaults). The highest layer that specifies a
 field wins; protected paths are additive across layers and never remove a built-in
-protected path. A file that is absent is simply not a layer. A file that is present
+protected path. A file that is absent is simply not a layer. The request snapshot also
+records which layer files were absent and where the user preferences file is looked up,
+so creating either file, or starting under a different `XDG_CONFIG_HOME`/`HOME` than the
+build, makes `stage1 start` refuse the request until it is rebuilt. A file that is present
 is validated strictly: an unknown key or section, a wrong type, an unsupported
 `schema_version`, an unknown workflow profile, or, in project policy only, a
 credential-shaped key or value is refused with exit code 2 and a message that names

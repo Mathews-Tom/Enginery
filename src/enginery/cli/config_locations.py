@@ -25,15 +25,15 @@ from enginery.domain.execution_selection import SelectionLayer
 
 PROJECT_POLICY_RELATIVE = Path(".enginery") / "project.toml"
 USER_CONFIG_RELATIVE = Path("enginery") / "user.toml"
-_MAX_CONFIG_BYTES = 1024 * 1024
+MAX_CONFIG_BYTES = 1024 * 1024
 
 
 def _read_config_bytes(path: Path) -> bytes:
     with path.open("rb") as stream:
-        raw = stream.read(_MAX_CONFIG_BYTES + 1)
-    if len(raw) > _MAX_CONFIG_BYTES:
+        raw = stream.read(MAX_CONFIG_BYTES + 1)
+    if len(raw) > MAX_CONFIG_BYTES:
         raise ConfigError(
-            f"exceeds the {_MAX_CONFIG_BYTES}-byte limit", file=str(path), key="<document>"
+            f"exceeds the {MAX_CONFIG_BYTES}-byte limit", file=str(path), key="<document>"
         )
     return raw
 
@@ -164,6 +164,7 @@ def read_user_layer(env: Mapping[str, str] | None = None) -> LayerDocument | Non
 
 
 __all__ = [
+    "MAX_CONFIG_BYTES",
     "PROJECT_POLICY_RELATIVE",
     "config_home",
     "private_state_directory",
@@ -171,6 +172,7 @@ __all__ = [
     "project_policy_path",
     "read_project_layer",
     "read_user_layer",
+    "record_absent_sources",
     "require_plain_path",
     "state_home",
     "user_config_path",

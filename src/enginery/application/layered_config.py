@@ -54,9 +54,12 @@ class ConfigError(InvalidInputError):
         allowed: tuple[str, ...] = (),
         details: Mapping[str, object] | None = None,
     ) -> None:
+        def escape_controls(value: str) -> str:
+            return re.sub(r"[\x00-\x1f\x7f]", lambda match: repr(match[0])[1:-1], value)
+
         suffix = f" (allowed: {', '.join(allowed)})" if allowed else ""
         super().__init__(
-            f"{file}: {key}: {message}{suffix}",
+            escape_controls(f"{file}: {key}: {message}{suffix}"),
             details={
                 "file": file,
                 "key": key,
