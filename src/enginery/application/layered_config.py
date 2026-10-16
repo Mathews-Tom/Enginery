@@ -163,7 +163,7 @@ class LayerDocument:
     provider_executables: Mapping[str, str] = field(default_factory=dict)
 
 
-class _Problem(Exception):
+class _ProblemError(Exception):
     def __init__(self, message: str, allowed: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.allowed = allowed
@@ -175,17 +175,17 @@ def _is_int(value: object) -> bool:
 
 def _text(value: object) -> str:
     if not isinstance(value, str):
-        raise _Problem(f"must be a string, got {type(value).__name__}")
+        raise _ProblemError(f"must be a string, got {type(value).__name__}")
     if not value.strip():
-        raise _Problem("must be non-blank")
+        raise _ProblemError("must be non-blank")
     return value
 
 
 def _strings(value: object, *, non_empty: bool) -> list[str]:
     if not isinstance(value, list):
-        raise _Problem(f"must be a list of strings, got {type(value).__name__}")
+        raise _ProblemError(f"must be a list of strings, got {type(value).__name__}")
     if non_empty and not value:
-        raise _Problem("must not be empty")
+        raise _ProblemError("must not be empty")
     return [_text(item) for item in value]
 
 
@@ -195,25 +195,25 @@ def _coerce(spec: _Spec, value: object) -> Value:
         return _text(value)
     if kind == "bool":
         if not isinstance(value, bool):
-            raise _Problem(f"must be true or false, got {type(value).__name__}")
+            raise _ProblemError(f"must be true or false, got {type(value).__name__}")
         return value
     if kind in {"int>=0", "int>0"}:
         if not _is_int(value):
-            raise _Problem(f"must be an integer, got {type(value).__name__}")
+            raise _ProblemError(f"must be an integer, got {type(value).__name__}")
         assert isinstance(value, int)
         floor = 0 if kind == "int>=0" else 1
         if value < floor:
-            raise _Problem(f"must be at least {floor}")
+            raise _ProblemError(f"must be at least {floor}")
         return value
     if kind == "enum":
         text = _text(value)
         if text not in spec.allowed:
-            raise _Problem(f"unsupported value {text!r}", spec.allowed)
+            raise _ProblemError(f"unsupported value {text!r}", spec.allowed)
         return text
     if kind == "reference":
         text = _text(value)
         if _REFERENCE.fullmatch(text) is None:
-            raise _Problem(
+            raise _ProblemError(
                 "must be an opaque credential reference name (letters, digits, '.', '_', ':', '-')"
             )
         return text
@@ -225,16 +225,16 @@ def _coerce(spec: _Spec, value: object) -> Value:
         items = _strings(value, non_empty=True)
         for item in items:
             if item not in spec.allowed:
-                raise _Problem(f"unsupported value {item!r}", spec.allowed)
+                raise _ProblemError(f"unsupported value {item!r}", spec.allowed)
         return items
     if kind == "commands":
         commands = _strings(value, non_empty=True)
         try:
             split = [shlex.split(command) for command in commands]
         except ValueError as error:
-            raise _Problem(f"is not a shell-splittable command: {error}") from error
+            raise _ProblemError(f"is not a shell-splittable command: {error}") from error
         if any(not command for command in split):
-            raise _Problem("must not contain an empty command")
+            raise _ProblemError("must not contain an empty command")
         return split
     raise AssertionError(f"unhandled kind {kind}")  # pragma: no cover
 
@@ -280,7 +280,9 @@ def parse_layer_document(
     except UnicodeDecodeError as error:
         raise ConfigError("the file is not valid UTF-8", file=source, key="<document>") from error
     except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"the file is not valid TOML: {error}", file=source, key="<document>")
+        raise ConfigError(
+            f"the file is not valid TOML: {error}", file=source, key="<document>"
+        ) from error
     version = data.get("schema_version")
     if version is None:
         raise ConfigError(
@@ -341,7 +343,7 @@ def parse_layer_document(
             raw_value = table[spec.key]
         try:
             coerced = _coerce(spec, raw_value)
-        except _Problem as problem:
+        except _ProblemError as problem:
             raise ConfigError(
                 str(problem), file=source, key=spec.path, allowed=problem.allowed
             ) from problem
@@ -355,7 +357,7 @@ def parse_layer_document(
         for key, item in table.items():
             try:
                 provider_executables[key] = _text(item)
-            except _Problem as problem:
+            except _ProblemError as problem:
                 raise ConfigError(
                     str(problem), file=source, key=f"{_PROVIDER_EXECUTABLES}.{key}"
                 ) from problem
@@ -376,10 +378,12 @@ def run_layer(values: Mapping[str, object]) -> LayerDocument:
     for name, raw_value in values.items():
         spec = by_name.get(name)
         if spec is None:
-            raise ConfigError("unknown run override", file=RUN_SOURCE, key=name, allowed=FIELD_NAMES)
+            raise ConfigError(
+                "unknown run override", file=RUN_SOURCE, key=name, allowed=FIELD_NAMES
+            )
         try:
             checked[name] = _coerce(spec, raw_value)
-        except _Problem as problem:
+        except _ProblemError as problem:
             raise ConfigError(
                 str(problem), file=RUN_SOURCE, key=name, allowed=problem.allowed
             ) from problem

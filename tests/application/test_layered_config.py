@@ -68,7 +68,10 @@ def test_an_invalid_document_is_refused_naming_file_key_and_allowed_values(
         'schema_version = 1\n[credentials]\ngithub_token = "x"\n',
         'schema_version = 1\n[credentials]\ngithub = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"\n',
         'schema_version = 1\n[executables]\ngithub = "-----BEGIN RSA PRIVATE KEY-----"\n',
-        'schema_version = 1\n[implementation]\nevidence_requirements = ["sk-abcdefghijklmnopqrstuvwx"]\n',
+        (
+            "schema_version = 1\n[implementation]\n"
+            'evidence_requirements = ["sk-abcdefghijklmnopqrstuvwx"]\n'
+        ),
     ],
 )
 def test_project_policy_refuses_credential_shaped_keys_and_values(text: str) -> None:

@@ -33,7 +33,9 @@ def _write_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str) -> P
 
 def _build(tmp_path: Path, repository: Path, base: str, *extra: str) -> tuple[int, Path]:
     output = tmp_path / "request.json"
-    argv = _minimal_argv(tmp_path=tmp_path, repository=repository, base_revision=base, output=output)
+    argv = _minimal_argv(
+        tmp_path=tmp_path, repository=repository, base_revision=base, output=output
+    )
     runner_index = argv.index("--runner")
     del argv[runner_index : runner_index + 2]  # the project or an override supplies the mode
     return main([*argv, *extra]), output
@@ -95,7 +97,7 @@ def test_a_missing_user_file_is_not_an_error_and_a_malformed_one_is(
     assert _build(tmp_path, repository, base)[0] == 0
 
     path = _write_user(monkeypatch, tmp_path, "schema_version = 1\n[execution]\nplanet = 1\n")
-    exit_code, output = _build(tmp_path, repository, base)
+    exit_code, _output = _build(tmp_path, repository, base)
     error = capsys.readouterr().err
 
     assert exit_code == INVALID
@@ -235,7 +237,10 @@ def test_start_refuses_a_request_edited_after_it_was_built(
 
     # A field edited with its digest recomputed: the bound snapshot disagrees with it.
     request = stage1_request_from_state(document)
-    forged = {**replace(request, repair_limit=9).initial_state(), "effective_config": document["effective_config"]}
+    forged = {
+        **replace(request, repair_limit=9).initial_state(),
+        "effective_config": document["effective_config"],
+    }
     output.write_text(json.dumps(forged), encoding="utf-8")
     capsys.readouterr()
     assert _start(tmp_path, output) == INVALID

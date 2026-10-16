@@ -240,9 +240,12 @@ class EffectiveConfig:
             )
         fields = tuple(_field_from_state(name, raw_fields[name]) for name in COMPILED_FIELD_NAMES)
         constraints = tuple(
-            _constraint_from_state(item) for item in _sequence(mapping["constraints"], "constraints")
+            _constraint_from_state(item)
+            for item in _sequence(mapping["constraints"], "constraints")
         )
-        sources = tuple(_source_from_state(item) for item in _sequence(mapping["sources"], "sources"))
+        sources = tuple(
+            _source_from_state(item) for item in _sequence(mapping["sources"], "sources")
+        )
         return cls(
             fields=fields,
             constraints=constraints,
@@ -344,7 +347,9 @@ def _source_from_state(state: object) -> SourceRecord:
     )
 
 
-def _entry(document: LayerDocument, name: str, value: Value, *, note: str | None = None) -> ChainEntry:
+def _entry(
+    document: LayerDocument, name: str, value: Value, *, note: str | None = None
+) -> ChainEntry:
     pinned = False
     if name in {"model", "effort"}:
         pinned = bool(document.values.get(f"{name}_pinned", False))
@@ -359,8 +364,10 @@ def _entry(document: LayerDocument, name: str, value: Value, *, note: str | None
 
 
 def _chain(
-    documents: Sequence[LayerDocument], name: str, *, ineligible: Callable[[LayerDocument], bool]
-    | None = None
+    documents: Sequence[LayerDocument],
+    name: str,
+    *,
+    ineligible: Callable[[LayerDocument], bool] | None = None,
 ) -> tuple[ChainEntry, ...]:
     return tuple(
         _entry(
@@ -507,14 +514,15 @@ def compile_effective_config(
         return None if winner is None else winner.values[name]
 
     # Runner first: it decides whether the host binary may be probed.
-    mode = value_of("runner_mode")
-    if mode is None:
+    mode_winner = winner_of("runner_mode")
+    if mode_winner is None:
         raise ConfigError(
             "no layer declares a trust mode; pass --runner or set it in project policy",
             file="<all layers>",
             key="runner.mode",
             allowed=RUNNER_MODES,
         )
+    mode = mode_winner.values["runner_mode"]
     assert isinstance(mode, str)
     runner = _runner(mode, value_of, winner_of)
 
@@ -538,7 +546,9 @@ def compile_effective_config(
     )
     controls = [_controls(document) for document in documents]
     try:
-        selection = resolve_execution_selection(controls, catalog=catalog, probe_host=resolver_probe)
+        selection = resolve_execution_selection(
+            controls, catalog=catalog, probe_host=resolver_probe
+        )
     except ConfigError:
         raise
     except InvalidInputError as error:
@@ -587,7 +597,10 @@ def compile_effective_config(
             tuple(
                 sorted(
                     chain,
-                    key=lambda item: (item.note is not None, PRECEDENCE.index(SelectionLayer(item.layer))),
+                    key=lambda item: (
+                        item.note is not None,
+                        PRECEDENCE.index(SelectionLayer(item.layer)),
+                    ),
                 )
             ),
         )
@@ -601,7 +614,7 @@ def compile_effective_config(
         UNSET if strict_winner is None else strict_winner.layer,
         strict_chain,
     )
-    record("runner_mode", mode, winner_of("runner_mode").layer.value, _chain(documents, "runner_mode"))  # type: ignore[union-attr]
+    record("runner_mode", mode, mode_winner.layer.value, _chain(documents, "runner_mode"))
     for name in ("runner_image", "docker_context"):
         generic(name)
     generic("model_access", fallback=MODEL_ACCESS_NONE)
@@ -761,7 +774,9 @@ def _check_constraint(
         subject = fields["runner_mode"]
         assert isinstance(value, list)
         if subject.value not in value:
-            raise _violation(document, name, subject, subject.value, f"one of {', '.join(map(str, value))}")
+            raise _violation(
+                document, name, subject, subject.value, f"one of {', '.join(map(str, value))}"
+            )
     elif name == "allowed_capabilities":
         subject = fields["permitted_capabilities"]
         assert isinstance(value, list) and isinstance(subject.value, tuple)
@@ -775,12 +790,12 @@ def _check_constraint(
                 f"permitted capabilities must be among {', '.join(map(str, value)) or 'none'}",
             )
     elif name in {"max_time_budget_seconds", "max_repair_limit"}:
-        subject = fields["time_budget_seconds" if name == "max_time_budget_seconds" else "repair_limit"]
+        subject = fields[
+            "time_budget_seconds" if name == "max_time_budget_seconds" else "repair_limit"
+        ]
         assert isinstance(value, int) and isinstance(subject.value, int)
         if subject.value > value:
             raise _violation(document, name, subject, subject.value, f"at most {value}")
-
-
 
 
 __all__ = [

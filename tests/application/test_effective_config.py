@@ -40,8 +40,8 @@ def _compile(
 
 
 def test_every_field_resolves_run_over_project_over_user_over_workflow_over_factory() -> None:
-    project = '[validation]\nrepair_limit = 4\n[implementation]\ntime_budget_seconds = 400\n'
-    user = '[validation]\nrepair_limit = 3\n[implementation]\ntime_budget_seconds = 300\n'
+    project = "[validation]\nrepair_limit = 4\n[implementation]\ntime_budget_seconds = 400\n"
+    user = "[validation]\nrepair_limit = 3\n[implementation]\ntime_budget_seconds = 300\n"
     profile = 'profile = "careful"\n'  # workflow layer: repair_limit 2, time budget 3600
 
     run_wins = _compile(
@@ -84,11 +84,15 @@ def test_every_field_resolves_run_over_project_over_user_over_workflow_over_fact
 
 
 def test_harness_model_and_effort_follow_precedence_through_the_selection_resolver() -> None:
-    project = '[execution]\nharness = "omp"\nmodel = "anthropic/claude-sonnet-4-5"\neffort = "low"\n'
+    project = (
+        '[execution]\nharness = "omp"\nmodel = "anthropic/claude-sonnet-4-5"\neffort = "low"\n'
+    )
     user = '[execution]\nmodel = "openai/gpt-5"\neffort = "high"\n'
 
     from_project = _compile(project=project, user=user).config
-    from_run = _compile(project=project, user=user, run={"effort": "medium", "effort_pinned": True}).config
+    from_run = _compile(
+        project=project, user=user, run={"effort": "medium", "effort_pinned": True}
+    ).config
 
     assert from_project.value("model") == "anthropic/claude-sonnet-4-5"
     assert from_project.field("model").winner == "project"
@@ -157,9 +161,9 @@ def test_a_project_hard_constraint_refuses_a_run_layer_override_before_any_reque
     assert refused.value.file == "project.toml"
     assert refused.value.key == "constraints.max_repair_limit"
     assert "run layer" in str(refused.value)
-    assert _compile(project=model + project, run={"repair_limit": 2}).config.value(
-        "repair_limit"
-    ) == 2
+    assert (
+        _compile(project=model + project, run={"repair_limit": 2}).config.value("repair_limit") == 2
+    )
 
 
 def test_a_lower_layer_cannot_loosen_a_hard_constraint() -> None:
@@ -220,9 +224,9 @@ def test_isolation_only_settings_are_refused_under_trusted_local() -> None:
 
 
 def test_the_snapshot_round_trips_and_its_digest_names_every_source() -> None:
-    first = _compile(project='[validation]\nrepair_limit = 4\n').config
-    again = _compile(project='[validation]\nrepair_limit = 4\n').config
-    changed = _compile(project='[validation]\nrepair_limit = 3\n').config
+    first = _compile(project="[validation]\nrepair_limit = 4\n").config
+    again = _compile(project="[validation]\nrepair_limit = 4\n").config
+    changed = _compile(project="[validation]\nrepair_limit = 3\n").config
 
     assert EffectiveConfig.from_state(first.to_state()) == first
     assert first.digest == again.digest
