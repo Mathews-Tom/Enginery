@@ -164,7 +164,7 @@ def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> Unins
                     path,
                     owned.role,
                     "keep",
-                    "holds files setup did not create, so the directory is kept",
+                    "holds files uninstall will not remove, so the directory is kept",
                 )
             )
         else:

@@ -133,7 +133,7 @@ def offline_holds(configuration: ProjectConfiguration) -> list[dict[str, str]]:
             {
                 "prerequisite": f"harness-{compiled.selection.harness}",
                 "detail": configuration.harness_probe_failure,
-                "resolve": harness_probe_resolution(configuration),
+                "resolve": harness_probe_resolution(compiled),
             }
         )
     versions = locked_versions(configuration.project)
