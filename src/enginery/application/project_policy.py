@@ -31,7 +31,6 @@ class SetupChoices:
     model: str | None = None
     effort: str | None = None
     runner_image: str | None = None
-    docker_context: str | None = None
     model_access: str | None = None
     validation_commands: tuple[str, ...] = ()
     required_checks: tuple[str, ...] = ()
@@ -66,7 +65,6 @@ def render_project_policy(choices: SetupChoices) -> bytes:
     runner = [f"mode = {_string(choices.runner_mode)}"]
     for key, value in (
         ("image", choices.runner_image),
-        ("docker_context", choices.docker_context),
         ("model_access", choices.model_access),
     ):
         if value is not None:

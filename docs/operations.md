@@ -631,15 +631,16 @@ uv run enginery factory doctor
 
 `--runner` is required: the trust mode is never defaulted. Other choices are
 `--profile`, `--harness`, `--model`, `--effort` (configured defaults, not pins),
-`--runner-image`, `--docker-context`, `--model-access`, repeatable
+`--runner-image`, `--model-access`, repeatable
 `--validation-command`, `--required-check`, `--protected-path`, and `--capability
 NAME[@VERSION]`; `--project PATH` defaults to the current directory. `--json` emits
 canonical JSON.
 
 When a model or effort is configured under `trusted-local`, the preview runs only the
 selected harness's read-only version probe (the same probe `build-request` runs).
-An unprobeable or unsupported harness is a hold (exit 5); applying that plan writes
-nothing until the harness is resolved.
+An out-of-range or unsupported harness version is a hold (exit 5); applying that
+plan writes nothing until the harness is resolved. A missing or unidentifiable
+harness is not checked by init; `factory doctor` reports it.
 
 Without `--apply`, `init` previews and writes nothing. The preview lists every file it
 would create (path, `tracked` or `private`, and the action `create`, `update`,
@@ -678,12 +679,16 @@ the container engine and the pinned image through the existing runner admission 
 for `isolated-oci`; and each permitted capability that is not installed. Every missing
 item is a hold that names the exact prerequisite and the command that resolves it, and
 the exit code is 5 while any hold remains. A project that declares no trust mode is
-itself a hold: an existing policy must be edited to add `[runner]` with
-`mode = "trusted-local"` or `mode = "isolated-oci"` (or declare that choice in the
-user preferences). With no policy, the hold names `enginery factory init`.
+itself a hold: set `mode = "trusted-local"` or `mode = "isolated-oci"` in the
+existing policy's `[runner]` table (add the table if absent), or declare that choice
+in the user preferences. With no policy, the hold names `enginery factory init`.
 A malformed policy or user file is invalid input (exit 2), not a hold. Engine holds
 name engine installation, startup, qualification or context selection; image holds
 name image rebuilding and status; relay holds name relay setup.
+Container checks disclose the Docker context in use (or `default context`) and list
+the container-engine contact in `network_access`. Select a machine-local context
+with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or with
+`enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
 
 ## Running a Stage 1 workflow
 

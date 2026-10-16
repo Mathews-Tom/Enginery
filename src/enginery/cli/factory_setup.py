@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from enginery.application.effective_config import CompiledConfig, compile_effective_config
+from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.layered_config import (
     ConfigError,
     LayerDocument,
@@ -175,6 +176,7 @@ class SetupPlan:
     configuration_digest: str
     ownership_record: OwnershipRecord | None
     harness_probe_failure: str | None = None
+    harness_probe_resolve: str | None = None
 
     @property
     def conflicts(self) -> tuple[FileAction, ...]:
@@ -200,7 +202,13 @@ class SetupPlan:
             "effective_configuration_digest": self.configuration_digest,
             "holds": [item.to_json() for item in self.installs]
             + (
-                [{"name": "harness", "detail": self.harness_probe_failure}]
+                [
+                    {
+                        "name": "harness",
+                        "detail": self.harness_probe_failure,
+                        "resolve": self.harness_probe_resolve,
+                    }
+                ]
                 if self.harness_probe_failure is not None
                 else []
             ),
@@ -279,6 +287,17 @@ def _auth_requirements(compiled: CompiledConfig) -> tuple[Mapping[str, str], ...
             }
         )
     return tuple(requirements)
+
+
+def harness_probe_resolution(compiled: CompiledConfig) -> str:
+    """Resolve a native-control host hold without changing project-owned configuration."""
+    harness = compiled.selection.harness
+    expectation = load_execution_catalog().host(harness).version.expectation
+    return (
+        f"install a {harness} harness version matching {expectation}; set harness in "
+        "[executables] in $XDG_CONFIG_HOME/enginery/user.toml "
+        "(or pass --harness-executable for the run)"
+    )
 
 
 def plan_init(
@@ -396,6 +415,9 @@ def plan_init(
         configuration_digest=str(compiled.config.digest),
         ownership_record=updated,
         harness_probe_failure=harness_probe_failure,
+        harness_probe_resolve=(
+            harness_probe_resolution(compiled) if harness_probe_failure is not None else None
+        ),
     )
 
 
@@ -463,6 +485,7 @@ __all__ = [
     "SetupPlan",
     "apply_plan",
     "capability_holds",
+    "harness_probe_resolution",
     "load_project_configuration",
     "plan_init",
     "resolve_project",

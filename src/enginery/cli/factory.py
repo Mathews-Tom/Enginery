@@ -64,7 +64,6 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     init.add_argument("--model", default=None, help="A configured default model (not a pin).")
     init.add_argument("--effort", default=None, help="A configured default effort (not a pin).")
     init.add_argument("--runner-image", default=None, metavar="sha256:ID")
-    init.add_argument("--docker-context", default=None)
     init.add_argument("--model-access", default=None, choices=MODEL_ACCESS_MODES)
     init.add_argument(
         "--validation-command", dest="validation_commands", action="append", default=[]
@@ -137,6 +136,7 @@ def _plan_lines(plan: SetupPlan, *, apply: bool, performed: tuple[str, ...]) -> 
         lines.extend(f"    run: {command}" for command in hold.commands)
     if plan.harness_probe_failure is not None:
         lines.append(f"  HOLD harness: {plan.harness_probe_failure}")
+        lines.append(f"    resolve: {plan.harness_probe_resolve}")
     lines.append("  network access: " + ("; ".join(plan.network) if plan.network else "none"))
     for requirement in plan.auth:
         lines.append(
@@ -146,6 +146,8 @@ def _plan_lines(plan: SetupPlan, *, apply: bool, performed: tuple[str, ...]) -> 
     lines.append(f"  effective configuration {plan.configuration_digest}")
     if plan.conflicts:
         lines.append("conflict: a user-owned file would be overwritten; nothing was written")
+    elif apply and plan.harness_probe_failure is not None:
+        lines.append("apply refused until the harness hold is resolved; nothing was written")
     elif apply and plan.harness_probe_failure is None:
         lines.append(
             "wrote: " + (", ".join(performed) if performed else "nothing (already set up)")
@@ -165,7 +167,6 @@ def _run_init(args: argparse.Namespace) -> int:
         model=args.model,
         effort=args.effort,
         runner_image=args.runner_image,
-        docker_context=args.docker_context,
         model_access=args.model_access,
         validation_commands=tuple(args.validation_commands),
         required_checks=tuple(args.required_checks),

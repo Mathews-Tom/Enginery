@@ -30,6 +30,7 @@ from enginery.cli.factory_setup import (
     INSTALL_ROOT_RELATIVE,
     LOCKFILE_RELATIVE,
     ProjectConfiguration,
+    harness_probe_resolution,
 )
 from enginery.domain.errors import EngineryError, InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_catalog import InstalledHost
@@ -218,8 +219,15 @@ def trust_mode_resolution(policy_path: Path) -> str:
 
 def _check_runner(compiled: CompiledConfig) -> Check:
     decision = OciRunnerAdmission(profile=RunnerProfile()).admit(compiled.runner)
+    context = (
+        f"Docker context {compiled.runner.docker_context!r}"
+        if compiled.runner.docker_context is not None
+        else "default context"
+    )
     if decision.hold is None:
-        return Check("container-runner", "ok", "the engine and the pinned image are admitted")
+        return Check(
+            "container-runner", "ok", f"the engine and the pinned image are admitted ({context})"
+        )
     message = decision.hold.message
     if "relay" in message:
         resolve = (
@@ -231,13 +239,15 @@ def _check_runner(compiled: CompiledConfig) -> Check:
         resolve = "enginery runner build-image, then `enginery runner status --image <id>`"
     else:
         resolve = (
-            "install, start and qualify the container engine; choose --docker-context "
-            "or set [runner] docker_context, then enginery runner status --image <id>"
+            "install, start and qualify the container engine; set docker_context in [runner] "
+            "in $XDG_CONFIG_HOME/enginery/user.toml (or use "
+            "enginery stage1 build-request --docker-context <name> for the run), "
+            "then enginery runner status --image <id>"
         )
     return Check(
         "container-runner",
         "hold",
-        decision.hold.message,
+        f"{decision.hold.message} ({context})",
         resolve,
     )
 
@@ -261,18 +271,6 @@ def capability_resolution(name: str, version: str | None) -> str:
     return (
         f"enginery capability preview {request} {sources} && "
         f"enginery capability install {request} {sources}"
-    )
-
-
-def harness_probe_resolution(configuration: ProjectConfiguration) -> str:
-    """Resolve a native-control host hold without changing project-owned configuration."""
-    assert configuration.compiled is not None
-    harness = configuration.compiled.selection.harness
-    expectation = load_execution_catalog().host(harness).version.expectation
-    return (
-        f"install a {harness} harness version matching {expectation}; set harness in "
-        "[executables] in $XDG_CONFIG_HOME/enginery/user.toml "
-        "(or pass --harness-executable for the run)"
     )
 
 
@@ -344,7 +342,7 @@ def run_doctor(
                 f"harness-{compiled.selection.harness}",
                 "hold",
                 configuration.harness_probe_failure,
-                harness_probe_resolution(configuration),
+                harness_probe_resolution(compiled),
             )
         )
     else:
@@ -357,6 +355,18 @@ def run_doctor(
         checks=tuple(checks),
         network=(
             f"`{compiled.config.text('github_executable')} auth status` may contact the GitHub API",
+            *(
+                (
+                    "container engine contact for "
+                    + (
+                        f"Docker context {compiled.runner.docker_context!r}"
+                        if compiled.runner.docker_context is not None
+                        else "default context"
+                    ),
+                )
+                if compiled.runner.isolated_mode
+                else ()
+            ),
         ),
         configuration_digest=str(compiled.config.digest),
     )

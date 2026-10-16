@@ -420,6 +420,34 @@ def test_old_harness_model_preview_and_apply_are_nonwriting_holds(
     assert plan["status"] == "hold"
     assert "native controls are unsupported" in str(plan["holds"])
     assert plan["performed"] == []
+    holds = plan["holds"]
+    assert isinstance(holds, list)
+    resolve = holds[0]["resolve"]
+    assert "install a omp harness version matching" in resolve
+    assert "[executables] in $XDG_CONFIG_HOME/enginery/user.toml" in resolve
+    assert (
+        main(
+            [
+                "factory",
+                "init",
+                "--project",
+                str(project),
+                "--runner",
+                "trusted-local",
+                "--model",
+                "openai/gpt-5.4",
+                *(["--apply"] if apply else []),
+            ]
+        )
+        == HOLD
+    )
+    text = capsys.readouterr().out
+    assert f"resolve: {resolve}" in text
+    if apply:
+        assert text.rstrip().endswith(
+            "apply refused until the harness hold is resolved; nothing was written"
+        )
+        assert "pass --apply" not in text
     assert _tree(project, *_xdg()) == before
 
 
@@ -451,3 +479,39 @@ def test_read_only_project_apply_is_a_typed_nonwriting_refusal(
         assert _tree(project, *_xdg()) == before
     finally:
         project.chmod(0o755)
+
+
+def test_init_rejects_machine_local_docker_context(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        _init(capsys, project, "--docker-context", "remote")
+    assert error.value.code == 2
+    assert "unrecognized arguments: --docker-context remote" in capsys.readouterr().err
+
+
+def test_oversized_existing_policy_is_a_typed_nonwriting_refusal(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from enginery.cli.config_locations import MAX_CONFIG_BYTES
+
+    policy = project / ".enginery" / "project.toml"
+    policy.parent.mkdir()
+    policy.write_bytes(b"#" * (MAX_CONFIG_BYTES + 1))
+    before = _tree(project, *_xdg())
+    assert (
+        main(
+            [
+                "factory",
+                "init",
+                "--project",
+                str(project),
+                "--runner",
+                "trusted-local",
+                "--apply",
+            ]
+        )
+        == INVALID
+    )
+    assert str(policy) in capsys.readouterr().err
+    assert _tree(project, *_xdg()) == before

@@ -22,6 +22,7 @@ from functools import wraps
 from pathlib import Path
 
 from enginery.capabilities.atomic import fsync_directory
+from enginery.cli.config_locations import MAX_CONFIG_BYTES
 from enginery.domain.errors import ExternalConflictError, InvalidInputError
 
 OWNERSHIP_SCHEMA_VERSION = 1
@@ -87,7 +88,14 @@ def read_regular(path: Path, *, what: str) -> bytes | None:
         raise InvalidInputError(
             f"{what} exists but is not a regular file", details={"path": str(path)}
         )
-    return path.read_bytes()
+    with path.open("rb") as stream:
+        payload = stream.read(MAX_CONFIG_BYTES + 1)
+    if len(payload) > MAX_CONFIG_BYTES:
+        raise InvalidInputError(
+            f"{what} at {path} exceeds the {MAX_CONFIG_BYTES}-byte limit",
+            details={"path": str(path)},
+        )
+    return payload
 
 
 @_typed_file_errors

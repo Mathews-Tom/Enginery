@@ -428,17 +428,100 @@ def test_existing_runner_table_resolution_does_not_add_duplicate_table(
     assert _doctor(capsys, project)[0] == 0
 
 
-def test_relay_resolution_flags_exist_on_real_parser() -> None:
-    import argparse
+def test_relay_resolution_flags_exist_on_real_parser(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shlex
 
     from enginery.cli.main import _build_parser
 
-    def child(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
-        action = next(
-            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
-        )
-        return action.choices[name]
+    class _Hold:
+        message = "model relay is not running"
+        reason = HoldReason.RUNNER_UNQUALIFIED
 
-    parser = child(child(child(_build_parser(), "runner"), "relay"), "up")
-    options = {option for action in parser._actions for option in action.option_strings}
-    assert {"--relay-image", "--upstream", "--token-file"} <= options
+    class _Decision:
+        hold = _Hold()
+
+    class _Admission:
+        def __init__(self, **_: object) -> None: ...
+
+        def admit(self, selection: object) -> _Decision:
+            return _Decision()
+
+    monkeypatch.setattr(factory_diagnostics, "OciRunnerAdmission", _Admission)
+    (project / ".enginery" / "project.toml").write_text(
+        'schema_version = 1\n[runner]\nmode = "isolated-oci"\n'
+        f'image = "sha256:{"a" * 64}"\n[validation]\ncommands = ["python3 -m unittest"]\n'
+    )
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    holds = cast(list[dict[str, str]], report["holds"])
+    resolve = next(item["resolve"] for item in holds if item["name"] == "container-runner")
+    assert "relay" in resolve
+    filled = (
+        resolve.replace("<relay image id>", "b" * 64)
+        .replace("<gateway URL>", "https://gateway.example")
+        .replace("<absolute token file>", str(project / "token"))
+    )
+    commands = filled.split(", then ")
+    assert len(commands) == 3
+    for command in commands:
+        arguments = shlex.split(command)
+        assert arguments.pop(0) == "enginery"
+        _build_parser().parse_args(arguments)
+
+
+@pytest.mark.parametrize("context", [None, "remote-builder"])
+@pytest.mark.parametrize("admitted", [False, True])
+def test_container_context_is_disclosed_and_user_preference_is_accepted(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    context: str | None,
+    admitted: bool,
+) -> None:
+    from enginery.cli.factory_setup import load_project_configuration
+
+    class _Hold:
+        message = "no qualified container engine is reachable"
+        reason = HoldReason.RUNNER_UNQUALIFIED
+
+    class _Decision:
+        hold = None if admitted else _Hold()
+
+    class _Admission:
+        def __init__(self, **_: object) -> None: ...
+
+        def admit(self, selection: object) -> _Decision:
+            return _Decision()
+
+    monkeypatch.setattr(factory_diagnostics, "OciRunnerAdmission", _Admission)
+    (project / ".enginery" / "project.toml").write_text(
+        'schema_version = 1\n[runner]\nmode = "isolated-oci"\n'
+        f'image = "sha256:{"a" * 64}"\n[validation]\ncommands = ["python3 -m unittest"]\n'
+    )
+    if context is not None:
+        user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
+        user.parent.mkdir(parents=True, exist_ok=True)
+        user.write_text(f'schema_version = 1\n[runner]\ndocker_context = "{context}"\n')
+    configuration = load_project_configuration(project)
+    assert configuration.compiled is not None
+    assert configuration.compiled.runner.docker_context == context
+    code, report = _doctor(capsys, project)
+    assert code == (0 if admitted else HOLD)
+    checks = cast(list[dict[str, str]], report["checks"])
+    runner = next(item for item in checks if item["name"] == "container-runner")
+    context_label = f"Docker context {context!r}" if context is not None else "default context"
+    assert context_label in runner["detail"]
+    network = cast(list[str], report["network_access"])
+    assert f"container engine contact for {context_label}" in network
+    if not admitted:
+        resolve = runner["resolve"]
+        assert "docker_context in [runner] in $XDG_CONFIG_HOME/enginery/user.toml" in resolve
+        assert "enginery stage1 build-request --docker-context <name>" in resolve
+        assert ".enginery/project.toml" not in resolve
+        assert "factory doctor --docker-context" not in resolve
