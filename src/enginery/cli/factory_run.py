@@ -51,6 +51,7 @@ from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
+    Stage1RunRequest,
     Stage1RunService,
     first_attempt_generation,
     stage1_request_from_state,
@@ -366,6 +367,8 @@ def advance_run(
             if _finished(report):
                 return report
             previous = progression
+            if _superseded_by(project, run.request, run_id) is not None:
+                return status(project, run_id)
             progression = service.advance(
                 RunId(run_id),
                 now=datetime.now(UTC),
@@ -396,6 +399,8 @@ def advance_run(
                 if progression.action is Stage1ProgressionAction.WAIT_FOR_CI:
                     delay = max(15.0, delay)
                 time.sleep(min(delay, remaining))
+                if _superseded_by(project, run.request, run_id) is not None:
+                    return status(project, run_id)
                 observed = service.next_action(RunId(run_id))
                 current_nodes = nodes(ledger, runtime, run_id=run_id)
                 current_digest = _node_digest(current_nodes)
@@ -646,6 +651,16 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object], issue: str) -> 
     return {**hold, "resolve": repair}
 
 
+def _superseded_by(project: Path, request: Stage1RunRequest, run_id: str) -> str | None:
+    intake = read_index(project).repositories.get(str(request.repository_id))
+    binding = (
+        None
+        if intake is None
+        else intake.issues.get(request.work_snapshot.work_item.external_reference)
+    )
+    return binding.run_id if binding is not None and binding.run_id != run_id else None
+
+
 def status(project: Path, run_id: str | None = None) -> dict[str, object]:
     path = database_path(project)
     connection = read_ledger(project)
@@ -675,13 +690,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
         report = watch_document(ledger, runtime, progression)
         report = _enrich(project, ledger, report, run_id)
         report["holds"] = [*cast(list[object], report["holds"]), *paused_hold(project)]
-        intake = read_index(project).repositories.get(str(run.request.repository_id))
-        binding = (
-            None
-            if intake is None
-            else intake.issues.get(run.request.work_snapshot.work_item.external_reference)
-        )
-        superseded_by = binding.run_id if binding is not None and binding.run_id != run_id else None
+        superseded_by = _superseded_by(project, run.request, run_id)
         report["superseded_by"] = superseded_by
         if superseded_by is not None:
             cast(list[object], report["holds"]).append(

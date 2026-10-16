@@ -2489,18 +2489,20 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ### Proposed factory commands (not shipped)
 
-`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped (see
-[Guided project setup](#guided-project-setup) and issue intake above). `enginery --help` lists exactly
+`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
+[Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
 `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `runner`, `capability`, and `factory`; `factory` provides those five
-subcommands only. `gate status` accepts `--gate G4` only, and `stage1` provides
+`workspace`, `runner`, `capability`, and `factory`. Alongside setup, `factory`
+ships `collect`, `run`, `status`, and `explain RUN` (see
+[Manual factory path](#manual-factory-path)). `gate status` accepts `--gate G4` only,
+and `stage1` provides
 `start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
 and `build-request`.
 
-The rest of a manual-first factory layer is proposed with this command family:
-`factory run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
-and `evidence`. Do not script against these names;
-they are a proposal, not a compatibility promise. The proposed boundary:
+The remaining manual-first factory controls, `resume`, `pause`, `drain`, `review`,
+`watch`, and `evidence`, are proposed and not shipped, as is scheduled collection.
+Do not script against these proposed names; they are not a compatibility promise.
+The proposed boundary:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;
   nothing is scheduled implicitly.

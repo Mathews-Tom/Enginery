@@ -303,6 +303,60 @@ def test_wait_loop_backs_off_and_stops_at_deadline_without_spinning(
     assert clock == sum(expected_sleeps)
 
 
+@pytest.mark.parametrize("idle", (False, True))
+def test_advance_stops_when_issue_binding_is_superseded(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    idle: bool,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+    finally:
+        ledger.close()
+    initial = Stage1Progression(Stage1ProgressionAction.QUALIFY, run)
+    after = Stage1Progression(
+        Stage1ProgressionAction.WAIT_FOR_CI if idle else Stage1ProgressionAction.IMPLEMENT,
+        run,
+    )
+    calls = 0
+    replacement = "replacement-run"
+
+    def advance(*_args: object, **_kwargs: object) -> Stage1Progression:
+        nonlocal calls
+        calls += 1
+        assert calls == 1, "superseded run must not advance again"
+        index = factory_run.read_index(project)
+        intake = index.repositories[str(run.request.repository_id)]
+        entry = intake.issues["owner/repo#1"]
+        intake.issues["owner/repo#1"] = type(entry)(
+            external_reference=entry.external_reference,
+            run_id=replacement,
+            bound_digest=entry.bound_digest,
+            source_revision=entry.source_revision,
+            recorded_at=entry.recorded_at,
+        )
+        factory_run.write_document(factory_run.index_path(project), index.to_state())
+        return after
+
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **_: SimpleNamespace(next_action=lambda _: initial, advance=advance),
+    )
+    monkeypatch.setattr(factory_run.time, "sleep", lambda _: None)
+    report = factory_run.advance_run(project, run_id, wait_seconds=30)
+    assert calls == 1
+    assert report["superseded_by"] == replacement
+    assert report["holds"][-1]["prerequisite"] == "superseded binding"
+    assert report["holds"][-1]["detail"] == f"superseded by run {replacement}"
+
+
 def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],
