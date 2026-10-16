@@ -32,7 +32,11 @@ from enginery.domain.errors import InternalInvariantViolationError, InvalidInput
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.ids import RunId
 from enginery.engine.recovery import assess_worker
-from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.engine.runtime import (
+    RUN_AGGREGATE_TYPE,
+    RUNTIME_NODE_AGGREGATE_TYPE,
+    CoordinatorRuntime,
+)
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.task_repository import intake_path_for
 from enginery.evaluation.outcomes import OutcomeCaptureService
@@ -104,9 +108,15 @@ def _runtime_for_run(ledger: LedgerService, *, owner: str, run_id: str) -> Coord
 def _start(args: argparse.Namespace) -> None:
     raw_request = _read_json(args.request)
     request = stage1_request_from_state(raw_request)
-    require_bound_configuration(raw_request, request)
     ledger = LedgerService.open(args.database)
     try:
+        if (
+            ledger.read_projection(
+                aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=str(request.run.id)
+            )
+            is None
+        ):
+            require_bound_configuration(raw_request, request)
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
         run = _read_only_service(runtime=runtime, ledger=ledger, request=request).start(
             request,

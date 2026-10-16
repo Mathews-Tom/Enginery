@@ -3,15 +3,19 @@
 ``stage1 build-request`` writes the compiled snapshot into the request document beside the
 request. ``stage1 start`` calls :func:`require_bound_configuration` before it runs anything:
 the snapshot's sha256 must be the request's ``configuration_snapshot_digest`` and every
-compiled field must equal the value the request actually carries. A request that was
-edited after it was built, that was built by hand, or that predates layered configuration
-is refused with an instruction to rebuild it. Runs that were already started are decoded
-from the ledger unchanged and never pass through this check.
+compiled field must equal the value the request actually carries. Inconsistent,
+policy-violating or drifted requests are refused with an instruction to rebuild.
+Runs that were already started are decoded from the ledger unchanged and never
+pass through this check.
 """
 
 from __future__ import annotations
 
-from enginery.application.effective_config import EffectiveConfig
+from pathlib import Path
+
+from enginery.application.effective_config import EffectiveConfig, enforce_snapshot_constraints
+from enginery.application.layered_config import load_factory_layer, load_workflow_layer
+from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.workflows.stage1 import Stage1RunRequest
 
@@ -80,6 +84,31 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
                 f"request field {name} disagrees with its configuration snapshot "
                 f"(request {carried!r}, snapshot {compiled!r}); {_REBUILD}",
                 details={"run_id": str(request.run.id), "field": name},
+            )
+    enforce_snapshot_constraints(config)
+    for source in config.sources:
+        if source.layer in {"factory", "workflow"}:
+            try:
+                packaged = (
+                    load_factory_layer()
+                    if source.layer == "factory"
+                    else load_workflow_layer(str(config.plain_value("profile")), selected_by=None)
+                )
+                current = packaged.digest
+            except (OSError, InvalidInputError):
+                current = None
+        elif source.layer in {"project", "user"}:
+            try:
+                current = Digest.of_bytes(Path(source.source).read_bytes())
+            except OSError:
+                current = None
+        else:
+            continue
+        if current is None or str(current) != source.digest:
+            raise InvalidInputError(
+                f"configuration changed since the request was built: {source.source}; "
+                "rebuild with enginery stage1 build-request",
+                details={"file": source.source},
             )
     return config
 

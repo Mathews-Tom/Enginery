@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from enginery.application.effective_config import EffectiveConfig
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
+from enginery.domain.execution_selection import SelectionLayer, SelectionMode
 from enginery.workflows.stage1 import stage1_request_from_state
 from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
 
@@ -220,8 +222,11 @@ def test_an_unknown_profile_is_refused_before_any_request(
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    "field", ["repair_limit", "validation_commands", "model", "harness_executable"]
+)
 def test_start_refuses_a_request_edited_after_it_was_built(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str
 ) -> None:
     repository, base = _repository(tmp_path)
     exit_code, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
@@ -231,20 +236,49 @@ def test_start_refuses_a_request_edited_after_it_was_built(
 
     # A field edited without its digest: the request digest no longer matches.
     edited = json.loads(json.dumps(document))
-    edited["repair_limit"] = 9
+    if field == "repair_limit":
+        edited[field] = 9
+    elif field == "validation_commands":
+        edited[field] = [["sh", "-c", "echo forged"]]
+    elif field == "model":
+        edited["execution_selection"]["model"]["selected"] = "openai/gpt-5"
+    else:
+        edited["execution_configuration"][field] = "/tmp/forged-omp"
     output.write_text(json.dumps(edited), encoding="utf-8")
     assert _start(tmp_path, output) == INVALID
 
     # A field edited with its digest recomputed: the bound snapshot disagrees with it.
     request = stage1_request_from_state(document)
-    forged = {
-        **replace(request, repair_limit=9).initial_state(),
-        "effective_config": document["effective_config"],
-    }
+    if field == "repair_limit":
+        changed = replace(request, repair_limit=9)
+    elif field == "validation_commands":
+        changed = replace(request, validation_commands=(("sh", "-c", "echo forged"),))
+    elif field == "model":
+        changed = replace(
+            request,
+            execution_selection=replace(
+                request.execution_selection,
+                model=replace(
+                    request.execution_selection.model,
+                    value="openai/gpt-5",
+                    source=SelectionLayer.RUN,
+                ),
+                selected_model="openai/gpt-5",
+                mode=SelectionMode.CONFIGURED_DEFAULT,
+            ),
+        )
+    else:
+        changed = replace(
+            request,
+            execution_configuration=replace(
+                request.execution_configuration, harness_executable="/tmp/forged-omp"
+            ),
+        )
+    forged = {**changed.initial_state(), "effective_config": document["effective_config"]}
     output.write_text(json.dumps(forged), encoding="utf-8")
     capsys.readouterr()
     assert _start(tmp_path, output) == INVALID
-    assert "repair_limit disagrees with its configuration snapshot" in capsys.readouterr().err
+    assert "disagrees with its configuration snapshot" in capsys.readouterr().err
 
     # A snapshot edited to match: its digest is no longer the one the run binds.
     forged_snapshot = json.loads(json.dumps(document))
@@ -290,3 +324,103 @@ def test_a_started_run_resumes_without_its_request_document(tmp_path: Path) -> N
         )
         == 0
     )
+
+
+def test_dangling_user_symlink_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = _write_user(monkeypatch, tmp_path, "schema_version = 1\n")
+    path.unlink()
+    path.symlink_to(tmp_path / "missing.toml")
+    assert _build(tmp_path, repository, base, "--runner", "trusted-local")[0] == INVALID
+    assert str(path) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("layer", ["project", "user"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_start_refuses_configuration_source_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    layer: str,
+    missing: bool,
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = (
+        _write_project(repository, '[runner]\nmode = "trusted-local"\n')
+        if layer == "project"
+        else _write_user(monkeypatch, tmp_path, "schema_version = 1\n")
+    )
+    assert _build(tmp_path, repository, base, "--runner", "trusted-local")[0] == 0
+    if missing:
+        path.unlink()
+    else:
+        path.write_text(path.read_text() + "\n# changed\n")
+    assert _start(tmp_path, tmp_path / "request.json") == INVALID
+    error = capsys.readouterr().err
+    assert str(path) in error and "configuration changed since" in error
+
+
+def test_restart_accepts_already_started_request_without_snapshot(tmp_path: Path) -> None:
+    repository, base = _repository(tmp_path)
+    _, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
+    assert _start(tmp_path, output) == 0
+    document = json.loads(output.read_text())
+    del document["effective_config"]
+    output.write_text(json.dumps(document))
+    assert _start(tmp_path, output) == 0
+
+
+def test_start_refuses_a_consistently_rebound_snapshot_that_violates_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    _write_project(
+        repository,
+        '[runner]\nmode = "trusted-local"\n[constraints]\nmax_repair_limit = 1\n',
+    )
+    assert _build(tmp_path, repository, base)[0] == 0
+    output = tmp_path / "request.json"
+    document = json.loads(output.read_text())
+    request = stage1_request_from_state(document)
+    snapshot = document["effective_config"]
+    snapshot["fields"]["repair_limit"]["value"] = 9
+    config = EffectiveConfig.from_state(snapshot)
+    forged = replace(
+        request,
+        repair_limit=9,
+        run=replace(request.run, configuration_snapshot_digest=config.digest),
+    )
+    output.write_text(json.dumps({**forged.initial_state(), "effective_config": snapshot}))
+    assert _start(tmp_path, output) == INVALID
+    assert "constraints.max_repair_limit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("layer", ["factory", "workflow"])
+def test_start_refuses_packaged_configuration_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    layer: str,
+) -> None:
+    from enginery.application.layered_config import load_factory_layer, load_workflow_layer
+    from enginery.cli import config_binding
+    from enginery.domain.digests import Digest
+
+    repository, base = _repository(tmp_path)
+    _, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
+    if layer == "factory":
+        changed = replace(load_factory_layer(), digest=Digest.of_bytes(b"new factory"))
+        monkeypatch.setattr(config_binding, "load_factory_layer", lambda: changed)
+    else:
+        changed = replace(
+            load_workflow_layer("standard", selected_by=None),
+            digest=Digest.of_bytes(b"new workflow"),
+        )
+        monkeypatch.setattr(
+            config_binding, "load_workflow_layer", lambda _name, *, selected_by: changed
+        )
+    assert _start(tmp_path, output) == INVALID
+    error = capsys.readouterr().err
+    assert "packaged:" in error and "configuration changed since" in error

@@ -180,8 +180,10 @@ work_item = WorkItem(
 )
 snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="manual-migration")
 
-# Compile the request's configuration exactly as `stage1 build-request` does: every choice
-# below is a run-layer value, and anything not named falls through to the factory defaults.
+# This manual migration deliberately skips project policy and user preferences (project=None,
+# user=None), unlike `stage1 build-request`, which reads both through config_locations.
+# Unspecified choices fall through to the packaged workflow and factory layers; no host
+# probe is supplied, so installed-harness model/effort observations are also skipped.
 compiled = compile_effective_config(
     project=None,
     user=None,

@@ -158,7 +158,7 @@ paths = ["infra/**"]              # additive: only adds to the built-in protecte
 github = "operator-gh-cli"
 harness = "operator-harness-session"
 
-[executables]
+[executables]                     # user preferences / run flags only; never project policy
 github = "gh"
 harness = "omp"                   # the executable of whichever harness resolves
 
@@ -172,6 +172,9 @@ max_time_budget_seconds = 3600
 max_repair_limit = 2
 ```
 
+Repository content must not choose host programs: `[executables]` is refused in project
+policy. Configure host executable paths in user preferences or explicit run flags instead.
+
 A hard constraint is conjunctive: the compiled value must satisfy the constraints of
 every layer, so a lower layer cannot loosen what a higher one forbids, and a run flag
 that violates a project constraint is refused before any request is written. The trust
@@ -183,13 +186,13 @@ The compiled result records, for every field, the value, the winning layer and e
 shadowed lower-layer value with its source file and sha256. Its canonical JSON is the
 configuration snapshot; the snapshot's sha256 is the request's
 `configuration_snapshot_digest`, and `build-request` writes the snapshot into the request
-document next to the request. `stage1 start` verifies that digest and that every
-compiled field equals the value the request carries, and refuses a request that was
-edited after it was built, was assembled by hand, or predates layered configuration
-(rebuild it with `enginery stage1 build-request`). A run that was already started is
-read from the ledger unchanged and is never recompiled. Building a `Stage1RunRequest`
-directly through the Python API stays supported, but such a request is not compiled and
-`stage1 start` will not accept it as a document.
+document next to the request. `stage1 start` verifies the digest, agreement with every
+carried field, the snapshot's recorded hard constraints and all recorded source digests
+(including packaged defaults and workflow profiles). It refuses inconsistent,
+policy-violating or drifted requests, or documents without a snapshot; rebuild them with
+`enginery stage1 build-request`. Already-started runs are read from the ledger unchanged.
+Building a `Stage1RunRequest` directly through the Python API stays supported; a document
+submitted to `stage1 start` must carry a consistent, current compiled snapshot.
 
 ## Command surface
 
@@ -663,7 +666,7 @@ rejected as an unrecognized argument.
 Every flag other than the run's identity and paths is a run-layer override of the
 [layered configuration](#layered-configuration): omitted, the project, user, workflow
 and factory layers decide, and the factory layer carries the defaults
-`docs/examples.md` documents (`policy-v1`, `uv run pytest -q` for trusted-local
+`docs/examples.md` documents (`uv run pytest -q` for trusted-local
 runs only: an isolated run must pass `--validation-command`,
 `repair-limit 1`, a 1800-second OMP implementation attempt with no cost budget
 (see [Authority separation](#authority-separation)), `operator-gh-cli`/`operator-harness-session` credential
@@ -673,6 +676,8 @@ project policy. `--profile` selects the packaged workflow profile. `--capability
 `capability_lock_digest` to the real lockfile `enginery capability
 lock` already reads when one exists, and to the documented
 no-capabilities-locked sentinel otherwise.
+The policy-set version `policy-v1` is a `build-request` argparse default, not a
+factory configuration value.
 `--environment-manifest-digest`/`--environment-manifest-file` bind the opaque
 environment `Run` digest to real bytes when a real environment manifest exists; omitted,
 it falls back to the fixed local-environment sentinel the documented manual script uses.
