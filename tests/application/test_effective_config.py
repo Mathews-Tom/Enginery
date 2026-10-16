@@ -228,7 +228,10 @@ def test_trusted_local_run_shadows_lower_isolated_configuration() -> None:
         '[runner]\nmode = "isolated-oci"\nimage = "sha256:' + "a" * 64 + '"\n'
         'docker_context = "private"\nmodel_access = "relay"\n'
     )
-    compiled = _compile(project=isolated, user=isolated)
+    compiled = _compile(
+        project=isolated.replace('docker_context = "private"\n', ""),
+        user=isolated,
+    )
     assert not compiled.runner.isolated_mode
     for name in ("runner_image", "docker_context", "model_access"):
         field = compiled.config.field(name)

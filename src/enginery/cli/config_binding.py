@@ -11,11 +11,14 @@ pass through this check.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from enginery.application.effective_config import EffectiveConfig, enforce_snapshot_constraints
 from enginery.application.layered_config import load_factory_layer, load_workflow_layer
-from enginery.domain.digests import Digest
+from enginery.cli.config_locations import (
+    project_policy_path,
+    read_project_layer,
+    read_user_layer,
+    user_config_path,
+)
 from enginery.domain.errors import InvalidInputError
 from enginery.workflows.stage1 import Stage1RunRequest
 
@@ -86,6 +89,8 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
                 details={"run_id": str(request.run.id), "field": name},
             )
     enforce_snapshot_constraints(config)
+    project_path = project_policy_path(request.repository_path.resolve())
+    user_path = user_config_path()
     for source in config.sources:
         if source.layer in {"factory", "workflow"}:
             try:
@@ -98,13 +103,29 @@ def require_bound_configuration(document: object, request: Stage1RunRequest) -> 
             except (OSError, InvalidInputError):
                 current = None
         elif source.layer in {"project", "user"}:
+            expected_path = project_path if source.layer == "project" else user_path
             try:
-                current = Digest.of_bytes(Path(source.source).read_bytes())
-            except OSError:
-                current = None
+                layer = (
+                    read_project_layer(request.repository_path.resolve())
+                    if source.layer == "project"
+                    else read_user_layer()
+                )
+                current = None if layer is None else layer.digest
+            except (OSError, InvalidInputError):
+                raise InvalidInputError(
+                    f"configuration changed since the request was built: {expected_path}; "
+                    f"{_REBUILD}",
+                    details={"file": str(expected_path)},
+                ) from None
+            if source.source != str(expected_path):
+                raise InvalidInputError(
+                    f"configuration changed since the request was built: {expected_path} "
+                    f"(previously {source.source}); {_REBUILD}",
+                    details={"file": str(expected_path)},
+                )
         else:
             continue
-        if current is None or str(current) != source.digest:
+        if (None if current is None else str(current)) != source.digest:
             raise InvalidInputError(
                 f"configuration changed since the request was built: {source.source}; "
                 "rebuild with enginery stage1 build-request",

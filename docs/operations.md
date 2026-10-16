@@ -138,7 +138,7 @@ strict_effective = false
 [runner]
 mode = "trusted-local"            # trusted-local | isolated-oci; never defaulted
 image = "sha256:<image id>"       # isolated-oci only
-docker_context = "colima"         # isolated-oci only
+docker_context = "colima"         # isolated-oci only; user preferences / run flags only
 model_access = "none"             # none | relay; isolated-oci only for relay
 
 [validation]
@@ -174,6 +174,12 @@ max_repair_limit = 2
 
 Repository content must not choose host programs: `[executables]` is refused in project
 policy. Configure host executable paths in user preferences or explicit run flags instead.
+Likewise, project policy cannot select `runner.docker_context`; set it in user preferences
+or with `--docker-context`.
+
+A higher-layer `trusted-local` mode shadows lower-layer image, Docker context and model
+access settings; image, context or `relay` stated at or above the mode-winning layer are
+refused, while `model_access = "none"` is always allowed.
 
 A hard constraint is conjunctive: the compiled value must satisfy the constraints of
 every layer, so a lower layer cannot loosen what a higher one forbids, and a run flag

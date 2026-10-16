@@ -44,7 +44,11 @@ from enginery.application.layered_config import (
 )
 from enginery.capabilities.serialization import read_lock
 from enginery.cli.config_binding import EFFECTIVE_CONFIG_KEY
-from enginery.cli.config_locations import read_project_layer, read_user_layer
+from enginery.cli.config_locations import (
+    read_project_layer,
+    read_user_layer,
+    record_absent_sources,
+)
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_catalog import InstalledHost
@@ -338,6 +342,7 @@ def build_request(args: argparse.Namespace) -> BuiltRequest:
         run=_run_layer(args),
         probe_host=_probe_host,
     )
+    compiled = record_absent_sources(compiled, args.repository_path)
     config = compiled.config
     selection = compiled.selection
     repair_limit = config.integer("repair_limit")

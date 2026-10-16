@@ -424,3 +424,137 @@ def test_start_refuses_packaged_configuration_drift(
     assert _start(tmp_path, output) == INVALID
     error = capsys.readouterr().err
     assert "packaged:" in error and "configuration changed since" in error
+
+
+@pytest.mark.parametrize("layer", ["run", "project", "user"])
+def test_trusted_local_allows_explicit_model_access_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: str
+) -> None:
+    repository, base = _repository(tmp_path)
+    extra = ["--runner", "trusted-local"]
+    if layer == "run":
+        extra += ["--model-access", "none"]
+    elif layer == "project":
+        _write_project(repository, '[runner]\nmodel_access = "none"\n')
+    else:
+        _write_user(monkeypatch, tmp_path, 'schema_version = 1\n[runner]\nmodel_access = "none"\n')
+    code, output = _build(tmp_path, repository, base, *extra)
+    assert code == 0
+    assert stage1_request_from_state(json.loads(output.read_text())).runner.model_access == "none"
+
+
+@pytest.mark.parametrize("layer", ["run", "project", "user"])
+def test_trusted_local_refuses_relay_at_mode_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layer: str
+) -> None:
+    repository, base = _repository(tmp_path)
+    text = '[runner]\nmode = "trusted-local"\nmodel_access = "relay"\n'
+    extra: list[str] = []
+    if layer == "run":
+        extra = ["--runner", "trusted-local", "--model-access", "relay"]
+    elif layer == "project":
+        _write_project(repository, text)
+    else:
+        _write_user(monkeypatch, tmp_path, f"schema_version = 1\n{text}")
+    assert _build(tmp_path, repository, base, *extra)[0] == INVALID
+
+
+@pytest.mark.parametrize("layer", ["project", "user"])
+def test_start_refuses_configuration_created_after_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], layer: str
+) -> None:
+    repository, base = _repository(tmp_path)
+    config_home = tmp_path / "user-config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    code, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
+    assert code == 0
+    snapshot = EffectiveConfig.from_state(json.loads(output.read_text())["effective_config"])
+    assert next(source for source in snapshot.sources if source.layer == layer).digest is None
+    path = (
+        _write_project(repository, "")
+        if layer == "project"
+        else _write_user(monkeypatch, tmp_path, "schema_version = 1\n")
+    )
+    assert _start(tmp_path, output) == INVALID
+    assert str(path) in capsys.readouterr().err
+
+
+def test_start_refuses_changed_user_configuration_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "first"))
+    code, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
+    assert code == 0
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "second"))
+    assert _start(tmp_path, output) == INVALID
+    assert str(tmp_path / "second" / "enginery" / "user.toml") in capsys.readouterr().err
+
+
+def test_start_accepts_unchanged_absent_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, base = _repository(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "absent"))
+    code, output = _build(tmp_path, repository, base, "--runner", "trusted-local")
+    assert code == 0
+    assert _start(tmp_path, output) == 0
+
+
+def test_start_refuses_project_policy_replaced_by_symlink(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = _write_project(repository, '[runner]\nmode = "trusted-local"\n')
+    code, output = _build(tmp_path, repository, base)
+    assert code == 0
+    target = tmp_path / "policy.toml"
+    target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(target)
+    assert _start(tmp_path, output) == INVALID
+    assert str(path) in capsys.readouterr().err
+
+
+def test_project_policy_cannot_select_docker_context(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = _write_project(
+        repository, '[runner]\nmode = "trusted-local"\ndocker_context = "remote"\n'
+    )
+    assert _build(tmp_path, repository, base)[0] == INVALID
+    error = capsys.readouterr().err
+    assert str(path) in error and "runner.docker_context" in error
+    assert "--docker-context" in error
+
+
+def test_project_policy_refuses_non_directory_ancestor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = repository / ".enginery"
+    path.write_text("not a directory")
+    assert _build(tmp_path, repository, base, "--runner", "trusted-local")[0] == INVALID
+    assert str(path) in capsys.readouterr().err
+
+
+def test_trusted_local_refuses_relay_above_mode_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, base = _repository(tmp_path)
+    _write_user(monkeypatch, tmp_path, 'schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    _write_project(repository, '[runner]\nmodel_access = "relay"\n')
+    assert _build(tmp_path, repository, base)[0] == INVALID
+
+
+def test_start_refuses_oversized_project_policy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    path = _write_project(repository, '[runner]\nmode = "trusted-local"\n')
+    code, output = _build(tmp_path, repository, base)
+    assert code == 0
+    path.write_bytes(b"#" * (1024 * 1024 + 1))
+    assert _start(tmp_path, output) == INVALID
+    assert str(path) in capsys.readouterr().err

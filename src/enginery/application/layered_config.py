@@ -305,6 +305,14 @@ def parse_layer_document(
             file=source,
             key="executables",
         )
+    runner = data.get("runner")
+    if layer is SelectionLayer.PROJECT and isinstance(runner, dict) and "docker_context" in runner:
+        raise ConfigError(
+            "repository content must not choose the container engine or host; set "
+            "docker_context in user preferences or --docker-context instead",
+            file=source,
+            key="runner.docker_context",
+        )
     if reject_credentials:
         _scan_credentials(data, path="", source=source)
 

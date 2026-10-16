@@ -136,7 +136,7 @@ class AppliedConstraint:
 
 @dataclass(frozen=True, slots=True)
 class SourceRecord:
-    """One layer document that contributed: its path and the sha256 of its bytes."""
+    """One layer path and its bytes' sha256, or null when the file was absent."""
 
     layer: str
     source: str
@@ -633,11 +633,26 @@ def compile_effective_config(
                     value=entry.value,
                     source=entry.source,
                     source_digest=entry.source_digest,
-                    note="shadowed by the higher-precedence trusted-local runner mode",
+                    note=(
+                        None
+                        if (
+                            name == "model_access"
+                            and entry.value == MODEL_ACCESS_NONE
+                            and PRECEDENCE.index(SelectionLayer(entry.layer))
+                            <= PRECEDENCE.index(mode_winner.layer)
+                        )
+                        else "shadowed by the higher-precedence trusted-local runner mode"
+                    ),
                 )
                 for entry in _chain(documents, name)
             )
-            record(name, MODEL_ACCESS_NONE if name == "model_access" else None, UNSET, chain)
+            explicit_none = next((entry for entry in chain if entry.note is None), None)
+            record(
+                name,
+                MODEL_ACCESS_NONE if name == "model_access" else None,
+                UNSET if explicit_none is None else explicit_none.layer,
+                chain,
+            )
         else:
             generic(name, fallback=MODEL_ACCESS_NONE if name == "model_access" else None)
     generic("validation_commands")
@@ -712,7 +727,7 @@ def _runner(
         for name, key, present in (
             ("runner_image", "runner.image", image is not None),
             ("docker_context", "runner.docker_context", context is not None),
-            ("model_access", "runner.model_access", value_of("model_access") is not None),
+            ("model_access", "runner.model_access", access != MODEL_ACCESS_NONE),
         ):
             document = winner_of(name)
             mode_document = winner_of("runner_mode")
