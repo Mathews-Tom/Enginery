@@ -481,6 +481,42 @@ def test_read_only_project_apply_is_a_typed_nonwriting_refusal(
         project.chmod(0o755)
 
 
+@pytest.mark.parametrize("context", [None, "colima", "builder's context"])
+def test_init_container_engine_resolution_targets_user_context(
+    project: Path, capsys: pytest.CaptureFixture[str], context: str | None
+) -> None:
+    import shlex
+    from typing import cast
+
+    from enginery.cli.main import _build_parser
+
+    if context is not None:
+        user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
+        user.parent.mkdir(parents=True, exist_ok=True)
+        user.write_text(f'schema_version = 1\n[runner]\ndocker_context = "{context}"\n')
+    code, plan = _init(
+        capsys,
+        project,
+        "--runner",
+        "isolated-oci",
+        "--runner-image",
+        "sha256:" + "a" * 64,
+        "--validation-command",
+        "python3 -m unittest",
+    )
+    assert code == 0
+    requirements = cast(list[dict[str, str]], plan["auth_requirements"])
+    command = next(item["resolve"] for item in requirements if item["name"] == "container-engine")
+    arguments = shlex.split(command)
+    assert arguments.pop(0) == "enginery"
+    if context is None:
+        assert "--docker-context" not in arguments
+    else:
+        assert f"--docker-context {shlex.quote(context)}" in command
+        assert arguments[arguments.index("--docker-context") + 1] == context
+    _build_parser().parse_args(arguments)
+
+
 def test_init_rejects_machine_local_docker_context(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

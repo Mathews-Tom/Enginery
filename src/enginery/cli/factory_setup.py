@@ -20,6 +20,7 @@ preview, which writes nothing.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -262,6 +263,15 @@ def capability_holds(
     return tuple(holds)
 
 
+def runner_resolution_command(compiled: CompiledConfig, command: str) -> str:
+    """Name a runner repair against the same engine as the compiled configuration."""
+    result = f"enginery runner {command}"
+    context = compiled.runner.docker_context
+    if context is not None:
+        result += f" --docker-context {shlex.quote(context)}"
+    return result
+
+
 def _auth_requirements(compiled: CompiledConfig) -> tuple[Mapping[str, str], ...]:
     config = compiled.config
     requirements: list[Mapping[str, str]] = [
@@ -283,7 +293,7 @@ def _auth_requirements(compiled: CompiledConfig) -> tuple[Mapping[str, str], ...
             {
                 "name": "container-engine",
                 "detail": "a qualified container engine and the pinned runner image",
-                "resolve": "enginery runner build-image",
+                "resolve": runner_resolution_command(compiled, "build-image"),
             }
         )
     return tuple(requirements)

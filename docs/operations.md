@@ -685,8 +685,9 @@ in the user preferences. With no policy, the hold names `enginery factory init`.
 A malformed policy or user file is invalid input (exit 2), not a hold. Engine holds
 name engine installation, startup, qualification or context selection; image holds
 name image rebuilding and status; relay holds name relay setup.
-Container checks disclose the Docker context in use (or `default context`) and list
-the container-engine contact in `network_access`. Select a machine-local context
+Container checks disclose the Docker context in use (or the docker CLI's current context) and list
+the container-engine contact in `network_access`. Repair commands carry `--docker-context`
+when a context is configured, so they target the same engine. Select a machine-local context
 with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or with
 `enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
 

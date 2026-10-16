@@ -31,6 +31,7 @@ from enginery.cli.factory_setup import (
     LOCKFILE_RELATIVE,
     ProjectConfiguration,
     harness_probe_resolution,
+    runner_resolution_command,
 )
 from enginery.domain.errors import EngineryError, InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_catalog import InstalledHost
@@ -222,7 +223,7 @@ def _check_runner(compiled: CompiledConfig) -> Check:
     context = (
         f"Docker context {compiled.runner.docker_context!r}"
         if compiled.runner.docker_context is not None
-        else "default context"
+        else "the docker CLI's current context"
     )
     if decision.hold is None:
         return Check(
@@ -231,18 +232,29 @@ def _check_runner(compiled: CompiledConfig) -> Check:
     message = decision.hold.message
     if "relay" in message:
         resolve = (
-            "enginery runner build-relay-image, then enginery runner relay up "
-            "--relay-image sha256:<relay image id> --upstream <gateway URL> "
-            "--token-file <absolute token file>, then enginery runner relay status"
+            runner_resolution_command(compiled, "build-relay-image")
+            + ", then "
+            + runner_resolution_command(
+                compiled,
+                "relay up --relay-image sha256:<relay image id> --upstream <gateway URL> "
+                "--token-file <absolute token file>",
+            )
+            + ", then "
+            + runner_resolution_command(compiled, "relay status")
         )
     elif decision.hold.reason is HoldReason.RUNNER_FINGERPRINT_DRIFT or "image" in message:
-        resolve = "enginery runner build-image, then `enginery runner status --image <id>`"
+        resolve = (
+            runner_resolution_command(compiled, "build-image")
+            + ", then `"
+            + runner_resolution_command(compiled, "status --image <id>")
+            + "`"
+        )
     else:
         resolve = (
             "install, start and qualify the container engine; set docker_context in [runner] "
             "in $XDG_CONFIG_HOME/enginery/user.toml (or use "
             "enginery stage1 build-request --docker-context <name> for the run), "
-            "then enginery runner status --image <id>"
+            "then " + runner_resolution_command(compiled, "status --image <id>")
         )
     return Check(
         "container-runner",
@@ -361,7 +373,7 @@ def run_doctor(
                     + (
                         f"Docker context {compiled.runner.docker_context!r}"
                         if compiled.runner.docker_context is not None
-                        else "default context"
+                        else "the docker CLI's current context"
                     ),
                 )
                 if compiled.runner.isolated_mode

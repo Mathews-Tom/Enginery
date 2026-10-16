@@ -428,11 +428,13 @@ def test_existing_runner_table_resolution_does_not_add_duplicate_table(
     assert _doctor(capsys, project)[0] == 0
 
 
+@pytest.mark.parametrize("context", [None, "colima", "builder's context"])
 def test_relay_resolution_flags_exist_on_real_parser(
     toolbox: Path,
     project: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    context: str | None,
 ) -> None:
     import shlex
 
@@ -456,6 +458,10 @@ def test_relay_resolution_flags_exist_on_real_parser(
         'schema_version = 1\n[runner]\nmode = "isolated-oci"\n'
         f'image = "sha256:{"a" * 64}"\n[validation]\ncommands = ["python3 -m unittest"]\n'
     )
+    if context is not None:
+        user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
+        user.parent.mkdir(parents=True, exist_ok=True)
+        user.write_text(f'schema_version = 1\n[runner]\ndocker_context = "{context}"\n')
     code, report = _doctor(capsys, project)
     assert code == HOLD
     holds = cast(list[dict[str, str]], report["holds"])
@@ -471,11 +477,19 @@ def test_relay_resolution_flags_exist_on_real_parser(
     for command in commands:
         arguments = shlex.split(command)
         assert arguments.pop(0) == "enginery"
+        if context is None:
+            assert "--docker-context" not in arguments
+        else:
+            assert f"--docker-context {shlex.quote(context)}" in command
+            assert arguments[arguments.index("--docker-context") + 1] == context
         _build_parser().parse_args(arguments)
 
 
-@pytest.mark.parametrize("context", [None, "remote-builder"])
+@pytest.mark.parametrize("context", [None, "colima", "builder's context"])
 @pytest.mark.parametrize("admitted", [False, True])
+@pytest.mark.parametrize(
+    "hold_message", ["no qualified container engine is reachable", "image missing"]
+)
 def test_container_context_is_disclosed_and_user_preference_is_accepted(
     toolbox: Path,
     project: Path,
@@ -483,11 +497,15 @@ def test_container_context_is_disclosed_and_user_preference_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
     context: str | None,
     admitted: bool,
+    hold_message: str,
 ) -> None:
+    import shlex
+
     from enginery.cli.factory_setup import load_project_configuration
+    from enginery.cli.main import _build_parser
 
     class _Hold:
-        message = "no qualified container engine is reachable"
+        message = hold_message
         reason = HoldReason.RUNNER_UNQUALIFIED
 
     class _Decision:
@@ -515,13 +533,29 @@ def test_container_context_is_disclosed_and_user_preference_is_accepted(
     assert code == (0 if admitted else HOLD)
     checks = cast(list[dict[str, str]], report["checks"])
     runner = next(item for item in checks if item["name"] == "container-runner")
-    context_label = f"Docker context {context!r}" if context is not None else "default context"
+    context_label = (
+        f"Docker context {context!r}" if context is not None else "the docker CLI's current context"
+    )
     assert context_label in runner["detail"]
     network = cast(list[str], report["network_access"])
     assert f"container engine contact for {context_label}" in network
     if not admitted:
         resolve = runner["resolve"]
-        assert "docker_context in [runner] in $XDG_CONFIG_HOME/enginery/user.toml" in resolve
-        assert "enginery stage1 build-request --docker-context <name>" in resolve
+        if "image" not in hold_message:
+            assert "docker_context in [runner] in $XDG_CONFIG_HOME/enginery/user.toml" in resolve
+            assert "enginery stage1 build-request --docker-context <name>" in resolve
         assert ".enginery/project.toml" not in resolve
         assert "factory doctor --docker-context" not in resolve
+        commands = resolve.replace("<id>", "sha256:" + "a" * 64).split(", then ")
+        for command in commands:
+            if not command.startswith(("enginery runner ", "`enginery runner ")):
+                continue
+            command = command.strip("`")
+            arguments = shlex.split(command)
+            assert arguments.pop(0) == "enginery"
+            if context is None:
+                assert "--docker-context" not in arguments
+            else:
+                assert f"--docker-context {shlex.quote(context)}" in command
+                assert arguments[arguments.index("--docker-context") + 1] == context
+            _build_parser().parse_args(arguments)
