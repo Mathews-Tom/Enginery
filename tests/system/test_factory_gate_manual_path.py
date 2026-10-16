@@ -33,8 +33,10 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
     assertions = {item["id"]: item for item in document["assertions"]}
     assert set(assertions) == set(manual_path.REQUIRED)
     assert all(item["ran"] and item["status"] == "pass" for item in assertions.values())
-    assert all(item["commands"] and item["observer"] and item["raw_artifacts"]
-               for item in assertions.values())
+    assert all(
+        item["commands"] and item["observer"] and item["raw_artifacts"]
+        for item in assertions.values()
+    )
     client = assertions["client-kill-worker-survives"]["observed"]
     coordinator = assertions["coordinator-kill-after-pr"]["observed"]
     assert client["killed"]["exit_code"] == coordinator["killed"]["exit_code"] == -9
@@ -46,9 +48,10 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
     retained = assertions["retained-workspace-hold-repair"]["observed"]
     assert retained["exit"] == 5
     assert retained["json"]["blocked_workspace"]["status"] == "retained"
-    assert any(hold["prerequisite"] == "retained workspace"
-               for hold in retained["json"]["holds"])
-    assert assertions["terminal-review-approved"]["observed"]["json"]["review_outcome"] == "approved"
+    assert any(hold["prerequisite"] == "retained workspace" for hold in retained["json"]["holds"])
+    assert (
+        assertions["terminal-review-approved"]["observed"]["json"]["review_outcome"] == "approved"
+    )
     drain = assertions["drain-releases-resources"]["observed"]
     assert drain["wait"]["released"] == "by resume/reconcile"
     assert drain["stop"]["released"] == "now" and drain["stop"]["remaining"] == []
@@ -61,21 +64,35 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
     assert terminal["terminal_evidence"]["verify_status"] == "passed"
     assert terminal["terminal_evidence"]["observation_registered"]
     assert effects["github_reads"] > 0
-    for name in ("hosted_inference_calls", "hosted_sessions", "container_engine_calls",
-                 "issue_label_mutations", "merges", "releases",
-                 "deployments", "global_location_changes"):
+    for name in (
+        "hosted_inference_calls",
+        "hosted_sessions",
+        "container_engine_calls",
+        "issue_label_mutations",
+        "merges",
+        "releases",
+        "deployments",
+        "global_location_changes",
+    ):
         assert effects[name] == 0
     for identity in ("subject", "build", "config", "host", "evaluator"):
         assert document["identities"][identity]
     assert document["identities"]["engine"] is None
     assert json.loads(capsys.readouterr().out)["verdict"] == "pass"
     raw = tmp_path / "evidence.raw"
-    for name in ("commands.json", "gh-calls.json", "harness-launches.json",
-                 "pull-request.json", "request.json"):
+    for name in (
+        "commands.json",
+        "gh-calls.json",
+        "harness-launches.json",
+        "pull-request.json",
+        "request.json",
+    ):
         assert (raw / name).is_file()
     commands = json.loads((raw / "commands.json").read_text(encoding="utf-8"))
-    assert all("exit_code" in command and "stdout" in command and "stderr" in command
-               for command in commands)
+    assert all(
+        "exit_code" in command and "stdout" in command and "stderr" in command
+        for command in commands
+    )
 
 
 def test_unexercised_required_assertions_fail_instead_of_silently_passing(
@@ -90,8 +107,7 @@ def test_unexercised_required_assertions_fail_instead_of_silently_passing(
 
     assert code == EXIT_FAIL and document["verdict"] == "fail"
     assert {item["id"] for item in document["assertions"]} == set(manual_path.REQUIRED)
-    assert all(item["ran"] is False and item["status"] == "fail"
-               for item in document["assertions"])
+    assert all(item["ran"] is False and item["status"] == "fail" for item in document["assertions"])
 
 
 def test_failed_prerequisite_records_all_unreachable_assertions_as_not_run(
@@ -107,9 +123,13 @@ def test_failed_prerequisite_records_all_unreachable_assertions_as_not_run(
 
     assert code == EXIT_FAIL
     assert set(assertions) == set(manual_path.REQUIRED)
-    for key in ("run-bound-dispatch", "client-kill-worker-survives",
-                "coordinator-kill-after-pr", "coordinator-resume-single-pr",
-                "drain-releases-resources"):
+    for key in (
+        "run-bound-dispatch",
+        "client-kill-worker-survives",
+        "coordinator-kill-after-pr",
+        "coordinator-resume-single-pr",
+        "drain-releases-resources",
+    ):
         assert assertions[key]["ran"] is False
         assert assertions[key]["status"] == "fail"
     assert assertions["local-only-effect-counts"]["status"] == "fail"

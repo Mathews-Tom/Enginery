@@ -19,7 +19,8 @@ from tests.support.github import StandInGitHub
 
 
 def dispatch(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> tuple[Path, dict]:
     project, github = bound_project
     harness = github.executable.parent.parent / "omp"
@@ -36,7 +37,8 @@ def dispatch(
 
 
 def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, run = dispatch(bound_project, capsys)
@@ -48,8 +50,11 @@ def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
         assert code == 5
         assert held["holds"][0]["resolve"] == f"enginery factory pause --lift --project {project}"
         assert held["worker"]["pid"] == run["worker"]["pid"]
-        monkeypatch.setattr(factory_run, "intake_prerequisites",
-                            lambda configuration: paused_hold(configuration.project))
+        monkeypatch.setattr(
+            factory_run,
+            "intake_prerequisites",
+            lambda configuration: paused_hold(configuration.project),
+        )
         code, held = invoke(capsys, project, "run", "owner/repo#2")
         assert code == 5 and "pause --lift" in held["holds"][0]["resolve"]
         code, drained = invoke(capsys, project, "drain", "--stop")
@@ -79,7 +84,8 @@ def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
 
 
 def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, run = dispatch(bound_project, capsys)
     request = Path(run["request_path"])
@@ -109,7 +115,8 @@ def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
 
 
 def test_resume_unknown_run_does_not_create_a_ledger(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, _ = bound_project
     assert main(["factory", "resume", "unknown", "--project", str(project), "--json"]) == 2

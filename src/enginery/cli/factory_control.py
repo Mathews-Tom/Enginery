@@ -43,7 +43,9 @@ def pause(project: Path, *, lift: bool, reason: str | None) -> dict[str, object]
         ledger.close()
 
 
-def drain(project: Path, *, stop: bool, wait_seconds: float | None) -> tuple[dict[str, object], int]:
+def drain(
+    project: Path, *, stop: bool, wait_seconds: float | None
+) -> tuple[dict[str, object], int]:
     """Pause and reuse the operator's worker-stop/container cleanup and exit contract."""
     ledger = _open_ledger(project)
     try:
@@ -57,24 +59,30 @@ def drain(project: Path, *, stop: bool, wait_seconds: float | None) -> tuple[dic
             assert wait_seconds is not None
             report = drain_wait(ledger, now=_now(), wait_seconds=wait_seconds)
         document = report.to_state()
-        document.update({
-            "scope": f"project ledger {database_path(project)}",
-            "database": str(database_path(project)),
-            "workspaces": workspace_documents(project, ledger),
-            "released": (
-                "by resume/reconcile" if not stop
-                else "partial; see stopped" if report.stop_failures
-                else "now"
-            ),
-            "release_scope": (
-                "successfully stopped workers; previously exited workers require resume/reconcile"
-                if stop else "wait observes exit only; it does not collect worker results"
-            ),
-            "reconcile": (
-                f"enginery factory pause --lift --project {project}; "
-                f"enginery factory resume RUN --project {project}"
-            ),
-        })
+        document.update(
+            {
+                "scope": f"project ledger {database_path(project)}",
+                "database": str(database_path(project)),
+                "workspaces": workspace_documents(project, ledger),
+                "released": (
+                    "by resume/reconcile"
+                    if not stop
+                    else "partial; see stopped"
+                    if report.stop_failures
+                    else "now"
+                ),
+                "release_scope": (
+                    "successfully stopped workers; previously exited workers require "
+                    "resume/reconcile"
+                    if stop
+                    else "wait observes exit only; it does not collect worker results"
+                ),
+                "reconcile": (
+                    f"enginery factory pause --lift --project {project}; "
+                    f"enginery factory resume RUN --project {project}"
+                ),
+            }
+        )
         if cleanup is not None:
             document["container_cleanup"] = cleanup
         return document, _drain_exit_code(report)

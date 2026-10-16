@@ -135,7 +135,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     pause_parser.add_argument("--lift", action="store_true")
     pause_parser.add_argument("--json", action="store_true")
 
-    drain_parser = commands.add_parser("drain", help="Pause, then wait for or stop project workers.")
+    drain_parser = commands.add_parser(
+        "drain", help="Pause, then wait for or stop project workers."
+    )
     _add_project(drain_parser)
     drain_mode = drain_parser.add_mutually_exclusive_group(required=True)
     drain_mode.add_argument("--wait-seconds", type=float)
