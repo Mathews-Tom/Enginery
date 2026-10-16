@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -469,6 +470,53 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
                     ]
                 )
         capsys.readouterr()
+
+
+def test_changed_issue_repair_cancels_an_exited_unreconciled_implementation(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, github = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    _, dispatched = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    worker = dispatched["worker"]
+    assert isinstance(worker, dict)
+    # A real operator's worker is reaped by its own launcher; reap the in-process child here.
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(int(worker["pid"]), 0)
+    github.serve(updated_at="2026-10-17T00:00:00Z")
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    repairs = held["holds"][0]["resolve"].split("; ")
+    cancel = [shlex.split(step) for step in repairs if " stage1 cancel " in f" {step} "]
+    assert cancel == [
+        [
+            "enginery",
+            "stage1",
+            "cancel",
+            "--database",
+            original["database"],
+            "--owner",
+            "factory",
+            "--run-id",
+            original["run_id"],
+            "--node-id",
+            "implement",
+        ]
+    ]
+    try:
+        for step in repairs:
+            capsys.readouterr()
+            assert main(shlex.split(step)[1:]) == 0
+            capsys.readouterr()
+        _, old = invoke(capsys, project, "status", original["run_id"])
+        implementation = next(node for node in old["nodes"] if node["node_id"] == "implement")
+        assert implementation["status"] == "cancelled"
+        assert old["superseded_by"] not in {None, original["run_id"]}
+    finally:
+        with contextlib.suppress(ChildProcessError):
+            while os.waitpid(-1, os.WNOHANG) != (0, 0):
+                pass
 
 
 def test_unstarted_request_is_rebuilt_when_configuration_changes(
