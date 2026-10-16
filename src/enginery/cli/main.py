@@ -123,9 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "evidence",
     ):
         lifecycle_parser = stage1_subparsers.add_parser(
-            command, help=(
+            command,
+            help=(
                 "Authenticated terminal human-wait decision; requires a factory review challenge."
-                if command in {"approve", "reject", "resume"} else None
+                if command in {"approve", "reject", "resume"}
+                else None
             ),
         )
         lifecycle_parser.add_argument("--database", required=True, type=Path)

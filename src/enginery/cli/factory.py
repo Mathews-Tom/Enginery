@@ -152,7 +152,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
                 help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
             )
 
-    packet = commands.add_parser("review", help="Render a safe packet and issue a terminal challenge.")
+    packet = commands.add_parser(
+        "review", help="Render a safe packet and issue a terminal challenge."
+    )
     _add_project(packet)
     packet.add_argument("run_id")
     packet.add_argument("--lavish", action="store_true")
@@ -160,7 +162,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     packet.add_argument("--no-open", action="store_true")
     packet.add_argument("--json", action="store_true")
     packet.add_argument("--principal-id", default=None)
-    decision = commands.add_parser("decide", help="Authenticate an exact action in the review terminal.")
+    decision = commands.add_parser(
+        "decide", help="Authenticate an exact action in the review terminal."
+    )
     _add_project(decision)
     decision.add_argument("run_id")
     decision.add_argument("--action", required=True)
@@ -381,7 +385,10 @@ def run_factory(args: argparse.Namespace) -> int:
         project = resolve_project(args.project)
         packet_report = review(project, args.run_id)
         issued_report = issue_for_review(
-            project, args.run_id, packet_report, principal_id=args.principal_id,
+            project,
+            args.run_id,
+            packet_report,
+            principal_id=args.principal_id,
         )
         secret = issued_report.pop("challenge", None)
         document = issued_report
@@ -393,9 +400,13 @@ def run_factory(args: argparse.Namespace) -> int:
         return SUCCESS
     if command == "decide":
         document = decide(
-            resolve_project(args.project), args.run_id, action=args.action,
-            subject_digest=args.subject_digest, challenge=args.challenge,
-            principal_id=args.principal_id, reason=args.reason,
+            resolve_project(args.project),
+            args.run_id,
+            action=args.action,
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
         )
         _emit(args, document, [json.dumps(document, sort_keys=True)])
         return SUCCESS

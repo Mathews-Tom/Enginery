@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.behavioral import fixture_behavioral_checks
-from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
+from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.execution import selection_for
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
@@ -81,6 +82,22 @@ def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
     ).stdout.strip()
+
+
+def _publication_workspace(request: Stage1RunRequest) -> str:
+    """Give manually completed nodes real committed objects for the review packet."""
+    workspace = request.workspace_path
+    workspace.mkdir(parents=True)
+    _git("init", cwd=workspace)
+    _git("config", "user.email", "test@example.invalid", cwd=workspace)
+    _git("config", "user.name", "Test", cwd=workspace)
+    (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _git("add", "tracked.txt", cwd=workspace)
+    _git("commit", "-m", "baseline", cwd=workspace)
+    _git("tag", request.run.base_revision, cwd=workspace)
+    (workspace / "tracked.txt").write_text("implementation\n", encoding="utf-8")
+    _git("commit", "-am", "implementation", cwd=workspace)
+    return _git("rev-parse", "HEAD", cwd=workspace)
 
 
 def _request(tmp_path: Path) -> FixtureDispatch:
@@ -942,6 +959,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
+    verified_head = _publication_workspace(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
     terminal_snapshot = (
@@ -955,6 +973,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1009,7 +1028,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": HEAD_REVISION},
+                        "result": {"head_revision": verified_head},
                     },
                 ),
             ),
@@ -1022,6 +1041,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
 
     pull_requests.failures_remaining = 1
     with pytest.raises(ExternalConflictError, match="simulated provider interruption"):
@@ -1151,6 +1171,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
+    verified_head = _publication_workspace(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
@@ -1161,6 +1182,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1215,7 +1237,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
                     expected_version=0,
                     event_type="node_attempt.result_ingested",
                     schema_version=1,
-                    payload={"result": {"head_revision": HEAD_REVISION}},
+                    payload={"result": {"head_revision": verified_head}},
                 ),
             ),
         )
@@ -1227,6 +1249,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     pull_requests.check_status = "completed"
     pull_requests.check_conclusion = "failure"
@@ -1312,6 +1335,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
+    _publication_workspace(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
@@ -1322,10 +1346,16 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
     def _drive_generation(generation: int) -> None:
+        if generation:
+            (request.workspace_path / "tracked.txt").write_text(
+                f"repair {generation}\n", encoding="utf-8"
+            )
+            _git("commit", "-am", f"repair {generation}", cwd=request.workspace_path)
         for node_id in (
             ("qualify", "implement", "validate")
             if generation == 0
@@ -1388,7 +1418,11 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
                         schema_version=1,
                         payload={
                             "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                            "result": {"head_revision": HEAD_REVISION},
+                            "result": {
+                                "head_revision": _git(
+                                    "rev-parse", "HEAD", cwd=request.workspace_path
+                                )
+                            },
                         },
                     ),
                 ),
@@ -1403,6 +1437,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     pull_requests.check_status = "completed"
     pull_requests.check_conclusion = "failure"
@@ -1427,6 +1462,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
         heartbeat_window=timedelta(seconds=60),
     )
     assert service.next_action(request.run.id).action.value == "open_pr"
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert len(pull_requests.requests) == 2
     assert pull_requests.requests[0].operation_id == pull_requests.requests[1].operation_id
@@ -1513,6 +1549,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
+    verified_head = _publication_workspace(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
@@ -1526,6 +1563,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
         outcomes=outcomes,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -1580,7 +1618,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": HEAD_REVISION},
+                        "result": {"head_revision": verified_head},
                     },
                 ),
             ),
@@ -1593,6 +1631,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert (
         service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
@@ -1704,6 +1743,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
             artifact_root=(tmp_path / "artifacts").resolve(),
         ),
     )
+    verified_head = _publication_workspace(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
@@ -1714,6 +1754,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
     )
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -1767,7 +1808,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": HEAD_REVISION},
+                        "result": {"head_revision": verified_head},
                     },
                 ),
             ),
@@ -1780,6 +1821,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert (
         service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
@@ -1873,6 +1915,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         work_ledger=cast(WorkLedgerPort, work_ledger),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
         harness=OmpHarness(
             OmpAdapterConfig(
                 credential_reference="test-keyring", executable=str(_fake_omp(tmp_path))
@@ -1930,7 +1973,10 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         operation_id=lease.operation_id,
         terminal_result="passed",
         artifact_references=(str(Digest.of_bytes(b"implementation")),),
-        result={"harness_status": "succeeded", "head_revision": HEAD_REVISION},
+        result={
+            "harness_status": "succeeded",
+            "head_revision": _git("rev-parse", "HEAD", cwd=request.workspace_path),
+        },
     )
     # The runtime refuses a result until it has observed the worker's exit; wait for that
     # rather than guessing how long a process takes to exit.
@@ -1952,6 +1998,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
         now=now,
         heartbeat_window=timedelta(seconds=60),
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
     pull_requests.check_status = "completed"
     pull_requests.check_conclusion = "failure"
@@ -2147,6 +2194,7 @@ def _check_disposition_fixture(
         ),
         pull_requests=cast(PullRequestPort, pull_requests),
         branch_publisher=RecordingBranchPublisher(),
+        publication_authorizer=AuthenticatedDecisions(ledger_service).authorize_publication,
     )
     if start:
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
@@ -2214,6 +2262,8 @@ def _drive_check_to_non_pass(
         source_drift=check_id == STAGE1_VERIFY_CHECK_ID and result == "fail",
         execution_selection=execution_selection,
     )
+    if check_id == STAGE1_VERIFY_CHECK_ID:
+        _publication_workspace(request)
     heartbeat = timedelta(seconds=60)
     _complete_check_node(runtime, request, "qualify", now)
     _complete_check_node(runtime, request, "implement", now)
@@ -2262,7 +2312,9 @@ def _drive_check_to_non_pass(
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": HEAD_REVISION},
+                        "result": {
+                            "head_revision": _git("rev-parse", "HEAD", cwd=request.workspace_path)
+                        },
                     },
                 ),
             ),
@@ -2275,6 +2327,7 @@ def _drive_check_to_non_pass(
         now=now,
         heartbeat_window=heartbeat,
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=heartbeat)
     service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
     if result == "indeterminate":

@@ -186,9 +186,14 @@ def advancing_service(
         behavioral_verifier=lambda bound, head: verify_for_stage1(
             ledger, bound, head, owner=runtime.coordinator.owner
         ),
-        publication_authorizer=lambda bound: require_for_effect(
-            ledger, bound, "pull_request.open", "open_pr",
-        ).id,
+        publication_authorizer=lambda bound: (
+            require_for_effect(
+                ledger,
+                bound,
+                "pull_request.open",
+                "open_pr",
+            ).id
+        ),
     )
 
 

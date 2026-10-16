@@ -34,6 +34,7 @@ from enginery.domain.ids import RunId
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerProfile, RunnerSelection
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.events import AppendCommand, EventWrite
+from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
@@ -323,6 +324,15 @@ def test_a_pinned_run_binds_its_selection_digest_into_the_verify_node_and_eviden
         default_node = default_service.ledger.read_projection(
             aggregate_type="runtime_node", aggregate_id="run-check:verify"
         )
+        for verified_service in (pinned_service, default_service):
+            decisions = list_decisions(verified_service.ledger.connection, "run-check")
+            publication = verified_service.ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id="run-check:open_pr"
+            )
+            assert len(decisions) == 1
+            assert decisions[0].action == "pull_request.open"
+            assert publication is not None
+            assert publication.state["decision_id"] == decisions[0].id
     finally:
         other.close()
 

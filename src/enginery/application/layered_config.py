@@ -370,12 +370,16 @@ def parse_layer_document(
         if not isinstance(registration, dict) or not required <= set(registration):
             raise ConfigError(
                 "must be a table containing principal_id, os_user and os_uid",
-                file=source, key="review_authority", allowed=tuple(sorted(allowed)),
+                file=source,
+                key="review_authority",
+                allowed=tuple(sorted(allowed)),
             )
         unknown = sorted(set(registration) - allowed)
         if unknown:
             raise ConfigError(
-                "unknown key", file=source, key=f"review_authority.{unknown[0]}",
+                "unknown key",
+                file=source,
+                key=f"review_authority.{unknown[0]}",
                 allowed=tuple(sorted(allowed)),
             )
         try:

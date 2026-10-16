@@ -63,9 +63,7 @@ def registered_humans() -> tuple[AuthorityPrincipal, ...]:
 def _registered_identity(principal_id: str | None = None) -> ReviewAuthority:
     registration = operator_registration()
     if principal_id is not None and principal_id != registration.principal_id:
-        raise PrincipalMismatchError(
-            f"select registered principal id: {registration.principal_id}"
-        )
+        raise PrincipalMismatchError(f"select registered principal id: {registration.principal_id}")
     if registration.os_uid != os.getuid() or registration.os_user != getpass.getuser():
         raise PrincipalMismatchError("register the current OS user and uid in user preferences")
     return registration
@@ -77,7 +75,9 @@ def _interactive() -> bool:
 
 def _authenticate(principal_id: str | None) -> tuple[ReviewAuthority, AuthenticatedDecisionContext]:
     if any(key in os.environ for key in ("HTTP_ORIGIN", "HTTP_REFERER", "REQUEST_METHOD")):
-        raise AuthenticationError("HTTP-originated decisions are not supported; use the local terminal")
+        raise AuthenticationError(
+            "HTTP-originated decisions are not supported; use the local terminal"
+        )
     if not _interactive():
         raise AuthenticationError("run factory review and decide in the same interactive terminal")
     registration = _registered_identity(principal_id)
@@ -85,7 +85,9 @@ def _authenticate(principal_id: str | None) -> tuple[ReviewAuthority, Authentica
         tty_name = os.ttyname(sys.stdin.fileno())
         output_tty = os.ttyname(sys.stdout.fileno())
     except (OSError, ValueError) as error:
-        raise AuthenticationError("run factory review and decide in a real local terminal") from error
+        raise AuthenticationError(
+            "run factory review and decide in a real local terminal"
+        ) from error
     if tty_name != output_tty:
         raise AuthenticationError("decision input and output must use the same local terminal")
     context = AuthenticatedDecisionContext(registration.principal, os.getuid(), tty_name)
@@ -95,7 +97,8 @@ def _authenticate(principal_id: str | None) -> tuple[ReviewAuthority, Authentica
 
 def _state(ledger: LedgerService, run_id: str, node_id: str) -> Mapping[str, object]:
     projection = ledger.read_projection(
-        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{node_id}",
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+        aggregate_id=f"{run_id}:{node_id}",
     )
     state = {} if projection is None else projection.state
     bounded_json(state)
@@ -104,7 +107,8 @@ def _state(ledger: LedgerService, run_id: str, node_id: str) -> Mapping[str, obj
 
 def _waits(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
     return tuple(
-        str(node_id) for node_id in request.manifest.nodes
+        str(node_id)
+        for node_id in request.manifest.nodes
         if _state(ledger, str(request.run.id), str(node_id)).get("status") == "awaiting_human"
     )
 
@@ -114,7 +118,8 @@ def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...
     actions: list[str] = []
     publication = _state(ledger, str(request.run.id), "open_pr")
     if "open_pr" in waiting or (
-        not waiting and _state(ledger, str(request.run.id), "review").get("status") == "passed"
+        not waiting
+        and _state(ledger, str(request.run.id), "review").get("status") == "passed"
         and publication.get("status") not in {"failed", "cancelled", "blocked"}
     ):
         actions.append(_PUBLICATION)
@@ -127,8 +132,14 @@ def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...
 
 
 def _schema(
-    ledger: LedgerService, request: Stage1RunRequest, packet: ReviewPacket, action: str,
-    *, node_id: str | None = None, reason: str = "", expires_at: datetime | None = None,
+    ledger: LedgerService,
+    request: Stage1RunRequest,
+    packet: ReviewPacket,
+    action: str,
+    *,
+    node_id: str | None = None,
+    reason: str = "",
+    expires_at: datetime | None = None,
 ) -> ApprovalSchema:
 
     scope = wait_scope(action)
@@ -141,16 +152,23 @@ def _schema(
     if isinstance(current_attempt, str):
         producers.add(current_attempt)
     schema = ApprovalSchema(
-        action=policy_action(action), repository=request.repository_id,
+        action=policy_action(action),
+        repository=request.repository_id,
         workflow_version=str(request.manifest.content_digest),
         policy_version=str(request.run.configuration_snapshot_digest),
         work_snapshot=packet.subject_digest,
         effective_configuration=packet.configuration_snapshot_digest,
-        target_resource=str(request.run.id), diff_or_artifact_digest=packet.diff_digest,
+        target_resource=str(request.run.id),
+        diff_or_artifact_digest=packet.diff_digest,
         acceptance_criteria_snapshot=str(request.work_snapshot.bound_digest),
-        evidence_bundle_digest=str(Digest.of_json({
-            "receipts": list(packet.evidence_receipt_digests), "ci": packet.ci_evidence_json,
-        })),
+        evidence_bundle_digest=str(
+            Digest.of_json(
+                {
+                    "receipts": list(packet.evidence_receipt_digests),
+                    "ci": packet.ci_evidence_json,
+                }
+            )
+        ),
         requesting_principal_id=request.implementation.attempt_id,
         producer_principal_ids=tuple(sorted(producers)),
         override_reason=reason if scope else None,
@@ -162,7 +180,11 @@ def _schema(
 
 
 def issue_for_review(
-    project: Path, run_id: str, report: dict[str, object], *, principal_id: str | None = None,
+    project: Path,
+    run_id: str,
+    report: dict[str, object],
+    *,
+    principal_id: str | None = None,
 ) -> dict[str, object]:
     """Return a terminal-only secret separately from serializable report lines."""
     result = dict(report)
@@ -182,15 +204,24 @@ def issue_for_review(
             result["challenge_reason"] = "decision_action_mismatch"
         else:
             issued = issue_challenge(
-                ledger.connection, run_id=run_id, subject_fields=packet.subject_fields(),
-                actions=actions, context=context, registered_humans=registration.registered_humans,
+                ledger.connection,
+                run_id=run_id,
+                subject_fields=packet.subject_fields(),
+                actions=actions,
+                context=context,
+                registered_humans=registration.registered_humans,
                 lifetime=timedelta(seconds=registration.ttl_seconds),
             )
-            result.update({
-                "challenge_issued": True, "challenge": issued.challenge,
-                "subject_digest": issued.subject_digest, "actions": list(issued.actions),
-                "expires_at": issued.expires_at.isoformat(), "principal_id": context.principal.id,
-            })
+            result.update(
+                {
+                    "challenge_issued": True,
+                    "challenge": issued.challenge,
+                    "subject_digest": issued.subject_digest,
+                    "actions": list(issued.actions),
+                    "expires_at": issued.expires_at.isoformat(),
+                    "principal_id": context.principal.id,
+                }
+            )
             lines = report.get("lines")
             result["lines"] = [
                 *(lines if isinstance(lines, list) else []),
@@ -204,9 +235,16 @@ def issue_for_review(
 
 
 def decide_in_ledger(
-    ledger: LedgerService, request: Stage1RunRequest, *, action: str, subject_digest: str,
-    challenge: str, principal_id: str | None = None, reason: str = "",
-    resumed_request: FixtureDispatch | None = None, owner: str = "factory",
+    ledger: LedgerService,
+    request: Stage1RunRequest,
+    *,
+    action: str,
+    subject_digest: str,
+    challenge: str,
+    principal_id: str | None = None,
+    reason: str = "",
+    resumed_request: FixtureDispatch | None = None,
+    owner: str = "factory",
 ) -> dict[str, object]:
     """Consume and release an exact wait under ONE write transaction, including its event."""
     registration, context = _authenticate(principal_id)
@@ -227,12 +265,22 @@ def decide_in_ledger(
         if _registered_identity(context.principal.id) != registration:
             raise PrincipalMismatchError("operator registration changed; run factory review again")
         schema = _schema(
-            ledger, request, packet, action, node_id=node_id, reason=reason,
+            ledger,
+            request,
+            packet,
+            action,
+            node_id=node_id,
+            reason=reason,
             expires_at=min(expires_at, decided_at + schema_expiry),
         )
         return decision_verifier(
-            run_id=run_id, action=action, subject_fields=packet.subject_fields(), context=context,
-            registered_humans=registration.registered_humans, schema=schema, reason=reason,
+            run_id=run_id,
+            action=action,
+            subject_fields=packet.subject_fields(),
+            context=context,
+            registered_humans=registration.registered_humans,
+            schema=schema,
+            reason=reason,
         )(decided_at, expires_at)
 
     def release(decision: HumanDecision) -> None:
@@ -243,62 +291,101 @@ def decide_in_ledger(
         runtime = runtime_for_run(ledger, owner=owner, run_id=run_id)
         epoch = runtime.claim_epoch(now=decision.decided_at, heartbeat_window=HEARTBEAT_WINDOW)
         extra: dict[str, object] = {
-            "decision_id": decision.id, "decision_action": action, "reason": decision.reason,
+            "decision_id": decision.id,
+            "decision_action": action,
+            "reason": decision.reason,
         }
         if not request.execution_selection.legacy:
             extra["execution_selection_digest"] = str(request.execution_selection.digest)
         if scope is not None and scope[1] == "requeue":
             prior = runtime.read_node_request(run_id=run_id, node_id=node_id)
             resumed = resumed_request or replace(
-                prior, attempt_id=f"{prior.attempt_id}-requeue-{decision.id[:8]}",
-                operation_id=str(Digest.of_json({"prior": prior.operation_id, "decision": decision.id})),
+                prior,
+                attempt_id=f"{prior.attempt_id}-requeue-{decision.id[:8]}",
+                operation_id=str(
+                    Digest.of_json({"prior": prior.operation_id, "decision": decision.id})
+                ),
                 expected_attempt_version=0,
             )
             if resumed.run_id != run_id or resumed.node_id != node_id:
                 raise ActionMismatchError("a requeue decision cannot release another node")
             runtime.resume_human_wait(
-                request=resumed, epoch=epoch.epoch, now=decision.decided_at, extra=extra,
+                request=resumed,
+                epoch=epoch.epoch,
+                now=decision.decided_at,
+                extra=extra,
             )
         else:
             runtime.resolve_human_wait(
-                run_id=run_id, node_id=node_id, epoch=epoch.epoch, now=decision.decided_at,
-                outcome="failed" if scope and scope[1] == "reject" else "passed", extra=extra,
+                run_id=run_id,
+                node_id=node_id,
+                epoch=epoch.epoch,
+                now=decision.decided_at,
+                outcome="failed" if scope and scope[1] == "reject" else "passed",
+                extra=extra,
             )
 
     decision = consume_decision(
-        ledger.connection, run_id=run_id, action=action, subject_digest=subject_digest,
-        current_subject_fields=packet.subject_fields(), challenge=challenge, context=context,
-        registered_humans=registration.registered_humans, verifier=verify, release=release,
+        ledger.connection,
+        run_id=run_id,
+        action=action,
+        subject_digest=subject_digest,
+        current_subject_fields=packet.subject_fields(),
+        challenge=challenge,
+        context=context,
+        registered_humans=registration.registered_humans,
+        verifier=verify,
+        release=release,
     )
     return {
-        "run_id": run_id, "decision_id": decision.id, "action": decision.action,
+        "run_id": run_id,
+        "decision_id": decision.id,
+        "action": decision.action,
         "outcome": "rejected" if scope and scope[1] == "reject" else "approved",
-        "subject_digest": decision.subject_digest, "expires_at": decision.expires_at.isoformat(),
+        "subject_digest": decision.subject_digest,
+        "expires_at": decision.expires_at.isoformat(),
         "node_id": node_id,
     }
 
 
 def decide(
-    project: Path, run_id: str, *, action: str, subject_digest: str, challenge: str,
-    principal_id: str | None = None, reason: str = "",
+    project: Path,
+    run_id: str,
+    *,
+    action: str,
+    subject_digest: str,
+    challenge: str,
+    principal_id: str | None = None,
+    reason: str = "",
 ) -> dict[str, object]:
     ledger, request = _open(project, run_id, writable=True)
     try:
         return decide_in_ledger(
-            ledger, request, action=action, subject_digest=subject_digest, challenge=challenge,
-            principal_id=principal_id, reason=reason,
+            ledger,
+            request,
+            action=action,
+            subject_digest=subject_digest,
+            challenge=challenge,
+            principal_id=principal_id,
+            reason=reason,
         )
     finally:
         ledger.close()
 
 
 def require_for_effect(
-    ledger: LedgerService, request: Stage1RunRequest, action: str, node_id: str | None = None,
+    ledger: LedgerService,
+    request: Stage1RunRequest,
+    action: str,
+    node_id: str | None = None,
 ) -> HumanDecision:
     """Recheck durable authority immediately before publication; no TTY grants authority here."""
     packet = build_packet(request.repository_path, ledger, request)
     decision = require_current_decision(
-        ledger.connection, str(request.run.id), action, packet.subject_digest,
+        ledger.connection,
+        str(request.run.id),
+        action,
+        packet.subject_digest,
     )
     registration = _registered_identity()
     if (
@@ -309,10 +396,17 @@ def require_for_effect(
     if decision.expires_at > decision.decided_at + timedelta(seconds=registration.ttl_seconds):
         raise AuthenticationError("the decision exceeds the current operator lifetime limit")
     scope = wait_scope(action)
-    if (scope and scope[0] != node_id) or (action == _PUBLICATION and node_id not in {None, "open_pr"}):
+    if (scope and scope[0] != node_id) or (
+        action == _PUBLICATION and node_id not in {None, "open_pr"}
+    ):
         raise ActionMismatchError("the decision cannot authorize another node")
     schema = _schema(
-        ledger, request, packet, action, node_id=node_id, reason=decision.reason,
+        ledger,
+        request,
+        packet,
+        action,
+        node_id=node_id,
+        reason=decision.reason,
         expires_at=decision.expires_at,
     )
     HardRuleEnforcer.enforce_approval(schema, (decision.principal,), (registration.principal_id,))

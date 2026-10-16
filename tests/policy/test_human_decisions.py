@@ -30,13 +30,13 @@ from enginery.domain.digests import Digest
 from enginery.domain.policy_decision import PolicyAction
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 from enginery.ledger.connection import open_connection
+from enginery.ledger.events import AppendCommand, EventWrite, append
 from enginery.ledger.human_decisions import (
     consume_decision,
     issue_challenge,
     list_decisions,
     require_current_decision,
 )
-from enginery.ledger.events import AppendCommand, EventWrite, append
 from enginery.ledger.migrations import apply_pending_migrations
 from enginery.policy.human_decisions import decision_verifier
 from enginery.policy.rules import HardRuleError
@@ -60,43 +60,76 @@ def connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
 
 def _subject(head: str = "head") -> dict[str, object]:
     return {
-        "run_id": "run-1", "request_digest": "request", "configuration_snapshot_digest": "config",
-        "base_revision": "base", "head_revision": head, "diff_digest": "diff",
-        "evidence_receipt_digests": ["receipt"], "ci_evidence_digest": "ci", "findings": [],
+        "run_id": "run-1",
+        "request_digest": "request",
+        "configuration_snapshot_digest": "config",
+        "base_revision": "base",
+        "head_revision": head,
+        "diff_digest": "diff",
+        "evidence_receipt_digests": ["receipt"],
+        "ci_evidence_digest": "ci",
+        "findings": [],
     }
 
 
 def _issue(
-    connection: sqlite3.Connection, *, fields: dict[str, object] | None = None,
+    connection: sqlite3.Connection,
+    *,
+    fields: dict[str, object] | None = None,
     lifetime: timedelta = timedelta(minutes=30),
 ) -> IssuedChallenge:
     return issue_challenge(
-        connection, run_id="run-1", subject_fields=fields or _subject(), actions=(ACTION,),
-        context=CONTEXT, registered_humans=REGISTERED, now=NOW, lifetime=lifetime,
+        connection,
+        run_id="run-1",
+        subject_fields=fields or _subject(),
+        actions=(ACTION,),
+        context=CONTEXT,
+        registered_humans=REGISTERED,
+        now=NOW,
+        lifetime=lifetime,
     )
 
 
 def _consume(
-    connection: sqlite3.Connection, issued: IssuedChallenge, *,
-    fields: dict[str, object] | None = None, context: AuthenticatedDecisionContext = CONTEXT,
-    action: str = ACTION, digest: str | None = None, now: datetime = NOW,
-    schema: ApprovalSchema | None = None, reason: str = "",
+    connection: sqlite3.Connection,
+    issued: IssuedChallenge,
+    *,
+    fields: dict[str, object] | None = None,
+    context: AuthenticatedDecisionContext = CONTEXT,
+    action: str = ACTION,
+    digest: str | None = None,
+    now: datetime = NOW,
+    schema: ApprovalSchema | None = None,
+    reason: str = "",
     release: Callable[[HumanDecision], None] | None = None,
 ) -> HumanDecision:
     fields = fields or _subject()
     schema = schema or ApprovalSchema(
-        action=PolicyAction(action), target_resource="run-1",
-        work_snapshot=str(Digest.of_json(fields)), requesting_principal_id="worker",
+        action=PolicyAction(action),
+        target_resource="run-1",
+        work_snapshot=str(Digest.of_json(fields)),
+        requesting_principal_id="worker",
         producer_principal_ids=("worker",),
     )
     return consume_decision(
-        connection, run_id="run-1", action=action,
-        subject_digest=digest or issued.subject_digest, current_subject_fields=fields,
-        challenge=issued.challenge, context=context, registered_humans=REGISTERED, now=now,
+        connection,
+        run_id="run-1",
+        action=action,
+        subject_digest=digest or issued.subject_digest,
+        current_subject_fields=fields,
+        challenge=issued.challenge,
+        context=context,
+        registered_humans=REGISTERED,
+        now=now,
         release=release,
         verifier=decision_verifier(
-            run_id="run-1", action=action, subject_fields=fields, context=context,
-            registered_humans=REGISTERED, schema=schema, reason=reason,
+            run_id="run-1",
+            action=action,
+            subject_fields=fields,
+            context=context,
+            registered_humans=REGISTERED,
+            schema=schema,
+            reason=reason,
         ),
     )
 
@@ -109,7 +142,11 @@ def test_challenge_is_hash_only_and_success_consumes_once(connection: sqlite3.Co
     assert issued.challenge not in repr(tuple(row))
     decision = _consume(connection, issued)
     assert decision == require_current_decision(
-        connection, "run-1", ACTION, issued.subject_digest, now=NOW,
+        connection,
+        "run-1",
+        ACTION,
+        issued.subject_digest,
+        now=NOW,
     )
     assert decision.attestation().approved
     assert decision.normalized_inputs["work_snapshot"] == issued.subject_digest
@@ -121,20 +158,29 @@ def test_challenge_is_hash_only_and_success_consumes_once(connection: sqlite3.Co
 
 @pytest.mark.parametrize("fail_release", [False, True])
 def test_decision_consumption_and_human_wait_event_are_atomic(
-    connection: sqlite3.Connection, fail_release: bool,
+    connection: sqlite3.Connection,
+    fail_release: bool,
 ) -> None:
     issued = _issue(connection)
 
     def release(decision: HumanDecision) -> None:
         assert connection.in_transaction
-        append(connection, AppendCommand(
-            correlation_id="human-wait-release",
-            events=(EventWrite(
-                aggregate_type="runtime_node", aggregate_id="run-1:open_pr",
-                expected_version=0, event_type="runtime_node.human_wait_resolved",
-                schema_version=1, payload={"decision_id": decision.id, "status": "passed"},
-            ),),
-        ))
+        append(
+            connection,
+            AppendCommand(
+                correlation_id="human-wait-release",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id="run-1:open_pr",
+                        expected_version=0,
+                        event_type="runtime_node.human_wait_resolved",
+                        schema_version=1,
+                        payload={"decision_id": decision.id, "status": "passed"},
+                    ),
+                ),
+            ),
+        )
         if fail_release:
             raise RuntimeError("release failed")
 
@@ -159,12 +205,15 @@ def test_decision_consumption_and_human_wait_event_are_atomic(
         (replace(CONTEXT, os_uid=os.getuid() + 1), AuthenticationError),
         (replace(CONTEXT, tty_name="http://localhost/decision"), AuthenticationError),
         (replace(CONTEXT, tty_name="/dev/ttys002"), PrincipalMismatchError),
-        (replace(CONTEXT, principal=replace(OPERATOR, principal_type=PrincipalType.AGENT)),
-         AuthenticationError),
+        (
+            replace(CONTEXT, principal=replace(OPERATOR, principal_type=PrincipalType.AGENT)),
+            AuthenticationError,
+        ),
     ],
 )
 def test_forged_principal_uid_tty_and_http_contexts_are_refused(
-    connection: sqlite3.Connection, context: AuthenticatedDecisionContext,
+    connection: sqlite3.Connection,
+    context: AuthenticatedDecisionContext,
     error: type[HumanDecisionError],
 ) -> None:
     issued = _issue(connection)
@@ -194,7 +243,8 @@ def test_expiry_boundary_is_mandatory(connection: sqlite3.Connection, seconds: i
 
 @pytest.mark.parametrize("lifetime", [timedelta(0), timedelta(minutes=31)])
 def test_challenge_lifetime_cannot_disable_or_extend_expiry(
-    connection: sqlite3.Connection, lifetime: timedelta,
+    connection: sqlite3.Connection,
+    lifetime: timedelta,
 ) -> None:
     with pytest.raises(HumanDecisionError, match="at most 30 minutes"):
         _issue(connection, lifetime=lifetime)
@@ -212,14 +262,20 @@ def test_changed_subject_rejects_challenge(connection: sqlite3.Connection) -> No
 @pytest.mark.parametrize(
     "field,new_value",
     [
-        ("head_revision", "new-head"), ("base_revision", "new-base"),
-        ("request_digest", "new-request"), ("configuration_snapshot_digest", "new-config"),
-        ("diff_digest", "new-diff"), ("evidence_receipt_digests", ["new-receipt"]),
-        ("ci_evidence_digest", "new-ci"), ("findings", ["new-finding"]),
+        ("head_revision", "new-head"),
+        ("base_revision", "new-base"),
+        ("request_digest", "new-request"),
+        ("configuration_snapshot_digest", "new-config"),
+        ("diff_digest", "new-diff"),
+        ("evidence_receipt_digests", ["new-receipt"]),
+        ("ci_evidence_digest", "new-ci"),
+        ("findings", ["new-finding"]),
     ],
 )
 def test_every_changed_bound_input_supersedes_history_without_new_decision(
-    connection: sqlite3.Connection, field: str, new_value: object,
+    connection: sqlite3.Connection,
+    field: str,
+    new_value: object,
 ) -> None:
     issued = _issue(connection)
     original = _consume(connection, issued)
@@ -244,11 +300,19 @@ def test_decision_expires_and_wrong_action_has_no_authority(connection: sqlite3.
     _consume(connection, issued)
     with pytest.raises(ExpiredDecisionError):
         require_current_decision(
-            connection, "run-1", ACTION, issued.subject_digest, now=issued.expires_at,
+            connection,
+            "run-1",
+            ACTION,
+            issued.subject_digest,
+            now=issued.expires_at,
         )
     with pytest.raises(MissingDecisionError):
         require_current_decision(
-            connection, "run-1", PolicyAction.POLICY_OVERRIDE.value, issued.subject_digest, now=NOW,
+            connection,
+            "run-1",
+            PolicyAction.POLICY_OVERRIDE.value,
+            issued.subject_digest,
+            now=NOW,
         )
 
 
@@ -257,8 +321,10 @@ def test_existing_registry_refuses_self_approval_without_consuming(
 ) -> None:
     issued = _issue(connection)
     schema = ApprovalSchema(
-        action=PolicyAction.PULL_REQUEST_OPEN, target_resource="run-1",
-        work_snapshot=issued.subject_digest, requesting_principal_id=OPERATOR.id,
+        action=PolicyAction.PULL_REQUEST_OPEN,
+        target_resource="run-1",
+        work_snapshot=issued.subject_digest,
+        requesting_principal_id=OPERATOR.id,
     )
     with pytest.raises(HardRuleError, match="producer separation"):
         _consume(connection, issued, schema=schema)
@@ -269,13 +335,21 @@ def test_existing_registry_refuses_self_approval_without_consuming(
 def test_existing_override_hard_rule_cannot_be_relaxed(connection: sqlite3.Connection) -> None:
     action = PolicyAction.POLICY_OVERRIDE.value
     issued = issue_challenge(
-        connection, run_id="run-1", subject_fields=_subject(), actions=(action,),
-        context=CONTEXT, registered_humans=REGISTERED, now=NOW,
+        connection,
+        run_id="run-1",
+        subject_fields=_subject(),
+        actions=(action,),
+        context=CONTEXT,
+        registered_humans=REGISTERED,
+        now=NOW,
     )
     schema = ApprovalSchema(
-        action=PolicyAction.POLICY_OVERRIDE, target_resource="run-1",
-        work_snapshot=issued.subject_digest, requesting_principal_id="worker",
-        override_reason="try bypass", override_scope=("approval_digest",),
+        action=PolicyAction.POLICY_OVERRIDE,
+        target_resource="run-1",
+        work_snapshot=issued.subject_digest,
+        requesting_principal_id="worker",
+        override_reason="try bypass",
+        override_scope=("approval_digest",),
         override_expires_at=issued.expires_at,
     )
     with pytest.raises(HardRuleError, match="cannot relax a hard rule"):
@@ -283,7 +357,9 @@ def test_existing_override_hard_rule_cannot_be_relaxed(connection: sqlite3.Conne
     assert list_decisions(connection, "run-1") == ()
 
 
-def test_failed_decision_insert_rolls_back_nonce_consumption(connection: sqlite3.Connection) -> None:
+def test_failed_decision_insert_rolls_back_nonce_consumption(
+    connection: sqlite3.Connection,
+) -> None:
     issued = _issue(connection)
     connection.execute(
         "CREATE TRIGGER refuse_decision BEFORE INSERT ON human_decisions "
@@ -291,9 +367,12 @@ def test_failed_decision_insert_rolls_back_nonce_consumption(connection: sqlite3
     )
     with pytest.raises(sqlite3.IntegrityError, match="simulated persistence failure"):
         _consume(connection, issued)
-    assert connection.execute(
-        "SELECT consumed_at FROM human_decision_challenges"
-    ).fetchone()["consumed_at"] is None
+    assert (
+        connection.execute("SELECT consumed_at FROM human_decision_challenges").fetchone()[
+            "consumed_at"
+        ]
+        is None
+    )
     assert list_decisions(connection, "run-1") == ()
     connection.execute("DROP TRIGGER refuse_decision")
     _consume(connection, issued)
@@ -322,7 +401,11 @@ def test_challenges_and_approved_decisions_survive_restart(tmp_path: Path) -> No
     connection = open_connection(path)
     try:
         restored = require_current_decision(
-            connection, "run-1", ACTION, issued.subject_digest, now=NOW,
+            connection,
+            "run-1",
+            ACTION,
+            issued.subject_digest,
+            now=NOW,
         )
         assert restored == original
         assert restored.schema_digest == original.schema_digest
@@ -343,9 +426,12 @@ def test_nonce_write_failure_rolls_back_inserted_decision(connection: sqlite3.Co
     with pytest.raises(sqlite3.IntegrityError, match="simulated consumption failure"):
         _consume(connection, issued)
     assert list_decisions(connection, "run-1") == ()
-    assert connection.execute(
-        "SELECT consumed_at FROM human_decision_challenges"
-    ).fetchone()["consumed_at"] is None
+    assert (
+        connection.execute("SELECT consumed_at FROM human_decision_challenges").fetchone()[
+            "consumed_at"
+        ]
+        is None
+    )
     connection.execute("DROP TRIGGER refuse_consumption")
     _consume(connection, issued)
 
@@ -358,10 +444,17 @@ def test_incomplete_subject_cannot_be_challenged(connection: sqlite3.Connection)
 def test_unregistered_human_cannot_issue_challenge(connection: sqlite3.Connection) -> None:
     with pytest.raises(PrincipalMismatchError, match="not registered"):
         issue_challenge(
-            connection, run_id="run-1", subject_fields=_subject(), actions=(ACTION,),
+            connection,
+            run_id="run-1",
+            subject_fields=_subject(),
+            actions=(ACTION,),
             context=replace(CONTEXT, principal=replace(OPERATOR, id="unregistered")),
-            registered_humans=REGISTERED, now=NOW,
+            registered_humans=REGISTERED,
+            now=NOW,
         )
-    assert connection.execute(
-        "SELECT COUNT(*) AS count FROM human_decision_challenges"
-    ).fetchone()["count"] == 0
+    assert (
+        connection.execute("SELECT COUNT(*) AS count FROM human_decision_challenges").fetchone()[
+            "count"
+        ]
+        == 0
+    )

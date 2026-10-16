@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.application.human_decisions import ReviewAuthority
+from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli import factory_decisions
 from enginery.cli.main import main
 from enginery.cli.stage1_composition import lease_window
@@ -28,19 +28,19 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
-from enginery.ledger.service import LedgerService
 from enginery.ledger.human_decisions import issue_challenge
+from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
-    stage1_request_from_state,
     Stage1RunService,
+    stage1_request_from_state,
 )
+from tests.cli.test_factory_decisions import _packet
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
-from tests.cli.test_factory_decisions import _packet
 
 
 @pytest.fixture
@@ -54,7 +54,9 @@ def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         os.fdopen(os.dup(slave), "w") as output_stream,
     ):
         monkeypatch.setattr(
-            factory_decisions, "sys", SimpleNamespace(stdin=input_stream, stdout=output_stream),
+            factory_decisions,
+            "sys",
+            SimpleNamespace(stdin=input_stream, stdout=output_stream),
         )
         monkeypatch.setattr(factory_decisions, "operator_registration", lambda: registration)
 
@@ -64,22 +66,35 @@ def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             run_id = arguments[arguments.index("--run-id") + 1]
             with LedgerService.open(database) as ledger:
                 runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
-                request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+                request = (
+                    Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+                )
                 packet = replace(_packet(), run_id=run_id)
                 monkeypatch.setattr(factory_decisions, "build_packet", lambda *args: packet)
                 _, context = factory_decisions._authenticate(None)
                 issued = issue_challenge(
-                    ledger.connection, run_id=run_id, subject_fields=packet.subject_fields(),
+                    ledger.connection,
+                    run_id=run_id,
+                    subject_fields=packet.subject_fields(),
                     actions=factory_decisions._actions(ledger, request),
-                    context=context, registered_humans=registration.registered_humans,
+                    context=context,
+                    registered_humans=registration.registered_humans,
                 )
             reason = () if "--reason" in arguments else ("--reason", "operator investigated wait")
             return original(
-                database, command, *arguments, *reason, "--subject-digest", issued.subject_digest,
-                "--challenge", issued.challenge,
+                database,
+                command,
+                *arguments,
+                *reason,
+                "--subject-digest",
+                issued.subject_digest,
+                "--challenge",
+                issued.challenge,
             )
 
-        monkeypatch.setattr(__import__(__name__, fromlist=["_lifecycle"]), "_lifecycle", authenticated)
+        monkeypatch.setattr(
+            __import__(__name__, fromlist=["_lifecycle"]), "_lifecycle", authenticated
+        )
         try:
             yield
         finally:

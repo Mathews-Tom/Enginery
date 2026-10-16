@@ -279,8 +279,13 @@ class TerminalSession:
 
     def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> TerminalResult:
         process = subprocess.Popen(
-            argv, stdin=self.slave, stdout=self.slave, stderr=self.slave,
-            cwd=cwd, env=env, shell=False,
+            argv,
+            stdin=self.slave,
+            stdout=self.slave,
+            stderr=self.slave,
+            cwd=cwd,
+            env=env,
+            shell=False,
         )
         output = bytearray()
         deadline = time.monotonic() + 180
@@ -303,15 +308,18 @@ class TerminalSession:
                     break
             text = output.decode("utf-8").replace("\r\n", "\n")
             challenges = re.findall(
-                r"(?im)^Decision challenge:\s*([0-9a-f]{64})\s*$", text,
+                r"(?im)^Decision challenge:\s*([0-9a-f]{64})\s*$",
+                text,
             )
             self.secrets.update(challenges)
             if len(challenges) > 1:
                 raise RuntimeError("review printed its plaintext challenge more than once")
             subjects = re.findall(r"(?im)^Subject digest:\s*(sha256:[0-9a-f]{64})\s*$", text)
             return TerminalResult(
-                process.returncode or 0, self.scrub(text),
-                challenges[0] if challenges else None, subjects[0] if subjects else None,
+                process.returncode or 0,
+                self.scrub(text),
+                challenges[0] if challenges else None,
+                subjects[0] if subjects else None,
             )
         finally:
             if process.poll() is None:
@@ -427,8 +435,14 @@ class ManualPathGate(SetupGate):
     def publication_hold(self, reason: str = "decision_required") -> tuple[int, dict[str, Any]]:
         """Observe an intentional authority refusal without treating other CLI errors as holds."""
         result = self.cli(
-            "factory", "resume", self.run_id, "--wait-seconds", "1",
-            "--project", str(self.project), "--json",
+            "factory",
+            "resume",
+            self.run_id,
+            "--wait-seconds",
+            "1",
+            "--project",
+            str(self.project),
+            "--json",
         )
         if result.returncode not in {0, 5} or (
             result.returncode == 5 and not result.stderr.startswith(reason + ":")
@@ -442,7 +456,8 @@ class ManualPathGate(SetupGate):
         ledger = LedgerService.open(self.database)
         try:
             projection = ledger.read_projection(
-                aggregate_type="runtime_node", aggregate_id=f"{self.run_id}:open_pr",
+                aggregate_type="runtime_node",
+                aggregate_id=f"{self.run_id}:open_pr",
             )
             state = {} if projection is None else dict(projection.state)
         finally:
@@ -452,14 +467,17 @@ class ManualPathGate(SetupGate):
             for node in status.get("nodes", [])
         )
         if (
-            status_code not in {0, 5} or not waiting
-            or state.get("status") != "awaiting_human" or state.get("reason") != reason
+            status_code not in {0, 5}
+            or not waiting
+            or state.get("status") != "awaiting_human"
+            or state.get("reason") != reason
             or "--action pull_request.open" not in str(status.get("next_decision"))
             or (self.bin / "gh-pr.json").exists()
         ):
             raise RuntimeError("publication refusal did not persist the expected decision wait")
         return result.returncode, {
-            **status, "publication_refusal": {"reason": reason, "stderr": result.stderr},
+            **status,
+            "publication_refusal": {"reason": reason, "stderr": result.stderr},
             "publication_node": state,
         }
 
@@ -484,14 +502,20 @@ class ManualPathGate(SetupGate):
         args = ["factory", command, self.run_id, "--project", str(self.project), *arguments]
         result = self.terminal.run(
             [sys.executable, "-m", "enginery.cli.main", *args],
-            cwd=self.root, env=self.environment(),
+            cwd=self.root,
+            env=self.environment(),
         )
         safe_args = [self.terminal.scrub(arg) for arg in args]
         self.commands.append("enginery " + shlex.join(safe_args))
-        self.completed.append({
-            "argv": safe_args, "exit_code": result.code, "stdout": result.text,
-            "stderr": "", "real_pty": True,
-        })
+        self.completed.append(
+            {
+                "argv": safe_args,
+                "exit_code": result.code,
+                "stdout": result.text,
+                "stderr": "",
+                "real_pty": True,
+            }
+        )
         return result
 
     def challenge(self) -> TerminalResult:
@@ -501,15 +525,26 @@ class ManualPathGate(SetupGate):
         return result
 
     def decide(
-        self, issued: TerminalResult, *, principal: str = OPERATOR_PRINCIPAL,
-        action: str = PUBLICATION_ACTION, subject: str | None = None,
+        self,
+        issued: TerminalResult,
+        *,
+        principal: str = OPERATOR_PRINCIPAL,
+        action: str = PUBLICATION_ACTION,
+        subject: str | None = None,
         challenge: str | None = None,
     ) -> TerminalResult:
         if issued.challenge is None or issued.subject is None:
             raise RuntimeError("a decision requires a real issued challenge")
         return self.interactive(
-            "decide", "--action", action, "--subject-digest", subject or issued.subject,
-            "--challenge", challenge or issued.challenge, "--principal-id", principal,
+            "decide",
+            "--action",
+            action,
+            "--subject-digest",
+            subject or issued.subject,
+            "--challenge",
+            challenge or issued.challenge,
+            "--principal-id",
+            principal,
         )
 
     def launch(self, command: str, *arguments: str) -> subprocess.Popen[str]:
@@ -948,7 +983,8 @@ def step_inspection_review(gate: ManualPathGate) -> None:
     report = dict(json.loads(result.stdout))
     gate.record(
         "terminal-review-findings-only",
-        result.returncode == 0 and report.get("findings_recorded") is True
+        result.returncode == 0
+        and report.get("findings_recorded") is True
         and not (gate.bin / "gh-pr.json").exists(),
         {"exit": result.returncode, "json": report},
         {"report": _read(report_path)},

@@ -88,7 +88,9 @@ class ReviewAuthority:
     def __post_init__(self) -> None:
         for name, value in (("principal_id", self.principal_id), ("os_user", self.os_user)):
             if (
-                not isinstance(value, str) or not value.strip() or value != value.strip()
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
                 or len(value) > 128
                 or any(ord(character) < 33 or ord(character) > 126 for character in value)
             ):
@@ -96,12 +98,17 @@ class ReviewAuthority:
         if type(self.os_uid) is not int or self.os_uid < 0:
             raise HumanDecisionError("review_authority.os_uid must be a nonnegative integer")
         if type(self.ttl_seconds) is not int or not 1 <= self.ttl_seconds <= 1800:
-            raise HumanDecisionError("review_authority.ttl_seconds must be an integer from 1 to 1800")
+            raise HumanDecisionError(
+                "review_authority.ttl_seconds must be an integer from 1 to 1800"
+            )
 
     @property
     def principal(self) -> AuthorityPrincipal:
         return AuthorityPrincipal(
-            self.principal_id, PrincipalType.HUMAN, "operator", "user-preferences",
+            self.principal_id,
+            PrincipalType.HUMAN,
+            "operator",
+            "user-preferences",
         )
 
     @property
@@ -131,7 +138,9 @@ def authenticate_context(
         or context.tty_name in {"/dev/null", "/dev/zero"}
         or any(ord(char) < 32 or ord(char) >= 127 for char in context.tty_name)
     ):
-        raise AuthenticationError("a registered local human and authenticated terminal are required")
+        raise AuthenticationError(
+            "a registered local human and authenticated terminal are required"
+        )
     if context.principal not in registered_humans:
         raise PrincipalMismatchError("the authenticated human principal is not registered")
 
@@ -139,7 +148,10 @@ def authenticate_context(
 def bounded_json(value: object) -> str:
     """Canonical retained inputs, bounded before they enter the private ledger."""
     encoded = json.dumps(
-        thaw_json_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        thaw_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
         allow_nan=False,
     )
     if len(encoded.encode()) > MAX_DECISION_BYTES:
@@ -165,15 +177,17 @@ def policy_action(action: str) -> PolicyAction:
 
 def subject_digest(run_id: str, fields: Mapping[str, object]) -> str:
     required = {
-        "run_id", "request_digest", "configuration_snapshot_digest", "base_revision",
-        "head_revision", "diff_digest", "evidence_receipt_digests", "ci_evidence_digest",
+        "run_id",
+        "request_digest",
+        "configuration_snapshot_digest",
+        "base_revision",
+        "head_revision",
+        "diff_digest",
+        "evidence_receipt_digests",
+        "ci_evidence_digest",
         "findings",
     }
-    if (
-        not run_id.strip()
-        or fields.get("run_id") != run_id
-        or not required.issubset(fields)
-    ):
+    if not run_id.strip() or fields.get("run_id") != run_id or not required.issubset(fields):
         raise SubjectMismatchError("the decision subject must bind every packet input and this run")
     return str(Digest.of_json(json.loads(bounded_json(fields))))
 
@@ -229,8 +243,11 @@ class HumanDecision:
 
     def attestation(self) -> ApprovalAttestation:
         return ApprovalAttestation(
-            action=policy_action(self.action), schema_digest=self.schema_digest,
-            normalized_inputs=self.normalized_inputs, approvers=(self.principal,),
-            approved=True, expires_at=self.expires_at,
+            action=policy_action(self.action),
+            schema_digest=self.schema_digest,
+            normalized_inputs=self.normalized_inputs,
+            approvers=(self.principal,),
+            approved=True,
+            expires_at=self.expires_at,
             superseded=self.superseded_by is not None,
         )

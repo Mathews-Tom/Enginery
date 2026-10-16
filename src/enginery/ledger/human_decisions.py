@@ -29,8 +29,10 @@ from enginery.application.human_decisions import (
     authenticate_context,
     bounded_json,
     checked_time,
-    subject_digest as compute_subject_digest,
     policy_action,
+)
+from enginery.application.human_decisions import (
+    subject_digest as compute_subject_digest,
 )
 from enginery.domain.digests import Digest
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
@@ -75,7 +77,9 @@ def issue_challenge(
         try:
             policy_action(action)
         except ValueError as error:
-            raise ActionMismatchError("the challenge action is outside the policy namespace") from error
+            raise ActionMismatchError(
+                "the challenge action is outside the policy namespace"
+            ) from error
     digest = compute_subject_digest(run_id, subject_fields)
     fields_json = bounded_json(subject_fields)
     challenge = secrets.token_hex(32)
@@ -88,9 +92,18 @@ def issue_challenge(
             "(challenge_hash, run_id, principal_json, os_uid, tty_name, actions_json, "
             "subject_digest, subject_fields_json, issued_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (challenge_hash, run_id, _principal_json(context.principal), context.os_uid,
-             context.tty_name, bounded_json(sorted(actions)), digest, fields_json,
-             issued_at.isoformat(), expires_at.isoformat()),
+            (
+                challenge_hash,
+                run_id,
+                _principal_json(context.principal),
+                context.os_uid,
+                context.tty_name,
+                bounded_json(sorted(actions)),
+                digest,
+                fields_json,
+                issued_at.isoformat(),
+                expires_at.isoformat(),
+            ),
         )
     return IssuedChallenge(challenge, digest, actions, expires_at)
 
@@ -151,11 +164,14 @@ def consume_decision(
             expiry = datetime.fromisoformat(row["expires_at"])
             decision = verifier(decided_at, expiry)
             if (
-                decision.run_id != run_id or decision.action != action
+                decision.run_id != run_id
+                or decision.action != action
                 or decision.subject_digest != current_digest
                 or decision.principal != context.principal
-                or decision.os_uid != context.os_uid or decision.tty_name != context.tty_name
-                or decision.decided_at != decided_at or decision.expires_at > expiry
+                or decision.os_uid != context.os_uid
+                or decision.tty_name != context.tty_name
+                or decision.decided_at != decided_at
+                or decision.expires_at > expiry
                 or decision.superseded_by is not None
             ):
                 raise SubjectMismatchError("the verified approval does not bind this challenge")
@@ -163,17 +179,32 @@ def consume_decision(
             fields = bounded_json(decision.subject_fields)
             principal = _principal_json(decision.principal)
             if challenge in bounded_json((inputs, fields, principal, decision.reason)):
-                raise HumanDecisionError("plaintext terminal challenges cannot be retained in decisions")
+                raise HumanDecisionError(
+                    "plaintext terminal challenges cannot be retained in decisions"
+                )
             connection.execute(
                 "INSERT INTO human_decisions "
                 "(decision_id, challenge_hash, run_id, principal_id, principal_json, action, "
                 "subject_digest, subject_fields_json, os_uid, tty_name, decided_at, expires_at, "
                 "schema_digest, normalized_inputs_json, reason) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (decision.id, challenge_hash, run_id, decision.principal.id, principal, action,
-                 current_digest, fields, context.os_uid, context.tty_name,
-                 decided_at.isoformat(), decision.expires_at.isoformat(),
-                 str(decision.schema_digest), inputs, decision.reason),
+                (
+                    decision.id,
+                    challenge_hash,
+                    run_id,
+                    decision.principal.id,
+                    principal,
+                    action,
+                    current_digest,
+                    fields,
+                    context.os_uid,
+                    context.tty_name,
+                    decided_at.isoformat(),
+                    decision.expires_at.isoformat(),
+                    str(decision.schema_digest),
+                    inputs,
+                    decision.reason,
+                ),
             )
             connection.execute(
                 "UPDATE human_decision_challenges SET consumed_at = ?, decision_id = ? "
@@ -193,25 +224,33 @@ def _decision_from_row(row: sqlite3.Row) -> HumanDecision:
     principal = json.loads(row["principal_json"])
     algorithm, hex_value = row["schema_digest"].split(":", 1)
     return HumanDecision(
-        id=row["decision_id"], run_id=row["run_id"],
+        id=row["decision_id"],
+        run_id=row["run_id"],
         principal=AuthorityPrincipal(
-            principal["id"], PrincipalType(principal["principal_type"]),
-            principal["role"], principal["authorization_source"],
+            principal["id"],
+            PrincipalType(principal["principal_type"]),
+            principal["role"],
+            principal["authorization_source"],
         ),
-        action=row["action"], subject_digest=row["subject_digest"],
-        subject_fields=json.loads(row["subject_fields_json"]), os_uid=row["os_uid"],
-        tty_name=row["tty_name"], decided_at=datetime.fromisoformat(row["decided_at"]),
+        action=row["action"],
+        subject_digest=row["subject_digest"],
+        subject_fields=json.loads(row["subject_fields_json"]),
+        os_uid=row["os_uid"],
+        tty_name=row["tty_name"],
+        decided_at=datetime.fromisoformat(row["decided_at"]),
         expires_at=datetime.fromisoformat(row["expires_at"]),
         schema_digest=Digest(algorithm, hex_value),
         normalized_inputs=json.loads(row["normalized_inputs_json"]),
-        reason=row["reason"], superseded_by=row["superseded_by"],
+        reason=row["reason"],
+        superseded_by=row["superseded_by"],
     )
 
 
 def list_decisions(connection: sqlite3.Connection, run_id: str) -> tuple[HumanDecision, ...]:
     """Retain all decisions for audit, including expired and superseded history."""
     rows = connection.execute(
-        "SELECT * FROM human_decisions WHERE run_id = ? ORDER BY rowid", (run_id,),
+        "SELECT * FROM human_decisions WHERE run_id = ? ORDER BY rowid",
+        (run_id,),
     ).fetchall()
     return tuple(_decision_from_row(row) for row in rows)
 

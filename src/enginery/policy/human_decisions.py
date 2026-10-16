@@ -48,15 +48,25 @@ def decision_verifier(
         else:
             expiry = expires_at
         record = ApprovalRegistry(registered_humans).record_approval(
-            schema, (context.principal,), request_id=run_id,
-            expires_at=expiry, decided_at=decided_at,
+            schema,
+            (context.principal,),
+            request_id=run_id,
+            expires_at=expiry,
+            decided_at=decided_at,
         )
         return HumanDecision(
-            id=record.id, run_id=run_id, principal=context.principal, action=action,
-            subject_digest=digest, subject_fields=subject_fields,
-            os_uid=context.os_uid, tty_name=context.tty_name,
-            decided_at=record.decided_at, expires_at=expiry,
-            schema_digest=record.schema_digest, normalized_inputs=record.normalized_inputs,
+            id=record.id,
+            run_id=run_id,
+            principal=context.principal,
+            action=action,
+            subject_digest=digest,
+            subject_fields=subject_fields,
+            os_uid=context.os_uid,
+            tty_name=context.tty_name,
+            decided_at=record.decided_at,
+            expires_at=expiry,
+            schema_digest=record.schema_digest,
+            normalized_inputs=record.normalized_inputs,
             reason=reason,
         )
 

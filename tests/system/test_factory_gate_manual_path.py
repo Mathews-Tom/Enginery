@@ -184,7 +184,10 @@ def test_manual_path_rejects_hosted_engine_and_custody_flags(
     ],
 )
 def test_publication_hold_does_not_suppress_unrelated_cli_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int, stderr: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    stderr: str,
 ) -> None:
     gate = object.__new__(manual_path.ManualPathGate)
     gate.project = tmp_path

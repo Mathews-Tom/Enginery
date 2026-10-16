@@ -79,6 +79,8 @@ class ReviewPacket:
 
     def to_state(self) -> dict[str, object]:
         return {
-            **self.subject_fields(), "subject_digest": self.subject_digest, "diff": self.diff,
+            **self.subject_fields(),
+            "subject_digest": self.subject_digest,
+            "diff": self.diff,
             "sections": {name: json.loads(value) for name, value in self.sections},
         }

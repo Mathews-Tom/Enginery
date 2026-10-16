@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.verified_implementation import git
 from tests.workflows.test_stage1_isolated import (
@@ -48,9 +49,11 @@ from enginery.application.branch_publication import (
     BranchPublicationRequest,
     PublishedBranch,
 )
+from enginery.application.human_decisions import HumanDecision
 from enginery.application.work_ports import PullRequestPort, PullRequestRequest, PullRequestSnapshot
 from enginery.application.worker_environment import LAUNCHER_KEYS, TRUSTED_LOCAL_WORKER_KEYS
 from enginery.cli.stage1_composition import branch_publisher
+from enginery.domain.digests import Digest
 from enginery.domain.errors import (
     ExternalConflictError,
     HumanActionRequiredError,
@@ -69,6 +72,7 @@ from enginery.engine.runtime import (
 )
 from enginery.engine.task_repository import intake_path_for, validation_path_for
 from enginery.ledger.events import AppendCommand, EventWrite
+from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewReport
 from enginery.workflows.stage1 import (
@@ -640,6 +644,7 @@ class Ready:
     publisher: EventfulPublisher
     events: list[str]
     pushes: Path
+    decisions: AuthenticatedDecisions
 
     def open(self) -> None:
         self.service.open_pull_request(
@@ -714,12 +719,18 @@ def _isolated_ready_to_open(
     real = branch_publisher(built.request)
     assert real is not None
     publisher = EventfulPublisher(real, events)
+    decisions = AuthenticatedDecisions(ledger)
     service = replace(
         built.service,
         pull_requests=cast(PullRequestPort, pulls),
         branch_publisher=cast(BranchPublicationPort, publisher),
+        publication_authorizer=decisions.authorize_publication,
     )
-    return Ready(built, service, remote, head, pulls, publisher, events, pushes)
+    if not branch_publication.ProtectedPathPolicy(protected_paths).matched(
+        publisher.changed_paths(base_revision=built.request.run.base_revision, head_revision=head)
+    ):
+        decisions.approve(built.request)
+    return Ready(built, service, remote, head, pulls, publisher, events, pushes, decisions)
 
 
 def _rival_push(ready: Ready, name: str = "rival.txt") -> str:
@@ -870,6 +881,11 @@ def _advance_to_repair_generation(ready: Ready, *, generation: int = 1) -> str:
         repaired,
         correlation=f"implementation-verified-head-{generation}",
     )
+    # A real repair leaves the collected worker checkout at the verified repair head too.
+    workspace = built.request.workspace_path
+    git("fetch", "-q", str(repository), repaired, cwd=workspace)
+    git("checkout", "-q", "--detach", repaired, cwd=workspace)
+    ready.decisions.approve(built.request, reason="reviewed the repaired implementation")
     return repaired
 
 
@@ -891,7 +907,7 @@ def test_a_repair_generation_publishes_only_over_the_head_its_previous_generatio
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None
     assert open_pr["published_revision"] == repaired
-    assert open_pr["attempt_id"] == "open-pr-1"
+    assert open_pr["attempt_id"] == f"open-pr-{open_pr['decision_id']}-1"
 
 
 def test_a_repair_generation_never_overwrites_a_remote_branch_that_moved_in_between(
@@ -998,13 +1014,17 @@ def test_a_run_persisted_before_operator_publication_publishes_nothing(
     )
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
     built.request.workspace_path.mkdir(parents=True)
+    built.request.workspace_path.parent.chmod(0o700)
     _complete_through_implement(built)
+    _verify_implementation(built)
     events: list[str] = []
     publisher = RecordingBranchPublisher()
+    decisions = AuthenticatedDecisions(ledger_service)
     service = replace(
         built.service,
         pull_requests=cast(PullRequestPort, EventfulPullRequests(events)),
         branch_publisher=publisher,
+        publication_authorizer=decisions.authorize_publication,
     )
     service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
@@ -1016,6 +1036,7 @@ def test_a_run_persisted_before_operator_publication_publishes_nothing(
         now=NOW + timedelta(seconds=4),
         heartbeat_window=HEARTBEAT,
     )
+    decisions.approve(built.request, reason="reviewed the legacy worker's publication")
 
     service.open_pull_request(
         built.request, now=NOW + timedelta(seconds=9), heartbeat_window=HEARTBEAT
@@ -1091,10 +1112,12 @@ def test_a_trusted_local_run_publishes_the_verified_head_from_its_workspace(
     events: list[str] = []
     real = branch_publisher(built.request)
     assert real is not None
+    decisions = AuthenticatedDecisions(ledger_service)
     service = replace(
         built.service,
         pull_requests=cast(PullRequestPort, EventfulPullRequests(events)),
         branch_publisher=cast(BranchPublicationPort, EventfulPublisher(real, events)),
+        publication_authorizer=decisions.authorize_publication,
     )
     service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
@@ -1106,6 +1129,7 @@ def test_a_trusted_local_run_publishes_the_verified_head_from_its_workspace(
         now=NOW + timedelta(seconds=4),
         heartbeat_window=HEARTBEAT,
     )
+    decisions.approve(built.request, reason="reviewed the trusted-local implementation")
 
     service.open_pull_request(
         built.request, now=NOW + timedelta(seconds=9), heartbeat_window=HEARTBEAT
@@ -1123,22 +1147,38 @@ def test_a_trusted_local_run_publishes_the_verified_head_from_its_workspace(
 _WORKFLOW = {".github/workflows/x.yml": "name: x\non: push\njobs: {}\n"}
 
 
-def _decide(ready: Ready, decision: str, *, reason: str = "reviewed the workflow change") -> None:
-    """Record the operator's decision exactly as ``stage1 approve``/``stage1 reject`` does."""
-    runtime = ready.built.runtime
-    now = NOW + timedelta(seconds=11)
-    epoch = runtime.claim_epoch(now=now, heartbeat_window=HEARTBEAT)
-    approved = decision == "approve"
-    runtime.resolve_human_wait(
-        run_id=RUN_ID,
-        node_id="open_pr",
-        epoch=epoch.epoch,
-        now=now,
-        outcome="passed" if approved else "failed",
-        extra={
-            "operator_decision": "approved" if approved else "rejected",
-            "reason": reason,
-        },
+def _decide(
+    ready: Ready, decision: str, *, reason: str = "reviewed the workflow change"
+) -> HumanDecision:
+    """Consume a durable terminal challenge through the production decision policy."""
+    action = "pull_request.open" if decision == "approve" else "human_wait.open_pr.reject"
+    return ready.decisions.decide(ready.built.request, action=action, reason=reason)
+
+
+def _decision(ledger: LedgerService, decision_id: str) -> HumanDecision | None:
+    return next(
+        (
+            decision
+            for decision in list_decisions(ledger.connection, RUN_ID)
+            if decision.id == decision_id
+        ),
+        None,
+    )
+
+
+def _assert_protected_subject(ready: Ready, paths: list[str]) -> None:
+    packet = ready.decisions.packet(ready.built.request)
+    policy = branch_publication.ProtectedPathPolicy(ready.built.request.protected_paths)
+    assert packet.head_revision == ready.head
+    assert packet.protected_publication_digest == str(
+        Digest.of_json(
+            {
+                "patterns": list(policy.patterns),
+                "base_revision": packet.base_revision,
+                "head_revision": ready.head,
+                "matched_paths": paths,
+            }
+        )
     )
 
 
@@ -1155,22 +1195,20 @@ def test_a_candidate_editing_a_ci_workflow_is_held_and_nothing_is_pushed(
         ready.open()
 
     message = str(caught.value)
-    assert ".github/workflows/x.yml" in message
-    assert "stage1 approve" in message and "stage1 reject" in message
-    assert f"--run-id {RUN_ID}" in message and "--node-id open_pr" in message
-    assert caught.value.details["approve_command"].startswith("enginery stage1 approve ")
+    assert "decision_required" in message
+    assert f"enginery factory review {RUN_ID}" in message
+    assert f"enginery factory decide {RUN_ID}" in message
+    assert "--action pull_request.open" in message
+    assert caught.value.details["reason"] == "decision_required"
+    assert caught.value.details["repair"].startswith("enginery factory review ")
     assert ready.remote_branch() is None, "nothing reached the remote"
     assert ready.accepted_pushes() == []
     assert ready.publisher.requests == [], "the publisher was never asked to push"
     assert ready.events == [] and ready.pulls.requests == []
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None and open_pr["status"] == "awaiting_human"
-    record = open_pr["protected_publication"]
-    assert isinstance(record, dict)
-    assert record["matched_paths"] == [".github/workflows/x.yml"]
-    assert record["head_revision"] == ready.head
-    assert ".github/**" in record["patterns"] and "CODEOWNERS" in record["patterns"]
-    assert record["digest"]
+    _assert_protected_subject(ready, [".github/workflows/x.yml"])
+    assert not list_decisions(ledger_service.connection, RUN_ID)
     assert open_pr["human_wait_reason"] == message
     assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, (
         "an advance never retries a held publication on its own"
@@ -1189,7 +1227,7 @@ def test_an_approved_protected_publication_publishes_and_records_the_decision(
     with pytest.raises(HumanActionRequiredError):
         ready.open()
 
-    _decide(ready, "approve", reason="the workflow change is intended")
+    approval = _decide(ready, "approve", reason="the workflow change is intended")
 
     assert _next_action(ready) is Stage1ProgressionAction.OPEN_PR, (
         "the step is performed, not skipped"
@@ -1203,16 +1241,16 @@ def test_an_approved_protected_publication_publishes_and_records_the_decision(
     open_pr = _node(ledger_service, "open_pr")
     assert open_pr is not None
     assert open_pr["status"] == "passed"
-    assert open_pr["attempt_id"] == "open-pr-approved-0"
+    assert open_pr["attempt_id"] == f"open-pr-{approval.id}-0"
     assert open_pr["published_revision"] == ready.head
     assert open_pr["pull_request_number"] == 17
     record = open_pr["protected_publication"]
     assert isinstance(record, dict) and record["matched_paths"] == [".github/workflows/x.yml"]
-    approval = open_pr["publication_approval"]
-    assert isinstance(approval, dict)
-    assert approval["operator_decision"] == "approved"
-    assert approval["reason"] == "the workflow change is intended"
-    assert approval["approved_protected_publication_digest"] == record["digest"]
+    assert open_pr["decision_id"] == approval.id
+    assert approval.action == "pull_request.open"
+    assert approval.reason == "the workflow change is intended"
+    assert approval.subject_fields["protected_publication_digest"] == record["digest"]
+    assert _decision(ledger_service, approval.id) == approval
     assert _next_action(ready) is Stage1ProgressionAction.WAIT_FOR_CI
 
 
@@ -1223,10 +1261,16 @@ def test_a_rejected_protected_publication_is_final_and_pushes_nothing(
     with pytest.raises(HumanActionRequiredError):
         ready.open()
 
-    _decide(ready, "reject", reason="not for this issue")
+    rejection = _decide(ready, "reject", reason="not for this issue")
 
     assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
-    with pytest.raises(ExternalConflictError, match="rejected"):
+    node = _node(ledger_service, "open_pr")
+    assert node is not None and node["status"] == "failed"
+    assert node["decision_id"] == rejection.id
+    assert rejection.action == "human_wait.open_pr.reject"
+    assert rejection.reason == "not for this issue"
+    assert _decision(ledger_service, rejection.id) == rejection
+    with pytest.raises(HumanActionRequiredError, match="decision_required"):
         ready.open()
     assert ready.remote_branch() is None and ready.publisher.requests == []
 
@@ -1237,8 +1281,8 @@ def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_ag
     ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
     with pytest.raises(HumanActionRequiredError):
         ready.open()
-    _decide(ready, "approve")
-    held_digest = _held_digest(ledger_service)
+    approval = _decide(ready, "approve")
+    held_digest = _held_digest(ready)
     flaky = _FailingOnce(ready.publisher.inner)
     ready.service = replace(ready.service, branch_publisher=cast(BranchPublicationPort, flaky))
 
@@ -1246,12 +1290,11 @@ def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_ag
         ready.open()
     interrupted = _node(ledger_service, "open_pr")
     assert interrupted is not None and interrupted["status"] == "queued"
-    assert interrupted["attempt_id"] == "open-pr-approved-0"
-    assert interrupted["publication_approval"] == {
-        "operator_decision": "approved",
-        "reason": "reviewed the workflow change",
-        "approved_protected_publication_digest": held_digest,
-    }, "the approved digest and reason travel with the re-registered node"
+    assert interrupted["attempt_id"] == f"open-pr-{approval.id}-0"
+    assert _decision(ledger_service, approval.id) == approval, (
+        "the durable approval survives replacement of the runtime node"
+    )
+    assert approval.subject_fields["protected_publication_digest"] == held_digest
     ready.open()
 
     assert ready.remote_branch() == ready.head
@@ -1259,19 +1302,14 @@ def test_a_publication_failure_after_an_approval_resumes_as_approved_not_held_ag
     assert node is not None and node["status"] == "passed"
     record = node["protected_publication"]
     assert isinstance(record, dict)
-    assert node["publication_approval"] == {
-        "operator_decision": "approved",
-        "reason": "reviewed the workflow change",
-        "approved_protected_publication_digest": record["digest"],
-    }, "the final record keeps the approval's reason and digest"
+    assert node["decision_id"] == approval.id
+    assert approval.reason == "reviewed the workflow change"
+    assert approval.subject_fields["protected_publication_digest"] == record["digest"]
+    assert _decision(ledger_service, approval.id) == approval
 
 
-def _held_digest(ledger: LedgerService) -> str:
-    node = _node(ledger, "open_pr")
-    assert node is not None
-    record = node["protected_publication"]
-    assert isinstance(record, dict)
-    return str(record["digest"])
+def _held_digest(ready: Ready) -> str:
+    return ready.decisions.packet(ready.built.request).protected_publication_digest
 
 
 def _widen_protected_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1290,15 +1328,11 @@ def test_a_protected_set_that_changed_after_the_approval_is_held_again_on_every_
     ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
     with pytest.raises(HumanActionRequiredError):
         ready.open()
-    _decide(ready, "approve")
+    approval = _decide(ready, "approve")
     _widen_protected_set(monkeypatch)
 
-    for attempt in range(2):
-        # The first call after the change says why the approval is void; the held node then
-        # simply keeps waiting for a decision.
-        with pytest.raises(
-            HumanActionRequiredError, match="no longer matches" if attempt == 0 else "held"
-        ):
+    for _ in range(2):
+        with pytest.raises(HumanActionRequiredError, match="decision_superseded"):
             ready.open()
 
         node = _node(ledger_service, "open_pr")
@@ -1308,6 +1342,9 @@ def test_a_protected_set_that_changed_after_the_approval_is_held_again_on_every_
         assert _next_action(ready) is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
         assert ready.remote_branch() is None and ready.publisher.requests == []
         assert ready.accepted_pushes() == [] and ready.events == []
+        retained = _decision(ledger_service, approval.id)
+        assert retained is not None
+        assert retained.superseded_by == ready.decisions.packet(ready.built.request).subject_digest
 
 
 def test_a_new_approval_of_the_changed_set_publishes_under_its_own_digest_and_reason(
@@ -1316,28 +1353,30 @@ def test_a_new_approval_of_the_changed_set_publishes_under_its_own_digest_and_re
     ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
     with pytest.raises(HumanActionRequiredError):
         ready.open()
-    _decide(ready, "approve", reason="first look")
-    first_digest = _held_digest(ledger_service)
+    first = _decide(ready, "approve", reason="first look")
+    first_digest = _held_digest(ready)
     _widen_protected_set(monkeypatch)
-    with pytest.raises(HumanActionRequiredError, match="no longer matches"):
+    with pytest.raises(HumanActionRequiredError, match="decision_superseded"):
         ready.open()
     held = _node(ledger_service, "open_pr")
-    assert held is not None and held["protected_publication"]["digest"] != first_digest  # type: ignore[index]
+    assert held is not None and held["status"] == "awaiting_human"
+    assert _held_digest(ready) != first_digest
 
-    _decide(ready, "approve", reason="second look at the wider set")
+    approval = _decide(ready, "approve", reason="second look at the wider set")
     ready.open()
 
     node = _node(ledger_service, "open_pr")
     assert node is not None and node["status"] == "passed"
-    assert node["attempt_id"] == "open-pr-approved-r2-0"
+    assert node["attempt_id"] == f"open-pr-{approval.id}-0"
     assert ready.remote_branch() == ready.head and ready.events == ["publish", "pull_request"]
     record = node["protected_publication"]
     assert isinstance(record, dict) and record["digest"] != first_digest
-    assert node["publication_approval"] == {
-        "operator_decision": "approved",
-        "reason": "second look at the wider set",
-        "approved_protected_publication_digest": record["digest"],
-    }
+    assert node["decision_id"] == approval.id
+    assert approval.reason == "second look at the wider set"
+    assert approval.subject_fields["protected_publication_digest"] == record["digest"]
+    assert _decision(ledger_service, approval.id) == approval
+    retained = _decision(ledger_service, first.id)
+    assert retained is not None and retained.superseded_by == approval.subject_digest
 
 
 def test_a_set_that_changes_between_a_publication_failure_and_its_retry_is_held_again(
@@ -1346,22 +1385,25 @@ def test_a_set_that_changes_between_a_publication_failure_and_its_retry_is_held_
     ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
     with pytest.raises(HumanActionRequiredError):
         ready.open()
-    _decide(ready, "approve")
+    approval = _decide(ready, "approve")
     flaky = _FailingOnce(ready.publisher.inner)
     ready.service = replace(ready.service, branch_publisher=cast(BranchPublicationPort, flaky))
     with pytest.raises(ExternalConflictError, match="simulated crash"):
         ready.open()
     _widen_protected_set(monkeypatch)
 
-    with pytest.raises(HumanActionRequiredError, match="no longer matches"):
+    with pytest.raises(HumanActionRequiredError, match="decision_superseded"):
         ready.open()
 
     node = _node(ledger_service, "open_pr")
     assert node is not None and node["status"] == "awaiting_human"
     assert ready.remote_branch() is None and ready.accepted_pushes() == []
+    retained = _decision(ledger_service, approval.id)
+    assert retained is not None
+    assert retained.superseded_by == ready.decisions.packet(ready.built.request).subject_digest
 
 
-def test_an_ordinary_change_publishes_unheld_and_records_the_empty_match(
+def test_an_authenticated_ordinary_change_publishes_and_records_the_empty_match(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
     ready = _isolated_ready_to_open(
@@ -1376,10 +1418,14 @@ def test_an_ordinary_change_publishes_unheld_and_records_the_empty_match(
     assert open_pr is not None
     assert open_pr["attempt_id"] == "open-pr-0"
     assert "publication_approval" not in open_pr
+    (approval,) = list_decisions(ledger_service.connection, RUN_ID)
+    assert open_pr["decision_id"] == approval.id
+    assert approval.action == "pull_request.open"
     record = open_pr["protected_publication"]
     assert isinstance(record, dict)
     assert record["matched_paths"] == [] and record["matched_path_count"] == 0
     assert record["changed_path_count"] == 2
+    assert approval.subject_fields["protected_publication_digest"] == record["digest"]
 
 
 @pytest.mark.parametrize(
@@ -1410,8 +1456,8 @@ def test_protected_paths_hold_including_case_variants_and_odd_names(
 
     assert ready.remote_branch() is None and ready.publisher.requests == []
     open_pr = _node(ledger_service, "open_pr")
-    assert open_pr is not None
-    assert open_pr["protected_publication"]["matched_paths"] == [path]  # type: ignore[index]
+    assert open_pr is not None and open_pr["status"] == "awaiting_human"
+    _assert_protected_subject(ready, [path])
 
 
 def test_an_extra_protected_pattern_bound_in_the_request_holds_what_it_names(
@@ -1424,15 +1470,17 @@ def test_an_extra_protected_pattern_bound_in_the_request_holds_what_it_names(
         protected_paths=("deploy/**",),
     )
 
-    with pytest.raises(HumanActionRequiredError, match=r"deploy/prod\.yaml"):
+    with pytest.raises(HumanActionRequiredError, match="decision_required"):
         ready.open()
 
     assert ready.remote_branch() is None
     open_pr = _node(ledger_service, "open_pr")
-    assert open_pr is not None
-    record = open_pr["protected_publication"]
-    assert isinstance(record, dict) and record["matched_paths"] == ["deploy/prod.yaml"]
-    assert "deploy/**" in record["patterns"]
+    assert open_pr is not None and open_pr["status"] == "awaiting_human"
+    _assert_protected_subject(ready, ["deploy/prod.yaml"])
+    assert (
+        "deploy/**"
+        in branch_publication.ProtectedPathPolicy(ready.built.request.protected_paths).patterns
+    )
 
 
 def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_push(
@@ -1466,10 +1514,12 @@ def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_p
     events: list[str] = []
     real = branch_publisher(built.request)
     assert real is not None
+    decisions = AuthenticatedDecisions(ledger_service)
     service = replace(
         built.service,
         pull_requests=cast(PullRequestPort, EventfulPullRequests(events)),
         branch_publisher=cast(BranchPublicationPort, EventfulPublisher(real, events)),
+        publication_authorizer=decisions.authorize_publication,
     )
     service.validate_implementation(
         built.request, now=NOW + timedelta(seconds=3), heartbeat_window=HEARTBEAT
@@ -1482,7 +1532,7 @@ def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_p
         heartbeat_window=HEARTBEAT,
     )
 
-    with pytest.raises(HumanActionRequiredError, match=r"\.gitlab-ci\.yml"):
+    with pytest.raises(HumanActionRequiredError, match="decision_required"):
         service.open_pull_request(
             built.request, now=NOW + timedelta(seconds=9), heartbeat_window=HEARTBEAT
         )
@@ -1490,6 +1540,10 @@ def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_p
     assert events == []
     assert pushes.exists() is False
     assert BRANCH not in git("for-each-ref", "refs/heads", cwd=remote)
+    packet = decisions.packet(built.request)
+    assert ".gitlab-ci.yml" in packet.diff
+    assert packet.head_revision == head
+    assert not list_decisions(ledger_service.connection, RUN_ID)
 
 
 # --- the run's own attempt generation --------------------------------------------------------
@@ -1524,7 +1578,8 @@ def test_a_first_attempt_id_not_ending_in_zero_publishes_first_and_repairs_over_
     )
     assert ready.remote_branch() == repaired
     open_pr = _node(ledger_service, "open_pr")
-    assert open_pr is not None and open_pr["attempt_id"] == f"open-pr-{first + 1}"
+    assert open_pr is not None
+    assert open_pr["attempt_id"] == f"open-pr-{open_pr['decision_id']}-{first + 1}"
 
 
 def test_a_review_for_another_repair_index_than_the_implementations_is_refused(

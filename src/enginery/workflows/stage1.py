@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -336,8 +335,6 @@ class Stage1ProgressionAction(StrEnum):
     REGISTER_OUTCOME_OBSERVATION = "register_outcome_observation"
     WAIT = "wait"
     HOLD = "hold"
-
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -1379,7 +1376,9 @@ class Stage1RunService:
         publication: dict[str, object] = {}
         try:
             if self.publication_authorizer is None:
-                raise MissingDecisionError("no authenticated publication decision verifier is configured")
+                raise MissingDecisionError(
+                    "no authenticated publication decision verifier is configured"
+                )
             publication["decision_id"] = self.publication_authorizer(request)
         except HumanDecisionError as error:
             repair = (
@@ -1389,7 +1388,10 @@ class Stage1RunService:
             )
             if self._node_status(request.run.id, "open_pr") == "queued":
                 self.runtime.await_human_node(
-                    run_id=str(request.run.id), node_id="open_pr", epoch=epoch.epoch, now=now,
+                    run_id=str(request.run.id),
+                    node_id="open_pr",
+                    epoch=epoch.epoch,
+                    now=now,
                     reason=f"{error.code}: {error}; repair: {repair}",
                     extra={"reason": error.code, "repair": repair},
                 )
@@ -2055,8 +2057,6 @@ def _implementation_attempt_for(request: Stage1RunRequest, generation: int) -> s
 _MAX_RECORDED_PROTECTED_PATHS = 200
 
 
-
-
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
     name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     if request.runner.isolated_mode:
@@ -2088,8 +2088,6 @@ def _scheduled_implementation(
             details={"run_id": str(run_id), "operation_id": str(operation_id)},
         )
     return matching[0] if matching else None
-
-
 
 
 def _generation(attempt_id: str) -> int:

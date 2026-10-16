@@ -186,11 +186,17 @@ def test_ledger_without_subcommand_errors(capsys: pytest.CaptureFixture[str]) ->
 
 def test_ledger_verify_against_the_checked_in_fixture(
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
-    """Matches the milestone verification command exactly:
-    ``enginery ledger verify --database tests/fixtures/ledger.db``."""
-    fixture = Path("tests/fixtures/ledger.db")
-    assert fixture.is_file()
+    """A historical ledger remains healthy after the normal schema upgrade."""
+    from enginery.ledger.service import LedgerService
+
+    historical = Path("tests/fixtures/ledger.db")
+    assert historical.is_file()
+    fixture = tmp_path / "ledger.db"
+    fixture.write_bytes(historical.read_bytes())
+    with LedgerService.open(fixture):
+        pass
 
     exit_code = main(["ledger", "verify", "--database", str(fixture)])
 

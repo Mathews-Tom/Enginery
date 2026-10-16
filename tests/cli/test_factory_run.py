@@ -1062,10 +1062,12 @@ def test_medium_risk_wait_names_approve_and_reject(
         argv = shlex.split(decision[key])
         parsed = _build_parser().parse_args(argv[1:])
         assert parsed.reason == "REASON"
-        assert argv[:3] == ["enginery", "stage1", action]
-        assert argv[argv.index("--node-id") + 1] == "qualify"
-        assert argv[argv.index("--run-id") + 1] == report["run_id"]
-        assert argv[argv.index("--database") + 1] == report["database"]
+        assert argv[:3] == ["enginery", "factory", "decide"]
+        assert parsed.action == f"human_wait.qualify.{action}"
+        assert parsed.run_id == report["run_id"]
+        assert parsed.project == project
+        assert parsed.subject_digest == "DIGEST"
+        assert parsed.challenge == "CHALLENGE"
 
 
 @pytest.mark.parametrize("repair", ("service repair --exact", None))
@@ -1255,9 +1257,9 @@ def test_failed_implementation_human_wait_names_its_decision(
     code, report = invoke(capsys, project, "status", original["run_id"])
     assert code == 0
     decision = report["next_decision"]
-    assert "--node-id implement" in decision["command"]
-    assert "--node-id implement" in decision["reject_command"]
-    assert decision["action"] == "stage1 approve|reject"
+    assert "--action human_wait.implement.approve" in decision["command"]
+    assert "--action human_wait.implement.reject" in decision["reject_command"]
+    assert decision["action"] == "factory review|decide"
     for key in ("command", "reject_command"):
         parsed = _build_parser().parse_args(shlex.split(decision[key])[1:])
         assert parsed.reason == "REASON"

@@ -32,8 +32,8 @@ from enginery.application.review_packet import ReviewPacket
 from enginery.cli import factory_decisions
 from enginery.domain.digests import Digest
 from enginery.domain.execution_selection import SelectionLayer
-from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.events import AppendCommand, EventWrite
+from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.policy.rules import HardRuleError
 from enginery.workflows.stage1 import Stage1RunRequest
@@ -44,7 +44,9 @@ RUN = "run-decisions"
 
 def _preferences(**changes: object) -> bytes:
     values: dict[str, object] = {
-        "principal_id": "operator", "os_user": getpass.getuser(), "os_uid": os.getuid(),
+        "principal_id": "operator",
+        "os_user": getpass.getuser(),
+        "os_uid": os.getuid(),
     }
     values.update(changes)
     lines = ["schema_version = 1", "[review_authority]"]
@@ -54,11 +56,15 @@ def _preferences(**changes: object) -> bytes:
 
 def _packet() -> ReviewPacket:
     return ReviewPacket(
-        run_id=RUN, request_digest=str(Digest.of_bytes(b"request")),
+        run_id=RUN,
+        request_digest=str(Digest.of_bytes(b"request")),
         configuration_snapshot_digest=str(Digest.of_bytes(b"config")),
-        base_revision="a" * 40, head_revision="b" * 40, diff="+persist the changed result",
+        base_revision="a" * 40,
+        head_revision="b" * 40,
+        diff="+persist the changed result",
         evidence_receipt_digests=(str(Digest.of_bytes(b"receipt")),),
-        ci_evidence_json='{"head":"bbbb","status":"passed"}', findings_json="[]",
+        ci_evidence_json='{"head":"bbbb","status":"passed"}',
+        findings_json="[]",
         sections=(("Intent", '{"objective":"persist the changed result"}'),),
     )
 
@@ -74,14 +80,18 @@ class Ingress:
 
     def issue(self, **kwargs: Any) -> dict[str, Any]:
         return factory_decisions.issue_for_review(
-            self.project, RUN, {"subject_digest": self.packet.subject_digest, "lines": ["Review"]},
+            self.project,
+            RUN,
+            {"subject_digest": self.packet.subject_digest, "lines": ["Review"]},
             **kwargs,
         )
 
     def decide(self, issued: dict[str, Any], **changes: Any) -> dict[str, object]:
         arguments = {
-            "action": ACTION, "subject_digest": issued["subject_digest"],
-            "challenge": issued["challenge"], **changes,
+            "action": ACTION,
+            "subject_digest": issued["subject_digest"],
+            "challenge": issued["challenge"],
+            **changes,
         }
         return factory_decisions.decide(self.project, RUN, **arguments)
 
@@ -94,23 +104,37 @@ def ingress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ingress
     preferences.parent.mkdir(parents=True)
     preferences.write_bytes(_preferences())
     ledger = LedgerService.open(tmp_path / "ledger.sqlite")
-    request = cast(Stage1RunRequest, SimpleNamespace(
-        run=SimpleNamespace(id=RUN, configuration_snapshot_digest=Digest.of_bytes(b"config")),
-        repository_path=tmp_path, repository_id="owner/repository",
-        execution_selection=SimpleNamespace(legacy=True),
-        implementation=SimpleNamespace(attempt_id="implement-1"),
-        manifest=SimpleNamespace(
-            nodes={"implement": None, "review": None, "open_pr": None, "validate": None},
-            content_digest=Digest.of_bytes(b"manifest"),
+    request = cast(
+        Stage1RunRequest,
+        SimpleNamespace(
+            run=SimpleNamespace(id=RUN, configuration_snapshot_digest=Digest.of_bytes(b"config")),
+            repository_path=tmp_path,
+            repository_id="owner/repository",
+            execution_selection=SimpleNamespace(legacy=True),
+            implementation=SimpleNamespace(attempt_id="implement-1"),
+            manifest=SimpleNamespace(
+                nodes={"implement": None, "review": None, "open_pr": None, "validate": None},
+                content_digest=Digest.of_bytes(b"manifest"),
+            ),
+            work_snapshot=SimpleNamespace(bound_digest=Digest.of_bytes(b"source")),
         ),
-        work_snapshot=SimpleNamespace(bound_digest=Digest.of_bytes(b"source")),
-    ))
-    value = Ingress(tmp_path, ledger, request, _packet(), preferences, {
-        "implement": {"status": "passed", "attempt_id": "implement-2"},
-        "review": {"status": "passed"}, "open_pr": {"status": "queued"},
-    })
+    )
+    value = Ingress(
+        tmp_path,
+        ledger,
+        request,
+        _packet(),
+        preferences,
+        {
+            "implement": {"status": "passed", "attempt_id": "implement-2"},
+            "review": {"status": "passed"},
+            "open_pr": {"status": "queued"},
+        },
+    )
     monkeypatch.setattr(factory_decisions, "build_packet", lambda *args: value.packet)
-    monkeypatch.setattr(factory_decisions, "_state", lambda ledger, run, node: value.states.get(node, {}))
+    monkeypatch.setattr(
+        factory_decisions, "_state", lambda ledger, run, node: value.states.get(node, {})
+    )
     # Keep one real migrated connection open across simulated CLI invocations.
     monkeypatch.setattr(factory_decisions, "_open", lambda *args, **kwargs: (ledger, request))
     monkeypatch.setattr(ledger, "close", lambda: None)
@@ -129,7 +153,9 @@ def terminal(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         os.fdopen(os.dup(slave), "w") as output_stream,
     ):
         monkeypatch.setattr(
-            factory_decisions, "sys", SimpleNamespace(stdin=input_stream, stdout=output_stream),
+            factory_decisions,
+            "sys",
+            SimpleNamespace(stdin=input_stream, stdout=output_stream),
         )
         try:
             yield
@@ -150,28 +176,44 @@ def test_registration_is_user_only_and_not_effective_request_behavior() -> None:
             parse_layer_document(selection, _preferences(), source="not-user.toml")
 
 
-@pytest.mark.parametrize("changes", [
-    {"principal_id": 1}, {"principal_id": ""}, {"principal_id": "forged\u202e"},
-    {"os_user": True}, {"os_user": " space"}, {"os_uid": True}, {"os_uid": -1},
-    {"os_uid": "0"}, {"ttl_seconds": True}, {"ttl_seconds": 0}, {"ttl_seconds": 1801},
-    {"ttl_seconds": 1.5}, {"unknown": "value"},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"principal_id": 1},
+        {"principal_id": ""},
+        {"principal_id": "forged\u202e"},
+        {"os_user": True},
+        {"os_user": " space"},
+        {"os_uid": True},
+        {"os_uid": -1},
+        {"os_uid": "0"},
+        {"ttl_seconds": True},
+        {"ttl_seconds": 0},
+        {"ttl_seconds": 1801},
+        {"ttl_seconds": 1.5},
+        {"unknown": "value"},
+    ],
+)
 def test_registration_refuses_unknown_fields_and_wrong_types(changes: dict[str, object]) -> None:
     with pytest.raises(ConfigError):
         parse_layer_document(SelectionLayer.USER, _preferences(**changes), source="user.toml")
 
 
-@pytest.mark.parametrize("document", [
-    b'schema_version=1\nreview_authority="operator"\n',
-    b'schema_version=1\n[review_authority]\nprincipal_id="operator"\n',
-])
+@pytest.mark.parametrize(
+    "document",
+    [
+        b'schema_version=1\nreview_authority="operator"\n',
+        b'schema_version=1\n[review_authority]\nprincipal_id="operator"\n',
+    ],
+)
 def test_registration_requires_a_complete_table(document: bytes) -> None:
     with pytest.raises(ConfigError):
         parse_layer_document(SelectionLayer.USER, document, source="user.toml")
 
 
 def test_noninteractive_review_preserves_display_without_issuing_authority(
-    ingress: Ingress, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(factory_decisions.sys, "stdin", io.StringIO())
     monkeypatch.setattr(factory_decisions.sys, "stdout", io.StringIO())
@@ -184,13 +226,18 @@ def test_noninteractive_review_preserves_display_without_issuing_authority(
     assert count == 0
     with pytest.raises(AuthenticationError, match="interactive"):
         factory_decisions.decide(
-            ingress.project, RUN, action=ACTION,
-            subject_digest=ingress.packet.subject_digest, challenge="f" * 64,
+            ingress.project,
+            RUN,
+            action=ACTION,
+            subject_digest=ingress.packet.subject_digest,
+            challenge="f" * 64,
         )
 
 
 def test_real_terminal_issues_hash_only_and_consumes_once(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     issued = ingress.issue()
     row = ingress.ledger.connection.execute("SELECT * FROM human_decision_challenges").fetchone()
@@ -217,8 +264,26 @@ def test_real_terminal_issues_hash_only_and_consumes_once(
         assert list_decisions(reopened.connection, RUN)[0] == decisions[0]
 
 
+def test_a_durable_publication_decision_cannot_release_another_action(
+    ingress: Ingress,
+    terminal: None,
+) -> None:
+    from enginery.application.human_decisions import MissingDecisionError
+
+    result = ingress.decide(ingress.issue())
+    with pytest.raises(MissingDecisionError):
+        factory_decisions.require_for_effect(
+            ingress.ledger, ingress.request, "human_wait.validate.approve", "validate"
+        )
+    assert (
+        factory_decisions.require_for_effect(ingress.ledger, ingress.request, ACTION).id
+        == result["decision_id"]
+    )
+
+
 def test_forged_principal_and_wrong_registered_os_identity_are_refused(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     with pytest.raises(PrincipalMismatchError):
         ingress.issue(principal_id="forged")
@@ -235,7 +300,8 @@ def test_forged_principal_and_wrong_registered_os_identity_are_refused(
 
 
 def test_wrong_action_and_forged_subject_leave_challenge_unconsumed(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     issued = ingress.issue()
     with pytest.raises(ActionMismatchError):
@@ -246,16 +312,21 @@ def test_wrong_action_and_forged_subject_leave_challenge_unconsumed(
     assert ingress.decide(issued)["outcome"] == "approved"
 
 
-@pytest.mark.parametrize("change", [
-    {"head_revision": "c" * 40},
-    {"diff": "+different protected change"},
-    {"protected_publication_digest": str(Digest.of_bytes(b"new protected matched set"))},
-    {"evidence_receipt_digests": (str(Digest.of_bytes(b"new evidence")),)},
-    {"ci_evidence_json": '{"status":"failed"}'},
-    {"findings_json": '["new finding"]'},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"head_revision": "c" * 40},
+        {"diff": "+different protected change"},
+        {"protected_publication_digest": str(Digest.of_bytes(b"new protected matched set"))},
+        {"evidence_receipt_digests": (str(Digest.of_bytes(b"new evidence")),)},
+        {"ci_evidence_json": '{"status":"failed"}'},
+        {"findings_json": '["new finding"]'},
+    ],
+)
 def test_changed_bound_inputs_refuse_challenge_and_supersede_durable_approval(
-    ingress: Ingress, terminal: None, change: dict[str, Any],
+    ingress: Ingress,
+    terminal: None,
+    change: dict[str, Any],
 ) -> None:
     old_packet = ingress.packet
     issued = ingress.issue()
@@ -271,13 +342,17 @@ def test_changed_bound_inputs_refuse_challenge_and_supersede_durable_approval(
     with pytest.raises(SupersededDecisionError):
         factory_decisions.require_for_effect(ingress.ledger, ingress.request, ACTION)
     retained = list_decisions(ingress.ledger.connection, RUN)[0]
-    assert retained.id == result["decision_id"] and retained.subject_digest == original.subject_digest
+    assert (
+        retained.id == result["decision_id"] and retained.subject_digest == original.subject_digest
+    )
     assert retained.normalized_inputs == original.normalized_inputs
     assert retained.superseded_by == ingress.packet.subject_digest
 
 
 def test_expired_challenge_cannot_record_authority(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_issue = factory_decisions.issue_challenge
 
@@ -292,7 +367,8 @@ def test_expired_challenge_cannot_record_authority(
 
 
 def test_current_registration_change_invalidates_effect_authority(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     ingress.decide(ingress.issue())
     ingress.preferences.write_bytes(_preferences(principal_id="replacement"))
@@ -302,7 +378,9 @@ def test_current_registration_change_invalidates_effect_authority(
 
 
 def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from enginery.cli import stage1_composition
 
@@ -320,14 +398,21 @@ def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
 
         def resolve_human_wait(self, **kwargs: Any) -> None:
             assert ingress.ledger.connection.in_transaction
-            ingress.ledger.append(AppendCommand(
-                correlation_id="resolve-wait",
-                events=(EventWrite(
-                    aggregate_type="runtime_node", aggregate_id=f"{RUN}:validate",
-                    expected_version=0, event_type="runtime_node.human_wait_resolved",
-                    schema_version=1, payload=kwargs["extra"],
-                ),),
-            ))
+            ingress.ledger.append(
+                AppendCommand(
+                    correlation_id="resolve-wait",
+                    events=(
+                        EventWrite(
+                            aggregate_type="runtime_node",
+                            aggregate_id=f"{RUN}:validate",
+                            expected_version=0,
+                            event_type="runtime_node.human_wait_resolved",
+                            schema_version=1,
+                            payload=kwargs["extra"],
+                        ),
+                    ),
+                )
+            )
             ingress.states["validate"]["status"] = kwargs["outcome"]
 
     monkeypatch.setattr(stage1_composition, "runtime_for_run", lambda *args, **kwargs: Runtime())
@@ -335,11 +420,15 @@ def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
     assert result["node_id"] == "validate"
     assert ingress.states["validate"]["status"] == "passed"
     event = ingress.ledger.read_projection(
-        aggregate_type="runtime_node", aggregate_id=f"{RUN}:validate",
+        aggregate_type="runtime_node",
+        aggregate_id=f"{RUN}:validate",
     )
     assert event is not None and event.state["decision_id"] == result["decision_id"]
     assert factory_decisions.require_for_effect(
-        ingress.ledger, ingress.request, action, "validate",
+        ingress.ledger,
+        ingress.request,
+        action,
+        "validate",
     ).normalized_inputs["override_scope"] == ("approve", "validate")
     with pytest.raises(ActionMismatchError):
         factory_decisions.require_for_effect(ingress.ledger, ingress.request, action, "review")
@@ -348,7 +437,8 @@ def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
 
 
 def test_self_approval_and_hard_rule_scope_are_never_overridden(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     ingress.preferences.write_bytes(_preferences(principal_id="implement-2"))
     issued = ingress.issue()
@@ -361,14 +451,17 @@ def test_self_approval_and_hard_rule_scope_are_never_overridden(
     issued = ingress.issue()
     with pytest.raises(HardRuleError, match="hard rule"):
         ingress.decide(
-            issued, action="human_wait.evidence.current_subject.approve",
+            issued,
+            action="human_wait.evidence.current_subject.approve",
             reason="cannot weaken subject binding",
         )
     assert not list_decisions(ingress.ledger.connection, RUN)
 
 
 def test_both_streams_must_be_interactive(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     issued = ingress.issue()
     monkeypatch.setattr(factory_decisions.sys, "stdout", io.StringIO())
@@ -379,7 +472,9 @@ def test_both_streams_must_be_interactive(
 
 
 def test_input_and_output_must_share_the_same_actual_terminal(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     master, slave = pty.openpty()
     try:
@@ -393,7 +488,8 @@ def test_input_and_output_must_share_the_same_actual_terminal(
 
 
 def test_operator_can_only_shorten_challenge_lifetime(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     ingress.preferences.write_bytes(_preferences(ttl_seconds=60))
     issued = ingress.issue()
@@ -407,7 +503,8 @@ def test_operator_can_only_shorten_challenge_lifetime(
 
 
 def test_review_without_an_available_action_issues_no_challenge(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     ingress.states["review"] = {"status": "queued"}
     report = ingress.issue()
@@ -416,7 +513,8 @@ def test_review_without_an_available_action_issues_no_challenge(
 
 
 def test_stale_subject_precedes_changed_action_availability(
-    ingress: Ingress, terminal: None,
+    ingress: Ingress,
+    terminal: None,
 ) -> None:
     issued = ingress.issue()
     ingress.packet = replace(ingress.packet, findings_json='["repair first"]')
@@ -427,7 +525,9 @@ def test_stale_subject_precedes_changed_action_availability(
 
 
 def test_subject_is_checked_again_under_the_nonce_consumption_lock(
-    ingress: Ingress, terminal: None, monkeypatch: pytest.MonkeyPatch,
+    ingress: Ingress,
+    terminal: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     issued = ingress.issue()
     builds = 0

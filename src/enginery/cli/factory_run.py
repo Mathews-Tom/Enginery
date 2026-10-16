@@ -601,6 +601,7 @@ def _enrich(
             "command": (
                 f"enginery factory decide {shlex.quote(run_id)} {project_flag} "
                 f"--action {shlex.quote(action)} --subject-digest DIGEST --challenge CHALLENGE"
+                + (" --reason REASON" if node_id != "open_pr" else "")
             ),
             "reject_command": (
                 f"enginery factory decide {shlex.quote(run_id)} {project_flag} "

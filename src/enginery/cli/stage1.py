@@ -106,12 +106,18 @@ def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
         runtime = runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
         action = (
-            "pull_request.open" if approved and args.node_id == "open_pr"
+            "pull_request.open"
+            if approved and args.node_id == "open_pr"
             else f"human_wait.{args.node_id}.{'approve' if approved else 'reject'}"
         )
         result = decide_in_ledger(
-            ledger, request, action=action, subject_digest=args.subject_digest,
-            challenge=args.challenge, principal_id=args.principal_id, reason=args.reason,
+            ledger,
+            request,
+            action=action,
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
             owner=args.owner,
         )
         _print({**result, "status": "passed" if approved else "failed"})
@@ -202,11 +208,18 @@ def _resume(args: argparse.Namespace) -> None:
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
         prior = runtime.read_node_request(run_id=args.run_id, node_id=args.node_id)
         result = decide_in_ledger(
-            ledger, request, action=f"human_wait.{args.node_id}.requeue",
-            subject_digest=args.subject_digest, challenge=args.challenge,
-            principal_id=args.principal_id, reason=args.reason, owner=args.owner,
+            ledger,
+            request,
+            action=f"human_wait.{args.node_id}.requeue",
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
+            owner=args.owner,
             resumed_request=replace(
-                prior, attempt_id=args.attempt_id, operation_id=args.operation_id,
+                prior,
+                attempt_id=args.attempt_id,
+                operation_id=args.operation_id,
                 expected_attempt_version=0,
             ),
         )
