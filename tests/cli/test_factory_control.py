@@ -16,7 +16,7 @@ import pytest
 from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import factory_control, factory_run
 from enginery.cli.factory_collect import database_path, paused_hold
-from enginery.cli.main import main
+from enginery.cli.main import _build_parser, main
 from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.ids import RunId
 from enginery.domain.runner import RunnerProfile, RunnerSelection
@@ -173,6 +173,46 @@ def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
         finally:
             ledger.close()
         assert len(list(request.parent.parent.glob("*/request.json"))) == 1
+    finally:
+        invoke(capsys, project, "drain", "--stop")
+
+
+def test_resume_preserves_bound_request_after_project_configuration_changes(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, run = dispatch(bound_project, capsys)
+    try:
+        request = Path(run["request_path"])
+        original = request.read_bytes()
+        code, bound = invoke(capsys, project, "status", run["run_id"])
+        assert code == 0
+        policy = project / ".enginery" / "project.toml"
+        policy.write_text(
+            policy.read_text(encoding="utf-8") + "[implementation]\ntime_budget_seconds = 123\n",
+            encoding="utf-8",
+        )
+        args = _build_parser().parse_args(
+            ["factory", "run", "owner/repo#1", "--project", str(project), "--once"]
+        )
+        recompiled = factory_run.compile_request(
+            factory_run.request_inputs(project, "owner/repo#1", run["run_id"], args)
+        ).request
+        assert recompiled.implementation.time_budget_seconds == 123
+        assert str(recompiled.digest) != bound["request_digest"]
+        assert (
+            str(recompiled.run.configuration_snapshot_digest)
+            != bound["configuration_snapshot_digest"]
+        )
+
+        code = main(["factory", "resume", run["run_id"], "--project", str(project), "--json"])
+        output = capsys.readouterr()
+        assert request.read_bytes() == original
+        assert code == 0, output.err
+        resumed = json.loads(output.out)
+        assert resumed["run_id"] == run["run_id"]
+        assert resumed["request_digest"] == bound["request_digest"]
+        assert resumed["configuration_snapshot_digest"] == bound["configuration_snapshot_digest"]
     finally:
         invoke(capsys, project, "drain", "--stop")
 
