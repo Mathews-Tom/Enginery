@@ -50,18 +50,25 @@ def _service(request: Stage1RunRequest) -> BehavioralAcceptanceService:
     path = behavioral_checks_path(request)
     assert path is not None
     ensure_private_directory(path.parent, what="behavioral evaluator custody")
-    ensure_private_directory(request.execution_configuration.artifact_root, what="evidence artifacts")
+    ensure_private_directory(
+        request.execution_configuration.artifact_root, what="evidence artifacts"
+    )
     user = read_user_layer()
     programs = None if user is None else user.operator_executables
     return BehavioralAcceptanceService(
-        ArtifactStore(request.execution_configuration.artifact_root), path.parent,
+        ArtifactStore(request.execution_configuration.artifact_root),
+        path.parent,
         browser_executable=None if programs is None else programs.browser,
         browser_expected_digest=None if programs is None else programs.browser_digest,
     )
 
 
 def execute_behavioral(
-    ledger: LedgerService, request: Stage1RunRequest, *, head_revision: str, calibrate: bool = False,
+    ledger: LedgerService,
+    request: Stage1RunRequest,
+    *,
+    head_revision: str,
+    calibrate: bool = False,
     without_faults: tuple[str, ...] = (),
 ) -> dict[str, object]:
     binding = read_behavioral_checks(request)
@@ -72,7 +79,8 @@ def execute_behavioral(
     ensure_private_directory(root, what="behavioral source checkouts")
     source = (
         intake_path_for(request.workspace_path)
-        if request.runner.isolated_mode else request.workspace_path
+        if request.runner.isolated_mode
+        else request.workspace_path
     )
     with tempfile.TemporaryDirectory(prefix="observe-", dir=root) as temporary:
         checkout = Path(temporary) / "candidate"
@@ -93,7 +101,9 @@ def execute_behavioral(
             calibration = service.calibrate(
                 **arguments,
                 inject_faults=tuple(
-                    cast(FaultClass, fault) for fault in FAULT_CLASSES if fault not in without_faults
+                    cast(FaultClass, fault)
+                    for fault in FAULT_CLASSES
+                    if fault not in without_faults
                 ),
             )
             holds = calibration_holds(
@@ -104,7 +114,8 @@ def execute_behavioral(
                     head_revision=head_revision,
                     build=calibration.receipt.build,
                     configuration_snapshot_digest=arguments["configuration_snapshot_digest"],
-                    evaluator=arguments["evaluator"], environment=arguments["environment"],
+                    evaluator=arguments["evaluator"],
+                    environment=arguments["environment"],
                 ),
                 calibration,
             )
@@ -119,7 +130,9 @@ def execute_behavioral(
             result = service.run(**arguments)
             state = {
                 "receipt_digest": str(result.receipt_digest),
-                "observation_receipt_digests": [str(item) for item in result.observation_receipt_digests],
+                "observation_receipt_digests": [
+                    str(item) for item in result.observation_receipt_digests
+                ],
                 "result": result.result.value,
                 "holds": list(result.holds),
                 "head_revision": head_revision,
@@ -127,14 +140,21 @@ def execute_behavioral(
     state["configuration_snapshot_digest"] = str(request.run.configuration_snapshot_digest)
     aggregate = "behavioral_calibration" if calibrate else "behavioral_acceptance"
     old = ledger.read_projection(aggregate_type=aggregate, aggregate_id=str(request.run.id))
-    ledger.append(AppendCommand(
-        correlation_id=f"{aggregate}:{request.run.id}:{datetime.now(UTC).isoformat()}",
-        events=(EventWrite(
-            aggregate_type=aggregate, aggregate_id=str(request.run.id),
-            expected_version=0 if old is None else old.aggregate_version,
-            event_type=aggregate + "_recorded", schema_version=1, payload=state,
-        ),),
-    ))
+    ledger.append(
+        AppendCommand(
+            correlation_id=f"{aggregate}:{request.run.id}:{datetime.now(UTC).isoformat()}",
+            events=(
+                EventWrite(
+                    aggregate_type=aggregate,
+                    aggregate_id=str(request.run.id),
+                    expected_version=0 if old is None else old.aggregate_version,
+                    event_type=aggregate + "_recorded",
+                    schema_version=1,
+                    payload=state,
+                ),
+            ),
+        )
+    )
     return {"run_id": str(request.run.id), **state}
 
 
@@ -142,9 +162,13 @@ def verify_for_stage1(ledger: LedgerService, request: Stage1RunRequest, head: st
     state = execute_behavioral(ledger, request, head_revision=head)
     if state["result"] != EvidenceResult.PASS.value:
         raise HumanActionRequiredError(
-            "behavioral_acceptance_indeterminate: "
-            + "; ".join(cast(list[str], state["holds"])),
-            details={"repair": f"enginery factory calibrate {request.run.id} --project {request.repository_path}"},
+            "behavioral_acceptance_indeterminate: " + "; ".join(cast(list[str], state["holds"])),
+            details={
+                "repair": (
+                    f"enginery factory calibrate {request.run.id}"
+                    f" --project {request.repository_path}"
+                )
+            },
         )
     algorithm, value = str(state["receipt_digest"]).split(":", 1)
     return Digest(algorithm, value)
@@ -154,10 +178,16 @@ def run_command(
     project: Path, run_id: str, *, calibrate: bool, without_faults: tuple[str, ...] = ()
 ) -> dict[str, object]:
     with LedgerService.open(database_path(project)) as ledger:
-        request = Stage1RunService(
-            runtime=CoordinatorRuntime(ledger, owner="factory"), ledger=ledger
-        ).read(RunId(run_id)).request
-        source = intake_path_for(request.workspace_path) if request.runner.isolated_mode else request.workspace_path
+        request = (
+            Stage1RunService(runtime=CoordinatorRuntime(ledger, owner="factory"), ledger=ledger)
+            .read(RunId(run_id))
+            .request
+        )
+        source = (
+            intake_path_for(request.workspace_path)
+            if request.runner.isolated_mode
+            else request.workspace_path
+        )
         head = resolve_commit(source, "HEAD")
         return execute_behavioral(
             ledger, request, head_revision=head, calibrate=calibrate, without_faults=without_faults

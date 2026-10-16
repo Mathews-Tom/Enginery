@@ -94,13 +94,16 @@ def browser_tree_digest(executable: Path) -> str:
         with path.open("rb") as stream:
             while chunk := stream.read(65536):
                 file_digest.update(chunk)
-        name = os.fsencode(path.relative_to(root.parent))
+        path_bytes = os.fsencode(path.relative_to(root.parent))
         # shasum escapes filenames containing backslashes or newlines.
-        escaped = b"\\" in name or b"\n" in name
-        name = name.replace(b"\\", b"\\\\").replace(b"\n", b"\\n")
+        escaped = b"\\" in path_bytes or b"\n" in path_bytes
+        path_bytes = path_bytes.replace(b"\\", b"\\\\").replace(b"\n", b"\\n")
         digest.update(
             (b"\\" if escaped else b"")
-            + file_digest.hexdigest().encode() + b"  " + name + b"\n"
+            + file_digest.hexdigest().encode()
+            + b"  "
+            + path_bytes
+            + b"\n"
         )
     return "sha256:" + digest.hexdigest()
 
@@ -153,11 +156,20 @@ class _Pipe:
         read_source = fcntl.fcntl(child_read, fcntl.F_DUPFD_CLOEXEC, 10)
         write_source = fcntl.fcntl(child_write, fcntl.F_DUPFD_CLOEXEC, 10)
         argv = [
-            str(executable), "--headless", "--remote-debugging-pipe",
-            f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
-            "--disable-background-networking", "--disable-component-update",
-            "--disable-sync", "--disable-default-apps", "--disable-extensions",
-            "--disable-domain-reliability", "--disable-breakpad", "--metrics-recording-only",
+            str(executable),
+            "--headless",
+            "--remote-debugging-pipe",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-sync",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-domain-reliability",
+            "--disable-breakpad",
+            "--metrics-recording-only",
             "--disable-quic",
             "--disable-features=WebRtcHideLocalIpsWithMdns,MediaRouter,OptimizationHints",
             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -375,7 +387,9 @@ def observe_browser(
                         "browser_dom_unobserved: invalid selector or evaluation failure"
                     )
                 results.append((index, result["value"]))
-            screenshot = pipe.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
+            screenshot = pipe.call(
+                "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+            )
             encoded = screenshot.get("data")
             if not isinstance(encoded, str):
                 raise BrowserObserverError("browser_capture_failed: missing PNG")

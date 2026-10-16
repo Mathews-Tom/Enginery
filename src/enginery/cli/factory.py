@@ -138,7 +138,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
         behavioral.add_argument("--json", action="store_true")
         if name == "calibrate":
             behavioral.add_argument(
-                "--without-fault", action="append", default=[],
+                "--without-fault",
+                action="append",
+                default=[],
                 choices=("constant_result", "skipped_persistence", "wrong_build"),
                 help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
             )
@@ -343,7 +345,9 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_doctor(args)
     if command in {"calibrate", "check"}:
         document = run_behavioral_command(
-            resolve_project(args.project), args.run_id, calibrate=command == "calibrate",
+            resolve_project(args.project),
+            args.run_id,
+            calibrate=command == "calibrate",
             without_faults=tuple(getattr(args, "without_fault", ())),
         )
         _emit(args, document, [json.dumps(document, sort_keys=True)])

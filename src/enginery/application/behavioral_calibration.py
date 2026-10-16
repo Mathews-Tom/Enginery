@@ -111,7 +111,9 @@ class CalibrationOutcome:
                 None if self.baseline_receipt_digest is None else str(self.baseline_receipt_digest)
             ),
             "observation_receipt_digest": (
-                None if self.observation_receipt_digest is None else str(self.observation_receipt_digest)
+                None
+                if self.observation_receipt_digest is None
+                else str(self.observation_receipt_digest)
             ),
             "reason": self.reason,
         }
@@ -119,9 +121,16 @@ class CalibrationOutcome:
     @classmethod
     def from_state(cls, state: object) -> CalibrationOutcome:
         fields = {
-            "assertion_id", "fault_class", "classification", "rung", "applied",
-            "baseline_result", "fault_result", "baseline_receipt_digest",
-            "observation_receipt_digest", "reason",
+            "assertion_id",
+            "fault_class",
+            "classification",
+            "rung",
+            "applied",
+            "baseline_result",
+            "fault_result",
+            "baseline_receipt_digest",
+            "observation_receipt_digest",
+            "reason",
         }
         if not isinstance(state, dict) or set(state) != fields:
             raise InvalidInputError("calibration outcome has missing or unknown fields")
@@ -132,7 +141,9 @@ class CalibrationOutcome:
             raise InvalidInputError("invalid calibration reason")
         try:
             baseline = (
-                None if state["baseline_result"] is None else EvidenceResult(state["baseline_result"])
+                None
+                if state["baseline_result"] is None
+                else EvidenceResult(state["baseline_result"])
             )
             fault = None if state["fault_result"] is None else EvidenceResult(state["fault_result"])
         except (TypeError, ValueError) as error:
@@ -146,11 +157,13 @@ class CalibrationOutcome:
             baseline_result=baseline,
             fault_result=fault,
             baseline_receipt_digest=(
-                None if state["baseline_receipt_digest"] is None
+                None
+                if state["baseline_receipt_digest"] is None
                 else _digest(state["baseline_receipt_digest"])
             ),
             observation_receipt_digest=(
-                None if state["observation_receipt_digest"] is None
+                None
+                if state["observation_receipt_digest"] is None
                 else _digest(state["observation_receipt_digest"])
             ),
             reason=reason,
@@ -166,7 +179,9 @@ class CalibrationReceipt:
     fixture_digest: Digest
 
     def __post_init__(self) -> None:
-        if not isinstance(self.receipt, EvidenceReceipt) or not isinstance(self.fixture_digest, Digest):
+        if not isinstance(self.receipt, EvidenceReceipt) or not isinstance(
+            self.fixture_digest, Digest
+        ):
             raise InvalidInputError("calibration requires a receipt and protected-fixture digest")
         if not isinstance(self.results, tuple) or any(
             not isinstance(item, CalibrationOutcome) for item in self.results
@@ -174,7 +189,9 @@ class CalibrationReceipt:
             raise InvalidInputError("calibration results must be immutable typed outcomes")
         keys = [(item.assertion_id, item.fault_class) for item in self.results]
         if len(keys) != len(set(keys)):
-            raise InvalidInputError("calibration cannot classify the same assertion and fault twice")
+            raise InvalidInputError(
+                "calibration cannot classify the same assertion and fault twice"
+            )
 
     def payload(self) -> dict[str, object]:
         return {
@@ -197,7 +214,10 @@ class CalibrationReceipt:
     @classmethod
     def from_state(cls, state: object) -> CalibrationReceipt:
         if not isinstance(state, dict) or set(state) != {
-            "schema_version", "fixture_digest", "results", "receipt",
+            "schema_version",
+            "fixture_digest",
+            "results",
+            "receipt",
         }:
             raise InvalidInputError("calibration receipt has missing or unknown fields")
         if type(state["schema_version"]) is not int or state["schema_version"] != 1:

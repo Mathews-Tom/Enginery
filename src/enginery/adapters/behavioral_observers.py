@@ -102,8 +102,13 @@ class _Process:
         if not argv or any(not isinstance(item, str) or "\x00" in item for item in argv):
             raise _ObservationError("observer_command_invalid: configure a nonempty trusted argv")
         self.process = subprocess.Popen(
-            argv, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            argv,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         self.stdout = bytearray()
         self.stderr = bytearray()

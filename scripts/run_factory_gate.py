@@ -96,7 +96,11 @@ SCENARIO_SETUP = "setup"
 SCENARIO_MANUAL_PATH = "manual-path"
 SCENARIO_BEHAVIORAL = "behavioral-acceptance"
 SCENARIO_NAMES = (
-    SCENARIO_BOUNDARY, SCENARIO_AUTH, SCENARIO_SETUP, SCENARIO_MANUAL_PATH, SCENARIO_BEHAVIORAL,
+    SCENARIO_BOUNDARY,
+    SCENARIO_AUTH,
+    SCENARIO_SETUP,
+    SCENARIO_MANUAL_PATH,
+    SCENARIO_BEHAVIORAL,
 )
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
@@ -120,8 +124,8 @@ class ScenarioSpec:
 
 def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_auth as auth
-    import factory_gate_boundary as boundary
     import factory_gate_behavioral as behavioral
+    import factory_gate_boundary as boundary
     import factory_gate_manual_path as manual_path
     import factory_gate_setup as setup
 
@@ -145,7 +149,10 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             prepare=manual_path.prepare,
         ),
         SCENARIO_BEHAVIORAL: ScenarioSpec(
-            behavioral.required_assertions, False, behavioral.run, behavioral.finalize,
+            behavioral.required_assertions,
+            False,
+            behavioral.run,
+            behavioral.finalize,
             prepare=behavioral.prepare,
         ),
     }

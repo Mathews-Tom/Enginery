@@ -23,7 +23,8 @@ from enginery.domain.errors import StaleEvidenceError
 
 def _git(checkout: Path, *args: str) -> bytes:
     with subprocess.Popen(
-        ("git", "-C", str(checkout), *args), stdout=subprocess.PIPE,
+        ("git", "-C", str(checkout), *args),
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=repository_isolated_environment(),
     ) as process:
@@ -34,7 +35,7 @@ def _git(checkout: Path, *args: str) -> bytes:
             raise StaleEvidenceError("checkout identity exceeds the 1 MiB bound")
         if process.wait(timeout=30):
             raise StaleEvidenceError("could not verify the behavioral checkout identity")
-        return output
+        return bytes(output)
 
 
 def verified_build(checkout: Path, expected_head: str) -> BuildIdentity:
@@ -74,9 +75,13 @@ def verified_build(checkout: Path, expected_head: str) -> BuildIdentity:
 
 def host_environment() -> EnvironmentFingerprint:
     """Retain a noncredential host receipt and the observer interpreter's real version."""
-    receipt = Digest.of_json({
-        "system": platform.system(), "release": platform.release(),
-        "machine": platform.machine(), "uid": os.getuid(),
-        "python_executable": str(Path(sys.executable).resolve()),
-    })
+    receipt = Digest.of_json(
+        {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "uid": os.getuid(),
+            "python_executable": str(Path(sys.executable).resolve()),
+        }
+    )
     return EnvironmentFingerprint(receipt, (ToolVersion("python", platform.python_version()),))

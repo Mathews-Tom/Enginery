@@ -30,7 +30,8 @@ def _check(
     assertions: list[dict[str, object]] | None = None,
 ) -> BehavioralCheck:
     raw: dict[str, object] = {
-        "name": "runtime", "observer": observer,
+        "name": "runtime",
+        "observer": observer,
         "assertions": (
             assertions if assertions is not None else [{"kind": "exit_status", "equals": 0}]
         ),
@@ -51,7 +52,7 @@ def _server(
     location: str | None = None,
 ) -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler override
+        def do_GET(self) -> None:
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             if location:
@@ -80,10 +81,14 @@ def test_command_observes_actual_exit_streams_files_and_literal_argv(tmp_path: P
         "import pathlib,sys; pathlib.Path('result.txt').write_text(sys.argv[1]); "
         "print('changed'); print('diagnostic', file=sys.stderr); sys.exit(7)"
     )
-    check = _check("command", argv=(sys.executable, "-c", code, literal), assertions=[
-        {"kind": "exit_status", "equals": 7},
-        {"kind": "produced_file", "path": "result.txt", "equals": literal},
-    ])
+    check = _check(
+        "command",
+        argv=(sys.executable, "-c", code, literal),
+        assertions=[
+            {"kind": "exit_status", "equals": 7},
+            {"kind": "produced_file", "path": "result.txt", "equals": literal},
+        ],
+    )
     data = observe(check, cwd=tmp_path)
     assert data.infrastructure_error is None
     assert data.returncode == 7
@@ -161,27 +166,48 @@ def test_produced_files_refuse_links_outside_checkout(tmp_path: Path, link_kind:
         os.link(secret, candidate / name)
     else:
         (candidate / name).symlink_to(secret)
-    data = observe(_check("command", argv=(sys.executable, "-c", "pass"), assertions=[
-        {"kind": "produced_file", "path": name, "contains": "evidence"},
-    ]), cwd=candidate)
+    data = observe(
+        _check(
+            "command",
+            argv=(sys.executable, "-c", "pass"),
+            assertions=[
+                {"kind": "produced_file", "path": name, "contains": "evidence"},
+            ],
+        ),
+        cwd=candidate,
+    )
     assert data.infrastructure_error is not None
     assert data.infrastructure_error.startswith("observer_produced_file_unsafe:")
     assert data.produced_files == ()
 
 
 def test_missing_produced_file_is_observed_absence_not_infrastructure(tmp_path: Path) -> None:
-    data = observe(_check("command", argv=(sys.executable, "-c", "pass"), assertions=[
-        {"kind": "produced_file", "path": "missing", "exists": False},
-    ]), cwd=tmp_path)
+    data = observe(
+        _check(
+            "command",
+            argv=(sys.executable, "-c", "pass"),
+            assertions=[
+                {"kind": "produced_file", "path": "missing", "exists": False},
+            ],
+        ),
+        cwd=tmp_path,
+    )
     assert data.infrastructure_error is None
     assert data.produced_files == ()
 
 
 def test_produced_file_output_is_bounded(tmp_path: Path) -> None:
     code = "from pathlib import Path; Path('large').write_bytes(b'x' * (1024 * 1024 + 1))"
-    data = observe(_check("command", argv=(sys.executable, "-c", code), assertions=[
-        {"kind": "produced_file", "path": "large", "contains": "x"},
-    ]), cwd=tmp_path)
+    data = observe(
+        _check(
+            "command",
+            argv=(sys.executable, "-c", code),
+            assertions=[
+                {"kind": "produced_file", "path": "large", "contains": "x"},
+            ],
+        ),
+        cwd=tmp_path,
+    )
     assert data.infrastructure_error is not None
     assert data.infrastructure_error.startswith("observer_output_limit:")
 
@@ -193,7 +219,8 @@ def test_service_observes_real_body_without_ambient_proxy(
     with _server(body=b"real changed path", status=418) as url:
         data = observe(
             _check(
-                "service", url=url,
+                "service",
+                url=url,
                 assertions=[{"kind": "body", "equals": "real changed path"}],
             ),
             cwd=tmp_path,
@@ -248,7 +275,8 @@ def test_unavailable_service_is_infrastructure(
     monkeypatch.setattr("enginery.adapters.behavioral_observers.OBSERVATION_TIMEOUT_SECONDS", 0.15)
     data = observe(
         _check(
-            "service", url="http://127.0.0.1:1/",
+            "service",
+            url="http://127.0.0.1:1/",
             assertions=[{"kind": "body", "contains": "x"}],
         ),
         cwd=tmp_path,
@@ -260,8 +288,11 @@ def test_unavailable_service_is_infrastructure(
 
 def test_nonloopback_observer_refused_before_start(tmp_path: Path) -> None:
     check = BehavioralCheck(
-        name="unsafe", observer="service", assertions=(),
-        fault_classes=("constant_result",), url="http://192.0.2.1/",
+        name="unsafe",
+        observer="service",
+        assertions=(),
+        fault_classes=("constant_result",),
+        url="http://192.0.2.1/",
     )
     data = observe(check, cwd=tmp_path)
     assert data.infrastructure_error is not None
@@ -271,7 +302,8 @@ def test_nonloopback_observer_refused_before_start(tmp_path: Path) -> None:
 
 def test_browser_absent_is_exact_repair_hold(tmp_path: Path) -> None:
     check = _check(
-        "browser", url="http://127.0.0.1:1/",
+        "browser",
+        url="http://127.0.0.1:1/",
         assertions=[{"kind": "dom", "selector": "h1", "equals": "changed"}],
     )
     data = observe(check, cwd=tmp_path)
@@ -291,17 +323,22 @@ def test_browser_tree_digest_matches_c_locale_and_holds_mismatch(tmp_path: Path)
     (root / "a").write_bytes(b"a")
     lines = b"".join(
         hashlib.sha256(path.read_bytes()).hexdigest().encode()
-        + b"  " + os.fsencode(path.relative_to(root.parent)) + b"\n"
+        + b"  "
+        + os.fsencode(path.relative_to(root.parent))
+        + b"\n"
         for path in (root / "Z", root / "a", executable)
     )
     expected = "sha256:" + hashlib.sha256(lines).hexdigest()
     assert browser_tree_digest(executable) == expected
     check = _check(
-        "browser", url="http://127.0.0.1:1/",
+        "browser",
+        url="http://127.0.0.1:1/",
         assertions=[{"kind": "dom", "selector": "h1", "exists": True}],
     )
     data = observe(
-        check, cwd=tmp_path, browser_executable=str(executable),
+        check,
+        cwd=tmp_path,
+        browser_executable=str(executable),
         browser_expected_digest="sha256:" + "0" * 64,
     )
     assert data.infrastructure_error is not None
@@ -320,13 +357,19 @@ def test_approved_browser_observes_dom_and_captures_png(tmp_path: Path) -> None:
         )
     body = b"<!doctype html><h1 id='changed'>real browser behavior</h1>"
     with _server(body=body) as url:
-        check = _check("browser", url=url, assertions=[
-            {"kind": "dom", "selector": "#changed", "equals": "real browser behavior"},
-            {"kind": "dom", "selector": "#absent", "exists": False},
-            {"kind": "dom", "selector": "#changed", "contains": "wrong expected text"},
-        ])
+        check = _check(
+            "browser",
+            url=url,
+            assertions=[
+                {"kind": "dom", "selector": "#changed", "equals": "real browser behavior"},
+                {"kind": "dom", "selector": "#absent", "exists": False},
+                {"kind": "dom", "selector": "#changed", "contains": "wrong expected text"},
+            ],
+        )
         data = observe(
-            check, cwd=tmp_path, browser_executable=executable,
+            check,
+            cwd=tmp_path,
+            browser_executable=executable,
             browser_expected_digest=expected,
         )
     assert data.infrastructure_error is None
@@ -343,7 +386,9 @@ def test_service_does_not_observe_a_preexisting_server_as_its_new_build(tmp_path
     with _server(body=b"stale build") as url:
         data = observe(
             _check(
-                "service", argv=(sys.executable, "-c", code), url=url,
+                "service",
+                argv=(sys.executable, "-c", code),
+                url=url,
                 assertions=[{"kind": "body", "equals": "stale build"}],
             ),
             cwd=tmp_path,

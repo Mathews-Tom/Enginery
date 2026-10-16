@@ -113,7 +113,9 @@ def _private_directory(path: Path, *, cwd: Path | None = None) -> None:
         raise InvalidInputError("behavioral evaluator directory must be an absolute private path")
     for component in (path, *path.parents):
         if component.is_symlink():
-            raise InvalidInputError("behavioral evaluator directory must not contain symbolic links")
+            raise InvalidInputError(
+                "behavioral evaluator directory must not contain symbolic links"
+            )
     metadata = path.stat()
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o077:
         raise InvalidInputError("behavioral evaluator directory must have mode 0700")
@@ -148,8 +150,10 @@ def _read_private(path: Path) -> bytes | None:
     try:
         metadata = os.fstat(descriptor)
         if (
-            not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077
-            or metadata.st_uid != os.getuid() or metadata.st_size > MAX_EVIDENCE_BYTES
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & 0o077
+            or metadata.st_uid != os.getuid()
+            or metadata.st_size > MAX_EVIDENCE_BYTES
         ):
             raise InvalidInputError("behavioral private document must be a bounded private file")
         with os.fdopen(os.dup(descriptor), "rb") as stream:
@@ -162,18 +166,29 @@ def _read_private(path: Path) -> bytes | None:
 
 
 def _receipt(
-    inputs: AcceptanceInputs, *, observer: ObserverIdentity, captures: tuple[CaptureArtifact, ...],
-    started_at: datetime, ended_at: datetime,
+    inputs: AcceptanceInputs,
+    *,
+    observer: ObserverIdentity,
+    captures: tuple[CaptureArtifact, ...],
+    started_at: datetime,
+    ended_at: datetime,
     category: ReceiptCategory = ReceiptCategory.INSTRUMENT_OBSERVATION,
-    evaluation: BehavioralEvaluation | None = None, references: tuple[Digest, ...] = (),
+    evaluation: BehavioralEvaluation | None = None,
+    references: tuple[Digest, ...] = (),
 ) -> EvidenceReceipt:
     return EvidenceReceipt(
-        source_revision=inputs.source_revision, base_revision=inputs.base_revision,
-        head_revision=inputs.head_revision, build=inputs.build,
+        source_revision=inputs.source_revision,
+        base_revision=inputs.base_revision,
+        head_revision=inputs.head_revision,
+        build=inputs.build,
         configuration_snapshot_digest=inputs.configuration_snapshot_digest,
-        evaluator=inputs.evaluator, environment=inputs.environment,
-        observer=observer, capture_manifest=CaptureManifest(captures),
-        started_at=started_at, ended_at=ended_at, category=category,
+        evaluator=inputs.evaluator,
+        environment=inputs.environment,
+        observer=observer,
+        capture_manifest=CaptureManifest(captures),
+        started_at=started_at,
+        ended_at=ended_at,
+        category=category,
         result=None if evaluation is None else evaluation.result,
         input_receipt_digests=references,
         assertion_outcomes=() if evaluation is None else evaluation.assertion_outcomes,
@@ -184,8 +199,12 @@ class BehavioralAcceptanceService:
     """Compose the existing ArtifactStore with real observers and the pure evaluator."""
 
     def __init__(
-        self, artifacts: ArtifactStore, evaluator_directory: Path, *,
-        browser_executable: str | None = None, browser_expected_digest: str | None = None,
+        self,
+        artifacts: ArtifactStore,
+        evaluator_directory: Path,
+        *,
+        browser_executable: str | None = None,
+        browser_expected_digest: str | None = None,
         calibration_python: str = sys.executable,
     ) -> None:
         _private_directory(evaluator_directory)
@@ -197,53 +216,86 @@ class BehavioralAcceptanceService:
         self.receipts = EvidenceReceiptRepository(artifacts, media_validator=validate_media)
 
     def _inputs(
-        self, *, checks: tuple[BehavioralCheck, ...], cwd: Path, source_revision: str,
-        base_revision: str, head_revision: str, configuration_snapshot_digest: Digest,
-        evaluator: EvaluatorIdentity, environment: EnvironmentFingerprint,
+        self,
+        *,
+        checks: tuple[BehavioralCheck, ...],
+        cwd: Path,
+        source_revision: str,
+        base_revision: str,
+        head_revision: str,
+        configuration_snapshot_digest: Digest,
+        evaluator: EvaluatorIdentity,
+        environment: EnvironmentFingerprint,
         build: BuildIdentity | None,
     ) -> AcceptanceInputs:
         _private_directory(self.evaluator_directory, cwd=cwd)
         if (
             evaluator.version != EVALUATOR_VERSION
-            or evaluator.assertion_set_digest != Digest.of_json([check.to_state() for check in checks])
+            or evaluator.assertion_set_digest
+            != Digest.of_json([check.to_state() for check in checks])
         ):
-            raise StaleEvidenceError("behavioral_evaluator_identity_mismatch: rebuild request custody")
+            raise StaleEvidenceError(
+                "behavioral_evaluator_identity_mismatch: rebuild request custody"
+            )
         current_build = verified_build(cwd, head_revision)
         if build is not None and current_build != build:
-            raise StaleEvidenceError("behavioral_build_mismatch: supplied build differs from checkout")
+            raise StaleEvidenceError(
+                "behavioral_build_mismatch: supplied build differs from checkout"
+            )
         return AcceptanceInputs(
-            source_revision, base_revision, head_revision, current_build,
-            configuration_snapshot_digest, evaluator, environment,
+            source_revision,
+            base_revision,
+            head_revision,
+            current_build,
+            configuration_snapshot_digest,
+            evaluator,
+            environment,
         )
 
     def _confirm_build(self, cwd: Path, inputs: AcceptanceInputs) -> None:
         if verified_build(cwd, inputs.head_revision) != inputs.build:
-            raise StaleEvidenceError("behavioral_build_mismatch: checkout changed during observation")
+            raise StaleEvidenceError(
+                "behavioral_build_mismatch: checkout changed during observation"
+            )
 
     def _capture(self, payload: object) -> CaptureArtifact:
-        return self.receipts.publish_capture(canonical_bytes(payload), media_type="application/json")
+        return self.receipts.publish_capture(
+            canonical_bytes(payload), media_type="application/json"
+        )
 
     def _observe(self, check: BehavioralCheck, cwd: Path) -> ObservationData:
         return observe(
-            check, cwd=cwd, browser_executable=self.browser_executable,
+            check,
+            cwd=cwd,
+            browser_executable=self.browser_executable,
             browser_expected_digest=self.browser_expected_digest,
         )
 
     def _record_observation(
-        self, check: BehavioralCheck, data: ObservationData, inputs: AcceptanceInputs, *,
+        self,
+        check: BehavioralCheck,
+        data: ObservationData,
+        inputs: AcceptanceInputs,
+        *,
         extra_captures: tuple[CaptureArtifact, ...] = (),
         references: tuple[Digest, ...] = (),
     ) -> ObservedCheck:
         now = datetime.now(UTC)
         try:
-            start, end = datetime.fromisoformat(data.started_at), datetime.fromisoformat(data.ended_at)
+            start, end = (
+                datetime.fromisoformat(data.started_at),
+                datetime.fromisoformat(data.ended_at),
+            )
             if start.utcoffset() is None or end.utcoffset() is None or end < start:
                 raise ValueError("invalid observation time")
             semantic = self._capture(observation_payload(data))
         except (InvalidInputError, ValueError):
             data = ObservationData(
-                observer=check.observer, started_at=now.isoformat(), ended_at=now.isoformat(),
-                infrastructure_error="behavioral_observer_capture_invalid", ran=False,
+                observer=check.observer,
+                started_at=now.isoformat(),
+                ended_at=now.isoformat(),
+                infrastructure_error="behavioral_observer_capture_invalid",
+                ran=False,
             )
             start = end = now
             semantic = self._capture(observation_payload(data))
@@ -255,10 +307,14 @@ class BehavioralAcceptanceService:
         receipt = _receipt(
             inputs,
             observer=ObserverIdentity(
-                f"enginery-{check.observer}-observer", ObserverKind(check.observer),
-                EVALUATOR_VERSION, mock=data.mock,
+                f"enginery-{check.observer}-observer",
+                ObserverKind(check.observer),
+                EVALUATOR_VERSION,
+                mock=data.mock,
             ),
-            captures=(semantic, transport, *media, *extra_captures), started_at=start, ended_at=end,
+            captures=(semantic, transport, *media, *extra_captures),
+            started_at=start,
+            ended_at=end,
             references=references,
         )
         self.receipts.publish(receipt)
@@ -284,15 +340,29 @@ class BehavioralAcceptanceService:
         return calibration
 
     def run(
-        self, *, checks: tuple[BehavioralCheck, ...], cwd: Path, source_revision: str,
-        base_revision: str, head_revision: str, configuration_snapshot_digest: Digest,
-        evaluator: EvaluatorIdentity, environment: EnvironmentFingerprint,
-        calibration: CalibrationReceipt | None = None, build: BuildIdentity | None = None,
+        self,
+        *,
+        checks: tuple[BehavioralCheck, ...],
+        cwd: Path,
+        source_revision: str,
+        base_revision: str,
+        head_revision: str,
+        configuration_snapshot_digest: Digest,
+        evaluator: EvaluatorIdentity,
+        environment: EnvironmentFingerprint,
+        calibration: CalibrationReceipt | None = None,
+        build: BuildIdentity | None = None,
     ) -> AcceptanceRun:
         inputs = self._inputs(
-            checks=checks, cwd=cwd, source_revision=source_revision, base_revision=base_revision,
-            head_revision=head_revision, configuration_snapshot_digest=configuration_snapshot_digest,
-            evaluator=evaluator, environment=environment, build=build,
+            checks=checks,
+            cwd=cwd,
+            source_revision=source_revision,
+            base_revision=base_revision,
+            head_revision=head_revision,
+            configuration_snapshot_digest=configuration_snapshot_digest,
+            evaluator=evaluator,
+            environment=environment,
+            build=build,
         )
         start = datetime.now(UTC)
         calibration = calibration if calibration is not None else self._load_calibration(inputs)
@@ -304,19 +374,31 @@ class BehavioralAcceptanceService:
             observed.append(self._record_observation(check, self._observe(check, cwd), inputs))
             self._confirm_build(cwd, inputs)
         evaluation = evaluate_behavioral(
-            checks=checks, inputs=inputs, observations=tuple(observed), calibration=calibration,
+            checks=checks,
+            inputs=inputs,
+            observations=tuple(observed),
+            calibration=calibration,
         )
-        run_capture = self._capture({
-            "checks": [check.to_state() for check in checks],
-            "result": evaluation.result.value, "holds": list(evaluation.holds),
-            "calibration_receipt_digest": None if calibration is None else str(calibration.digest),
-            "assertion_outcomes": [item.to_state() for item in evaluation.assertion_outcomes],
-        })
+        run_capture = self._capture(
+            {
+                "checks": [check.to_state() for check in checks],
+                "result": evaluation.result.value,
+                "holds": list(evaluation.holds),
+                "calibration_receipt_digest": None
+                if calibration is None
+                else str(calibration.digest),
+                "assertion_outcomes": [item.to_state() for item in evaluation.assertion_outcomes],
+            }
+        )
         end = datetime.now(UTC)
         context = _receipt(
-            inputs, observer=ObserverIdentity("enginery-behavioral-run", ObserverKind.COMMAND,
-                                             EVALUATOR_VERSION),
-            captures=(run_capture,), started_at=start, ended_at=end,
+            inputs,
+            observer=ObserverIdentity(
+                "enginery-behavioral-run", ObserverKind.COMMAND, EVALUATOR_VERSION
+            ),
+            captures=(run_capture,),
+            started_at=start,
+            ended_at=end,
         )
         context_digest = self.receipts.publish(context)
         observation_digests = tuple(item.receipt.digest for item in observed)
@@ -324,26 +406,49 @@ class BehavioralAcceptanceService:
         if calibration is not None:
             references += (calibration.digest,)
         verdict = _receipt(
-            inputs, observer=ObserverIdentity("enginery-semantic-evaluator", ObserverKind.EVALUATOR,
-                                             EVALUATOR_VERSION),
-            captures=(run_capture,), started_at=start, ended_at=end,
-            category=ReceiptCategory.EVALUATED_VERDICT, evaluation=evaluation, references=references,
+            inputs,
+            observer=ObserverIdentity(
+                "enginery-semantic-evaluator", ObserverKind.EVALUATOR, EVALUATOR_VERSION
+            ),
+            captures=(run_capture,),
+            started_at=start,
+            ended_at=end,
+            category=ReceiptCategory.EVALUATED_VERDICT,
+            evaluation=evaluation,
+            references=references,
         )
         return AcceptanceRun(
-            evaluation.result, verdict, self.receipts.publish(verdict),
-            observation_digests, evaluation.holds,
+            evaluation.result,
+            verdict,
+            self.receipts.publish(verdict),
+            observation_digests,
+            evaluation.holds,
         )
 
     def calibrate(
-        self, *, checks: tuple[BehavioralCheck, ...], cwd: Path, source_revision: str,
-        base_revision: str, head_revision: str, configuration_snapshot_digest: Digest,
-        evaluator: EvaluatorIdentity, environment: EnvironmentFingerprint,
-        build: BuildIdentity | None = None, inject_faults: tuple[FaultClass, ...] | None = None,
+        self,
+        *,
+        checks: tuple[BehavioralCheck, ...],
+        cwd: Path,
+        source_revision: str,
+        base_revision: str,
+        head_revision: str,
+        configuration_snapshot_digest: Digest,
+        evaluator: EvaluatorIdentity,
+        environment: EnvironmentFingerprint,
+        build: BuildIdentity | None = None,
+        inject_faults: tuple[FaultClass, ...] | None = None,
     ) -> CalibrationReceipt:
         inputs = self._inputs(
-            checks=checks, cwd=cwd, source_revision=source_revision, base_revision=base_revision,
-            head_revision=head_revision, configuration_snapshot_digest=configuration_snapshot_digest,
-            evaluator=evaluator, environment=environment, build=build,
+            checks=checks,
+            cwd=cwd,
+            source_revision=source_revision,
+            base_revision=base_revision,
+            head_revision=head_revision,
+            configuration_snapshot_digest=configuration_snapshot_digest,
+            evaluator=evaluator,
+            environment=environment,
+            build=build,
         )
         start = datetime.now(UTC)
         fixture_capture = self.receipts.publish_capture(_FIXTURE, media_type="text/x-python")
@@ -355,7 +460,9 @@ class BehavioralAcceptanceService:
             self._confirm_build(cwd, inputs)
             references.append(baseline.receipt.digest)
             baseline_results = evaluate_observation(
-                check=check, observation=baseline, inputs=inputs,
+                check=check,
+                observation=baseline,
+                inputs=inputs,
             ).assertion_outcomes
             for fault in check.fault_classes:
                 applicable = any(fault_applies(assertion, fault) for assertion in check.assertions)
@@ -367,7 +474,10 @@ class BehavioralAcceptanceService:
                 if applicable and requested:
                     if fault == "wrong_build":
                         observation, binding_rejected, infrastructure_error = self._wrong_build(
-                            check, cwd, inputs, fixture_capture,
+                            check,
+                            cwd,
+                            inputs,
+                            fixture_capture,
                         )
                         applied = True
                     else:
@@ -375,11 +485,18 @@ class BehavioralAcceptanceService:
                         applied = observation.data.ran
                         infrastructure_error = observation.data.infrastructure_error
                     references.append(observation.receipt.digest)
-                fault_results = () if observation is None else (
-                    evaluate_assertions(check, observation.data) if fault == "wrong_build"
-                    else evaluate_observation(
-                        check=check, observation=observation, inputs=inputs,
-                    ).assertion_outcomes
+                fault_results = (
+                    ()
+                    if observation is None
+                    else (
+                        evaluate_assertions(check, observation.data)
+                        if fault == "wrong_build"
+                        else evaluate_observation(
+                            check=check,
+                            observation=observation,
+                            inputs=inputs,
+                        ).assertion_outcomes
+                    )
                 )
                 for index, assertion in enumerate(check.assertions):
                     relevant = fault_applies(assertion, fault)
@@ -392,37 +509,55 @@ class BehavioralAcceptanceService:
                         classification, rung = "inconclusive", None
                     else:
                         classification, rung = classify_calibration(
-                            applied=applied and relevant, baseline_result=baseline_result,
-                            fault_result=fault_result, infrastructure_error=infrastructure_error,
+                            applied=applied and relevant,
+                            baseline_result=baseline_result,
+                            fault_result=fault_result,
+                            infrastructure_error=infrastructure_error,
                             binding_rejected=binding_rejected,
                             binding_accepted=(
-                                fault == "wrong_build" and applied and not binding_rejected
+                                fault == "wrong_build"
+                                and applied
+                                and not binding_rejected
                                 and infrastructure_error is None
                             ),
                         )
-                    outcomes.append(CalibrationOutcome(
-                        assertion_id(check, index), fault, classification, rung,
-                        applied=applied and relevant, baseline_result=baseline_result,
-                        fault_result=fault_result if relevant else None,
-                        baseline_receipt_digest=baseline.receipt.digest,
-                        observation_receipt_digest=(
-                            None if observation is None else observation.receipt.digest
-                        ),
-                        reason=(
-                            "fault_not_applicable" if not relevant else "fault_not_requested"
-                            if not requested else infrastructure_error
-                        ),
-                    ))
+                    outcomes.append(
+                        CalibrationOutcome(
+                            assertion_id(check, index),
+                            fault,
+                            classification,
+                            rung,
+                            applied=applied and relevant,
+                            baseline_result=baseline_result,
+                            fault_result=fault_result if relevant else None,
+                            baseline_receipt_digest=baseline.receipt.digest,
+                            observation_receipt_digest=(
+                                None if observation is None else observation.receipt.digest
+                            ),
+                            reason=(
+                                "fault_not_applicable"
+                                if not relevant
+                                else "fault_not_requested"
+                                if not requested
+                                else infrastructure_error
+                            ),
+                        )
+                    )
         self._confirm_build(cwd, inputs)
         result_payload = {
-            "schema_version": 1, "fixture_digest": str(fixture_capture.digest),
+            "schema_version": 1,
+            "fixture_digest": str(fixture_capture.digest),
             "results": [item.to_state() for item in outcomes],
         }
         capture = self._capture(result_payload)
         receipt = _receipt(
-            inputs, observer=ObserverIdentity(CALIBRATION_DRIVER, ObserverKind.COMMAND,
-                                             inputs.evaluator.version),
-            captures=(fixture_capture, capture), started_at=start, ended_at=datetime.now(UTC),
+            inputs,
+            observer=ObserverIdentity(
+                CALIBRATION_DRIVER, ObserverKind.COMMAND, inputs.evaluator.version
+            ),
+            captures=(fixture_capture, capture),
+            started_at=start,
+            ended_at=datetime.now(UTC),
             references=tuple(dict.fromkeys(references)),
         )
         self.receipts.publish(receipt)
@@ -431,10 +566,15 @@ class BehavioralAcceptanceService:
         return calibration
 
     def _fault_observation(
-        self, check: BehavioralCheck, fault: FaultClass, inputs: AcceptanceInputs,
+        self,
+        check: BehavioralCheck,
+        fault: FaultClass,
+        inputs: AcceptanceInputs,
         fixture_capture: CaptureArtifact,
     ) -> ObservedCheck:
-        with tempfile.TemporaryDirectory(prefix="fault-", dir=self.evaluator_directory) as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="fault-", dir=self.evaluator_directory
+        ) as directory:
             root = Path(directory)
             _private_directory(root)
             fixture = root / "deliberate_fault.py"
@@ -454,20 +594,24 @@ class BehavioralAcceptanceService:
                     file_contents.setdefault(assertion.path, "enginery-calibration-persisted")
             for assertion in check.assertions:
                 if (
-                    assertion.path is not None and assertion.operator == "contains"
+                    assertion.path is not None
+                    and assertion.operator == "contains"
                     and isinstance(assertion.expected, str)
                     and assertion.expected not in file_contents[assertion.path]
                 ):
                     file_contents[assertion.path] += assertion.expected
             produced_files = [[path, content] for path, content in file_contents.items()]
             spec: dict[str, object] = {
-                "fault": fault, "observer": check.observer, "port": port,
+                "fault": fault,
+                "observer": check.observer,
+                "port": port,
                 "produced_files": produced_files,
             }
             spec_path = root / "fault.json"
             _write_private(spec_path, canonical_bytes(spec))
             fault_check = replace(
-                check, argv=(self.calibration_python, "-I", str(fixture), str(spec_path)),
+                check,
+                argv=(self.calibration_python, "-I", str(fixture), str(spec_path)),
                 url=None if check.observer == "command" else f"http://127.0.0.1:{port}/",
             )
             references: tuple[Digest, ...] = ()
@@ -477,12 +621,16 @@ class BehavioralAcceptanceService:
                 baseline_spec = {**spec, "fault": "baseline"}
                 _write_private(spec_path, canonical_bytes(baseline_spec))
                 normal = self._record_observation(
-                    fault_check, self._observe(fault_check, baseline_root), inputs,
+                    fault_check,
+                    self._observe(fault_check, baseline_root),
+                    inputs,
                     extra_captures=(fixture_capture, self._capture(baseline_spec)),
                 )
                 references = (normal.receipt.digest,)
                 normal_outcomes = evaluate_observation(
-                    check=check, observation=normal, inputs=inputs,
+                    check=check,
+                    observation=normal,
+                    inputs=inputs,
                 ).assertion_outcomes
                 if normal.data.infrastructure_error is not None or any(
                     normal_outcomes[index].result is not EvidenceResult.PASS
@@ -492,11 +640,16 @@ class BehavioralAcceptanceService:
                     data = replace(
                         normal.data,
                         ran=False,
-                        infrastructure_error=(normal.data.infrastructure_error
-                                              or "behavioral_calibration_fixture_baseline_failed"),
+                        infrastructure_error=(
+                            normal.data.infrastructure_error
+                            or "behavioral_calibration_fixture_baseline_failed"
+                        ),
                     )
                     return self._record_observation(
-                        fault_check, data, inputs, extra_captures=(fixture_capture,),
+                        fault_check,
+                        data,
+                        inputs,
+                        extra_captures=(fixture_capture,),
                         references=references,
                     )
                 _write_private(spec_path, canonical_bytes(spec))
@@ -506,12 +659,18 @@ class BehavioralAcceptanceService:
             injected_root.mkdir(mode=0o700)
             data = self._observe(fault_check, injected_root)
             return self._record_observation(
-                fault_check, data, inputs,
-                extra_captures=(fixture_capture, self._capture(spec)), references=references,
+                fault_check,
+                data,
+                inputs,
+                extra_captures=(fixture_capture, self._capture(spec)),
+                references=references,
             )
 
     def _wrong_build(
-        self, check: BehavioralCheck, cwd: Path, inputs: AcceptanceInputs,
+        self,
+        check: BehavioralCheck,
+        cwd: Path,
+        inputs: AcceptanceInputs,
         fixture_capture: CaptureArtifact,
     ) -> tuple[ObservedCheck, bool, str | None]:
         wrong_head = ("0" if inputs.head_revision != "0" * 40 else "1") * 40
@@ -527,37 +686,58 @@ class BehavioralAcceptanceService:
         except (OSError, TimeoutError):
             infrastructure_error = "behavioral_binding_unavailable"
         now = datetime.now(UTC).isoformat()
-        gate = self._capture({
-            "fault": "wrong_build", "expected_head": wrong_head,
-            "current_head": inputs.head_revision, "binding_rejected": rejected,
-            "infrastructure_error": infrastructure_error,
-        })
+        gate = self._capture(
+            {
+                "fault": "wrong_build",
+                "expected_head": wrong_head,
+                "current_head": inputs.head_revision,
+                "binding_rejected": rejected,
+                "infrastructure_error": infrastructure_error,
+            }
+        )
         data = ObservationData(
-            check.observer, started_at=now, ended_at=now, ran=False,
+            check.observer,
+            started_at=now,
+            ended_at=now,
+            ran=False,
             infrastructure_error=infrastructure_error,
         )
         observation = self._record_observation(
-            check, data, replace(inputs, head_revision=wrong_head),
+            check,
+            data,
+            replace(inputs, head_revision=wrong_head),
             extra_captures=(fixture_capture, gate),
         )
         return observation, rejected, infrastructure_error
 
 
 def run_acceptance(
-    *, checks: tuple[BehavioralCheck, ...], inputs: AcceptanceInputs, cwd: Path,
-    evaluator_directory: Path, artifacts: ArtifactStore,
+    *,
+    checks: tuple[BehavioralCheck, ...],
+    inputs: AcceptanceInputs,
+    cwd: Path,
+    evaluator_directory: Path,
+    artifacts: ArtifactStore,
     calibration: CalibrationReceipt | None = None,
-    browser_executable: str | None = None, browser_expected_digest: str | None = None,
+    browser_executable: str | None = None,
+    browser_expected_digest: str | None = None,
 ) -> AcceptanceRun:
     """Functional composition entry point for an injected Stage 1 verification callback."""
     service = BehavioralAcceptanceService(
-        artifacts, evaluator_directory, browser_executable=browser_executable,
+        artifacts,
+        evaluator_directory,
+        browser_executable=browser_executable,
         browser_expected_digest=browser_expected_digest,
     )
     return service.run(
-        checks=checks, cwd=cwd, source_revision=inputs.source_revision,
-        base_revision=inputs.base_revision, head_revision=inputs.head_revision,
+        checks=checks,
+        cwd=cwd,
+        source_revision=inputs.source_revision,
+        base_revision=inputs.base_revision,
+        head_revision=inputs.head_revision,
         configuration_snapshot_digest=inputs.configuration_snapshot_digest,
-        evaluator=inputs.evaluator, environment=inputs.environment,
-        calibration=calibration, build=inputs.build,
+        evaluator=inputs.evaluator,
+        environment=inputs.environment,
+        calibration=calibration,
+        build=inputs.build,
     )
