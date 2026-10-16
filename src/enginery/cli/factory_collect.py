@@ -417,6 +417,7 @@ def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
             f"enginery factory run {issue} --supersede --project {project}"
         ),
     }
+
 def document_lines(document: Mapping[str, object]) -> list[str]:
     """Render all external text with terminal controls escaped, preserving JSON types."""
     return [text(line) for line in json.dumps(document, indent=2, sort_keys=True).splitlines()]

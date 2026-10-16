@@ -67,6 +67,8 @@ def test_the_runtime_for_an_isolated_run_is_wired_with_the_engine_lookup(
 def test_a_run_that_is_not_a_stage1_run_gets_the_plain_runtime(
     ledger_service: LedgerService,
 ) -> None:
-    runtime = stage1_composition.runtime_for_run(ledger_service, owner="coordinator", run_id="unknown")
+    runtime = stage1_composition.runtime_for_run(
+        ledger_service, owner="coordinator", run_id="unknown"
+    )
 
     assert runtime._container_gone is None

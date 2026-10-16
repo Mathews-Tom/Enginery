@@ -506,7 +506,7 @@ def test_watch_of_a_run_whose_profile_still_matches_reports_no_hold(
 ) -> None:
     _started_isolated_run(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "enginery.cli.stage1.probe_installed_omp",
+        "enginery.cli.stage1_composition.probe_installed_omp",
         lambda executable, runner=None: InstalledHost("18.10.3", "json-protocol=3"),
     )
     capsys.readouterr()

@@ -29,7 +29,6 @@ from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.stage1 import Stage1RunService
 
 
-
 def run_stage1(args: argparse.Namespace) -> int:
     """Run one Stage 1 lifecycle operation and emit a machine-readable result."""
     command = args.stage1_command

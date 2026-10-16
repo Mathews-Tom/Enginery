@@ -32,7 +32,7 @@ def test_bound_start_refuses_a_request_that_disagrees_with_its_compiled_configur
     raw_request = {**tampered.initial_state(), "effective_config": document["effective_config"]}
     ledger = LedgerService.open(tmp_path / "ledger.sqlite")
     try:
-        with pytest.raises(InvalidInputError, match="repair_limit.*configuration snapshot"):
+        with pytest.raises(InvalidInputError, match=r"repair_limit.*configuration snapshot"):
             start_bound_run(ledger, owner="factory", raw_request=raw_request)
         assert (
             ledger.read_projection(

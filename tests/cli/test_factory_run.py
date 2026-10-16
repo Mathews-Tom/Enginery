@@ -55,16 +55,21 @@ def invoke(capsys: pytest.CaptureFixture[str], project: Path, *arguments: str) -
 
 
 def test_run_binds_compiler_request_and_status_explains_embedded_selection(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, _ = bound_project
     code, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 0
     raw = json.loads(Path(run["request_path"]).read_text())
     request = stage1_request_from_state(raw)
-    assert run["run_id"] == derive_run_id(project_identity(project), "owner/repo#1",
-                                          str(request.work_snapshot.bound_digest))
-    assert request.workspace_path == private_state_directory(project) / "runs" / run["run_id"] / "workspace"
+    assert run["run_id"] == derive_run_id(
+        project_identity(project), "owner/repo#1", str(request.work_snapshot.bound_digest)
+    )
+    assert (
+        request.workspace_path
+        == private_state_directory(project) / "runs" / run["run_id"] / "workspace"
+    )
     assert request.implementation.permitted_capabilities == tuple(run["permitted_capabilities"])
     code, status = invoke(capsys, project, "status", run["run_id"])
     assert code == 0 and status["request_digest"] == str(request.digest)
@@ -72,13 +77,17 @@ def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     assert status["selection"] == run["selection"]
     code, explanation = invoke(capsys, project, "explain", run["run_id"])
     assert code == 0 and explanation["fields"] == run["fields"]
-    assert next(field for field in explanation["fields"] if field["name"] == "runner_mode")["winner"] == "project"
+    assert (
+        next(field for field in explanation["fields"] if field["name"] == "runner_mode")["winner"]
+        == "project"
+    )
     _, listing = invoke(capsys, project, "status")
     assert [item["run_id"] for item in listing["runs"]] == [run["run_id"]]
 
 
 def test_changed_issue_holds_without_replacing_request(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, github = bound_project
     _, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
@@ -93,7 +102,8 @@ def test_changed_issue_holds_without_replacing_request(
 
 
 def test_repeat_run_reuses_durable_request_and_workspace(
-    bound_project: tuple[Path, StandInGitHub], capsys: pytest.CaptureFixture[str],
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, _ = bound_project
     _, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
@@ -103,7 +113,20 @@ def test_repeat_run_reuses_durable_request_and_workspace(
     assert code == 0 and repeated["run_id"] == run["run_id"]
     assert path.read_bytes() == before
     assert len(list(path.parent.parent.glob("*/request.json"))) == 1
-    assert main([
-        "stage1", "cancel", "--database", run["database"], "--owner", "factory",
-        "--run-id", run["run_id"], "--node-id", "implement",
-    ]) == 0
+    assert (
+        main(
+            [
+                "stage1",
+                "cancel",
+                "--database",
+                run["database"],
+                "--owner",
+                "factory",
+                "--run-id",
+                run["run_id"],
+                "--node-id",
+                "implement",
+            ]
+        )
+        == 0
+    )
