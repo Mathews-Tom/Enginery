@@ -647,15 +647,19 @@ configuration the choices compile to. `--apply` performs exactly that plan:
   `conflict`, exits 9, and writes nothing at all. If it already holds exactly what init
   would write, nothing changes, so repeating `init` with the same choices is a no-op.
 - **A private ownership record** under `$XDG_STATE_HOME/enginery/projects/<id>/`
-  lists the files setup created with the sha256 of what it wrote.
+  lists the files setup created with the sha256 of what it wrote. Every newly created
+  private directory has mode 0700. The record is written before the policy and restored
+  if creating the policy fails.
 - Capabilities are never installed by init. For a selected capability that is not
   installed under `.enginery/installed`, init returns a hold (exit 5) naming the exact
   `enginery capability preview` and `install` commands; approvals stay digest-bound
   through the policy registry and init never records one.
 - A choice the compiler would refuse (an unknown profile, an image under
   `trusted-local`, a malformed `user.toml`, a relative XDG directory) is refused with
-  exit 2 before any file is touched. A symbolic link on the `.enginery` directory or the
-  policy file is refused.
+  exit 2 before any file is touched. A symbolic link on any owned state-path component,
+  the `.enginery` directory or the policy file is refused at preview and apply; an
+  existing non-directory `.enginery` is also refused. Capability names and versions
+  must satisfy the capability manifest grammar.
 
 Setup never writes credentials, never installs or changes launchd, systemd or cron
 units, MCP servers or global configuration, never edits `user.toml`, and never touches
@@ -669,8 +673,12 @@ the container engine and the pinned image through the existing runner admission 
 for `isolated-oci`; and each permitted capability that is not installed. Every missing
 item is a hold that names the exact prerequisite and the command that resolves it, and
 the exit code is 5 while any hold remains. A project that declares no trust mode is
-itself a hold naming `enginery factory init`. A malformed policy or user file is invalid
-input (exit 2), not a hold.
+itself a hold: an existing policy must be edited to add `[runner]` with
+`mode = "trusted-local"` or `mode = "isolated-oci"` (or declare that choice in the
+user preferences). With no policy, the hold names `enginery factory init`.
+A malformed policy or user file is invalid input (exit 2), not a hold. Engine holds
+name engine installation, startup, qualification or context selection; image holds
+name image rebuilding and status; relay holds name relay setup.
 
 ## Running a Stage 1 workflow
 

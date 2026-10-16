@@ -11,6 +11,7 @@ from enginery.cli import factory_diagnostics
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
+from enginery.domain.execution_selection import HoldReason
 
 HOLD = exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
 
@@ -181,6 +182,7 @@ def test_an_isolated_project_checks_the_engine_and_not_the_host_harness(
 ) -> None:
     class _Hold:
         message = "no qualified container engine is reachable"
+        reason = HoldReason.RUNNER_UNQUALIFIED
 
     class _Decision:
         hold = _Hold()
@@ -206,7 +208,8 @@ def test_an_isolated_project_checks_the_engine_and_not_the_host_harness(
     assert statuses["container-runner"] == "hold"
     assert statuses["harness-omp"] == "not-needed"
     (hold,) = report["holds"]  # type: ignore[misc]
-    assert "enginery runner build-image" in hold["resolve"]
+    assert "container engine" in hold["resolve"]
+    assert "docker_context" in hold["resolve"]
 
 
 def test_a_permitted_capability_that_is_not_installed_is_a_hold_with_the_install_commands(
@@ -253,3 +256,96 @@ def test_a_malformed_project_policy_is_invalid_input_not_a_hold(
         FailureClass.INVALID_INPUT
     )
     assert "surprise" in capsys.readouterr().err
+
+
+def test_failed_git_version_is_a_repair_hold(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _script(toolbox, "git", "echo broken >&2; exit 1")
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    holds = report["holds"]
+    assert any(
+        item["name"] == "git" and item["resolve"] == "repair the git install"
+        for item in holds  # type: ignore[union-attr]
+    )
+
+
+def test_existing_policy_trust_hold_names_edit_and_edit_clears_it(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    policy = project / ".enginery" / "project.toml"
+    policy.write_text("schema_version = 1\n")
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    (hold,) = report["holds"]  # type: ignore[misc]
+    assert str(policy) in hold["resolve"]
+    assert "edit" in hold["resolve"]
+    assert "[runner]" in hold["resolve"]
+    policy.write_text('schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    assert _doctor(capsys, project)[0] == 0
+
+
+def test_engine_unreachable_hold_names_engine_not_image_repair(
+    toolbox: Path,
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _script(toolbox, "docker", "echo 'engine unreachable' >&2; exit 1")
+    (project / ".enginery" / "project.toml").write_text(
+        'schema_version = 1\n[runner]\nmode = "isolated-oci"\n'
+        f'image = "sha256:{"a" * 64}"\n[validation]\ncommands = ["python3 -m unittest"]\n'
+    )
+    code, report = _doctor(capsys, project)
+    assert code == HOLD
+    holds = report["holds"]
+    runner = next(
+        item
+        for item in holds
+        if item["name"] == "container-runner"  # type: ignore[union-attr]
+    )
+    assert "container engine" in runner["resolve"]
+    assert "docker_context" in runner["resolve"]
+    assert "build-image" not in runner["resolve"]
+
+
+def test_doctor_digest_matches_build_request_without_run_overrides(
+    toolbox: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from enginery.workflows.stage1 import stage1_request_from_state
+    from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
+
+    with monkeypatch.context() as context:
+        context.setenv("PATH", os.defpath)
+        repository, base = _repository(tmp_path)
+    policy = repository / ".enginery" / "project.toml"
+    policy.parent.mkdir()
+    policy.write_text(
+        'schema_version = 1\n[execution]\nmodel = "openai/gpt-5.4"\neffort = "high"\n'
+        '[runner]\nmode = "trusted-local"\n'
+    )
+    output = tmp_path / "request.json"
+    argv = _minimal_argv(
+        tmp_path=tmp_path, repository=repository, base_revision=base, output=output
+    )
+    github_index = argv.index("--github-executable")
+    github = Path(argv[github_index + 1])
+    (toolbox / "gh").write_bytes(github.read_bytes())
+    (toolbox / "gh").chmod(0o755)
+    (toolbox / "gh-state.json").write_bytes((github.parent / "gh-state.json").read_bytes())
+    for flag in ("--runner", "--github-executable"):
+        index = argv.index(flag)
+        del argv[index : index + 2]
+    assert main(argv) == 0
+    request = stage1_request_from_state(json.loads(output.read_text()))
+    _, report = _doctor(capsys, repository)
+    assert report["effective_configuration_digest"] == str(
+        request.run.configuration_snapshot_digest
+    )

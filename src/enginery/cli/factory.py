@@ -18,6 +18,7 @@ from pathlib import Path
 
 from enginery.application.layered_config import RUNNER_MODES
 from enginery.application.project_policy import SetupChoices
+from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_setup import (
@@ -114,6 +115,9 @@ def _capability_choices(values: list[str]) -> tuple[tuple[str, ...], dict[str, s
             raise InvalidInputError(
                 "--capability must be NAME or NAME@VERSION", details={"capability": raw}
             )
+        validate_name(name)
+        if separator:
+            validate_version(version)
         if name not in names:
             names.append(name)
         if separator:

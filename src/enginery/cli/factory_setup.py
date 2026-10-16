@@ -29,6 +29,7 @@ from enginery.application.layered_config import (
     ConfigError,
     LayerDocument,
     parse_layer_document,
+    run_layer,
 )
 from enginery.application.project_policy import (
     BUILTIN_CAPABILITIES,
@@ -36,6 +37,7 @@ from enginery.application.project_policy import (
     render_project_policy,
 )
 from enginery.capabilities.install import load_owned_manifest
+from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli.config_locations import (
     PROJECT_POLICY_RELATIVE,
     private_state_directory,
@@ -50,9 +52,12 @@ from enginery.cli.setup_files import (
     create_exclusive,
     load_ownership,
     read_regular,
+    refuse_links,
+    require_private_path,
     sha256_bytes,
     write_private_atomically,
 )
+from enginery.cli.stage1_request import _probe_host
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
 
@@ -94,7 +99,7 @@ def load_project_configuration(
     user_layer = read_user_layer(env)
     try:
         compiled = compile_effective_config(
-            project=project_layer, user=user_layer, run=None, probe_host=None
+            project=project_layer, user=user_layer, run=run_layer({}), probe_host=_probe_host
         )
     except ConfigError as error:
         if error.key == "runner.mode" and error.file == "<all layers>":
@@ -257,6 +262,11 @@ def plan_init(
     env: Mapping[str, str] | None = None,
 ) -> SetupPlan:
     """Compute what ``init`` would do for ``choices``; writes nothing and runs nothing."""
+    for name in choices.capabilities:
+        validate_name(name)
+    for name, version in capability_versions.items():
+        validate_name(name)
+        validate_version(version)
     rendered = render_project_policy(choices)
     policy_path = project / PROJECT_POLICY_RELATIVE
     # The rendered policy must be a valid layer and must compile with the user's layer, so a
@@ -266,12 +276,14 @@ def plan_init(
     )
     user_layer = read_user_layer(env)
     compiled = compile_effective_config(
-        project=document, user=user_layer, run=None, probe_host=None
+        project=document, user=user_layer, run=run_layer({}), probe_host=_probe_host
     )
 
     require_plain_path(project, PROJECT_POLICY_RELATIVE, what="the project policy path")
+    refuse_links(project, PROJECT_POLICY_RELATIVE, what="the project policy path")
     state_directory = private_state_directory(project, env)
     ownership_path = state_directory / OWNERSHIP_FILE
+    require_private_path(ownership_path, what="the setup ownership record")
     record = load_ownership(ownership_path, project=project)
     digest = sha256_bytes(rendered)
     existing = read_regular(policy_path, what="the project policy file")
@@ -348,20 +360,57 @@ def plan_init(
 
 
 def apply_plan(plan: SetupPlan) -> tuple[str, ...]:
-    """Perform exactly the previewed ``create``/``update`` actions; nothing on a conflict."""
+    """Persist ownership before tracked files and roll it back on a tracked-write failure."""
     if plan.conflicts:
         return ()
     performed: list[str] = []
-    for item in plan.files:
-        if item.action == "unchanged":
-            continue
-        if item.role == PROJECT_POLICY_ROLE:
-            create_exclusive(
-                plan.project, PROJECT_POLICY_RELATIVE, item.payload, what="the project policy"
-            )
-        else:
-            write_private_atomically(item.path, item.payload, what="the setup ownership record")
+    records = [
+        item
+        for item in plan.files
+        if item.tracking == "private" and item.action in ("create", "update")
+    ]
+    prior: dict[Path, bytes | None] = {}
+    missing_state_directories: list[Path] = []
+    for item in records:
+        require_private_path(item.path, what="the setup ownership record")
+        prior[item.path] = read_regular(item.path, what="the setup ownership record")
+        directory = item.path.parent
+        while not directory.exists():
+            missing_state_directories.append(directory)
+            directory = directory.parent
+        write_private_atomically(item.path, item.payload, what="the setup ownership record")
         performed.append(str(item.path))
+    created: list[Path] = []
+    policy_directory_existed = (plan.project / PROJECT_POLICY_RELATIVE.parent).exists()
+    try:
+        for item in plan.files:
+            if item.tracking != "tracked" or item.action != "create":
+                continue
+            created.append(
+                create_exclusive(
+                    plan.project, PROJECT_POLICY_RELATIVE, item.payload, what="the project policy"
+                )
+            )
+            performed.append(str(item.path))
+    except BaseException:
+        for path in created:
+            path.unlink()
+        policy_directory = plan.project / PROJECT_POLICY_RELATIVE.parent
+        if (
+            not policy_directory_existed
+            and policy_directory.is_dir()
+            and not policy_directory.is_symlink()
+            and not any(policy_directory.iterdir())
+        ):
+            policy_directory.rmdir()
+        for path, payload in prior.items():
+            if payload is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_private_atomically(path, payload, what="the setup ownership record")
+        for directory in missing_state_directories:
+            directory.rmdir()
+        raise
     return tuple(performed)
 
 

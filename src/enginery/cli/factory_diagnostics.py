@@ -32,6 +32,7 @@ from enginery.cli.factory_setup import (
 )
 from enginery.domain.errors import EngineryError, MissingPrerequisiteError
 from enginery.domain.execution_catalog import InstalledHost
+from enginery.domain.execution_selection import HoldReason
 from enginery.domain.runner import RunnerProfile
 
 _TIMEOUT_SECONDS = 30
@@ -114,6 +115,13 @@ def _check_git(run: Runner) -> Check:
         return Check(
             "git", "hold", f"`git --version` could not run: {error}", "repair the git install"
         )
+    if completed.returncode != 0:
+        return Check(
+            "git",
+            "hold",
+            f"`git --version` exited {completed.returncode}",
+            "repair the git install",
+        )
     first = completed.stdout.strip().splitlines()[:1]
     return Check("git", "ok", first[0] if first else "git runs")
 
@@ -194,15 +202,38 @@ def _check_harness(compiled: CompiledConfig, probe: HostProbe | None) -> Check:
     )
 
 
+def trust_mode_resolution(policy_path: Path) -> str:
+    """Give an actionable trust-mode choice without overwriting an existing policy."""
+    if policy_path.exists():
+        return (
+            f"edit {policy_path} (or the user preferences file): add [runner] with "
+            'mode = "trusted-local" or mode = "isolated-oci"'
+        )
+    return "enginery factory init --runner <trusted-local|isolated-oci> --apply"
+
+
 def _check_runner(compiled: CompiledConfig) -> Check:
     decision = OciRunnerAdmission(profile=RunnerProfile()).admit(compiled.runner)
     if decision.hold is None:
         return Check("container-runner", "ok", "the engine and the pinned image are admitted")
+    message = decision.hold.message
+    if "relay" in message:
+        resolve = (
+            "enginery runner build-relay-image, then enginery runner relay up "
+            "--image <relay image id>, then enginery runner relay status"
+        )
+    elif decision.hold.reason is HoldReason.RUNNER_FINGERPRINT_DRIFT or "image" in message:
+        resolve = "enginery runner build-image, then `enginery runner status --image <id>`"
+    else:
+        resolve = (
+            "install, start and qualify the container engine; choose --docker-context "
+            "or set [runner] docker_context, then enginery runner status --image <id>"
+        )
     return Check(
         "container-runner",
         "hold",
         decision.hold.message,
-        "enginery runner build-image, then `enginery runner status --image <image id>`",
+        resolve,
     )
 
 
@@ -265,7 +296,7 @@ def run_doctor(
                     "hold",
                     "no layer declares a trust mode (trusted-local or isolated-oci), so the "
                     "prerequisites cannot be derived",
-                    "enginery factory init --runner trusted-local --apply",
+                    trust_mode_resolution(configuration.project / ".enginery" / "project.toml"),
                 ),
             ),
             network=(),
@@ -286,4 +317,4 @@ def run_doctor(
     )
 
 
-__all__ = ["Check", "DoctorReport", "run_doctor"]
+__all__ = ["Check", "DoctorReport", "run_doctor", "trust_mode_resolution"]
