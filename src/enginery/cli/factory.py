@@ -19,15 +19,23 @@ import argparse
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 from enginery.application.layered_config import RUNNER_MODES
 from enginery.application.project_policy import SetupChoices
 from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_collect import collect, document_lines
+from enginery.cli.factory_control import drain, pause
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
-from enginery.cli.factory_run import nonnegative_seconds, run_issue, status
+from enginery.cli.factory_run import (
+    factory_repairs,
+    nonnegative_seconds,
+    resume_run,
+    run_issue,
+    status,
+)
 from enginery.cli.factory_setup import (
     SetupPlan,
     apply_plan,
@@ -121,6 +129,27 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     _add_project(status_parser)
     status_parser.add_argument("run_id", nargs="?")
     status_parser.add_argument("--json", action="store_true")
+
+    resume = commands.add_parser("resume", help="Reconcile workers and continue a durable run.")
+    _add_project(resume)
+    resume.add_argument("run_id")
+    resume.add_argument("--wait-seconds", type=nonnegative_seconds, default=0)
+    resume.add_argument("--json", action="store_true")
+
+    pause_parser = commands.add_parser("pause", help="Pause project-ledger dispatch only.")
+    _add_project(pause_parser)
+    pause_parser.add_argument("--reason", default=None)
+    pause_parser.add_argument("--lift", action="store_true")
+    pause_parser.add_argument("--json", action="store_true")
+
+    drain_parser = commands.add_parser(
+        "drain", help="Pause, then wait for or stop project workers."
+    )
+    _add_project(drain_parser)
+    drain_mode = drain_parser.add_mutually_exclusive_group(required=True)
+    drain_mode.add_argument("--wait-seconds", type=nonnegative_seconds)
+    drain_mode.add_argument("--stop", action="store_true")
+    drain_parser.add_argument("--json", action="store_true")
 
     explain_parser = commands.add_parser(
         "explain",
@@ -294,14 +323,32 @@ def _run_uninstall(args: argparse.Namespace) -> int:
 
 def run_factory(args: argparse.Namespace) -> int:
     command = args.factory_command
+    document: Mapping[str, object]
     if command == "init":
         return _run_init(args)
     if command == "doctor":
         return _run_doctor(args)
     if command == "collect":
-        document = collect(resolve_project(args.project), dry_run=args.dry_run)
+        project = resolve_project(args.project)
+        collected = collect(project, dry_run=args.dry_run)
+        holds = cast(list[dict[str, str]], collected["holds"])
+        document = {**collected, "holds": factory_repairs(project, holds)}
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document["holds"] else SUCCESS
+    if command == "resume":
+        document = resume_run(resolve_project(args.project), args.run_id, args.wait_seconds)
+        _emit(args, document, document_lines(document))
+        return HOLD_EXIT if document.get("holds") else SUCCESS
+    if command == "pause":
+        document = pause(resolve_project(args.project), lift=args.lift, reason=args.reason)
+        _emit(args, document, document_lines(document))
+        return SUCCESS
+    if command == "drain":
+        document, code = drain(
+            resolve_project(args.project), stop=args.stop, wait_seconds=args.wait_seconds
+        )
+        _emit(args, document, document_lines(document))
+        return code
     if command in {"run", "status"}:
         project = resolve_project(args.project)
         document = run_issue(project, args) if command == "run" else status(project, args.run_id)

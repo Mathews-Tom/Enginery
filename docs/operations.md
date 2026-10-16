@@ -94,9 +94,9 @@ from the one a run was bound to (for example after upgrading Enginery),
 `enginery stage1 watch` reports the diagnostic as `hold` and refuses to
 advance the run; the run's original binding is retained, never rebound.
 
-The `--database` flag on every mutating command names the SQLite ledger
-file. There is no default location; an operator chooses and tracks this
-path per project or environment. The ledger file is the single source of
+Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
+commands use the project's private `ledger.sqlite` and report its path; pass that
+path to Stage 1 commands to act on the same runs. The ledger is the single source of
 durable truth: deleting or corrupting it discards every run, node, policy
 decision, and evidence record it contains, so back it up (see
 [Backup and restore](#backup-and-restore)) before any risky operation.
@@ -259,6 +259,9 @@ script against a command that is not listed above.
 | `enginery factory collect [--dry-run] [--project PATH] [--json]` | Preview eligible GitHub issues; without `--dry-run`, record only private intake state. |
 | `enginery factory run OWNER/REPO#N [--project PATH] [--once] [--wait-seconds N] [--json]` | Compile, bind and advance an issue through the existing Stage 1 coordinator. |
 | `enginery factory status [RUN] [--project PATH] [--json]` | List durable project runs or inspect one run without advancing it. |
+| `enginery factory resume RUN [--project PATH] [--wait-seconds N] [--json]` | Reconcile durable workers and pending external operations, then continue the same run. |
+| `enginery factory pause [--reason TEXT] [--lift] [--project PATH] [--json]` | Pause project-ledger dispatch, or lift that pause; running workers are untouched. |
+| `enginery factory drain (--wait-seconds N \| --stop) [--project PATH] [--json]` | Pause dispatch, then wait for or stop workers through the existing drain path. |
 | `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
 
 ### Capability packages
@@ -765,12 +768,22 @@ enginery factory run OWNER/REPO#N --project . --json
 enginery factory status --project . --json
 enginery factory status RUN --project . --json
 enginery factory explain RUN --project . --json
+enginery stage1 review --database DATABASE --owner factory --run-id RUN \
+  --report review.json --repair-attempt 0
+enginery factory resume RUN --project . --json
+enginery factory pause --reason "operator maintenance" --project . --json
+enginery factory drain --wait-seconds 30 --project . --json
+# Or stop remaining workers instead of waiting:
+enginery factory drain --stop --project . --json
+enginery factory pause --lift --project . --json
 ```
 
-Use the returned `run_id` in place of RUN. Setup does not install capabilities or
-authenticate: resolve its reported holds before running. Collect, run, status and
-explain do not call a model; an implementation worker dispatched by the coordinator
-can use the selected coding harness and model. Collection never dispatches a worker.
+Use the returned `run_id` in place of RUN and `database` in place of DATABASE.
+Submit `review.json` in the existing Stage 1 report format once the run awaits
+human review; the journey is not an instruction to approve work without inspecting it.
+Setup does not install capabilities or authenticate: resolve reported holds first.
+Factory control makes no model calls; an implementation worker dispatched by the
+coordinator can use the selected coding harness and model. Collection never dispatches a worker.
 
 `factory run` uses the same request compiler and bound-start path as `stage1 start`.
 The shared Stage 1 composition supplies runtime selection, inspection and advancing
@@ -801,7 +814,8 @@ artifacts/
 
 The command reports the database and request paths; these are local runtime state,
 not tracked policy. Intake and request writes are atomic and link-safe. The intake
-index stores each issue's run ID and bound snapshot digest, plus the repository cursor.
+index stores the repository cursor on collection; only `run` binds each issue's run ID
+and snapshot digest. Collection never creates issue-to-run bindings.
 The run ID is `fr-` followed by the first 20 hexadecimal characters of SHA-256 over
 canonical JSON with keys `project`, `issue`, and `snapshot`: project identity, canonical
 issue reference from the adapter and bound snapshot digest. The same project/issue/snapshot
@@ -817,6 +831,9 @@ CI is pending, advance the coordinator no more often than every 15 seconds.
 CI waits poll no more often than every 15 seconds. The command returns at the deadline
 rather than making another idle advance.
 Repeating `factory run` for the same bound issue continues that durable run.
+An existing unstarted request is recompiled; if its digest differs, it is replaced
+before binding and the report discloses `request_rebuilt: true`. Bound requests are
+never replaced by that path.
 `status` never advances it: without RUN it lists project runs; with RUN it reports
 current nodes, next action, worker PID or container identity, selection and winning
 layers, runner, budget basis, and holds with repairs. Time budgets are reported in
@@ -828,6 +845,40 @@ node states and current hold repairs. It does not recompile today's configuratio
 Without RUN, `factory explain` retains the current configuration and setup-ownership
 explanation described above.
 
+`factory resume RUN` first reconciles exited workers and pending external operations
+through the existing Stage 1 service and broker paths, then continues the durable
+run. A killed client or coordinator does not require a new request, workspace or run
+ID; retrying pending PR publication reconciles its operation identity rather than
+creating a second PR. Binding, catalog or runner drift still holds; resume does not
+rewrite the binding or bypass those checks. `--wait-seconds` has the same wait-boundary
+meaning as on `run`. This is distinct from `stage1 resume --database DATABASE
+--owner factory --run-id RUN --node-id NODE --attempt-id ATTEMPT --operation-id OPERATION`,
+which requeues a human-wait node; its flags and semantics are unchanged.
+
+`factory pause` reports its scope as the **project ledger**, not the whole host or
+another project's ledger. Running workers are untouched. Both `run` and `resume`
+hold while dispatch is paused; lift it with `factory pause --lift --project .`.
+`factory drain --wait-seconds N` pauses and waits for running workers, reporting
+`released: by resume/reconcile`: observing an exit does not collect its result or
+release its lease/workspace reservation. Lift the pause, then run
+`enginery factory resume RUN --project .` to reconcile those exited workers through
+the authoritative lifecycle. Reconciliation releases the worker lease; a successful
+implementation's workspace remains **retained**, including after verification, until
+explicitly released. `status` and `drain` show that retention and its release command.
+A timeout reports the workers still running.
+Read-only inspection by `status` may create SQLite `-wal`/`-shm` sidecars when
+reading a WAL ledger; `status` discloses newly created sidecars in `local_writes`
+without changing ledger content. `drain` is not read-only: it records a pause flag.
+`factory drain --stop` pauses and stops live workers using the existing supervisor
+path; successful stop cleanup reports `released: now` for those stopped workers,
+releases their leases/workspace reservations, and removes isolated worker containers
+using each run's bound engine context. Per-worker `container_cleanup` reports removal
+or that a trusted-local run has no container. Removal failures produce partial release
+and a non-success exit code. Workers that had already exited still require
+resume/reconciliation. Partial cleanup is reported explicitly, never called complete.
+Neither form cancels or reverses external effects, and the pause remains until
+explicitly lifted.
+
 Terminal review remains `enginery stage1 review` against the returned database and
 run ID. The independent review gate reports `next_decision` with
 `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
@@ -835,53 +886,48 @@ run ID. The independent review gate reports `next_decision` with
 Supply the review report in the existing Stage 1 format. Other human-wait nodes
 report matching `stage1 approve` and `stage1 reject` commands with the waiting node ID
 and required `--reason REASON`; a failed implementation without a human-wait node reports
-its failure as a hold with an `enginery factory run ISSUE --project P` repair using
-the bound issue rather than suggesting an inapplicable review. A `blocked` action instead
+its failure as a hold with an `enginery factory resume RUN --project P` repair using
+the bound run rather than suggesting an inapplicable review. A `blocked` action instead
 reports a hold with its recorded reason and matching repair; it is not an approval
 or a successful validation. The other Stage 1 commands retain their flags and output.
 There is no factory review UI. This path ends at a verified open PR plus outcome
 observation. Merge, release and deployment are separate human actions, never actions
 performed by this factory path.
 
+The factory preserves the shared watch document's aggregate `status`, which the existing
+Stage 1 lifecycle may retain as `created`; it does not invent a run-state transition.
+Its `terminal_decision: merge_ready` and `workflow_complete: true` require durable
+verification success, the recorded PR outcome, an outcome-observation registration and
+the coordinator's `wait` action. `terminal_evidence` names those source records and fields.
+This means **an open verified PR awaiting a separate human merge decision**, not a merged PR.
+The existing Stage 1 outcome projection also writes one visible, operation-marked lifecycle
+comment to the issue and reconciles it before retrying. This is disclosed in gate effect
+counts; it is not a hidden issue reply. Collection itself still performs zero GitHub mutations.
+
 ### Manual-path holds
 
-Holds report the exact repair command. Common cases are:
+Holds report repairs; replace placeholders with the values reported for the run:
 
-- Missing or unparseable `origin`: configure the GitHub remote with
-  `git remote add origin …` (or correct the existing remote).
-- Missing or unauthenticated `gh`: install it or run `gh auth login`.
-- Missing, duplicate or unknown canonical issue labels: apply exactly one supported
-  work-kind and risk label using the reported GitHub label command.
-- Missing or unapproved selected capability: follow the reported capability
-  lock/install or policy approval command; collection does not install it.
-- Changed issue snapshot: the command holds with "issue changed since run … was
-  bound". Inspect the old run with `factory status RUN`; cancel it with
-  `enginery stage1 cancel --database PATH --owner factory --run-id RUN --node-id implement`
-  as appropriate before `enginery factory run OWNER/REPO#N --supersede`.
-  Superseding requires a terminal run, or a terminal latest implementation with no
-  active lease or live worker and no pending `open_pr` node. It also accepts an
-  implementation never registered when no active lease, live worker or `open_pr`
-  node exists. Cancellation repairs name only this run's queued or running agent nodes,
-  never human or deterministic nodes. An unchanged snapshot with `--supersede` is an
-  input error: use `enginery factory run ISSUE --project P` with the bound issue.
-  The refusal names those durable read fields for inspection.
-  Cancellation does not invent a run-state transition. Superseding explicitly records
-  a new binding and run; the old run remains durable and visible in status, with
-  `superseded_by` naming the new run. Advancing the old run holds without dispatch.
-- Paused dispatch: `enginery-operator resume --database DB` lifts the project-ledger
-  pause. Inspection retains any other execution holds alongside this pause.
-- Catalog, configuration or runner drift: `enginery factory doctor --project P`, then
-  restore the run's bound configuration rather than silently rebinding it, then
-  continue with `enginery factory run ISSUE --project P` using the bound issue reference.
-- Unprovable worker identity: resolve the worker on its launching host. This host
-  cannot safely signal or release a worker whose identity it cannot prove.
-- Other execution or blocked-node holds: a repair supplied by the service is reported
-  verbatim; otherwise the repair names `enginery factory doctor --project P` followed
-  by the hold's own diagnostic message.
+| Hold | Repair |
+|---|---|
+| Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
+| Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
+| `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |
+| Missing, duplicate or unknown canonical labels | Use `gh issue edit N --repo OWNER/REPO --remove-label INVALID_LABEL` for conflicting labels, then `gh issue edit N --repo OWNER/REPO --add-label 'enginery/work-kind/<issue\|plan>' --add-label 'enginery/risk/<low\|medium>'`, replacing each quoted placeholder with the human-selected supported value. Exactly one supported label in each family is required; no risk is selected by default. |
+| Missing runner selection | `enginery factory init --runner trusted-local --apply --project .`, or select the intended isolated runner and satisfy its reported admission repair. Trusted-local is not containment. |
+| Missing or unapproved selected capability | Run the reported `enginery capability preview NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` then `enginery capability install NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` from the project. If approval is required, obtain owner approval for the exact closure and lock digest; collection never grants approval or installs packages. |
+| Paused dispatch | `enginery factory pause --lift --project .`. Running workers were not stopped by pause. |
+| Retained workspace blocks a new run | `factory status` reports `workspace.status: retained` for its owner, and a new run reports a hold with the exact `enginery workspace release --database DATABASE --owner factory --repository-id OWNER/REPO --run-id RETAINING_RUN --json` command. Inspect the retained run before explicitly releasing it; then retry the new run. Release is never performed silently. |
+| Issue changed since the run was bound | Inspect `enginery factory status RUN --project .`; drain with `enginery factory drain --stop --project .`. Follow the reported `enginery stage1 cancel --database DATABASE --owner factory --run-id RUN --node-id NODE` commands only for queued/running agent nodes without a live worker: drain already cancels live-worker nodes, and human-waiting non-agent nodes are not cancelled. A never-registered implementation has nothing to cancel. Lift the pause with `enginery factory pause --lift --project .`, then explicitly create the new binding with `enginery factory run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
+| Supersede cannot prove the old run safe | `--supersede` accepts terminal `run.status`, or a terminal latest implementation with no active node lease, no live worker-supervisor attempt and no pending `open_pr` node. It also accepts a never-registered implementation with no active lease, live worker or `open_pr` node. Otherwise the hold reports the blocking statuses, implementation/lease attempt IDs and lease expiry, with cancellation commands only for queued/running agent nodes without a live worker; drain/cancel as directed, lift pause, then retry the explicit supersede repair above. Human-waiting non-agent nodes are not cancelled. An unchanged issue snapshot is refused; use `factory run` or `factory resume` for its existing binding. |
+| `superseded binding` | `status` reports `superseded_by` when the issue binding points at a newer run. The old run remains visible but cannot advance or resume, with no run-state transition or dispatch. Inspect the replacement with the reported `enginery factory status NEW_RUN --project .` command. |
+| Awaiting a human decision | `next_decision` names the node that waits: the independent review gate reports the exact `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` command; a human-wait node (a qualification decision, a failed implementation awaiting a decision) reports `enginery stage1 approve --database DB --owner factory --run-id RUN --node-id NODE --reason REASON` and the matching `stage1 reject … --reason REASON`. This is a decision boundary, not a hold or successful validation; a failed implementation with no waiting node is reported as a hold with `enginery factory resume RUN --project .` unless the service supplies a more specific repair. |
+| Blocked progression | The hold preserves the recorded reason and its matching repair; resolve that cause before resuming. |
+| Catalog, host fingerprint or runner drift | Run `enginery factory doctor --project .`; restore the run's bound configuration, then `enginery factory resume RUN --project .`. Resume never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
+| Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
 
-Factory `resume`, `pause`, `drain`, `review`, `watch` and `evidence` remain proposed
-and must not be scripted against. Scheduled collection/watch is not shipped.
-Use existing Stage 1 and operator controls for their documented lifecycle operations.
+Only factory `review`, `watch` and `evidence` remain proposed and must not be
+scripted against. Scheduled collection/watch is not shipped.
 
 ## Running a Stage 1 workflow
 
@@ -2490,19 +2536,16 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 ### Proposed factory commands (not shipped)
 
 `enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
-[Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
-`doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
-`workspace`, `runner`, `capability`, and `factory`. Alongside setup, `factory`
-ships `collect`, `run`, `status`, and `explain RUN` (see
-[Manual factory path](#manual-factory-path)). `gate status` accepts `--gate G4` only,
-and `stage1` provides
-`start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
-and `build-request`.
+[Guided project setup](#guided-project-setup)), as are `collect`, `run`, `status`,
+`resume`, `pause` and `drain` (see [Manual factory path](#manual-factory-path)).
+`factory explain` without RUN retains its existing configuration/setup explanation;
+with RUN it explains the durable binding. Terminal review stays on `stage1 review`.
+`gate status` accepts `--gate G4` only, and `stage1` retains `start`, `watch`,
+`review`, `approve`, `reject`, `cancel`, `resume`, `evidence`, and `build-request`.
 
-The remaining manual-first factory controls, `resume`, `pause`, `drain`, `review`,
-`watch`, and `evidence`, are proposed and not shipped, as is scheduled collection.
-Do not script against these proposed names; they are not a compatibility promise.
-The proposed boundary:
+Only `factory review`, `watch`, and `evidence` remain proposed. Do not script
+against those names: they are not a compatibility promise. Scheduled collection
+and factory watch are not shipped. The manual factory boundary is:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;
   nothing is scheduled implicitly.

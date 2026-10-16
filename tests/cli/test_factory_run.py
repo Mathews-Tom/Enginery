@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -100,6 +101,37 @@ def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     )
     _, listing = invoke(capsys, project, "status")
     assert [item["run_id"] for item in listing["runs"]] == [run["run_id"]]
+    rebuilt = project.parent / "stage1-request.json"
+    assert (
+        main(
+            [
+                "stage1",
+                "build-request",
+                "--output",
+                str(rebuilt),
+                "--run-id",
+                run["run_id"],
+                "--repository",
+                "owner/repo",
+                "--external-reference",
+                "owner/repo#1",
+                "--repository-path",
+                str(project),
+                "--workspace-path",
+                str(request.workspace_path),
+                "--artifact-root",
+                str(request.execution_configuration.artifact_root),
+                "--base-branch",
+                request.base_branch,
+                "--base-revision",
+                request.run.base_revision,
+                "--capability-lockfile",
+                str(project / ".enginery" / "capabilities.lock.json"),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(rebuilt.read_text()) == raw
 
 
 def test_changed_issue_holds_without_replacing_request(
@@ -115,7 +147,24 @@ def test_changed_issue_holds_without_replacing_request(
     assert code == 5
     assert held["holds"][0]["detail"] == f"issue changed since run {run['run_id']} was bound"
     assert "stage1 cancel" not in held["holds"][0]["resolve"]
-    assert shlex.split(held["holds"][0]["resolve"]) == [
+    repairs = held["holds"][0]["resolve"].split("; ")
+    assert shlex.split(repairs[0]) == [
+        "enginery",
+        "factory",
+        "drain",
+        "--stop",
+        "--project",
+        str(project),
+    ]
+    assert shlex.split(repairs[1]) == [
+        "enginery",
+        "factory",
+        "pause",
+        "--lift",
+        "--project",
+        str(project),
+    ]
+    assert shlex.split(repairs[2]) == [
         "enginery",
         "factory",
         "run",
@@ -379,8 +428,9 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     github.serve(updated_at="2026-10-17T00:00:00Z")
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
     assert code == 5
-    assert f"--run-id {original['run_id']}" in held["holds"][0]["resolve"]
-    assert "--node-id implement" in held["holds"][0]["resolve"]
+    assert held["holds"][0]["resolve"].startswith(
+        f"enginery factory drain --stop --project {shlex.quote(str(project))}; "
+    )
     assert "run.status=" in held["holds"][0]["detail"]
     assert f"runtime_node[{original['run_id']}:implement].status=" in held["holds"][0]["detail"]
     assert f"node_leases[{original['run_id']}:implement].expires_at=" in held["holds"][0]["detail"]
@@ -420,6 +470,53 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
                     ]
                 )
         capsys.readouterr()
+
+
+def test_changed_issue_repair_cancels_an_exited_unreconciled_implementation(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, github = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    _, dispatched = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    worker = dispatched["worker"]
+    assert isinstance(worker, dict)
+    # A real operator's worker is reaped by its own launcher; reap the in-process child here.
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(int(worker["pid"]), 0)
+    github.serve(updated_at="2026-10-17T00:00:00Z")
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    repairs = held["holds"][0]["resolve"].split("; ")
+    cancel = [shlex.split(step) for step in repairs if " stage1 cancel " in f" {step} "]
+    assert cancel == [
+        [
+            "enginery",
+            "stage1",
+            "cancel",
+            "--database",
+            original["database"],
+            "--owner",
+            "factory",
+            "--run-id",
+            original["run_id"],
+            "--node-id",
+            "implement",
+        ]
+    ]
+    try:
+        for step in repairs:
+            capsys.readouterr()
+            assert main(shlex.split(step)[1:]) == 0
+            capsys.readouterr()
+        _, old = invoke(capsys, project, "status", original["run_id"])
+        implementation = next(node for node in old["nodes"] if node["node_id"] == "implement")
+        assert implementation["status"] == "cancelled"
+        assert old["superseded_by"] not in {None, original["run_id"]}
+    finally:
+        with contextlib.suppress(ChildProcessError):
+            while os.waitpid(-1, os.WNOHANG) != (0, 0):
+                pass
 
 
 def test_unstarted_request_is_rebuilt_when_configuration_changes(
@@ -497,10 +594,12 @@ def test_paused_run_preserves_execution_holds(
     assert report["holds"][0]["message"] == "worker is remote"
     assert report["holds"][0]["resolve"] == "Resolve the worker on its launching host"
     assert shlex.split(report["holds"][1]["resolve"]) == [
-        "enginery-operator",
-        "resume",
-        "--database",
-        original["database"],
+        "enginery",
+        "factory",
+        "pause",
+        "--lift",
+        "--project",
+        str(project),
     ]
 
 
@@ -555,7 +654,7 @@ def test_status_preserves_service_hold_diagnostics_and_matching_repairs(
         == {
             "restore": (
                 f"{doctor}; restore the run's bound configuration; "
-                f"enginery factory run {shlex.quote(original['issue'])} "
+                f"enginery factory resume {shlex.quote(original['run_id'])} "
                 f"--project {shlex.quote(str(project))}"
             ),
             "message": f"{doctor}; {hold['message']}",
@@ -666,6 +765,34 @@ def test_status_never_opens_the_migrating_ledger(
     monkeypatch.setattr(LedgerService, "open", unexpected_open)
     code, report = invoke(capsys, project, "status", original["run_id"])
     assert code == 0 and report["run_id"] == original["run_id"]
+
+
+@pytest.mark.parametrize("single_run", (False, True))
+def test_status_discloses_only_new_wal_sidecars(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    single_run: bool,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    path = Path(original["database"])
+    with LedgerService.open(path) as ledger:
+        assert ledger.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
+    existing = {sidecar for sidecar in sidecars if sidecar.exists()}
+    content = path.read_bytes()
+    arguments = ("status", original["run_id"]) if single_run else ("status",)
+    code, report = invoke(capsys, project, *arguments)
+    assert code == 0
+    assert path.with_name(path.name + "-shm").exists()
+    assert report["local_writes"] == [
+        str(sidecar) for sidecar in sidecars if sidecar not in existing and sidecar.exists()
+    ]
+    assert report["local_writes"]
+    assert path.read_bytes() == content
+    code, repeated = invoke(capsys, project, *arguments)
+    assert code == 0 and repeated["local_writes"] == []
+    assert path.read_bytes() == content
 
 
 def test_base_branch_cannot_be_interpreted_as_a_git_option(
@@ -903,9 +1030,11 @@ def test_medium_risk_wait_names_approve_and_reject(
         assert argv[argv.index("--database") + 1] == report["database"]
 
 
+@pytest.mark.parametrize("repair", ("service repair --exact", None))
 def test_failed_implementation_without_wait_reports_service_failure(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],
+    repair: str | None,
 ) -> None:
     project, _ = bound_project
     _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
@@ -925,7 +1054,7 @@ def test_failed_implementation_without_wait_reports_service_failure(
                             "status": "failed",
                             "attempt_id": "implement-0",
                             "message": "Implementation exceeded its time limit",
-                            "repair": "service repair --exact",
+                            **({"repair": repair} if repair is not None else {}),
                         },
                     ),
                 ),
@@ -937,7 +1066,13 @@ def test_failed_implementation_without_wait_reports_service_failure(
     assert code == 5
     assert "next_decision" not in report
     assert report["holds"][0]["message"] == "Implementation exceeded its time limit"
-    assert report["holds"][0]["resolve"] == "service repair --exact"
+    assert report["holds"][0]["resolve"] == (
+        repair
+        or (
+            f"enginery factory resume {shlex.quote(original['run_id'])} "
+            f"--project {shlex.quote(str(project))}"
+        )
+    )
 
 
 @pytest.mark.parametrize(

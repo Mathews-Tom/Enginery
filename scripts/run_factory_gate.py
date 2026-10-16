@@ -30,6 +30,11 @@ Scenarios:
     global locations. Local only: no hosted session, container engine or custody; ``--live``,
     ``--harness``, ``--model`` and the gateway, image and custody flags are rejected for it.
 
+``manual-path``
+    Real manual issue-to-verified-open-PR CLI journey with local recording executables,
+    durable recovery after client/coordinator interruption, and pause/drain. Like setup,
+    it rejects hosted-session, harness-selection, engine, image and custody flags.
+
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;
 raw artifacts go to ``<evidence stem>.raw/`` beside it. Exit status: 0 only if every required
 assertion ran and passed; 1 if any assertion failed or did not run; 2 for a usage error; 3 when the
@@ -88,7 +93,8 @@ from factory_gate_support import Scrubber  # noqa: E402
 SCENARIO_BOUNDARY = "runner-boundary"
 SCENARIO_AUTH = "runner-auth"
 SCENARIO_SETUP = "setup"
-SCENARIO_NAMES = (SCENARIO_BOUNDARY, SCENARIO_AUTH, SCENARIO_SETUP)
+SCENARIO_MANUAL_PATH = "manual-path"
+SCENARIO_NAMES = (SCENARIO_BOUNDARY, SCENARIO_AUTH, SCENARIO_SETUP, SCENARIO_MANUAL_PATH)
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -112,6 +118,7 @@ class ScenarioSpec:
 def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_auth as auth
     import factory_gate_boundary as boundary
+    import factory_gate_manual_path as manual_path
     import factory_gate_setup as setup
 
     return {
@@ -125,6 +132,13 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             setup.run,
             setup.finalize,
             prepare=setup.prepare,
+        ),
+        SCENARIO_MANUAL_PATH: ScenarioSpec(
+            manual_path.required_assertions,
+            False,
+            manual_path.run,
+            manual_path.finalize,
+            prepare=manual_path.prepare,
         ),
     }
 
@@ -188,7 +202,7 @@ def parse_options(
     scenario: str = args.scenario
     if scenario == SCENARIO_AUTH and args.harness is None:
         parser.error("--harness {omp,claude} is required for --scenario runner-auth")
-    if scenario == SCENARIO_SETUP:
+    if scenario in {SCENARIO_SETUP, SCENARIO_MANUAL_PATH}:
         local_only = {
             "--harness": args.harness,
             "--model": args.model,
@@ -205,7 +219,7 @@ def parse_options(
         given = [flag for flag, value in local_only.items() if value]
         if given:
             parser.error(
-                f"{', '.join(given)} do not apply to --scenario setup, which runs locally "
+                f"{', '.join(given)} do not apply to --scenario {scenario}, which runs locally "
                 "with no hosted session, container engine or custody"
             )
     if scenario == SCENARIO_BOUNDARY and (args.harness or args.model or args.live):

@@ -21,6 +21,7 @@ from enginery.cli.factory_collect import (
     index_path,
     intake_lock,
     intake_prerequisites,
+    ledger_sidecars,
     paused_hold,
     read_document,
     read_index,
@@ -43,11 +44,18 @@ from enginery.cli.stage1_composition import (
 from enginery.cli.stage1_request import RequestInputs, compile_request
 from enginery.domain.errors import EngineryError, InvalidInputError
 from enginery.domain.ids import NodeId, RunId
+from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import RUN_TRANSITIONS
+from enginery.domain.serialization import observation_to_dict
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.operator_control import live_workers, read_control_state
-from enginery.engine.runtime import RUN_AGGREGATE_TYPE, RUNTIME_NODE_AGGREGATE_TYPE
+from enginery.engine.runtime import (
+    RUN_AGGREGATE_TYPE,
+    RUNTIME_NODE_AGGREGATE_TYPE,
+    CoordinatorRuntime,
+)
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
@@ -86,19 +94,23 @@ def nonnegative_seconds(value: str) -> float:
 
 
 def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
-    repairs = []
+    repairs = [f"enginery factory drain --stop --project {shlex.quote(str(project))}"]
     connection = read_ledger(project)
     if connection is not None:
         try:
             ledger = LedgerService(connection)
             runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
             request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+            live_node_ids = {
+                worker.node_id for worker in live_workers(ledger) if worker.run_id == run_id
+            }
             for node in ledger.list_projections(aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE):
                 node_id = node.aggregate_id.removeprefix(f"{run_id}:")
                 if (
                     node.aggregate_id.startswith(f"{run_id}:")
                     and node.state.get("status") in {"queued", "running"}
                     and request.manifest.nodes[NodeId(node_id)].actor_type is ActorType.AGENT
+                    and node_id not in live_node_ids
                 ):
                     repairs.append(
                         f"enginery stage1 cancel "
@@ -108,6 +120,7 @@ def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
                     )
         finally:
             connection.close()
+    repairs.append(f"enginery factory pause --lift --project {shlex.quote(str(project))}")
     repairs.append(
         f"enginery factory run {shlex.quote(issue)} --supersede "
         f"--project {shlex.quote(str(project))}"
@@ -249,7 +262,7 @@ def _held(project: Path, holds: list[dict[str, str]]) -> dict[str, object]:
 
 def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
     configuration = load_project_configuration(project)
-    holds = intake_prerequisites(configuration)
+    holds = factory_repairs(project, intake_prerequisites(configuration))
     if holds:
         return _held(project, holds)
     try:
@@ -343,6 +356,12 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
     if request_rebuilt:
         report["request_rebuilt"] = True
     return report
+
+
+def resume_run(project: Path, run_id: str, wait_seconds: float = 0) -> dict[str, object]:
+    """Resume the durable run without compiling another request."""
+    status(project, run_id)
+    return advance_run(project, run_id, wait_seconds=wait_seconds)
 
 
 def advance_run(
@@ -457,6 +476,49 @@ def _finished(report: Mapping[str, object]) -> bool:
     )
 
 
+def factory_repairs(project: Path, holds: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            **hold,
+            "resolve": f"enginery factory pause --lift --project {shlex.quote(str(project))}",
+        }
+        if hold.get("prerequisite") == "dispatch"
+        else hold
+        for hold in holds
+    ]
+
+
+def workspace_documents(project: Path, ledger: LedgerService) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for reservation in CoordinatorRuntime(ledger, owner="factory").list_workspace_reservations():
+        command = shlex.join(
+            [
+                "enginery",
+                "workspace",
+                "release",
+                "--database",
+                str(database_path(project)),
+                "--owner",
+                "factory",
+                "--repository-id",
+                reservation.repository_id,
+                "--run-id",
+                reservation.run_id,
+                "--json",
+            ]
+        )
+        rows.append(
+            {
+                "status": reservation.status,
+                "run_id": reservation.run_id,
+                "repository_id": reservation.repository_id,
+                "path": str(reservation.workspace_path),
+                "resolve": command if reservation.status == "retained" else None,
+            }
+        )
+    return rows
+
+
 def _enrich(
     project: Path, ledger: LedgerService, report: dict[str, object], run_id: str
 ) -> dict[str, object]:
@@ -470,6 +532,10 @@ def _enrich(
     if snapshot is not None:
         config = EffectiveConfig.from_state(snapshot)
         fields = [{"name": field.name, **field.to_state()} for field in config.fields]
+        if config.digest != request.run.configuration_snapshot_digest:
+            raise InvalidInputError(
+                "the retained request snapshot differs from the durable binding"
+            )
     workers = [
         node["worker"]
         for node in cast(list[dict[str, object]], report["nodes"])
@@ -582,18 +648,94 @@ def _enrich(
                 supplied_repair = supplied_repair or details.get("repair") or details.get("resolve")
             if not supplied_repair:
                 hold["resolve"] = (
-                    f"enginery factory run "
-                    f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
+                    f"enginery factory resume {shlex.quote(run_id)} "
                     f"--project {shlex.quote(str(project))}"
                 )
-    issue = request.work_snapshot.work_item.external_reference
-    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, issue)]
+    holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, run_id)]
+    node_index = {str(node["node_id"]): node for node in node_states}
+    graph = [
+        {
+            "node_id": str(node.node_id),
+            "kind": node.kind.value,
+            "actor": node.actor_type.value,
+            "dependencies": [str(dependency) for dependency in node.dependencies],
+            "status": node_index.get(str(node.node_id), {}).get("status", "not_started"),
+        }
+        for node in request.manifest.nodes.values()
+    ]
+    opened = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:open_pr"
+    )
+    pull_request = (
+        None
+        if opened is None
+        else {
+            "number": opened.state.get("pull_request_number"),
+            "head_revision": opened.state.get("head_revision"),
+            "base_revision": opened.state.get("base_revision"),
+            "head_branch": request.head_branch,
+            "operation_id": opened.state.get("operation_id"),
+        }
+    )
+    verified = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:verify"
+    )
+    decision = (
+        verified.state.get("pull_request_outcome")
+        if verified is not None and verified.state.get("status") == "passed"
+        else None
+    )
+    observation_id = observation_id_for(RunId(run_id), OutcomeKind.MERGE_RESULT)
+    observation = OutcomeCaptureService(ledger=ledger).read_observation(observation_id)
+    workspaces = workspace_documents(project, ledger)
+    owned_workspace = next((row for row in workspaces if row["run_id"] == run_id), None)
+    blocked_workspace = next(
+        (
+            row
+            for row in workspaces
+            if row["repository_id"] == request.repository_id
+            and row["run_id"] != run_id
+            and row["status"] == "retained"
+        ),
+        None,
+    )
+    if blocked_workspace is not None and report["next_action"] in {"implement", "dispatch_queued"}:
+        holds.append(
+            {
+                "prerequisite": "retained workspace",
+                "detail": f"repository workspace is retained by run {blocked_workspace['run_id']}",
+                "resolve": blocked_workspace["resolve"],
+            }
+        )
     report.update(
         {
             "database": str(database_path(project)),
             "request_path": str(request_path(project, run_id)),
             "issue": request.work_snapshot.work_item.external_reference,
             "worker": workers[0] if workers else None,
+            "workers": workers,
+            "workspace": owned_workspace,
+            "blocked_workspace": blocked_workspace,
+            "node_graph": graph,
+            "terminal_decisions": sorted(request.manifest.terminal_states),
+            "pull_request": pull_request,
+            "terminal_decision": decision,
+            "outcome_observation": (
+                None if observation is None else observation_to_dict(observation)
+            ),
+            "workflow_complete": (
+                decision == "merge_ready"
+                and observation is not None
+                and report["next_action"] == "wait"
+            ),
+            "terminal_evidence": {
+                "verify_projection": f"runtime_node:{run_id}:verify",
+                "verify_status": None if verified is None else verified.state.get("status"),
+                "pull_request_outcome": decision,
+                "observation_id": str(observation_id),
+                "observation_registered": observation is not None,
+                "next_action": report["next_action"],
+            },
             "current_node": next(
                 (
                     node["node_id"]
@@ -619,7 +761,7 @@ def _enrich(
     return report
 
 
-def _hold_with_repair(project: Path, hold: Mapping[str, object], issue: str) -> dict[str, object]:
+def _hold_with_repair(project: Path, hold: Mapping[str, object], run_id: str) -> dict[str, object]:
     details = hold.get("details")
     repair = hold.get("resolve") or hold.get("repair")
     if not repair and isinstance(details, Mapping):
@@ -645,7 +787,7 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object], issue: str) -> 
             repair = f"{doctor}; {message}"
             if message == "restore the run's bound configuration":
                 repair += (
-                    f"; enginery factory run {shlex.quote(issue)} "
+                    f"; enginery factory resume {shlex.quote(run_id)} "
                     f"--project {shlex.quote(str(project))}"
                 )
     return {**hold, "resolve": repair}
@@ -661,13 +803,19 @@ def _superseded_by(project: Path, request: Stage1RunRequest, run_id: str) -> str
     return binding.run_id if binding is not None and binding.run_id != run_id else None
 
 
+def _created_sidecars(project: Path, existing: frozenset[Path]) -> list[str]:
+    created = ledger_sidecars(project) - existing
+    return [str(path) for path in sorted(created, key=lambda path: not path.name.endswith("-wal"))]
+
+
 def status(project: Path, run_id: str | None = None) -> dict[str, object]:
     path = database_path(project)
+    existing_sidecars = ledger_sidecars(project)
     connection = read_ledger(project)
     if connection is None:
         if run_id is not None:
             raise InvalidInputError(f"unknown factory run: {run_id}")
-        return {"database": str(path), "runs": [], "paused": False}
+        return {"database": str(path), "runs": [], "paused": False, "local_writes": []}
     ledger = LedgerService(connection)
     try:
         if run_id is None:
@@ -679,6 +827,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                 "database": str(path),
                 "paused": read_control_state(ledger).paused,
                 "runs": [status(project, identity) for identity in identities],
+                "local_writes": _created_sidecars(project, existing_sidecars),
             }
         runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
         try:
@@ -689,7 +838,10 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
         progression = service.next_action(RunId(run_id))
         report = watch_document(ledger, runtime, progression)
         report = _enrich(project, ledger, report, run_id)
-        report["holds"] = [*cast(list[object], report["holds"]), *paused_hold(project)]
+        report["holds"] = [
+            *cast(list[object], report["holds"]),
+            *factory_repairs(project, paused_hold(project)),
+        ]
         superseded_by = _superseded_by(project, run.request, run_id)
         report["superseded_by"] = superseded_by
         if superseded_by is not None:
@@ -703,6 +855,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                     ),
                 }
             )
+        report["local_writes"] = _created_sidecars(project, existing_sidecars)
         return report
     finally:
         ledger.close()

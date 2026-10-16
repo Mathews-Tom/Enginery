@@ -1,0 +1,111 @@
+"""Project-ledger pause and drain using the fixed operator's recovery path."""
+
+from __future__ import annotations
+
+import argparse
+import shlex
+from datetime import UTC, datetime
+from pathlib import Path
+
+from enginery.adapters.oci.engine import OciEngine
+from enginery.cli.factory_collect import (
+    database_path,
+    ensure_private_directory,
+    require_state_path,
+)
+from enginery.cli.factory_run import workspace_documents
+from enginery.cli.operator import _drain_exit_code, _stop_workers
+from enginery.domain.ids import RunId
+from enginery.domain.runner import RunnerSelection
+from enginery.engine.operator_control import OperatorControl, WorkerView, drain_wait
+from enginery.engine.runtime import CoordinatorRuntime
+from enginery.ledger.service import LedgerService
+from enginery.workflows.stage1 import Stage1RunService
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _open_ledger(project: Path) -> LedgerService:
+    path = database_path(project)
+    require_state_path(path, what="project ledger")
+    ensure_private_directory(path.parent, what="project ledger")
+    require_state_path(path, what="project ledger")
+    return LedgerService.open(path)
+
+
+def pause(project: Path, *, lift: bool, reason: str | None) -> dict[str, object]:
+    """Only the project's ledger dispatch flag changes; workers remain untouched."""
+    ledger = _open_ledger(project)
+    try:
+        control = OperatorControl(ledger)
+        change = control.resume(now=_now()) if lift else control.pause(now=_now(), reason=reason)
+        return {
+            "scope": f"project ledger {database_path(project)}",
+            "database": str(database_path(project)),
+            "changed": change.changed,
+            "running_workers": "untouched",
+            **change.state.to_report(),
+        }
+    finally:
+        ledger.close()
+
+
+def drain(
+    project: Path, *, stop: bool, wait_seconds: float | None
+) -> tuple[dict[str, object], int]:
+    """Pause and reuse the operator's worker-stop/container cleanup and exit contract."""
+    ledger = _open_ledger(project)
+    try:
+        cleanup = None
+        if stop:
+            service = Stage1RunService(
+                runtime=CoordinatorRuntime(ledger, owner="factory"), ledger=ledger
+            )
+
+            def context_for(worker: WorkerView) -> RunnerSelection | None:
+                runner = service.read(RunId(worker.run_id)).request.runner
+                return runner if runner.isolated_mode else None
+
+            args = argparse.Namespace(owner="factory", docker_context=None)
+            report, cleanup = _stop_workers(
+                args,
+                ledger,
+                _now,
+                lambda context: OciEngine(context=context),
+                context_for=context_for,
+            )
+        else:
+            assert wait_seconds is not None
+            report = drain_wait(ledger, now=_now(), wait_seconds=wait_seconds)
+        document = report.to_state()
+        document.update(
+            {
+                "scope": f"project ledger {database_path(project)}",
+                "database": str(database_path(project)),
+                "workspaces": workspace_documents(project, ledger),
+                "released": (
+                    "by resume/reconcile"
+                    if not stop
+                    else "partial; see stopped"
+                    if report.stop_failures
+                    else "now"
+                ),
+                "release_scope": (
+                    "successfully stopped workers; previously exited workers require "
+                    "resume/reconcile"
+                    if stop
+                    else "wait observes exit only; it does not collect worker results"
+                ),
+                "reconcile": (
+                    f"enginery factory pause --lift --project {shlex.quote(str(project))}; "
+                    f"enginery factory resume RUN --project {shlex.quote(str(project))}"
+                ),
+            }
+        )
+        if cleanup is not None:
+            document["container_cleanup"] = cleanup
+        return document, _drain_exit_code(report)
+    finally:
+        ledger.close()
