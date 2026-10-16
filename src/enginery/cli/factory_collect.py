@@ -21,7 +21,7 @@ from enginery.application.work_classification import (
     WORK_KIND_LABELS,
     declared_classification,
 )
-from enginery.cli.config_locations import private_state_directory
+from enginery.cli.config_locations import private_state_directory, state_home
 from enginery.cli.factory_diagnostics import _check_github, _run
 from enginery.cli.factory_explain import offline_holds
 from enginery.cli.factory_setup import ProjectConfiguration, load_project_configuration
@@ -219,8 +219,10 @@ def selection_document(configuration: ProjectConfiguration) -> dict[str, object]
     }
 
 
-def classification_repair(repository: str, reference: str, labels: Sequence[str]) -> str:
-    command = ["gh", "issue", "edit", reference.rsplit("#", 1)[1], "--repo", repository]
+def classification_repair(
+    repository: str, reference: str, labels: Sequence[str], *, executable: str
+) -> str:
+    command = [executable, "issue", "edit", reference.rsplit("#", 1)[1], "--repo", repository]
     for prefix, allowed, placeholder in (
         (CLASSIFICATION_PREFIXES[0], WORK_KIND_LABELS, "enginery/work-kind/<issue|plan>"),
         (CLASSIFICATION_PREFIXES[1], RISK_LABELS, "enginery/risk/<low|medium>"),
@@ -268,11 +270,17 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
             }
         )
         return document
-    intake_directory_existed = index_path(project).parent.exists()
+    intake_directory = index_path(project).parent
+    state_root = state_home()
+    relative_directory = intake_directory.relative_to(state_root)
+    missing_directories = [
+        state_root / relative
+        for relative in (*reversed(relative_directory.parents), relative_directory)
+        if not (state_root / relative).exists()
+    ]
     with contextlib.nullcontext() if dry_run else intake_lock(project):
         if not dry_run:
-            if not intake_directory_existed:
-                local_writes.append(str(index_path(project).parent))
+            local_writes.extend(str(path) for path in missing_directories)
             local_writes.append(str(index_path(project).with_suffix(".lock")))
         index = read_index(project)
         intake = index.repositories.setdefault(repository, RepositoryIntake())
@@ -322,7 +330,10 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                     "prerequisite": "classification",
                     "detail": str(error),
                     "resolve": classification_repair(
-                        repository, candidate.external_reference, candidate.labels
+                        repository,
+                        candidate.external_reference,
+                        candidate.labels,
+                        executable=compiled.config.text("github_executable"),
                     ),
                 }
                 row["classification"] = {"hold": str(error)}

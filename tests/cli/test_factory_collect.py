@@ -90,8 +90,19 @@ def test_collect_discloses_index_and_cursor_and_detects_changed_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(factory_collect, "github_ledger", lambda *_: adapter())
+    assert not (project.parent / "state").exists()
     first = collect(project, dry_run=False)
-    assert str(index_path(project)) in first["local_writes"]
+    path = index_path(project)
+    state_root = project.parent / "state"
+    assert first["local_writes"] == [
+        str(state_root),
+        str(state_root / "enginery"),
+        str(state_root / "enginery" / "projects"),
+        str(path.parent.parent),
+        str(path.parent),
+        str(path.with_suffix(".lock")),
+        str(path),
+    ]
     recorded = read_index(project).repositories["owner/repo"]
     assert recorded.last_seen_updated_at == "2026-10-16T00:00:00Z"
     assert recorded.issues == {}
@@ -116,14 +127,14 @@ def test_collect_discloses_index_and_cursor_and_detects_changed_snapshot(
     assert all(hold["prerequisite"] != "bound snapshot" for hold in changed["holds"])
 
 
-def assert_repair(command: str) -> None:
+def assert_repair(command: str, *, github_executable: str = "gh") -> None:
     for part in command.split("; "):
         argv = shlex.split(part)
         if argv[0] == "enginery":
             _build_parser().parse_args(argv[1:])
         elif argv[0] == "enginery-operator":
             _build_operator_parser().parse_args(argv[1:])
-        elif argv[:3] == ["gh", "issue", "edit"]:
+        elif argv[:3] == [github_executable, "issue", "edit"]:
             assert argv[3].isascii() and argv[3].isdigit()
             assert argv[4:6] == ["--repo", "owner/repo"]
             assert len(argv[6:]) >= 2 and len(argv[6:]) % 2 == 0
@@ -146,9 +157,13 @@ def assert_repair(command: str) -> None:
 def test_classification_repairs_name_allowed_values_and_remove_offenders(
     labels: tuple[str, ...],
 ) -> None:
-    repair = factory_collect.classification_repair("owner/repo", "owner/repo#12", labels)
-    assert_repair(repair)
+    executable = "/configured tools/alternate gh"
+    repair = factory_collect.classification_repair(
+        "owner/repo", "owner/repo#12", labels, executable=executable
+    )
+    assert_repair(repair, github_executable=executable)
     argv = shlex.split(repair)
+    assert argv[0] == executable
     if "enginery/risk/high" in labels:
         assert "--remove-label enginery/risk/high" in repair
     if not any(label.startswith("enginery/risk/") for label in labels):
@@ -290,7 +305,14 @@ def test_listing_failure_discloses_lock_and_new_directory(
     assert_repair(report["holds"][0]["resolve"])
     expected = [] if dry_run else [str(path.with_suffix(".lock"))]
     if not dry_run and not intake_directory_exists:
-        expected.insert(0, str(path.parent))
+        state_root = project.parent / "state"
+        expected[:0] = [
+            str(state_root),
+            str(state_root / "enginery"),
+            str(state_root / "enginery" / "projects"),
+            str(path.parent.parent),
+            str(path.parent),
+        ]
     assert report["local_writes"] == expected
     assert not path.exists()
 
@@ -323,6 +345,10 @@ def test_intake_failure_repair_uses_configured_github(
     auth, retry = repair.split("; ")
     assert shlex.split(auth) == [executable, "auth", "status"]
     assert_repair(retry)
+    if not listing_fails:
+        classification = report["candidates"][1]["holds"][0]["resolve"]
+        assert shlex.split(classification)[0] == executable
+        assert_repair(classification, github_executable=executable)
 
 
 def test_prerequisite_auth_probe_count_and_repairs(
@@ -382,11 +408,11 @@ def test_collect_inspects_wal_ledger_without_changing_content(
     before = {file.name: file.read_bytes() for file in path.parent.iterdir() if file.is_file()}
     report = collect(project, dry_run=dry_run)
     assert path.read_bytes() == before[path.name]
-    for suffix in ("-wal", "-shm"):
-        sidecar = path.with_name(path.name + suffix)
-        assert (str(sidecar) in report["local_writes"]) == (
-            sidecar.exists() and sidecar.name not in before
-        )
+    assert path.with_name(path.name + "-shm").exists()
+    sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
+    assert [write for write in report["local_writes"] if write in map(str, sidecars)] == [
+        str(sidecar) for sidecar in sidecars if sidecar.exists() and sidecar.name not in before
+    ]
     if paused:
         assert report["candidates"] == []
         assert report["holds"][0]["prerequisite"] == "dispatch"

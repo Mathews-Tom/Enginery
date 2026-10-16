@@ -730,7 +730,8 @@ created sidecars are disclosed in `local_writes`, including during a dry run.
 The 1 MiB document limit applies to the intake index and request documents, not the ledger.
 
 Without `--dry-run`, collection also records the private `intake/index.json`, its
-lock file and, when newly created, the `intake/` directory. Only the repository
+lock file and every newly created directory from `$XDG_STATE_HOME` (or its default)
+through `intake/`, disclosed outermost first before the lock and index paths. Only the repository
 `last_seen_updated_at` cursor changes: it cannot advance
 past the earliest held or errored issue. Collection never creates issue-to-run bindings;
 it reads existing bindings to report `new`, `bound:<run-id>` or `changed:<run-id>`.
