@@ -814,7 +814,8 @@ artifacts/
 
 The command reports the database and request paths; these are local runtime state,
 not tracked policy. Intake and request writes are atomic and link-safe. The intake
-index stores each issue's run ID and bound snapshot digest, plus the repository cursor.
+index stores the repository cursor on collection; only `run` binds each issue's run ID
+and snapshot digest. Collection never creates issue-to-run bindings.
 The run ID is `fr-` followed by the first 20 hexadecimal characters of SHA-256 over
 canonical JSON with keys `project`, `issue`, and `snapshot`: project identity, canonical
 issue reference from the adapter and bound snapshot digest. The same project/issue/snapshot
@@ -830,6 +831,9 @@ CI is pending, advance the coordinator no more often than every 15 seconds.
 CI waits poll no more often than every 15 seconds. The command returns at the deadline
 rather than making another idle advance.
 Repeating `factory run` for the same bound issue continues that durable run.
+An existing unstarted request is recompiled; if its digest differs, it is replaced
+before binding and the report discloses `request_rebuilt: true`. Bound requests are
+never replaced by that path.
 `status` never advances it: without RUN it lists project runs; with RUN it reports
 current nodes, next action, worker PID or container identity, selection and winning
 layers, runner, budget basis, and holds with repairs. Time budgets are reported in
@@ -905,12 +909,15 @@ Holds report repairs; replace placeholders with the values reported for the run:
 |---|---|
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
 | Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
-| Missing, duplicate or unknown canonical labels | Use `gh issue edit N --repo OWNER/REPO --remove-label INVALID_LABEL` for conflicting labels, then `gh issue edit N --repo OWNER/REPO --add-label enginery/work-kind/issue --add-label enginery/risk/low` for an issue genuinely classified that way. Exactly one supported label in each family is required; classification is human-owned. |
+| Missing, duplicate or unknown canonical labels | Use `gh issue edit N --repo OWNER/REPO --remove-label INVALID_LABEL` for conflicting labels, then `gh issue edit N --repo OWNER/REPO --add-label 'enginery/work-kind/<issue\|plan>' --add-label 'enginery/risk/<low\|medium>'`, replacing each quoted placeholder with the human-selected supported value. Exactly one supported label in each family is required; no risk is selected by default. |
 | Missing runner selection | `enginery factory init --runner trusted-local --apply --project .`, or select the intended isolated runner and satisfy its reported admission repair. Trusted-local is not containment. |
 | Missing or unapproved selected capability | Run the reported `enginery capability preview NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` then `enginery capability install NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` from the project. If approval is required, obtain owner approval for the exact closure and lock digest; collection never grants approval or installs packages. |
 | Paused dispatch | `enginery factory pause --lift --project .`. Running workers were not stopped by pause. |
 | Retained workspace blocks a new run | `factory status` reports `workspace.status: retained` for its owner, and a new run reports a hold with the exact `enginery workspace release --database DATABASE --owner factory --repository-id OWNER/REPO --run-id RETAINING_RUN --json` command. Inspect the retained run before explicitly releasing it; then retry the new run. Release is never performed silently. |
 | Issue changed since the run was bound | Inspect `enginery factory status RUN --project .`; drain with `enginery factory drain --stop --project .`. Where cancellation is appropriate, use the complete command `enginery stage1 cancel --database DATABASE --owner factory --run-id RUN --node-id implement`. Lift the pause with `enginery factory pause --lift --project .`, then explicitly create the new binding with `enginery factory run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
+| Supersede cannot prove the old run safe | `--supersede` requires terminal `run.status`, or terminal latest `runtime_node[RUN:implement].status` with no active `node_leases[RUN:implement]`, no live worker-supervisor attempt and no pending `runtime_node[RUN:open_pr]`. The hold reports these statuses, implementation/lease attempt IDs and lease expiry; drain/cancel, lift pause, then retry the explicit supersede repair above. |
+| Awaiting human review | `next_decision` names the exact `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` command; this is a decision boundary, not a hold or successful validation. |
+| Blocked progression | The hold preserves the recorded reason and its matching repair; resolve that cause before resuming. |
 | Catalog, host fingerprint or runner drift | Restore the bound catalog/host/runner as directed by the reported hold, then `enginery factory resume RUN --project .`; otherwise rebuild under an explicitly new binding. Resume never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
 | Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
 

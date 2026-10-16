@@ -14,7 +14,7 @@ import pytest
 
 from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import factory_control, factory_run
-from enginery.cli.factory_collect import paused_hold
+from enginery.cli.factory_collect import database_path, paused_hold
 from enginery.cli.main import main
 from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.ids import RunId
@@ -146,7 +146,7 @@ def test_resume_unknown_run_does_not_create_a_ledger(
     project, _ = bound_project
     assert main(["factory", "resume", "unknown", "--project", str(project), "--json"]) == 2
     assert "unknown factory run" in capsys.readouterr().err
-    assert not factory_run.database_path(project).exists()
+    assert not database_path(project).exists()
 
 
 @pytest.mark.parametrize(

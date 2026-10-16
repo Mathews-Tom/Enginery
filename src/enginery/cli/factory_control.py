@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
 from enginery.adapters.oci.engine import OciEngine
-from enginery.cli.factory_collect import require_state_path
-from enginery.cli.factory_run import database_path, workspace_documents
+from enginery.cli.factory_collect import database_path, require_state_path
+from enginery.cli.factory_run import workspace_documents
 from enginery.cli.operator import _drain_exit_code, _stop_workers
 from enginery.domain.ids import RunId
 from enginery.domain.runner import RunnerSelection
@@ -24,9 +25,9 @@ def _now() -> datetime:
 
 def _open_ledger(project: Path) -> LedgerService:
     path = database_path(project)
-    require_state_path(path)
+    require_state_path(path, what="project ledger")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    require_state_path(path)
+    require_state_path(path, what="project ledger")
     return LedgerService.open(path)
 
 
@@ -94,8 +95,8 @@ def drain(
                     else "wait observes exit only; it does not collect worker results"
                 ),
                 "reconcile": (
-                    f"enginery factory pause --lift --project {project}; "
-                    f"enginery factory resume RUN --project {project}"
+                    f"enginery factory pause --lift --project {shlex.quote(str(project))}; "
+                    f"enginery factory resume RUN --project {shlex.quote(str(project))}"
                 ),
             }
         )

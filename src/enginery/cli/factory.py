@@ -126,7 +126,7 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     resume = commands.add_parser("resume", help="Reconcile workers and continue a durable run.")
     _add_project(resume)
     resume.add_argument("run_id")
-    resume.add_argument("--wait-seconds", type=float, default=0)
+    resume.add_argument("--wait-seconds", type=nonnegative_seconds, default=0)
     resume.add_argument("--json", action="store_true")
 
     pause_parser = commands.add_parser("pause", help="Pause project-ledger dispatch only.")
@@ -140,7 +140,7 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     )
     _add_project(drain_parser)
     drain_mode = drain_parser.add_mutually_exclusive_group(required=True)
-    drain_mode.add_argument("--wait-seconds", type=float)
+    drain_mode.add_argument("--wait-seconds", type=nonnegative_seconds)
     drain_mode.add_argument("--stop", action="store_true")
     drain_parser.add_argument("--json", action="store_true")
 

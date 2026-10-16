@@ -146,7 +146,24 @@ def test_changed_issue_holds_without_replacing_request(
     assert code == 5
     assert held["holds"][0]["detail"] == f"issue changed since run {run['run_id']} was bound"
     assert "stage1 cancel" not in held["holds"][0]["resolve"]
-    assert shlex.split(held["holds"][0]["resolve"]) == [
+    repairs = held["holds"][0]["resolve"].split("; ")
+    assert shlex.split(repairs[0]) == [
+        "enginery",
+        "factory",
+        "drain",
+        "--stop",
+        "--project",
+        str(project),
+    ]
+    assert shlex.split(repairs[1]) == [
+        "enginery",
+        "factory",
+        "pause",
+        "--lift",
+        "--project",
+        str(project),
+    ]
+    assert shlex.split(repairs[2]) == [
         "enginery",
         "factory",
         "run",
@@ -157,12 +174,14 @@ def test_changed_issue_holds_without_replacing_request(
     ]
     assert path.read_bytes() == before
     code, replacement = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
-    assert code == 0 and replacement["run_id"] != run["run_id"]
+    assert code == 5
+    assert "supersede not safe" in replacement["holds"][0]["detail"]
+    assert "--node-id implement" in replacement["holds"][0]["resolve"]
     assert path.read_bytes() == before
     _, old = invoke(capsys, project, "status", run["run_id"])
     assert old["run_id"] == run["run_id"] and old["request_path"] == str(path)
     _, listing = invoke(capsys, project, "status")
-    assert {item["run_id"] for item in listing["runs"]} == {run["run_id"], replacement["run_id"]}
+    assert {item["run_id"] for item in listing["runs"]} == {run["run_id"]}
 
 
 def test_repeat_run_reuses_durable_request_and_workspace(
@@ -535,10 +554,12 @@ def test_paused_run_preserves_execution_holds(
     assert report["holds"][0]["message"] == "worker is remote"
     assert report["holds"][0]["resolve"] == "Resolve the worker on its launching host"
     assert shlex.split(report["holds"][1]["resolve"]) == [
-        "enginery-operator",
-        "resume",
-        "--database",
-        original["database"],
+        "enginery",
+        "factory",
+        "pause",
+        "--lift",
+        "--project",
+        str(project),
     ]
 
 

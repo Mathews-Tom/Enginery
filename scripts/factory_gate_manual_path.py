@@ -526,7 +526,7 @@ def step_collect(gate: ManualPathGate) -> None:
         and cursor == UPDATED_AT
         and str(index_path) in writes
         and all(Path(path).is_relative_to(gate.state) for path in writes)
-        and index["repositories"][REPOSITORY]["issues"][ISSUE]["external_reference"] == ISSUE
+        and index["repositories"][REPOSITORY]["issues"] == {}
         and collected.get("external_effects", {}).get("github_mutations") == 0,
         {"exit": code, "json": collected},
         {"index": index, "path": str(index_path)},
