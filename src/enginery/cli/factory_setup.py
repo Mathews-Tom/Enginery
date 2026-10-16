@@ -180,9 +180,7 @@ class SetupPlan:
             "holds": [item.to_json() for item in self.installs],
             "conflicts": [str(item.path) for item in self.conflicts],
             "performed": list(performed),
-            "status": (
-                "conflict" if self.conflicts else "hold" if self.installs else "ok"
-            ),
+            "status": ("conflict" if self.conflicts else "hold" if self.installs else "ok"),
         }
 
 

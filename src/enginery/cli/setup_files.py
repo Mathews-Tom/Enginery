@@ -32,7 +32,9 @@ def sha256_bytes(payload: bytes) -> str:
 def refuse_links(root: Path, relative: Path, *, what: str) -> None:
     """Refuse a symbolic link on any existing component of ``relative`` below ``root``."""
     if ".." in relative.parts or relative.is_absolute():
-        raise InvalidInputError(f"{what} must be a plain relative path", details={"path": str(relative)})
+        raise InvalidInputError(
+            f"{what} must be a plain relative path", details={"path": str(relative)}
+        )
     current = root
     for part in relative.parts:
         current = current / part

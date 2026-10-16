@@ -41,7 +41,16 @@ def _init(
 ) -> tuple[int, dict[str, object]]:
     capsys.readouterr()
     code = main(
-        ["factory", "init", "--project", str(project), "--json", "--runner", "trusted-local", *extra]
+        [
+            "factory",
+            "init",
+            "--project",
+            str(project),
+            "--json",
+            "--runner",
+            "trusted-local",
+            *extra,
+        ]
     )
     out = capsys.readouterr().out
     return code, json.loads(out) if out.strip() else {}

@@ -48,8 +48,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     )
     _add_project(init)
     init.add_argument(
-        "--apply", action="store_true", help="Perform exactly the previewed plan; default is "
-        "to preview and write nothing."
+        "--apply",
+        action="store_true",
+        help="Perform exactly the previewed plan; default is to preview and write nothing.",
     )
     init.add_argument(
         "--runner",
@@ -124,8 +125,7 @@ def _plan_lines(plan: SetupPlan, *, apply: bool, performed: tuple[str, ...]) -> 
     lines = [f"{'apply' if apply else 'preview'} setup for {plan.project}"]
     for item in plan.files:
         lines.append(
-            f"  {item.action.upper():9} {item.tracking:7} {item.path}\n"
-            f"            {item.detail}"
+            f"  {item.action.upper():9} {item.tracking:7} {item.path}\n            {item.detail}"
         )
     lines.append("  installs: none performed by init")
     for hold in plan.installs:

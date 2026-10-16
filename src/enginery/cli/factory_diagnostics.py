@@ -111,7 +111,9 @@ def _check_git(run: Runner) -> Check:
     try:
         completed = run(("git", "--version"))
     except (OSError, subprocess.TimeoutExpired) as error:
-        return Check("git", "hold", f"`git --version` could not run: {error}", "repair the git install")
+        return Check(
+            "git", "hold", f"`git --version` could not run: {error}", "repair the git install"
+        )
     first = completed.stdout.strip().splitlines()[:1]
     return Check("git", "ok", first[0] if first else "git runs")
 
@@ -124,8 +126,8 @@ def _check_github(executable: str, run: Runner) -> list[Check]:
                 "hold",
                 f"the GitHub CLI `{executable}` is not on PATH; Stage 1 reads issues and "
                 "opens pull requests through it",
-                f"install the GitHub CLI (https://cli.github.com), or point [executables] github "
-                f"at it in .enginery/project.toml",
+                "install the GitHub CLI (https://cli.github.com), or point [executables] github "
+                "at it in .enginery/project.toml",
             )
         ]
     checks = [Check("github-cli", "ok", f"`{executable}` is on PATH")]
@@ -176,9 +178,7 @@ def _check_harness(compiled: CompiledConfig, probe: HostProbe | None) -> Check:
             "an isolated run executes the pinned image's harness, never the host binary",
         )
     if _executable(executable) is None:
-        return Check(
-            f"harness-{harness}", "hold", f"`{executable}` is not on PATH", resolve
-        )
+        return Check(f"harness-{harness}", "hold", f"`{executable}` is not on PATH", resolve)
     installed = (probe or (lambda name: _default_probe(harness, name)))(executable)
     host = load_execution_catalog().host(harness)
     try:
@@ -219,7 +219,8 @@ def _locked_versions(project: Path) -> Mapping[str, str]:
 
 def _check_capabilities(project: Path, compiled: CompiledConfig) -> list[Check]:
     names = [
-        name for name in compiled.config.strings("permitted_capabilities")
+        name
+        for name in compiled.config.strings("permitted_capabilities")
         if name not in BUILTIN_CAPABILITIES
     ]
     if not names:

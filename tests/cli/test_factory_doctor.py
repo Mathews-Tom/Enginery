@@ -42,7 +42,8 @@ def toolbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _script(
         bin_dir,
         "gh",
-        f'echo "gh $*" >> {calls}; if [ "$1 $2" = "auth status" ]; then exit "${{GH_AUTH_EXIT:-0}}"; fi',
+        f'echo "gh $*" >> {calls}; '
+        'if [ "$1 $2" = "auth status" ]; then exit "${GH_AUTH_EXIT:-0}"; fi',
     )
     _script(bin_dir, "omp", f'echo "omp $*" >> {calls}; echo "omp v18.10.3"')
     monkeypatch.setenv("PATH", str(bin_dir))
@@ -85,9 +86,10 @@ def test_a_satisfied_project_reports_ok_and_mutates_nothing(
         "harness-omp": "ok",
     }
     assert report["mutations"] == []
-    assert _tree(
-        project, Path(os.environ["XDG_CONFIG_HOME"]), Path(os.environ["XDG_STATE_HOME"])
-    ) == before
+    assert (
+        _tree(project, Path(os.environ["XDG_CONFIG_HOME"]), Path(os.environ["XDG_STATE_HOME"]))
+        == before
+    )
     calls = (toolbox.parent / "calls.log").read_text(encoding="utf-8").splitlines()
     assert "gh auth status" in calls and "gh auth login" not in calls
 
@@ -220,7 +222,10 @@ def test_a_permitted_capability_that_is_not_installed_is_a_hold_with_the_install
 
     assert code == HOLD
     held = {hold["name"]: hold for hold in report["holds"]}  # type: ignore[union-attr]
-    assert "enginery capability install review-skill@<version>" in held["capability-review-skill"]["resolve"]
+    assert (
+        "enginery capability install review-skill@<version>"
+        in held["capability-review-skill"]["resolve"]
+    )
 
 
 def test_a_project_without_a_declared_trust_mode_is_held_with_the_init_command(
