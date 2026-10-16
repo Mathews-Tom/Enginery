@@ -705,6 +705,9 @@ holds that can be derived from local files (an undeclared trust mode, a permitte
 capability that is not installed). It reads local files only, changes nothing, exits 5
 while a hold remains and 2 for a malformed policy or user file. Host prerequisites
 remain `doctor`'s job.
+Ownership entries are validated before any are reported as owned: the recorded role must
+match setup's project-relative path, with no traversal or symbolic links. A tampered
+ownership record is invalid input, not evidence of ownership.
 
 `factory uninstall` previews by default and, with `--apply`, undoes exactly what
 `init` did, using only the private ownership record. It removes the policy file only
@@ -2282,10 +2285,13 @@ constraint refusing a run override, an unknown key being refused, `factory docto
 holding an unauthenticated `gh` with `gh auth login`, `factory uninstall` removing only
 unmodified setup-owned files, and the disposable home's global locations (`~/.config/gh`,
 `~/.omp`, `~/.claude`, `~/.claude.json`, MCP configuration, launchd and systemd
-directories) being byte-identical before and after. `--live`, `--harness`, `--model`
-and the gateway, image and custody flags are rejected for it. Exit status and evidence
-follow the same contract as the other scenarios: `0` only if every required assertion
-ran and passed, `3` (hold) when `git` is missing.
+directories) being byte-identical before and after. Snapshots include `.git`; all git
+subprocesses disable automatic maintenance and garbage collection without replacing
+inherited command-scope configuration. Apply must create every previewed path and no
+other paths except their ancestor directories. `--live`, `--harness`, `--model`,
+`--session-deadline-seconds` and the gateway, image and custody flags are rejected for it.
+Exit status and evidence follow the same contract as the other scenarios: `0` only if
+every required assertion ran and passed, `3` (hold) when `git` is missing.
 
 ## Release scope and gate-deferred work
 

@@ -27,11 +27,13 @@ from enginery.cli.config_locations import (
     PROJECT_POLICY_RELATIVE,
     private_state_directory,
 )
+from enginery.cli.factory_diagnostics import trust_mode_resolution
 from enginery.cli.factory_setup import (
     DIRECTORY_ROLE,
     INSTALL_ROOT_RELATIVE,
     ProjectConfiguration,
 )
+from enginery.cli.factory_uninstall import validate_owned_path
 from enginery.cli.setup_files import OWNERSHIP_FILE, load_ownership, read_regular
 
 
@@ -54,9 +56,9 @@ def owned_file_statuses(
     statuses: list[OwnedFileStatus] = []
     recorded: set[str] = set()
     if record is not None:
-        for owned in record.files:
+        paths = [(owned, project / validate_owned_path(project, owned)) for owned in record.files]
+        for owned, path in paths:
             recorded.add(owned.path)
-            path = Path(owned.path)
             if owned.role == DIRECTORY_ROLE:
                 present = os.path.lexists(path)
                 statuses.append(
@@ -106,7 +108,7 @@ def offline_holds(configuration: ProjectConfiguration) -> list[dict[str, str]]:
             {
                 "prerequisite": "trust mode",
                 "detail": "no layer declares a trust mode (trusted-local or isolated-oci)",
-                "resolve": "enginery factory init --runner trusted-local --apply",
+                "resolve": trust_mode_resolution(configuration.project / PROJECT_POLICY_RELATIVE),
             }
         ]
     manifest = load_owned_manifest(configuration.project / INSTALL_ROOT_RELATIVE)

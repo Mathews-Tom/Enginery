@@ -182,7 +182,8 @@ def parse_options(
 ) -> GateOptions:
     """Parse and validate the command line; a usage error exits with status 2."""
     parser = build_parser()
-    args = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(arguments)
     environment = os.environ if environ is None else environ
     scenario: str = args.scenario
     if scenario == SCENARIO_AUTH and args.harness is None:
@@ -199,6 +200,9 @@ def parse_options(
             "--docker-context": args.docker_context,
             "--runner-image": args.runner_image,
             "--relay-image": args.relay_image,
+            "--session-deadline-seconds": any(
+                argument.split("=", 1)[0] == "--session-deadline-seconds" for argument in arguments
+            ),
         }
         given = [flag for flag, value in local_only.items() if value]
         if given:

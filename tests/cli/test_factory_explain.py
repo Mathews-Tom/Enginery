@@ -83,6 +83,7 @@ def test_explain_shows_the_same_digest_build_request_binds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from enginery.application.effective_config import EffectiveConfig
+    from enginery.workflows.stage1 import stage1_request_from_state
     from tests.support.github import write_stand_in_gh
 
     repository, base = _repository(tmp_path)
@@ -90,7 +91,11 @@ def test_explain_shows_the_same_digest_build_request_binds(
     _write(
         repository / ".enginery" / "project.toml",
         'schema_version = 1\n[runner]\nmode = "trusted-local"\n'
-        f'[executables]\ngithub = "{github.executable}"\n',
+        '[execution]\nmodel = "openai/gpt-5"\neffort = "high"\n',
+    )
+    _write(
+        Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml",
+        f'schema_version = 1\n[executables]\ngithub = "{github.executable}"\n',
     )
     _, document = _explain(capsys, repository)
     output = tmp_path / "request.json"
@@ -105,6 +110,10 @@ def test_explain_shows_the_same_digest_build_request_binds(
     built = json.loads(output.read_text(encoding="utf-8"))
     assert document["effective_configuration_digest"] == str(
         EffectiveConfig.from_state(built["effective_config"]).digest
+    )
+    request = stage1_request_from_state(built)
+    assert document["effective_configuration_digest"] == str(
+        request.run.configuration_snapshot_digest
     )
 
 
@@ -186,3 +195,56 @@ def test_a_malformed_policy_is_invalid_input(
         FailureClass.INVALID_INPUT
     )
     assert "schema_version" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("entry", ["absolute", "traversal", "outside-directory", "symlink"])
+def test_invalid_ownership_entries_are_never_reported_owned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], entry: str
+) -> None:
+    from enginery.cli.config_locations import private_state_directory
+    from enginery.cli.setup_files import OWNERSHIP_FILE
+
+    project = tmp_path / "project"
+    project.mkdir()
+    assert (
+        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
+        == 0
+    )
+    record_path = private_state_directory(project.resolve()) / OWNERSHIP_FILE
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if entry == "absolute":
+        record["files"][0]["path"] = str(outside / "project.toml")
+    elif entry == "traversal":
+        record["files"][0]["path"] = str(project / ".." / "outside")
+    elif entry == "outside-directory":
+        record["files"][0].update(path=str(outside), role="directory")
+    else:
+        policy = project / ".enginery" / "project.toml"
+        policy.unlink()
+        policy.symlink_to(outside / "project.toml")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["factory", "explain", "--project", str(project), "--json"]) == exit_code_for(
+        FailureClass.INVALID_INPUT
+    )
+    captured = capsys.readouterr()
+    assert '"owned"' not in captured.out
+
+
+def test_existing_policy_trust_hold_names_an_actionable_edit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    policy = project / ".enginery" / "project.toml"
+    _write(policy, "schema_version = 1\n")
+
+    code, document = _explain(capsys, project)
+
+    assert code == HOLD
+    resolution = document["holds"][0]["resolve"]  # type: ignore[index]
+    assert str(policy) in resolution
+    assert "trusted-local" in resolution and "isolated-oci" in resolution
+    assert "factory init" not in resolution

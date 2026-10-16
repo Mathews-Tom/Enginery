@@ -95,6 +95,8 @@ def test_a_missing_git_is_a_hold_never_a_pass(
         ["--harness", "omp"],
         ["--model", "openai/gpt-5"],
         ["--confirm-single-session"],
+        ["--session-deadline-seconds", "900"],
+        ["--session-deadline-seconds=120"],
         ["--custody-receipt", "receipt.json"],
         ["--gateway-url", "http://127.0.0.1:1", "--gateway-token-file", "token"],
         ["--docker-context", "colima"],
@@ -108,3 +110,48 @@ def test_flags_for_hosted_or_container_scenarios_are_refused(
         parse_options(_argv(tmp_path, *extra))
 
     assert refused.value.code == 2
+
+
+def test_setup_preserves_inherited_git_configuration_without_background_maintenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "3")
+    for index, (key, value) in enumerate(
+        (("maintenance.auto", "true"), ("gc.auto", "1"), ("test.inherited", "preserved"))
+    ):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", value)
+    original = factory_gate_setup.SetupGate.new_project
+
+    def new_project(gate: factory_gate_setup.SetupGate, name: str) -> Path:
+        project = original(gate, name)
+        assert gate.git(project, "config", "maintenance.auto") == "false"
+        assert gate.git(project, "config", "gc.auto") == "0"
+        assert gate.git(project, "config", "test.inherited") == "preserved"
+        return project
+
+    monkeypatch.setattr(factory_gate_setup.SetupGate, "new_project", new_project)
+    code, document = _run(tmp_path)
+
+    assert code == EXIT_PASS
+    assert document["verdict"] == "pass"
+
+
+def test_setup_apply_rejects_an_unpreviewed_created_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = factory_gate_setup.SetupGate.cli
+
+    def cli(gate: factory_gate_setup.SetupGate, *arguments: str, **kwargs: Any) -> Any:
+        process = original(gate, *arguments, **kwargs)
+        if arguments[:2] == ("factory", "init") and "--apply" in arguments:
+            project = Path(arguments[arguments.index("--project") + 1])
+            (project / "unpreviewed").write_text("unexpected\n", encoding="utf-8")
+        return process
+
+    monkeypatch.setattr(factory_gate_setup.SetupGate, "cli", cli)
+    code, document = _run(tmp_path)
+
+    assert code == EXIT_FAIL
+    recorded = {item["id"]: item for item in document["assertions"]}
+    assert recorded["setup-apply-performs-previewed-plan"]["status"] == "fail"

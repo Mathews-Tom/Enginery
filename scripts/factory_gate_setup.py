@@ -237,7 +237,18 @@ class SetupGate:
         }
         if "PYTHONPATH" in os.environ:
             env["PYTHONPATH"] = os.environ["PYTHONPATH"]
+        for key, value in os.environ.items():
+            if key == "GIT_CONFIG_COUNT" or key.startswith(
+                ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+            ):
+                env[key] = value
         env.update(extra or {})
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+        for key, value in (("maintenance.auto", "false"), ("gc.auto", "0")):
+            env[f"GIT_CONFIG_KEY_{count}"] = key
+            env[f"GIT_CONFIG_VALUE_{count}"] = value
+            count += 1
+        env["GIT_CONFIG_COUNT"] = str(count)
         return env
 
     def cli(
@@ -471,10 +482,15 @@ def step_init(gate: SetupGate) -> None:
     )
     after_apply = tree()
     created = sorted(set(after_apply) - set(before))
+    previewed_keys = {str(Path(path).relative_to(gate.root)) for path in previewed}
+    allowed_created = set(previewed_keys)
+    for key in previewed_keys:
+        allowed_created.update(str(parent) for parent in Path(key).parents if parent != Path("."))
+    exact_creation = set(created) <= allowed_created and previewed_keys <= set(after_apply)
     _record(
         gate,
         "setup-apply-performs-previewed-plan",
-        passed=apply_process.returncode == 0 and written_ok and len(created) >= len(previewed),
+        passed=apply_process.returncode == 0 and written_ok and exact_creation,
         since=start,
         observed={
             "exit": apply_process.returncode,
@@ -482,8 +498,8 @@ def step_init(gate: SetupGate) -> None:
             "previewed": sorted(previewed),
             "created_paths": created,
         },
-        expected="exit 0; performed paths equal the previewed paths; each file's sha256 equals "
-        "the preview's",
+        expected="exit 0; performed paths equal the previewed paths; every previewed path exists; "
+        "only previewed paths and their ancestor directories are created; file sha256s match",
         observer={"filesystem_before_after": {"created": created}},
     )
 

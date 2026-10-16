@@ -90,7 +90,8 @@ class UninstallPlan:
         }
 
 
-def _relative(project: Path, owned: OwnedFile) -> Path:
+def validate_owned_path(project: Path, owned: OwnedFile) -> Path:
+    """Validate the recorded role and path, refusing traversal and links."""
     try:
         relative = Path(owned.path).relative_to(project)
     except ValueError as error:
@@ -107,6 +108,7 @@ def _relative(project: Path, owned: OwnedFile) -> Path:
             "the setup ownership record names a path setup never creates; refusing to act on it",
             details={"path": owned.path, "role": owned.role},
         )
+    refuse_links(project, relative, what="a setup-owned path")
     return relative
 
 
@@ -120,9 +122,8 @@ def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> Unins
     removing_policy = False
     ordered = sorted(record.files, key=lambda item: item.role == DIRECTORY_ROLE)
     for owned in ordered:
-        relative = _relative(project, owned)
+        relative = validate_owned_path(project, owned)
         path = project / relative
-        refuse_links(project, relative, what="a setup-owned path")
         if owned.role == PROJECT_POLICY_ROLE:
             current = read_regular(path, what="the project policy file")
             if current is None:
@@ -193,4 +194,11 @@ def apply_uninstall(plan: UninstallPlan) -> tuple[str, ...]:
     return tuple(removed)
 
 
-__all__ = ["NEVER_TOUCHED", "RemovalOutcome", "UninstallPlan", "apply_uninstall", "plan_uninstall"]
+__all__ = [
+    "NEVER_TOUCHED",
+    "RemovalOutcome",
+    "UninstallPlan",
+    "apply_uninstall",
+    "plan_uninstall",
+    "validate_owned_path",
+]
