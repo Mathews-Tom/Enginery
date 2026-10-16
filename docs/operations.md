@@ -134,9 +134,54 @@ are distinct categories: a claim or a decodable screenshot is never acceptance.
 PNG validation checks signatures, chunk CRCs, dimensions and the decoded zlib
 stream; successful decoding alone says nothing about semantic behavior.
 
+Run `enginery factory calibrate RUN --project PROJECT` to execute the protected
+deliberate-fault fixtures and `enginery factory check RUN --project PROJECT` to
+observe the candidate. Stage 1's terminal verify node uses the same observer and
+evaluator service automatically for requests declaring checks. Observers inspect
+a clean, independently verified checkout of the current head, not uncommitted
+worker files. Command subprocesses receive argv and a fresh minimal environment;
+optional service argv starts and tears down a loopback service. HTTP redirects,
+non-loopback targets and a preexisting listener are refused.
+
+The evaluator requires actual, unskipped semantic comparisons and current
+calibration; an empty assertion set, exit-zero skipped output, mock-marked observer,
+worker claim, stale build or calibration-insensitive assertion cannot pass.
+Calibration distinguishes `caught`, `escaped`, `not_injected` and `inconclusive`
+for every assertion/fault pair, with `binding_identity`, `observer` or `evaluator`
+attribution only for demonstrated catches. Constant results and skipped persistence
+are exercised in protected fixture processes; wrong heads are rejected at the
+identity gate. Missing programs and timeouts are inconclusive, never catches.
+`calibrate --without-fault FAULT` deliberately records missing injection and cannot
+qualify acceptance.
+
+The optional browser observer uses the operator's user preferences only:
+
+```toml
+[executables]
+browser = "/absolute/path/to/chrome-headless-shell"
+browser_digest = "sha256:EXACT_DISTRIBUTION_TREE_DIGEST"
+```
+
+Only the qualified headless shell runs, over anonymous CDP pipes with a fresh
+profile and loopback-only requests. Its distribution digest is verified before
+every launch. The canonical tree digest is SHA-256 over path-byte-sorted lines
+`<file-sha256>  <path-relative-to-the-distribution-parent>\n`, equivalent to
+`find DIR -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256`
+when invoked from that parent. This is content identity, not publisher trust or
+OS containment. Browser DOM assertions and decodable screenshots are separate
+evidence; no public upload occurs.
+
+The local-only `behavioral-acceptance` factory-gate scenario exercises installed
+fixture CLI/service behavior and the qualified browser. A missing browser records
+unrun browser evidence and does not produce a passing scenario. `--live`, harness,
+engine/image and custody options are refused for this scenario.
+
 | Hold | Repair |
 |---|---|
 | `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery factory run ISSUE --project PROJECT`. For `stage1 start`, rebuild with `enginery stage1 build-request` first. Existing immutable runs are never rebound. |
+| `browser_observer_unqualified` | Install the approved headless-shell distribution and set its exact absolute executable and canonical distribution digest in user preferences; rerun `enginery factory check RUN --project PROJECT`. |
+| `behavioral_calibration_required`, stale, incomplete, escaped, not-injected or inconclusive calibration | Repair the named observer/assertion or missing fault injection, run `enginery factory calibrate RUN --project PROJECT`, then `enginery factory check RUN --project PROJECT`. A changed head/config/evaluator requires current calibration. |
+| `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. Recalibrate and rerun the check. |
 
 Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
 commands use the project's private `ledger.sqlite` and report its path; pass that

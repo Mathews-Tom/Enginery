@@ -398,6 +398,7 @@ class Stage1RunService:
     runner_admission: RunnerAdmissionPort | None = None
     isolated_command_runner: IsolatedCommandRunner | None = None
     branch_publisher: BranchPublicationPort | None = None
+    behavioral_verifier: Callable[[Stage1RunRequest, str], Digest] | None = None
 
     def start(
         self,
@@ -1751,6 +1752,17 @@ class Stage1RunService:
             _string(self._node_state(request.run.id, "implement"), "attempt_id")
         )
         validation = self._node_state(request.run.id, "validate")
+        behavioral_receipts: tuple[Digest, ...] = ()
+        if request.behavioral_checks is not None:
+            if self.behavioral_verifier is None:
+                raise HumanActionRequiredError(
+                    "behavioral acceptance is required but no trusted observer is configured; "
+                    f"run enginery factory check {request.run.id} "
+                    f"--project {request.repository_path}"
+                )
+            behavioral_receipts = (
+                self.behavioral_verifier(request, _string(open_pr, "head_revision")),
+            )
         verification_request = Stage1VerificationRequest(
             run_id=request.run.id,
             lifecycle_operation_id=OperationId.derive(
@@ -1773,6 +1785,7 @@ class Stage1RunService:
             implementation_artifacts=_digest_tuple(implementation, "artifact_references"),
             verification_artifacts=(
                 _digest_from_string(_string(validation, "validation_artifact_digest")),
+                *behavioral_receipts,
             ),
             execution_selection_digest=_selection_digest(request),
         )

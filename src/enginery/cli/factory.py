@@ -25,6 +25,7 @@ from enginery.application.layered_config import RUNNER_MODES
 from enginery.application.project_policy import SetupChoices
 from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
+from enginery.cli.factory_behavioral import run_command as run_behavioral_command
 from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_control import drain, pause
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
@@ -129,6 +130,18 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     _add_project(status_parser)
     status_parser.add_argument("run_id", nargs="?")
     status_parser.add_argument("--json", action="store_true")
+
+    for name in ("calibrate", "check"):
+        behavioral = commands.add_parser(name, help="Run independently bound behavioral checks.")
+        _add_project(behavioral)
+        behavioral.add_argument("run_id")
+        behavioral.add_argument("--json", action="store_true")
+        if name == "calibrate":
+            behavioral.add_argument(
+                "--without-fault", action="append", default=[],
+                choices=("constant_result", "skipped_persistence", "wrong_build"),
+                help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
+            )
 
     resume = commands.add_parser("resume", help="Reconcile workers and continue a durable run.")
     _add_project(resume)
@@ -328,6 +341,17 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_init(args)
     if command == "doctor":
         return _run_doctor(args)
+    if command in {"calibrate", "check"}:
+        document = run_behavioral_command(
+            resolve_project(args.project), args.run_id, calibrate=command == "calibrate",
+            without_faults=tuple(getattr(args, "without_fault", ())),
+        )
+        _emit(args, document, [json.dumps(document, sort_keys=True)])
+        return (
+            SUCCESS
+            if document.get("qualified") is True or document.get("result") == "pass"
+            else HOLD_EXIT
+        )
     if command == "collect":
         project = resolve_project(args.project)
         collected = collect(project, dry_run=args.dry_run)

@@ -76,7 +76,7 @@ class EvidenceEvaluator:
         satisfied: list[str] = []
         missing: list[str] = []
         failed: list[str] = []
-        indeterminate: list[str] = []
+        indeterminate: list[str] = [] if contract.requirements else ["no_requirements"]
         stale: list[str] = []
         subject_mismatch: list[str] = []
         for requirement in contract.requirements:

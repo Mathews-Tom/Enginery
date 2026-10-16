@@ -16,6 +16,7 @@ from enginery.adapters.github import (
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.config_binding import bind_behavioral_checks, require_bound_configuration
+from enginery.cli.factory_behavioral import verify_for_stage1
 from enginery.cli.stage1_execution import execution_report
 from enginery.cli.stage1_runner import (
     DriftedRunnerWiring,
@@ -180,6 +181,7 @@ def advancing_service(
         runner_admission=None if wiring is None else wiring.admission,
         isolated_command_runner=isolated_validation,
         branch_publisher=branch_publisher(request),
+        behavioral_verifier=lambda bound, head: verify_for_stage1(ledger, bound, head),
     )
 
 
