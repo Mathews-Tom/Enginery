@@ -209,11 +209,11 @@ The full current CLI surface, generated from `enginery --help`:
 
 ```text
 usage: enginery [-h] [--version]
-                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,capability}
+                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,runner,capability,factory}
                 ...
 
 positional arguments:
-  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,capability}
+  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,runner,capability,factory}
     doctor              Report locally implemented prerequisites.
     adapter             Inspect configured adapter providers.
     ledger              Ledger consistency and storage commands.
@@ -223,7 +223,9 @@ positional arguments:
     outcome             Inspect raw outcome observations and completeness.
     gate                Report readiness against a decision gate.
     workspace           Inspect and release run-scoped workspace reservations.
+    runner              Build and qualify the isolated worker image and engine.
     capability          Capability lock and scoped install commands.
+    factory             Guided project setup and prerequisite diagnostics.
 ```
 
 This is materially narrower than the full command-family list in the system
@@ -249,6 +251,8 @@ script against a command that is not listed above.
 | `enginery gate record-g4-deficiency-evidence --database PATH --finding-id ID --correlation-id ID --github-repository OWNER/REPO --github-credential-reference REF [--github-executable PATH] [--floor-config PATH] [--json]` | Verify one merged GitHub evidence PR and record its immutable two-human authority evidence. |
 | `enginery workspace inspect --database PATH --owner OWNER [--json]` | List every repository's current workspace reservation. |
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
+| `enginery factory init --runner MODE [--apply] [--project PATH] [choices...] [--json]` | Preview, or with `--apply` perform, guided project setup (below). |
+| `enginery factory doctor [--project PATH] [--json]` | Report the prerequisites the project's compiled selection needs, read-only (below). |
 | `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
 
 ### Capability packages
@@ -609,6 +613,83 @@ Each entry also carries a content-addressed `fingerprint`; a Stage 1 run
 binds to the exact fingerprint of every provider it uses and refuses to
 silently resume under a changed adapter (see
 [Recovery semantics](#recovery-semantics)).
+
+## Guided project setup
+
+`enginery factory init` resolves explicit choices into the project policy file the
+[layered configuration](#layered-configuration) reads, and `enginery factory doctor`
+reports what the project still needs. Setup is preview-first and its footprint is
+small enough to read in full.
+
+```bash
+uv run enginery factory init --runner trusted-local --harness omp \
+  --validation-command "uv run pytest -q" --required-check CI          # preview, writes nothing
+uv run enginery factory init --runner trusted-local --harness omp \
+  --validation-command "uv run pytest -q" --required-check CI --apply  # performs that exact plan
+uv run enginery factory doctor
+```
+
+`--runner` is required: the trust mode is never defaulted. Other choices are
+`--profile`, `--harness`, `--model`, `--effort` (configured defaults, not pins),
+`--runner-image`, `--model-access`, repeatable
+`--validation-command`, `--required-check`, `--protected-path`, and `--capability
+NAME[@VERSION]`; `--project PATH` defaults to the current directory. `--json` emits
+canonical JSON.
+
+When a model or effort is configured under `trusted-local`, the preview runs only the
+selected harness's read-only version probe (the same probe `build-request` runs).
+An out-of-range or unsupported harness version is a hold (exit 5); applying that
+plan writes nothing until the harness is resolved. A missing or unidentifiable
+harness is not checked by init; `factory doctor` reports it.
+
+Without `--apply`, `init` previews and writes nothing. The preview lists every file it
+would create (path, `tracked` or `private`, and the action `create`, `update`,
+`unchanged` or `conflict`), every capability install (init performs none), every
+network access (none) and every authentication requirement, plus the digest of the
+configuration the choices compile to. `--apply` performs exactly that plan:
+
+- **`<project>/.enginery/project.toml`** (tracked) is created, never overwritten. If it
+  exists and differs from what init would write it is user-owned: init reports a
+  `conflict`, exits 9, and writes nothing at all. If it already holds exactly what init
+  would write, nothing changes, so repeating `init` with the same choices is a no-op.
+- **A private ownership record** under `$XDG_STATE_HOME/enginery/projects/<id>/`
+  lists the files setup created with the sha256 of what it wrote. Every newly created
+  private directory has mode 0700. The record is written before the policy and restored
+  if creating the policy fails.
+- Capabilities are never installed by init. For a selected capability that is not
+  installed under `.enginery/installed`, init returns a hold (exit 5) naming the exact
+  `enginery capability preview` and `install` commands; approvals stay digest-bound
+  through the policy registry and init never records one.
+- A choice the compiler would refuse (an unknown profile, an image under
+  `trusted-local`, a malformed `user.toml`, a relative XDG directory) is refused with
+  exit 2 before any file is touched. A symbolic link on any owned state-path component,
+  the `.enginery` directory or the policy file is refused at preview and apply; an
+  existing non-directory `.enginery` is also refused. Capability names and versions
+  must satisfy the capability manifest grammar.
+
+Setup never writes credentials, never installs or changes launchd, systemd or cron
+units, MCP servers or global configuration, never edits `user.toml`, and never touches
+the ledger, evidence, the capability store or lockfile, or authentication state.
+
+`factory doctor` checks only what the compiled selection needs and never changes
+anything: git; the GitHub CLI and its read-only `auth status`; the selected harness
+executable through the same host probe `build-request` uses, against the packaged
+catalog (skipped for an `isolated-oci` run, which executes the image's pinned harness);
+the container engine and the pinned image through the existing runner admission only
+for `isolated-oci`; and each permitted capability that is not installed. Every missing
+item is a hold that names the exact prerequisite and the command that resolves it, and
+the exit code is 5 while any hold remains. A project that declares no trust mode is
+itself a hold: set `mode = "trusted-local"` or `mode = "isolated-oci"` in the
+existing policy's `[runner]` table (add the table if absent), or declare that choice
+in the user preferences. With no policy, the hold names `enginery factory init`.
+A malformed policy or user file is invalid input (exit 2), not a hold. Engine holds
+name engine installation, startup, qualification or context selection; image holds
+name image rebuilding and status; relay holds name relay setup.
+Container checks disclose the Docker context in use (or the docker CLI's current context) and list
+the container-engine contact in `network_access`. Repair commands carry `--docker-context`
+when a context is configured, so they target the same engine. Select a machine-local context
+with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or with
+`enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
 
 ## Running a Stage 1 workflow
 
@@ -2194,16 +2275,17 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 ### Proposed factory commands (not shipped)
 
-Nothing in this subsection exists in the shipped CLI. `enginery --help` lists
-exactly `doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`,
-`outcome`, `gate`, `workspace`, and `capability`; there is no
-`enginery factory` command. `gate status` accepts `--gate G4` only, and
-`stage1` provides `start`, `watch`, `review`, `approve`, `reject`, `cancel`,
-`resume`, `evidence`, and `build-request`.
+`enginery factory init` and `enginery factory doctor` are shipped (see
+[Guided project setup](#guided-project-setup)). `enginery --help` lists exactly
+`doctor`, `adapter`, `ledger`, `policy`, `stage1`, `stage2`, `outcome`, `gate`,
+`workspace`, `runner`, `capability`, and `factory`; `factory` provides `init` and
+`doctor` only. `gate status` accepts `--gate G4` only, and `stage1` provides
+`start`, `watch`, `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`,
+and `build-request`.
 
-A manual-first factory layer is proposed with this command family:
-`factory init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`,
-`drain`, `review`, `watch`, and `evidence`. Do not script against these names;
+The rest of a manual-first factory layer is proposed with this command family:
+`factory collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`,
+`review`, `watch`, and `evidence`. Do not script against these names;
 they are a proposal, not a compatibility promise. The proposed boundary:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;

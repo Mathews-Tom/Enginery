@@ -143,9 +143,9 @@ Enginery protects **workflow integrity** first. Its `trusted-local` backend is d
 
 Every public claim must name its boundary. "Reconciliation before retry" applies only to adapter operations with a stable provider-visible operation ID and a deterministic reconciliation query. It does not make a provider operation atomic, revoke an already-issued request, or establish that competing products lack an equivalent mechanism.
 
-### Proposed factory direction (not shipped)
+### Shipped setup and proposed factory direction
 
-The shipped `v0.6.0` substrate (published to PyPI and GitHub Releases on 2026-10-13) exposes the CLI surface listed in the operator guide, with no `enginery factory` command. A manual-first factory layer is **proposed and not shipped**; its command family is `init`, `collect`, `run`, `status`, `explain`, `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`. The rest of this subsection describes that proposal only, not current behavior.
+The shipped `v0.6.0` substrate (published to PyPI and GitHub Releases on 2026-10-13) exposes the CLI surface listed in the operator guide. Guided configuration is shipped as `enginery factory init` and `doctor`. The wider manual-first factory layer remains **proposed and not shipped**: `collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`. The rest of this subsection describes that wider proposal only, not current behavior.
 
 The proposal adds no second engine. It keeps one deterministic engine and ledger, and its boundary is manual-first, local-first, and deterministic: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. The harness, the model it reports, the session, and the worker machine are separate axes; none is inferred from another. Reference projects inform patterns only; no upstream skills or code are vendored.
 
