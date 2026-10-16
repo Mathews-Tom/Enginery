@@ -161,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session-deadline-seconds",
         type=int,
-        default=MAX_SESSION_DEADLINE_SECONDS,
+        default=None,
         help=f"runner-auth process-group deadline (1..{MAX_SESSION_DEADLINE_SECONDS})",
     )
     parser.add_argument(
@@ -200,9 +200,7 @@ def parse_options(
             "--docker-context": args.docker_context,
             "--runner-image": args.runner_image,
             "--relay-image": args.relay_image,
-            "--session-deadline-seconds": any(
-                argument.split("=", 1)[0] == "--session-deadline-seconds" for argument in arguments
-            ),
+            "--session-deadline-seconds": args.session_deadline_seconds is not None,
         }
         given = [flag for flag, value in local_only.items() if value]
         if given:
@@ -229,6 +227,8 @@ def parse_options(
             )
     elif args.confirm_single_session:
         parser.error("--confirm-single-session applies only with --live")
+    if args.session_deadline_seconds is None:
+        args.session_deadline_seconds = MAX_SESSION_DEADLINE_SECONDS
     if not 1 <= args.session_deadline_seconds <= MAX_SESSION_DEADLINE_SECONDS:
         parser.error(f"--session-deadline-seconds must be 1..{MAX_SESSION_DEADLINE_SECONDS}")
     for flag, value in (("--runner-image", args.runner_image), ("--relay-image", args.relay_image)):

@@ -97,6 +97,8 @@ def test_a_missing_git_is_a_hold_never_a_pass(
         ["--confirm-single-session"],
         ["--session-deadline-seconds", "900"],
         ["--session-deadline-seconds=120"],
+        ["--session-deadline", "120"],
+        ["--session-dead=120"],
         ["--custody-receipt", "receipt.json"],
         ["--gateway-url", "http://127.0.0.1:1", "--gateway-token-file", "token"],
         ["--docker-context", "colima"],
@@ -147,6 +149,26 @@ def test_setup_apply_rejects_an_unpreviewed_created_path(
         if arguments[:2] == ("factory", "init") and "--apply" in arguments:
             project = Path(arguments[arguments.index("--project") + 1])
             (project / "unpreviewed").write_text("unexpected\n", encoding="utf-8")
+        return process
+
+    monkeypatch.setattr(factory_gate_setup.SetupGate, "cli", cli)
+    code, document = _run(tmp_path)
+
+    assert code == EXIT_FAIL
+    recorded = {item["id"]: item for item in document["assertions"]}
+    assert recorded["setup-apply-performs-previewed-plan"]["status"] == "fail"
+
+
+def test_setup_apply_rejects_changes_to_an_existing_project_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = factory_gate_setup.SetupGate.cli
+
+    def cli(gate: factory_gate_setup.SetupGate, *arguments: str, **kwargs: Any) -> Any:
+        process = original(gate, *arguments, **kwargs)
+        if arguments[:2] == ("factory", "init") and "--apply" in arguments:
+            project = Path(arguments[arguments.index("--project") + 1])
+            (project / "README").write_text("unexpected replacement\n", encoding="utf-8")
         return process
 
     monkeypatch.setattr(factory_gate_setup.SetupGate, "cli", cli)

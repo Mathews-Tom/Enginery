@@ -483,10 +483,13 @@ def step_init(gate: SetupGate) -> None:
     after_apply = tree()
     created = sorted(set(after_apply) - set(before))
     previewed_keys = {str(Path(path).relative_to(gate.root)) for path in previewed}
-    allowed_created = set(previewed_keys)
+    allowed = set(previewed_keys)
     for key in previewed_keys:
-        allowed_created.update(str(parent) for parent in Path(key).parents if parent != Path("."))
-    exact_creation = set(created) <= allowed_created and previewed_keys <= set(after_apply)
+        allowed.update(str(parent) for parent in Path(key).parents if parent != Path("."))
+    changed = _changed(before, after_apply)
+    exact_creation = (
+        set(created) <= allowed and set(changed) <= allowed and previewed_keys <= set(after_apply)
+    )
     _record(
         gate,
         "setup-apply-performs-previewed-plan",
@@ -497,10 +500,11 @@ def step_init(gate: SetupGate) -> None:
             "performed": applied.get("performed"),
             "previewed": sorted(previewed),
             "created_paths": created,
+            "changed_paths": changed,
         },
         expected="exit 0; performed paths equal the previewed paths; every previewed path exists; "
-        "only previewed paths and their ancestor directories are created; file sha256s match",
-        observer={"filesystem_before_after": {"created": created}},
+        "only previewed paths and their ancestor directories change; file sha256s match",
+        observer={"filesystem_before_after": {"created": created, "changed": changed}},
     )
 
     start = len(gate.commands)

@@ -701,10 +701,11 @@ compiled field it prints the value, the winning layer, each shadowed lower-layer
 with its source file and sha256, then the hard constraints that applied, every layer
 file with its digest, each file setup created with its status (`owned`,
 `user-modified`, `missing`, or `user-owned` for a policy setup did not create), and the
-holds that can be derived from local files (an undeclared trust mode, a permitted
-capability that is not installed). It reads local files only, changes nothing, exits 5
-while a hold remains and 2 for a malformed policy or user file. Host prerequisites
-remain `doctor`'s job.
+current holds (an undeclared trust mode, a permitted capability that is not installed,
+or an incompatible selected harness). It changes nothing and reads local files; when
+a model or effort is configured under trusted-local, it also runs the selected harness's
+read-only version probe, as `build-request` does. It exits 5 while a hold remains and 2
+for malformed configuration. Other host prerequisites remain `doctor`'s job.
 Ownership entries are validated before any are reported as owned: the recorded role must
 match setup's project-relative path, with no traversal or symbolic links. A tampered
 ownership record is invalid input, not evidence of ownership.
@@ -713,11 +714,12 @@ ownership record is invalid input, not evidence of ownership.
 `init` did, using only the private ownership record. It removes the policy file only
 while its sha256 still equals the one setup recorded; a file you edited is kept and
 reported as user-owned, and a file that is already gone is a no-op. The `.enginery`
-directory setup created is removed only while it is empty, and the ownership record is
-removed last, so a second run reports nothing to uninstall. It never touches `user.toml`,
+directory setup created is removed only while it is empty; otherwise it is listed under
+`kept_not_empty`, separately from edited policies under `kept_user_owned`. The ownership
+record is removed last, so a second run reports nothing to uninstall. It never touches `user.toml`,
 the ledger, evidence and artifacts, the capability store or lockfile, or authentication
 state; a record that names any path other than the two setup creates is refused rather
-than obeyed, and a symbolic link on the way to either path is refused.
+than obeyed, and a symbolic link on the way to either path or the ownership record is refused.
 
 ## Running a Stage 1 workflow
 

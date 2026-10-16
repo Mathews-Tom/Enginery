@@ -104,6 +104,8 @@ def test_apply_removes_only_unmodified_owned_files_and_the_record_and_never_a_by
     assert (setup / ".enginery").is_dir()  # not empty: it holds the capability store and lock
     kept = {item["path"]: item for item in plan["files"]}  # type: ignore[union-attr]
     assert kept[str(setup / ".enginery")]["action"] == "keep"
+    assert plan["kept_user_owned"] == []
+    assert plan["kept_not_empty"] == [str(setup / ".enginery")]
     for path, content in bystanders.items():
         assert Path(path).read_bytes() == content
 
@@ -142,6 +144,8 @@ def test_a_modified_policy_is_kept_as_user_owned_and_the_record_is_still_removed
     assert code == 0
     assert policy.read_bytes() == edited
     assert str(policy) in plan["kept_user_owned"]  # type: ignore[operator]
+    assert plan["kept_user_owned"] == [str(policy)]
+    assert plan["kept_not_empty"] == [str(setup / ".enginery")]
     assert not _record_path(setup).exists()
     code, again = _factory(capsys, setup, "uninstall", "--apply")
     assert again["status"] == "nothing-to-uninstall" and policy.read_bytes() == edited
@@ -209,3 +213,41 @@ def test_a_project_setup_never_touched_has_nothing_to_uninstall(
     assert code == 0
     assert plan["status"] == "nothing-to-uninstall"
     assert policy.exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "apply"), [("explain", False), ("uninstall", False), ("uninstall", True)]
+)
+def test_a_symlinked_state_ancestor_is_refused_without_deleting_anything(
+    setup: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str, apply: bool
+) -> None:
+    record = _record_path(setup)
+    ancestor = record.parent.parent
+    moved = tmp_path / "moved-state"
+    ancestor.rename(moved)
+    ancestor.symlink_to(moved, target_is_directory=True)
+    before = _tree(setup, moved)
+
+    code, _ = _factory(capsys, setup, command, *(("--apply",) if apply else ()))
+
+    assert code == INVALID
+    assert _tree(setup, moved) == before
+
+
+def test_uninstall_rechecks_the_private_state_path_after_planning(
+    setup: Path, tmp_path: Path
+) -> None:
+    from enginery.cli.factory_uninstall import apply_uninstall, plan_uninstall
+    from enginery.domain.errors import InvalidInputError
+
+    plan = plan_uninstall(setup)
+    ancestor = plan.record_path.parent.parent
+    moved = tmp_path / "moved-state"
+    ancestor.rename(moved)
+    ancestor.symlink_to(moved, target_is_directory=True)
+    before = _tree(setup, moved)
+
+    with pytest.raises(InvalidInputError):
+        apply_uninstall(plan)
+
+    assert _tree(setup, moved) == before

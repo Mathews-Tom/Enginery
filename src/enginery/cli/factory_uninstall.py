@@ -31,6 +31,7 @@ from enginery.cli.setup_files import (
     refuse_links,
     remove_empty_directory,
     remove_regular,
+    require_private_path,
     sha256_bytes,
 )
 from enginery.domain.errors import InvalidInputError
@@ -83,7 +84,10 @@ class UninstallPlan:
                 "path": str(self.record_path),
                 "action": "remove" if self.has_record else "none",
             },
-            "kept_user_owned": [str(item.path) for item in self.kept],
+            "kept_user_owned": [
+                str(item.path) for item in self.kept if item.role == PROJECT_POLICY_ROLE
+            ],
+            "kept_not_empty": [str(item.path) for item in self.kept if item.role == DIRECTORY_ROLE],
             "removed": list(removed),
             "never_touched": list(NEVER_TOUCHED),
             "status": "nothing-to-uninstall" if not self.has_record else "ok",
@@ -115,6 +119,7 @@ def validate_owned_path(project: Path, owned: OwnedFile) -> Path:
 def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> UninstallPlan:
     """What uninstall would do; reads the record and the owned files, changes nothing."""
     record_path = private_state_directory(project, env) / OWNERSHIP_FILE
+    require_private_path(record_path, what="the setup ownership record")
     record = load_ownership(record_path, project=project)
     if record is None:
         return UninstallPlan(project, (), record_path, has_record=False)
@@ -171,6 +176,7 @@ def plan_uninstall(project: Path, env: Mapping[str, str] | None = None) -> Unins
 
 def apply_uninstall(plan: UninstallPlan) -> tuple[str, ...]:
     """Perform exactly the previewed removals, then the ownership record."""
+    require_private_path(plan.record_path, what="the setup ownership record")
     removed: list[str] = []
     for outcome in plan.outcomes:
         if outcome.action != "remove":
@@ -182,14 +188,11 @@ def apply_uninstall(plan: UninstallPlan) -> tuple[str, ...]:
         elif remove_empty_directory(plan.project, relative, what="the policy directory"):
             removed.append(str(outcome.path))
     if plan.has_record:
-        if plan.record_path.is_symlink():
-            raise InvalidInputError(
-                "the setup ownership record is a symbolic link; refusing to remove through it",
-                details={"path": str(plan.record_path)},
-            )
+        require_private_path(plan.record_path, what="the setup ownership record")
         plan.record_path.unlink()
         removed.append(str(plan.record_path))
         with contextlib.suppress(OSError):  # the private directory is shared when not empty
+            require_private_path(plan.record_path, what="the setup ownership record")
             plan.record_path.parent.rmdir()
     return tuple(removed)
 

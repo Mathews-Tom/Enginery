@@ -3,8 +3,9 @@
 Reads the same compiler output ``doctor`` and ``build-request`` use. For every field it
 reports the value, the winning layer, each shadowed lower-layer value, the hard constraints
 that applied and the source file and sha256 of every layer; it reports the files setup
-created with their ownership status; and it lists the holds that can be derived offline. It
-reads local files only and changes nothing; host prerequisites are ``factory doctor``'s job.
+created with their ownership status; and it lists the current configuration holds. It changes
+nothing and reads local files. When a model or effort is configured under trusted-local, it
+also runs the selected harness's read-only version probe, just as ``build-request`` does.
 """
 
 from __future__ import annotations
@@ -23,18 +24,30 @@ from enginery.application.effective_config import (
 )
 from enginery.application.project_policy import BUILTIN_CAPABILITIES
 from enginery.capabilities.install import load_owned_manifest
+from enginery.capabilities.manifest import validate_name
 from enginery.cli.config_locations import (
     PROJECT_POLICY_RELATIVE,
     private_state_directory,
 )
-from enginery.cli.factory_diagnostics import trust_mode_resolution
+from enginery.cli.factory_diagnostics import (
+    capability_resolution,
+    harness_probe_resolution,
+    locked_versions,
+    trust_mode_resolution,
+)
 from enginery.cli.factory_setup import (
     DIRECTORY_ROLE,
     INSTALL_ROOT_RELATIVE,
     ProjectConfiguration,
 )
 from enginery.cli.factory_uninstall import validate_owned_path
-from enginery.cli.setup_files import OWNERSHIP_FILE, load_ownership, read_regular
+from enginery.cli.setup_files import (
+    OWNERSHIP_FILE,
+    load_ownership,
+    read_regular,
+    require_private_path,
+)
+from enginery.domain.errors import InvalidInputError
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +65,9 @@ def owned_file_statuses(
     project: Path, env: Mapping[str, str] | None = None
 ) -> tuple[OwnedFileStatus, ...]:
     """Every file setup recorded, judged against what is on disk now."""
-    record = load_ownership(private_state_directory(project, env) / OWNERSHIP_FILE, project=project)
+    record_path = private_state_directory(project, env) / OWNERSHIP_FILE
+    require_private_path(record_path, what="the setup ownership record")
+    record = load_ownership(record_path, project=project)
     statuses: list[OwnedFileStatus] = []
     recorded: set[str] = set()
     if record is not None:
@@ -113,15 +128,31 @@ def offline_holds(configuration: ProjectConfiguration) -> list[dict[str, str]]:
         ]
     manifest = load_owned_manifest(configuration.project / INSTALL_ROOT_RELATIVE)
     holds: list[dict[str, str]] = []
+    if configuration.harness_probe_failure is not None:
+        holds.append(
+            {
+                "prerequisite": f"harness-{compiled.selection.harness}",
+                "detail": configuration.harness_probe_failure,
+                "resolve": harness_probe_resolution(configuration),
+            }
+        )
+    versions = locked_versions(configuration.project)
     for name in compiled.config.strings("permitted_capabilities"):
+        try:
+            validate_name(name)
+        except InvalidInputError as error:
+            source = compiled.config.field("permitted_capabilities").chain[0].source
+            raise InvalidInputError(
+                f"{source}: implementation.permitted_capabilities contains an invalid "
+                f"capability name: {name!r}"
+            ) from error
         if name in BUILTIN_CAPABILITIES or (manifest and manifest.package(name)):
             continue
         holds.append(
             {
                 "prerequisite": f"capability {name}",
                 "detail": f"capability {name} is permitted but not installed",
-                "resolve": f"enginery capability preview {name}@<version> "
-                "--project-source <REPOSITORY>@<COMMIT> --project-subdir <DIR>",
+                "resolve": capability_resolution(name, versions.get(name)),
             }
         )
     return holds

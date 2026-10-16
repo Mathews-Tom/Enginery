@@ -248,3 +248,81 @@ def test_existing_policy_trust_hold_names_an_actionable_edit(
     assert str(policy) in resolution
     assert "trusted-local" in resolution and "isolated-oci" in resolution
     assert "factory init" not in resolution
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_capability_hold_previews_then_installs_the_locked_version(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], locked: bool
+) -> None:
+    from enginery.capabilities.serialization import write_lock
+    from tests.support.capabilities import lock_of, locked_entry
+
+    project = tmp_path / "project"
+    _write(
+        project / ".enginery" / "project.toml",
+        'schema_version = 1\n[runner]\nmode = "trusted-local"\n'
+        '[implementation]\npermitted_capabilities = ["review-skill"]\n',
+    )
+    if locked:
+        write_lock(
+            lock_of(locked_entry("review-skill", version="2.3")),
+            project / ".enginery" / "capabilities.lock.json",
+        )
+
+    code, document = _explain(capsys, project)
+
+    assert code == HOLD
+    resolution = document["holds"][0]["resolve"]  # type: ignore[index]
+    request = "review-skill@" + ("2.3" if locked else "<version>")
+    assert f"enginery capability preview {request} " in resolution
+    assert f" && enginery capability install {request} " in resolution
+
+
+@pytest.mark.parametrize("layer", ["project", "user"])
+def test_invalid_capability_name_is_invalid_input_naming_its_file_and_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], layer: str
+) -> None:
+    project = tmp_path / "project"
+    policy = project / ".enginery" / "project.toml"
+    _write(policy, 'schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    source = (
+        policy
+        if layer == "project"
+        else Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
+    )
+    prefix = policy.read_text(encoding="utf-8") if layer == "project" else "schema_version = 1\n"
+    _write(source, prefix + '[implementation]\npermitted_capabilities = ["bad;command"]\n')
+    capsys.readouterr()
+
+    code = main(["factory", "explain", "--project", str(project), "--json"])
+
+    assert code == exit_code_for(FailureClass.INVALID_INPUT)
+    error = capsys.readouterr().err
+    assert str(source) in error and "implementation.permitted_capabilities" in error
+
+
+def test_incompatible_harness_model_default_is_an_explain_hold(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    executable = tmp_path / "omp"
+    _write(executable, "#!/bin/sh\nprintf 'omp v99.0.0\\n'\n")
+    executable.chmod(0o755)
+    _write(
+        project / ".enginery" / "project.toml",
+        'schema_version = 1\n[runner]\nmode = "trusted-local"\n'
+        '[execution]\nmodel = "openai/gpt-5"\n',
+    )
+    _write(
+        Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml",
+        f'schema_version = 1\n[executables]\nharness = "{executable}"\n',
+    )
+
+    code, document = _explain(capsys, project)
+
+    assert code == HOLD
+    holds = document["holds"]
+    assert isinstance(holds, list)
+    hold = next(item for item in holds if item["prerequisite"] == "harness-omp")
+    assert "99.0.0" in hold["detail"]
+    assert "install" in hold["resolve"] and "omp" in hold["resolve"]
