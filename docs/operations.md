@@ -785,7 +785,9 @@ present. `--base-branch` selects a different base branch. Run-layer overrides ar
 `--required-check`, `--protected-path` and `--time-budget-seconds`, with the same
 meaning and defaults as `stage1 build-request`; all other settings come from the
 compiled project/user/workflow/factory layers. A bound run is not recompiled by
-repeating `run` with different overrides.
+repeating `run` with different overrides. If a previous invocation wrote `request.json`
+but never started the run, repeating `run` recompiles it against the current configuration.
+A changed request digest replaces that unbound file and reports `request_rebuilt: true`.
 
 The project-specific private state directory contains:
 
@@ -801,17 +803,22 @@ The command reports the database and request paths; these are local runtime stat
 not tracked policy. Intake and request writes are atomic and link-safe. The intake
 index stores each issue's run ID and bound snapshot digest, plus the repository cursor.
 The run ID is `fr-` followed by the first 20 hexadecimal characters of SHA-256 over
-canonical JSON with keys `project`, `issue`, and `snapshot`: project identity, issue
-reference and bound snapshot digest. The same project/issue/snapshot reuses the same
-durable run, request and workspace rather than creating another run.
+canonical JSON with keys `project`, `issue`, and `snapshot`: project identity, canonical
+issue reference from the adapter and bound snapshot digest. The same project/issue/snapshot
+reuses the same durable run, request and workspace rather than creating another run.
+Issue numbers use positive ASCII digits without leading zeroes; `OWNER/REPO#01` is refused.
 
 `run --once` performs one advance. Otherwise it advances until a hold, block, human
 review, terminal state or wait boundary; `--wait-seconds` defaults to zero, returning
-at the first wait while the supervised worker may keep running. Repeating `factory run`
-for the same bound issue continues that durable run. `status` never advances it:
-without RUN it lists project runs; with RUN it reports current nodes, next action,
-worker PID or container identity, selection and winning layers, runner, budget basis,
-and holds with repairs. Time budgets are reported in seconds; cost remains unenforced.
+at the first wait while the supervised worker may keep running. The wait must be a
+finite non-negative number. Idle or unchanged actions back off for 0.5, 1, 2, then
+5 seconds between passes; CI waits poll no more often than every 15 seconds. The
+command returns at the deadline rather than making another idle advance.
+Repeating `factory run` for the same bound issue continues that durable run.
+`status` never advances it: without RUN it lists project runs; with RUN it reports
+current nodes, next action, worker PID or container identity, selection and winning
+layers, runner, budget basis, and holds with repairs. Time budgets are reported in
+seconds; cost remains unenforced.
 
 `factory explain RUN` reads the immutable binding: request and configuration digests,
 embedded field sources, harness/model/effort, runner, permitted capability subset,
@@ -820,10 +827,15 @@ Without RUN, `factory explain` retains the current configuration and setup-owner
 explanation described above.
 
 Terminal review remains `enginery stage1 review` against the returned database and
-run ID, using its existing flags and report format; the other Stage 1 commands retain
-their flags and output. There is no factory review UI. This path ends at a verified
-open PR plus outcome observation. Merge, release and deployment are separate human
-actions, never actions performed by this factory path.
+run ID. An `await_human_review` action reports `next_decision` with
+`enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
+--repair-attempt N`, using the current implementation's repair index (zero initially).
+Supply the review report in the existing Stage 1 format. A `blocked` action instead
+reports a hold with its recorded reason and matching repair; it is not an approval
+or a successful validation. The other Stage 1 commands retain their flags and output.
+There is no factory review UI. This path ends at a verified open PR plus outcome
+observation. Merge, release and deployment are separate human actions, never actions
+performed by this factory path.
 
 ### Manual-path holds
 
@@ -838,9 +850,22 @@ Holds report the exact repair command. Common cases are:
   lock/install or policy approval command; collection does not install it.
 - Changed issue snapshot: the command holds with "issue changed since run … was
   bound". Inspect the old run with `factory status RUN`; cancel it with
-  `enginery stage1 cancel --database PATH --run-id RUN` as appropriate before
-  `enginery factory run OWNER/REPO#N --supersede`. Superseding explicitly records a
-  new binding and run; the old run remains durable and visible in status.
+  `enginery stage1 cancel --database PATH --owner factory --run-id RUN --node-id implement`
+  as appropriate before `enginery factory run OWNER/REPO#N --supersede`.
+  Superseding refuses a still-active old run: its run status must be terminal, or its
+  latest implementation attempt must be terminal with no active lease or live worker
+  and no pending `open_pr` node. The refusal names those durable read fields for inspection.
+  Cancellation does not invent a run-state transition. Superseding explicitly records
+  a new binding and run; the old run remains durable and visible in status.
+- Paused dispatch: `enginery-operator resume --database DB` lifts the project-ledger
+  pause. Inspection retains any other execution holds alongside this pause.
+- Catalog, configuration or runner drift: `enginery factory doctor --project P`, then
+  restore the run's bound configuration rather than silently rebinding it.
+- Unprovable worker identity: resolve the worker on its launching host. This host
+  cannot safely signal or release a worker whose identity it cannot prove.
+- Other execution or blocked-node holds: a repair supplied by the service is reported
+  verbatim; otherwise the repair names `enginery factory doctor --project P` followed
+  by the hold's own diagnostic message.
 
 Factory `resume`, `pause`, `drain`, `review`, `watch` and `evidence` remain proposed
 and must not be scripted against. Scheduled collection/watch is not shipped.

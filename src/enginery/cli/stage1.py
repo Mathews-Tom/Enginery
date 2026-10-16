@@ -26,7 +26,7 @@ from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
-from enginery.workflows.stage1 import Stage1RunService
+from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
 
 
 def run_stage1(args: argparse.Namespace) -> int:
@@ -57,9 +57,10 @@ def run_stage1(args: argparse.Namespace) -> int:
 
 def _start(args: argparse.Namespace) -> None:
     raw_request = _read_json(args.request)
+    request = stage1_request_from_state(raw_request)
     ledger = LedgerService.open(args.database)
     try:
-        run = start_bound_run(ledger, owner=args.owner, raw_request=raw_request)
+        run = start_bound_run(ledger, owner=args.owner, request=request, raw_request=raw_request)
         _print({"run_id": str(run.request.run.id), "status": run.status.value})
     finally:
         ledger.close()

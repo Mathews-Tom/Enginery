@@ -33,7 +33,7 @@ def test_bound_start_refuses_a_request_that_disagrees_with_its_compiled_configur
     ledger = LedgerService.open(tmp_path / "ledger.sqlite")
     try:
         with pytest.raises(InvalidInputError, match=r"repair_limit.*configuration snapshot"):
-            start_bound_run(ledger, owner="factory", raw_request=raw_request)
+            start_bound_run(ledger, owner="factory", request=tampered, raw_request=raw_request)
         assert (
             ledger.read_projection(
                 aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=str(request.run.id)
@@ -42,6 +42,17 @@ def test_bound_start_refuses_a_request_that_disagrees_with_its_compiled_configur
         )
     finally:
         ledger.close()
+
+
+def test_malformed_start_request_leaves_no_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.sqlite"
+    path = tmp_path / "request.json"
+    path.write_text("{}", encoding="utf-8")
+    assert _start(database, path) == 2
+    assert "Stage 1 run projection run must be a mapping" in capsys.readouterr().err
+    assert not database.exists()
 
 
 def test_shared_watch_document_preserves_the_stage1_watch_shape_and_values(

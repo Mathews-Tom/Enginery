@@ -43,7 +43,6 @@ from enginery.workflows.stage1 import (
     Stage1Run,
     Stage1RunRequest,
     Stage1RunService,
-    stage1_request_from_state,
 )
 
 HEARTBEAT_WINDOW = timedelta(seconds=60)
@@ -286,10 +285,13 @@ def _now() -> datetime:
 
 
 def start_bound_run(
-    ledger: LedgerService, *, owner: str, raw_request: dict[str, object]
+    ledger: LedgerService,
+    *,
+    owner: str,
+    request: Stage1RunRequest,
+    raw_request: dict[str, object],
 ) -> Stage1Run:
     """Start a durable run, requiring its bound configuration before a new projection."""
-    request = stage1_request_from_state(raw_request)
     if (
         ledger.read_projection(aggregate_type=RUN_AGGREGATE_TYPE, aggregate_id=str(request.run.id))
         is None

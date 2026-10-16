@@ -27,7 +27,7 @@ from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
-from enginery.cli.factory_run import run_issue, status
+from enginery.cli.factory_run import nonnegative_seconds, run_issue, status
 from enginery.cli.factory_setup import (
     SetupPlan,
     apply_plan,
@@ -104,7 +104,7 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     _add_project(run)
     run.add_argument("issue", metavar="OWNER/REPO#N")
     run.add_argument("--once", action="store_true")
-    run.add_argument("--wait-seconds", type=float, default=0)
+    run.add_argument("--wait-seconds", type=nonnegative_seconds, default=0)
     run.add_argument("--supersede", action="store_true")
     run.add_argument("--base-branch", default=None)
     run.add_argument("--model", default=None)
