@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from enginery.adapters.claude_code import probe_installed_host as probe_installed_claude
@@ -68,6 +68,55 @@ from enginery.workflows.stage1 import (
 _NO_CAPABILITY_LOCK_DIGEST = Digest.of_bytes(b"no-capabilities-locked")
 _LOCAL_ENVIRONMENT_DIGEST = Digest.of_bytes(b"local-environment")
 _DEFAULT_CAPABILITY_LOCKFILE = Path(".enginery/capabilities.lock.json")
+
+
+@dataclass(frozen=True, slots=True)
+class RequestInputs:
+    """Compiler inputs shared by the CLI and factory callers.
+
+    Defaults match ``stage1 build-request``. Compilation reads the source issue and
+    configuration but does not write ``output``; the calling command owns that write.
+    """
+
+    output: Path
+    run_id: str
+    repository: str
+    external_reference: str
+    base_revision: str
+    repository_path: Path
+    workspace_path: Path
+    artifact_root: Path
+    inapplicable_criteria: list[int] = field(default_factory=list)
+    policy_set_version: str = "policy-v1"
+    capability_lockfile: Path = _DEFAULT_CAPABILITY_LOCKFILE
+    environment_manifest_digest: str | None = None
+    environment_manifest_file: Path | None = None
+    base_branch: str = "main"
+    head_branch: str | None = None
+    validation_commands: list[str] | None = None
+    required_checks: list[str] | None = None
+    repair_limit: int | None = None
+    protected_paths: list[str] | None = None
+    implementation_attempt_id: str | None = None
+    implementation_operation_id: str | None = None
+    implementation_time_budget_seconds: int | None = None
+    implementation_cost_budget: str | None = None
+    permitted_capabilities: list[str] | None = None
+    evidence_requirements: list[str] | None = None
+    github_repository: str | None = None
+    github_credential_reference: str | None = None
+    github_executable: str | None = None
+    harness_provider: str | None = None
+    harness_credential_reference: str | None = None
+    harness_executable: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    strict_effective: bool = False
+    profile: str | None = None
+    runner: str | None = None
+    runner_image: str | None = None
+    docker_context: str | None = None
+    model_access: str | None = None
 
 
 def add_build_request_parser(
@@ -245,7 +294,7 @@ def _parse_digest(value: str) -> Digest:
     return Digest(algorithm=algorithm, hex_value=hex_value.lower())
 
 
-def _digest_override(args: argparse.Namespace, *, flag: str, default: Digest) -> Digest:
+def _digest_override(args: RequestInputs, *, flag: str, default: Digest) -> Digest:
     digest_value = getattr(args, f"{flag}_digest")
     file_value = getattr(args, f"{flag}_file")
     if digest_value is not None:
@@ -261,7 +310,7 @@ def _capability_lock_digest(lockfile: Path) -> Digest:
     return read_lock(lockfile).digest()
 
 
-def _reject_cost_budget(args: argparse.Namespace) -> None:
+def _reject_cost_budget(args: RequestInputs) -> None:
     """Refuse a hard-dollar budget instead of recording a number nothing enforces."""
     if args.implementation_cost_budget is not None:
         raise InvalidInputError(
@@ -282,7 +331,7 @@ def _probe_host(harness: str, executable: str) -> InstalledHost | None:
     )
 
 
-def _run_layer(args: argparse.Namespace) -> LayerDocument:
+def _run_layer(args: RequestInputs) -> LayerDocument:
     """The run layer: exactly the choices the operator made on the command line."""
     values: dict[str, object] = {}
     for name, flag in (
@@ -332,9 +381,15 @@ class BuiltRequest:
 
 
 def build_request(args: argparse.Namespace) -> BuiltRequest:
-    """Construct one durable Stage 1 request for the GitHub issue named by
-    ``--external-reference``, compiled from the layered configuration.
-    """
+    """Adapt the public CLI namespace to the shared request compiler."""
+    return compile_request(
+        RequestInputs(**{item.name: getattr(args, item.name) for item in fields(RequestInputs)})
+    )
+
+
+def compile_request(inputs: RequestInputs) -> BuiltRequest:
+    """Compile a durable Stage 1 request from layered configuration and a source issue."""
+    args = inputs
     _reject_cost_budget(args)
     compiled = compile_effective_config(
         project=read_project_layer(args.repository_path.resolve()),
@@ -467,4 +522,11 @@ def run_build_request(args: argparse.Namespace) -> int:
     return 0
 
 
-__all__ = ["BuiltRequest", "add_build_request_parser", "build_request", "run_build_request"]
+__all__ = [
+    "BuiltRequest",
+    "RequestInputs",
+    "add_build_request_parser",
+    "build_request",
+    "compile_request",
+    "run_build_request",
+]

@@ -710,6 +710,23 @@ Ownership entries are validated before any are reported as owned: the recorded r
 match setup's project-relative path, with no traversal or symbolic links. A tampered
 ownership record is invalid input, not evidence of ownership.
 
+### Issue intake
+
+`enginery factory collect --dry-run --project . --json` lists open issues from the
+repository's `origin`, excluding pull requests. Exactly one canonical
+`enginery/work-kind/issue|plan` and one `enginery/risk/low|medium` label are required.
+Missing, duplicated or unknown labels hold the issue with an explicit repair command.
+The preview includes deduplication, selected workflow, harness/model/effort and winning
+layers, runner, time budget and the unenforced cost basis. It makes no local writes,
+GitHub mutations or hosted inference calls; effect counts are explicit in JSON.
+
+Without `--dry-run`, collection records only the private `intake/index.json` and its
+lock file. The index retains a repository `last_seen_updated_at` cursor and immutable
+issue snapshot bindings; changed snapshots hold rather than silently rebinding a run.
+The JSON `local_writes` list discloses these paths. Collection never comments, labels,
+opens a pull request, merges, deploys, installs a capability or starts a worker.
+
+
 `factory uninstall` previews by default and, with `--apply`, undoes exactly what
 `init` did, using only the private ownership record. It removes the policy file only
 while its sha256 still equals the one setup recorded; a file you edited is kept and

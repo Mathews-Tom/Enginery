@@ -36,9 +36,13 @@ described in [Guided project setup](docs/operations.md#guided-project-setup). Th
 only a project policy file and a private ownership record, and never install
 capabilities, sign in, or touch services, MCP servers or global configuration.
 
+`enginery factory collect --dry-run` previews canonical issue classification, deduplication,
+workflow selection and budgets without mutations. `collect` records only the private
+intake index and cursor; neither form calls a model or changes GitHub.
+
 A manual-first software-factory layer on top of the shipped substrate is
 otherwise **proposed and not shipped**: the remaining proposed command family
-(`collect`, `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
+(`run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
 `evidence`) does not exist yet and must not be scripted against. The
 proposal keeps the same boundary the shipped substrate already has: control is
 manual-first, local-first, and deterministic. Models never poll, schedule, keep

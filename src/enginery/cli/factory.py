@@ -24,6 +24,7 @@ from enginery.application.layered_config import RUNNER_MODES
 from enginery.application.project_policy import SetupChoices
 from enginery.capabilities.manifest import validate_name, validate_version
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
+from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
 from enginery.cli.factory_setup import (
@@ -92,6 +93,11 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     )
     _add_project(doctor)
     doctor.add_argument("--json", action="store_true", help="Emit canonical JSON.")
+
+    collect_parser = commands.add_parser("collect", help="Preview or record GitHub issue intake.")
+    _add_project(collect_parser)
+    collect_parser.add_argument("--dry-run", action="store_true")
+    collect_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
     explain_parser = commands.add_parser(
         "explain",
@@ -264,6 +270,10 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_init(args)
     if command == "doctor":
         return _run_doctor(args)
+    if command == "collect":
+        document = collect(resolve_project(args.project), dry_run=args.dry_run)
+        _emit(args, document, document_lines(document))
+        return HOLD_EXIT if document["holds"] else SUCCESS
     if command == "explain":
         return _run_explain(args)
     if command == "uninstall":

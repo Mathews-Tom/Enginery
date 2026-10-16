@@ -19,8 +19,12 @@ from enginery.application.adapter_types import (
     ProviderKind,
 )
 from enginery.application.delivery_ports import PublicationReceipt, PublicationRequest
+from enginery.application.factory_intake import (
+    IssueCandidate,
+    declared_classification,
+    label_names,
+)
 from enginery.application.work_ports import (
-    DeclaredWorkClassification,
     LifecycleProjection,
     PullRequestCheck,
     PullRequestEvidence,
@@ -30,7 +34,6 @@ from enginery.application.work_ports import (
     WorkLedgerSnapshot,
 )
 from enginery.domain.digests import Digest
-from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import (
     AmbiguousExternalSideEffectError,
     AuthenticationFailureError,
@@ -52,16 +55,6 @@ _PAGE_SIZE = 100
 _LIFECYCLE_MARKER_PREFIX = "<!-- enginery:lifecycle:"
 _PULL_REQUEST_MARKER_PREFIX = "<!-- enginery:pull-request:"
 _MERGE_METHODS = frozenset({"merge", "squash", "rebase"})
-
-_WORK_KIND_LABELS = {
-    "enginery/work-kind/issue": WorkKind.ISSUE,
-    "enginery/work-kind/plan": WorkKind.PLAN,
-}
-_RISK_LABELS = {
-    "enginery/risk/low": RiskClass.LOW,
-    "enginery/risk/medium": RiskClass.MEDIUM,
-}
-_CLASSIFICATION_PREFIXES = ("enginery/work-kind/", "enginery/risk/")
 
 
 class GitHubCliUnavailableError(MissingPrerequisiteError, OSError):
@@ -115,6 +108,7 @@ class GitHubWorkLedger:
         )
     )
     _outcomes: dict[str, ReconciliationResult] = field(default_factory=dict, init=False)
+    github_reads: int = field(default=0, init=False)
 
     def probe(self) -> AdapterStatus:
         try:
@@ -160,6 +154,40 @@ class GitHubWorkLedger:
             detail="GitHub issue work ledger is available",
         )
 
+    def list_candidates(self, *, since: str | None) -> tuple[IssueCandidate, ...]:
+        """List open issue metadata, retaining labels from the paginated listing."""
+        candidates: list[IssueCandidate] = []
+        page = 1
+        while True:
+            endpoint = (
+                f"repos/{self.config.repository}/issues"
+                f"?state=open&per_page={_PAGE_SIZE}&page={page}"
+            )
+            if since is not None:
+                endpoint += f"&since={quote(since, safe='')}"
+            records = self._request_array("GET", endpoint)
+            for record in records:
+                if not isinstance(record, Mapping):
+                    raise TransientProviderFailureError("GitHub issue record must be an object")
+                if "pull_request" in record:
+                    continue
+                labels = record.get("labels")
+                if not isinstance(labels, list):
+                    raise TransientProviderFailureError("GitHub issue labels must be a JSON array")
+                candidates.append(
+                    IssueCandidate(
+                        external_reference=(
+                            f"{self.config.repository}#{_required_positive_int(record, 'number')}"
+                        ),
+                        title=_required_string(record, "title"),
+                        labels=label_names(labels),
+                        updated_at=_required_string(record, "updated_at"),
+                    )
+                )
+            if len(records) < _PAGE_SIZE:
+                return tuple(candidates)
+            page += 1
+
     def fetch(self, external_reference: str) -> WorkLedgerSnapshot:
         issue_number = self._issue_number(external_reference)
         endpoint = f"repos/{self.config.repository}/issues/{issue_number}"
@@ -167,14 +195,14 @@ class GitHubWorkLedger:
         if "pull_request" in payload:
             raise InvalidInputError("GitHub pull requests cannot be ingested as issues")
         labels = self._labels(endpoint)
-        _declared_classification(labels, source_url=_required_string(payload, "url"))
+        declared_classification(label_names(labels), source_url=_required_string(payload, "url"))
         confirmed_payload = self._request_object("GET", endpoint)
         if payload != confirmed_payload:
             raise StaleEvidenceError(
                 "GitHub issue changed while declared classification was collected"
             )
         confirmed_labels = self._labels(endpoint)
-        if _label_names(labels) != _label_names(confirmed_labels):
+        if label_names(labels) != label_names(confirmed_labels):
             raise StaleEvidenceError(
                 "GitHub declared classification changed while it was collected"
             )
@@ -226,8 +254,8 @@ class GitHubWorkLedger:
         else:
             raise InvalidInputError("GitHub issue body must be a non-blank string or null")
         source_snapshot_reference = _required_string(payload, "url")
-        work_kind, risk_class, classification = _declared_classification(
-            labels, source_url=source_snapshot_reference
+        work_kind, risk_class, classification = declared_classification(
+            label_names(labels), source_url=source_snapshot_reference
         )
         work_item = WorkItem(
             id=WorkItemId(f"github:{self.config.repository}#{issue_number}"),
@@ -345,6 +373,8 @@ class GitHubWorkLedger:
         return cast(Sequence[object], payload)
 
     def _request(self, method: str, endpoint: str, *fields: str) -> object:
+        if method == "GET":
+            self.github_reads += 1
         return _request(self.config, self.command_runner, method, endpoint, *fields)
 
     def _run(self, arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -851,50 +881,6 @@ class GitHubReleaseAdapter:
         if not isinstance(payload, Mapping):
             raise TransientProviderFailureError("GitHub API response must be a JSON object")
         return payload
-
-
-def _declared_classification(
-    labels: Sequence[object], *, source_url: str
-) -> tuple[WorkKind, RiskClass, DeclaredWorkClassification]:
-    names: list[str] = []
-    for label in labels:
-        if not isinstance(label, Mapping):
-            raise TransientProviderFailureError("GitHub issue label record must be an object")
-        names.append(_required_string(label, "name"))
-    work_labels = [
-        name for name in names if name.casefold().startswith(_CLASSIFICATION_PREFIXES[0])
-    ]
-    risk_labels = [
-        name for name in names if name.casefold().startswith(_CLASSIFICATION_PREFIXES[1])
-    ]
-    if len(work_labels) != 1:
-        raise InvalidInputError("GitHub issue requires exactly one declared work-kind label")
-    if len(risk_labels) != 1:
-        raise InvalidInputError("GitHub issue requires exactly one declared risk label")
-    if work_labels[0] not in _WORK_KIND_LABELS:
-        raise InvalidInputError("GitHub work-kind labels must use the exact declared vocabulary")
-    if risk_labels[0] not in _RISK_LABELS:
-        raise InvalidInputError("GitHub risk labels must use the exact declared vocabulary")
-    work_label = work_labels[0]
-    risk_label = risk_labels[0]
-    return (
-        _WORK_KIND_LABELS[work_label],
-        _RISK_LABELS[risk_label],
-        DeclaredWorkClassification(
-            source_provider="github-issues",
-            source_url=source_url,
-            canonical_labels=(work_label, risk_label),
-        ),
-    )
-
-
-def _label_names(labels: Sequence[object]) -> tuple[str, ...]:
-    names: list[str] = []
-    for label in labels:
-        if not isinstance(label, Mapping):
-            raise TransientProviderFailureError("GitHub issue label record must be an object")
-        names.append(_required_string(label, "name"))
-    return tuple(sorted(names))
 
 
 def _request(
