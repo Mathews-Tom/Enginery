@@ -49,15 +49,18 @@ class _Tags(HTMLParser):
 
 
 def test_hostile_html_is_inert_and_cannot_load_worker_previews() -> None:
-    hostile = '\"><script>alert(1)</script><img src="https://evil.invalid/x">&\' <iframe src="file:///tmp/worker.html">'
+    hostile = '"><script>alert(1)</script><img src="https://evil.invalid/x">&\' <iframe src="file:///tmp/worker.html">'
     packet = _packet(hostile)
     document = render_html(packet)
     parser = _Tags()
     parser.feed(document)
     assert html.escape(hostile, quote=True) in document
     assert not {tag for tag, _ in parser.tags} & {"script", "img", "iframe", "a", "form", "link"}
-    policies = [attrs["content"] for tag, attrs in parser.tags
-                if tag == "meta" and attrs.get("http-equiv") == "Content-Security-Policy"]
+    policies = [
+        attrs["content"]
+        for tag, attrs in parser.tags
+        if tag == "meta" and attrs.get("http-equiv") == "Content-Security-Policy"
+    ]
     assert policies == [REVIEW_CSP]
     assert "default-src 'none'" in REVIEW_CSP
     assert "script-src 'none'" in REVIEW_CSP
@@ -67,9 +70,18 @@ def test_hostile_html_is_inert_and_cannot_load_worker_previews() -> None:
 
 
 def test_every_terminal_control_is_visible_instead_of_executable() -> None:
-    controls = "".join(chr(value) for value in (*range(0x20), *range(0x7F, 0xA0),
-                                                0x61C, 0x200E, 0x200F,
-                                                *range(0x202A, 0x202F), *range(0x2066, 0x2070)))
+    controls = "".join(
+        chr(value)
+        for value in (
+            *range(0x20),
+            *range(0x7F, 0xA0),
+            0x61C,
+            0x200E,
+            0x200F,
+            *range(0x202A, 0x202F),
+            *range(0x2066, 0x2070),
+        )
+    )
     escaped = escape_terminal(controls)
     assert all(character not in escaped for character in controls)
     assert "\\u001b" in escaped and "\\u009b" in escaped and "\\u202e" in escaped
@@ -78,18 +90,21 @@ def test_every_terminal_control_is_visible_instead_of_executable() -> None:
     assert any("\\u001b[2J" in line for line in lines)
 
 
-@pytest.mark.parametrize("changes", [
-    {"run_id": "another-run"},
-    {"request_digest": str(Digest.of_bytes(b"other request"))},
-    {"configuration_snapshot_digest": str(Digest.of_bytes(b"other config"))},
-    {"base_revision": "c" * 40},
-    {"head_revision": "d" * 40},
-    {"diff": "+different diff"},
-    {"evidence_receipt_digests": (str(Digest.of_bytes(b"different observation")),)},
-    {"ci_evidence_json": '{"status":"failed"}'},
-    {"findings_json": '["repair the result"]'},
-    {"sections": (("Intent", '{"text":"different intent"}'),)},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"run_id": "another-run"},
+        {"request_digest": str(Digest.of_bytes(b"other request"))},
+        {"configuration_snapshot_digest": str(Digest.of_bytes(b"other config"))},
+        {"base_revision": "c" * 40},
+        {"head_revision": "d" * 40},
+        {"diff": "+different diff"},
+        {"evidence_receipt_digests": (str(Digest.of_bytes(b"different observation")),)},
+        {"ci_evidence_json": '{"status":"failed"}'},
+        {"findings_json": '["repair the result"]'},
+        {"sections": (("Intent", '{"text":"different intent"}'),)},
+    ],
+)
 def test_subject_digest_binds_every_review_input(changes: dict[str, Any]) -> None:
     packet = _packet()
     assert replace(packet, **changes).subject_digest != packet.subject_digest
@@ -120,61 +135,81 @@ def _feedback_setup(monkeypatch: pytest.MonkeyPatch, packet: ReviewPacket) -> li
         reports.append(report)
         return SimpleNamespace(outcome=route_review(report, repair_attempt=0, repair_limit=2))
 
-    monkeypatch.setattr(factory_review, "read_only_service", lambda **kwargs:
-                        SimpleNamespace(review_implementation=record_review))
+    monkeypatch.setattr(
+        factory_review,
+        "read_only_service",
+        lambda **kwargs: SimpleNamespace(review_implementation=record_review),
+    )
     return reports
 
 
 def test_terminal_feedback_enters_existing_repair_path_and_never_approves(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packet = _packet()
     reports = _feedback_setup(monkeypatch, packet)
-    text = '<script>approve everything</script>\x1b[2J'
-    result = factory_review.feedback(tmp_path, packet.run_id,
-                                     subject_digest=packet.subject_digest, text=text)
+    text = "<script>approve everything</script>\x1b[2J"
+    result = factory_review.feedback(
+        tmp_path, packet.run_id, subject_digest=packet.subject_digest, text=text
+    )
     assert result["feedback_queued"] is True
     assert result["authority_granted"] is False
     assert result["review_outcome"] == ReviewOutcome.REPAIR_REQUESTED.value
-    report, = reports
-    finding, = report.findings
+    (report,) = reports
+    (finding,) = report.findings
     assert finding.actionable and not finding.blocking
     queued = json.loads(finding.finding_id)
-    assert queued == {"kind": "packet_feedback", "subject_digest": packet.subject_digest,
-                      "text": text}
+    assert queued == {
+        "kind": "packet_feedback",
+        "subject_digest": packet.subject_digest,
+        "text": text,
+    }
     assert route_review(report, repair_attempt=2, repair_limit=2) is ReviewOutcome.REPAIR_EXHAUSTED
 
 
 def test_feedback_rejects_stale_subject_and_empty_reports(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packet = _packet()
     reports = _feedback_setup(monkeypatch, packet)
     with pytest.raises(InvalidInputError, match="stale"):
-        factory_review.feedback(tmp_path, packet.run_id,
-                                subject_digest=str(Digest.of_bytes(b"old")), text="repair")
+        factory_review.feedback(
+            tmp_path, packet.run_id, subject_digest=str(Digest.of_bytes(b"old")), text="repair"
+        )
     with pytest.raises(InvalidInputError, match="non-blank"):
-        factory_review.feedback(tmp_path, packet.run_id, subject_digest=packet.subject_digest, text=" ")
+        factory_review.feedback(
+            tmp_path, packet.run_id, subject_digest=packet.subject_digest, text=" "
+        )
     assert reports == []
 
 
 def test_existing_unresolved_feedback_is_preserved_with_its_original_subject(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = _packet()
-    old_finding = json.dumps({"kind": "packet_feedback", "subject_digest": original.subject_digest,
-                              "text": "first repair"})
+    old_finding = json.dumps(
+        {
+            "kind": "packet_feedback",
+            "subject_digest": original.subject_digest,
+            "text": "first repair",
+        }
+    )
     current = replace(original, findings_json=json.dumps([old_finding]))
     reports = _feedback_setup(monkeypatch, current)
-    factory_review.feedback(tmp_path, current.run_id, subject_digest=current.subject_digest,
-                            text="second repair")
-    report, = reports
+    factory_review.feedback(
+        tmp_path, current.run_id, subject_digest=current.subject_digest, text="second repair"
+    )
+    (report,) = reports
     assert report.findings[0].finding_id == old_finding
     assert json.loads(report.findings[1].finding_id)["subject_digest"] == current.subject_digest
 
 
 def test_exact_feedback_replay_is_idempotent_without_re_resolving_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = _packet()
     queued = json.dumps(
@@ -193,7 +228,8 @@ def test_exact_feedback_replay_is_idempotent_without_re_resolving_review(
 
 
 def test_review_writes_a_private_digest_specific_inert_packet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     packet = _packet("<script>hostile</script>")
@@ -216,7 +252,9 @@ def test_review_writes_a_private_digest_specific_inert_packet(
         factory_review.review(project, packet.run_id)
 
 
-def test_receipt_display_verifies_digest_without_treating_worker_claim_as_verdict(tmp_path: Path) -> None:
+def test_receipt_display_verifies_digest_without_treating_worker_claim_as_verdict(
+    tmp_path: Path,
+) -> None:
     raw = json.dumps({"category": "worker_claim", "result": "PASS"}).encode()
     digest = Digest.of_bytes(raw)
     path = tmp_path / "objects" / digest.algorithm / digest.hex_value[:2] / digest.hex_value
@@ -232,7 +270,8 @@ def test_receipt_display_verifies_digest_without_treating_worker_claim_as_verdic
 
 
 def test_packet_reads_durable_observation_projection_and_verified_head(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.cli.test_stage1 import _request
 
@@ -253,17 +292,20 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
         "result": "indeterminate",
     }
     states: dict[tuple[str, str], dict[str, object]] = {
-        (factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:implement"):
-            {"attempt_id": request.implementation.attempt_id},
+        (factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:implement"): {
+            "attempt_id": request.implementation.attempt_id
+        },
         ("node_attempt", request.implementation.attempt_id): {"result": {"head_revision": head}},
         ("behavioral_acceptance", run_id): observed,
     }
     monkeypatch.setattr(
-        factory_review, "_projection",
+        factory_review,
+        "_projection",
         lambda ledger, aggregate_type, aggregate_id: states.get((aggregate_type, aggregate_id), {}),
     )
     monkeypatch.setattr(
-        factory_review, "CoordinatorRuntime",
+        factory_review,
+        "CoordinatorRuntime",
         lambda *args, **kwargs: SimpleNamespace(
             read_node_request=lambda **kwargs: SimpleNamespace(base_revision="a" * 40)
         ),

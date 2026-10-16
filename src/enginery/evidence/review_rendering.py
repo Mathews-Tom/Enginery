@@ -20,7 +20,9 @@ def escape_terminal(text: str) -> str:
     """Make all C0/C1/DEL and directional controls visible, including newlines."""
     return "".join(
         f"\\u{ord(character):04x}"
-        if ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F or ord(character) in _BIDI_CONTROLS
+        if ord(character) < 0x20
+        or 0x7F <= ord(character) <= 0x9F
+        or ord(character) in _BIDI_CONTROLS
         else character
         for character in text
     )
@@ -46,7 +48,10 @@ def render_terminal(packet: ReviewPacket) -> tuple[str, ...]:
     """Return complete terminal lines, escaping data before adding trusted layout."""
     lines = (
         "Enginery review packet — feedback requests repairs; it never approves an action.",
-        *(f"{escape_terminal(name)}: {escape_terminal(value)}" for name, value in _sections(packet)),
+        *(
+            f"{escape_terminal(name)}: {escape_terminal(value)}"
+            for name, value in _sections(packet)
+        ),
     )
     _bounded("\n".join(lines))
     return lines
@@ -66,11 +71,11 @@ def render_html(packet: ReviewPacket) -> str:
         + '"><meta name="enginery-review-packet" content="'
         + PACKET_MARKER
         + '"><title>Enginery review packet</title></head><body>'
-        '<h1>Enginery review packet</h1><p>Feedback requests repairs. '
-        'This packet and its annotations cannot approve any action. '
-        'Artifact references are text only; worker previews are not embedded.</p>'
+        "<h1>Enginery review packet</h1><p>Feedback requests repairs. "
+        "This packet and its annotations cannot approve any action. "
+        "Artifact references are text only; worker previews are not embedded.</p>"
         + sections
-        + '</body></html>'
+        + "</body></html>"
     )
     _bounded(document)
     return document

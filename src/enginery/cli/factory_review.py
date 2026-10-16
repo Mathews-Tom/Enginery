@@ -53,7 +53,9 @@ def _git(path: Path, *arguments: str) -> str:
     """Read Git output with a hard byte bound and wall-clock deadline, never a shell."""
     command = ("git", "--no-pager", "-C", str(path), *arguments)
     with subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         env=repository_isolated_environment(),
     ) as process:
         assert process.stdout is not None
@@ -78,7 +80,9 @@ def _git(path: Path, *arguments: str) -> str:
                     if len(output) > MAX_PACKET_BYTES:
                         raise InvalidInputError("review Git output exceeds the 1 MiB limit")
             if process.wait(timeout=max(0.01, deadline - time.monotonic())):
-                raise MissingPrerequisiteError("review requires locally available base and verified head")
+                raise MissingPrerequisiteError(
+                    "review requires locally available base and verified head"
+                )
         except BaseException:
             process.kill()
             process.wait()
@@ -87,7 +91,9 @@ def _git(path: Path, *arguments: str) -> str:
 
 
 def _revision(path: Path, revision: str) -> str:
-    resolved = _git(path, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}").strip()
+    resolved = _git(
+        path, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
+    ).strip()
     if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", resolved) is None:
         raise InvalidInputError("review revision is not a full Git commit identity")
     return resolved
@@ -125,7 +131,9 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     implementation = states["implement"]
     attempt_id = implementation.get("attempt_id")
     if not isinstance(attempt_id, str):
-        raise MissingPrerequisiteError("review requires a collected implementation with a verified head")
+        raise MissingPrerequisiteError(
+            "review requires a collected implementation with a verified head"
+        )
     attempt = _projection(ledger, "node_attempt", attempt_id)
     result = attempt.get("result")
     result = dict(result) if isinstance(result, Mapping) else {}
@@ -135,7 +143,9 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     # Inspect committed objects only: no external diff/textconv and no untracked worker content.
     repository = request.workspace_path
     if _revision(repository, "HEAD") != head:
-        raise InvalidInputError("review head changed; collect and validate the current implementation")
+        raise InvalidInputError(
+            "review head changed; collect and validate the current implementation"
+        )
     bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
     base = _revision(repository, bound_base)
     diff = _git(repository, "diff", "--no-ext-diff", "--no-textconv", "--binary", base, head, "--")
@@ -155,41 +165,68 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     ci = states["verify"]
     ci_head = ci.get("head_revision")
     ci_view: dict[str, object] = {
-        "availability": "current_head" if ci and ci_head == head else "not_persisted_for_current_head",
+        "availability": "current_head"
+        if ci and ci_head == head
+        else "not_persisted_for_current_head",
         "persisted": ci,
     }
     sections = (
-        ("Intent", _json({
-            "work_item": raw["work_item"],
-            "source_revision": raw["source_revision"],
-            "request_reference": str(
-                private_state_directory(project) / "runs" / run_id / "request.json"
+        (
+            "Intent",
+            _json(
+                {
+                    "work_item": raw["work_item"],
+                    "source_revision": raw["source_revision"],
+                    "request_reference": str(
+                        private_state_directory(project) / "runs" / run_id / "request.json"
+                    ),
+                }
             ),
-        })),
-        ("Reproduction evidence", _json({
-            "artifact_root": str(request.execution_configuration.artifact_root),
-            "implementation_result": result,
-            "validation": states["validate"],
-        })),
-        ("Observed result", _json({
-            "availability": "persisted" if observed else "not_persisted",
-            "display_only": True,
-            "behavioral_acceptance": observed,
-            "receipts": [
-                _receipt_document(request.execution_configuration.artifact_root, value)
-                for value in receipts
-            ],
-        })),
-        ("Risk", _json({
-            "classification_provenance": raw.get("classification_provenance"),
-            "protected_paths": list(request.protected_paths),
-            "publication": states["open_pr"],
-        })),
-        ("Routing and cost basis", _json({
-            "execution_selection": request.execution_selection.to_state(),
-            "implementation": raw["implementation"],
-            "runner": request.runner.to_state(),
-        })),
+        ),
+        (
+            "Reproduction evidence",
+            _json(
+                {
+                    "artifact_root": str(request.execution_configuration.artifact_root),
+                    "implementation_result": result,
+                    "validation": states["validate"],
+                }
+            ),
+        ),
+        (
+            "Observed result",
+            _json(
+                {
+                    "availability": "persisted" if observed else "not_persisted",
+                    "display_only": True,
+                    "behavioral_acceptance": observed,
+                    "receipts": [
+                        _receipt_document(request.execution_configuration.artifact_root, value)
+                        for value in receipts
+                    ],
+                }
+            ),
+        ),
+        (
+            "Risk",
+            _json(
+                {
+                    "classification_provenance": raw.get("classification_provenance"),
+                    "protected_paths": list(request.protected_paths),
+                    "publication": states["open_pr"],
+                }
+            ),
+        ),
+        (
+            "Routing and cost basis",
+            _json(
+                {
+                    "execution_selection": request.execution_selection.to_state(),
+                    "implementation": raw["implementation"],
+                    "runner": request.runner.to_state(),
+                }
+            ),
+        ),
     )
     packet = ReviewPacket(
         run_id=run_id,
@@ -244,8 +281,11 @@ def read_packet(project: Path, run_id: str) -> ReviewPacket:
 
 def _packet_path(project: Path, packet: ReviewPacket) -> Path:
     return (
-        private_state_directory(project) / "review" / packet.run_id
-        / packet.digest.hex_value / "packet.html"
+        private_state_directory(project)
+        / "review"
+        / packet.run_id
+        / packet.digest.hex_value
+        / "packet.html"
     )
 
 
@@ -277,7 +317,8 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
     try:
         packet = build_packet(project, ledger, request)
         payload = {
-            "kind": "packet_feedback", "subject_digest": subject_digest,
+            "kind": "packet_feedback",
+            "subject_digest": subject_digest,
             "text": redact_credential_shaped_text(text),
         }
         finding_id = _json(payload)
@@ -323,9 +364,14 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
             now=datetime.now(UTC),
             heartbeat_window=HEARTBEAT_WINDOW,
         )
-        return {"run_id": run_id, "subject_digest": subject_digest,
-                "review_outcome": result.outcome.value, "feedback_queued": True,
-                "authority_granted": False, "finding_id": str(Digest.of_json(payload))}
+        return {
+            "run_id": run_id,
+            "subject_digest": subject_digest,
+            "review_outcome": result.outcome.value,
+            "feedback_queued": True,
+            "authority_granted": False,
+            "finding_id": str(Digest.of_json(payload)),
+        }
     finally:
         ledger.close()
 
@@ -367,12 +413,12 @@ def lavish_feedback(
         findings = presenter.poll(path)
         if not findings:
             return {
-                "run_id": run_id, "subject_digest": subject_digest,
-                "feedback_queued": False, "authority_granted": False,
+                "run_id": run_id,
+                "subject_digest": subject_digest,
+                "feedback_queued": False,
+                "authority_granted": False,
             }
-        return feedback(
-            project, run_id, subject_digest=subject_digest, text="\n".join(findings)
-        )
+        return feedback(project, run_id, subject_digest=subject_digest, text="\n".join(findings))
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error
     finally:

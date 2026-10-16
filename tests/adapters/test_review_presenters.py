@@ -31,13 +31,15 @@ def _packet(state: Path) -> Path:
         f'<meta name="enginery-review-packet" content="{PACKET_MARKER}">'
         '<meta http-equiv="Content-Security-Policy" '
         f'content="{html.escape(REVIEW_CSP, quote=True)}"></head>'
-        '<body><h1>Review</h1><pre>&lt;worker&gt;</pre></body></html>', encoding="utf-8"
+        "<body><h1>Review</h1><pre>&lt;worker&gt;</pre></body></html>",
+        encoding="utf-8",
     )
     return packet
 
 
 def test_lavish_uses_only_packet_poll_end_and_private_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _state(tmp_path)
     packet = _packet(state)
@@ -68,7 +70,8 @@ def test_lavish_uses_only_packet_poll_end_and_private_environment(
 
 
 def test_explicit_browser_launch_does_not_inherit_no_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     environments: list[dict[str, str]] = []
 
@@ -83,10 +86,13 @@ def test_explicit_browser_launch_does_not_inherit_no_open(
     assert "LAVISH_AXI_NO_OPEN" not in environments[0]
 
 
-@pytest.mark.parametrize("payload", [
-    '{"decision":"approve","action":"publish","principal":"owner"}',
-    '{"approved":true,"score":100}',
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"decision":"approve","action":"publish","principal":"owner"}',
+        '{"approved":true,"score":100}',
+    ],
+)
 def test_decision_shaped_feedback_is_ignored(payload: str) -> None:
     assert presenters._findings(payload) == ()
 
@@ -99,11 +105,16 @@ def test_feedback_text_is_only_escaped_findings() -> None:
         presenters._findings('{"annotations":')
 
 
-@pytest.mark.parametrize("active", [
-    '<script>alert(1)</script>', '<iframe src="worker.html"></iframe>',
-    '<img src="https://example.invalid/a">', '<p onclick="alert(1)">x</p>',
-    '<meta http-equiv="refresh" content="0;url=https://example.invalid">',
-])
+@pytest.mark.parametrize(
+    "active",
+    [
+        "<script>alert(1)</script>",
+        '<iframe src="worker.html"></iframe>',
+        '<img src="https://example.invalid/a">',
+        '<p onclick="alert(1)">x</p>',
+        '<meta http-equiv="refresh" content="0;url=https://example.invalid">',
+    ],
+)
 def test_packet_refuses_active_worker_markup(tmp_path: Path, active: str) -> None:
     state = _state(tmp_path)
     packet = _packet(state)

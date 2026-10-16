@@ -1297,7 +1297,8 @@ class Stage1RunService:
                     request,
                     node_id="review",
                     attempt_id=(
-                        f"review-{generation}" if packet_feedback_digest is None
+                        f"review-{generation}"
+                        if packet_feedback_digest is None
                         else f"review-feedback-{packet_feedback_digest}-{generation}"
                     ),
                     operation_id=str(
@@ -1306,7 +1307,8 @@ class Stage1RunService:
                             node_id=NodeId("review"),
                             side_effect_kind="review",
                             target_scope=(
-                                request.repository_id if packet_feedback_digest is None
+                                request.repository_id
+                                if packet_feedback_digest is None
                                 else f"{request.repository_id}:{packet_feedback_digest}"
                             ),
                             ordinal=repair_attempt,

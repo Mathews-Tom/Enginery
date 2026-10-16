@@ -376,11 +376,11 @@ def run_factory(args: argparse.Namespace) -> int:
     if command == "feedback":
         project = resolve_project(args.project)
         document = (
-            lavish_feedback(project, args.run_id, subject_digest=args.subject_digest, port=args.port)
-            if args.lavish_poll
-            else feedback(
-                project, args.run_id, subject_digest=args.subject_digest, text=args.text
+            lavish_feedback(
+                project, args.run_id, subject_digest=args.subject_digest, port=args.port
             )
+            if args.lavish_poll
+            else feedback(project, args.run_id, subject_digest=args.subject_digest, text=args.text)
         )
         _emit(args, document, [json.dumps(document, sort_keys=True)])
         return SUCCESS

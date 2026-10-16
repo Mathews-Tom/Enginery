@@ -23,7 +23,9 @@ class PresenterError(ValueError):
 
 
 def _environment() -> dict[str, str]:
-    return {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME") if key in os.environ}
+    return {
+        key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME") if key in os.environ
+    }
 
 
 def _private_directory(path: Path) -> Path:
@@ -50,8 +52,12 @@ def _execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
         raise PresenterError("presenter argv exceeds 1 MiB")
     try:
         process = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=environment, shell=False,
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            shell=False,
         )
     except OSError as exc:
         raise PresenterError("presenter executable could not be started") from exc
@@ -104,9 +110,37 @@ class _PacketMarkup(HTMLParser):
         self.csp = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag not in {"html", "head", "meta", "title", "body", "main", "section", "h1", "h2",
-                       "h3", "p", "pre", "ul", "ol", "li", "dl", "dt", "dd", "strong", "code",
-                       "table", "thead", "tbody", "tr", "th", "td", "span", "div", "br"}:
+        if tag not in {
+            "html",
+            "head",
+            "meta",
+            "title",
+            "body",
+            "main",
+            "section",
+            "h1",
+            "h2",
+            "h3",
+            "p",
+            "pre",
+            "ul",
+            "ol",
+            "li",
+            "dl",
+            "dt",
+            "dd",
+            "strong",
+            "code",
+            "table",
+            "thead",
+            "tbody",
+            "tr",
+            "th",
+            "td",
+            "span",
+            "div",
+            "br",
+        }:
             raise PresenterError("packet contains non-Enginery active markup")
         values = dict(attrs)
         if len(values) != len(attrs):
@@ -174,6 +208,7 @@ def _findings(text: str) -> tuple[str, ...]:
             raise PresenterError("presenter feedback contains malformed JSON") from None
         return tuple(escape_terminal(line) for line in text.splitlines() if line.strip())
     result: list[str] = []
+
     def collect(item: object) -> None:
         if isinstance(item, str) and item.strip():
             result.append(escape_terminal(item))
@@ -182,10 +217,18 @@ def _findings(text: str) -> tuple[str, ...]:
                 collect(entry)
         elif isinstance(item, dict):
             # Allowlisted feedback fields only: approval/action/principal fields are ignored.
-            for field in ("findings", "annotations", "prompts", "feedback", "prompt",
-                          "text", "message"):
+            for field in (
+                "findings",
+                "annotations",
+                "prompts",
+                "feedback",
+                "prompt",
+                "text",
+                "message",
+            ):
                 if field in item:
                     collect(item[field])
+
     try:
         collect(value)
     except RecursionError as exc:
@@ -210,8 +253,11 @@ class LavishPresenter:
     def _run(self, *arguments: str) -> str:
         _private_directory(self.private_state_dir)
         environment = _environment()
-        environment.update(LAVISH_AXI_TELEMETRY="0", LAVISH_AXI_STATE_DIR=str(self.private_state_dir),
-                           LAVISH_AXI_PORT=str(self.port))
+        environment.update(
+            LAVISH_AXI_TELEMETRY="0",
+            LAVISH_AXI_STATE_DIR=str(self.private_state_dir),
+            LAVISH_AXI_PORT=str(self.port),
+        )
         if self.no_open:
             environment["LAVISH_AXI_NO_OPEN"] = "1"
         return _execute((self.executable, *arguments), environment)
@@ -234,15 +280,20 @@ class GhAxiView:
         if not self.executable or self.executable.startswith("-"):
             raise PresenterError("gh-axi executable must be explicitly configured")
         parts = repository.split("/")
-        if len(parts) != 2 or any(not part or not part[0].isalnum() or any(
-            not (char.isascii() and (char.isalnum() or char in "-_.")) for char in part
-        ) for part in parts):
+        if len(parts) != 2 or any(
+            not part
+            or not part[0].isalnum()
+            or any(not (char.isascii() and (char.isalnum() or char in "-_.")) for char in part)
+            for part in parts
+        ):
             raise PresenterError("repository must be an owner/name pair")
         if isinstance(number, bool) or number < 1:
             raise PresenterError("pull request number must be positive")
-        return escape_terminal(_execute(
-            (self.executable, "pr", command, str(number), "--repo", repository), _environment()
-        ))
+        return escape_terminal(
+            _execute(
+                (self.executable, "pr", command, str(number), "--repo", repository), _environment()
+            )
+        )
 
     def pr_view(self, repository: str, number: int) -> str:
         return self._view("view", repository, number)
