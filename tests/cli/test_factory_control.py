@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import signal
 import sys
 import time
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from enginery.cli import factory_run
+from enginery.adapters.oci.launch import container_name_for
+from enginery.cli import factory_control, factory_run
 from enginery.cli.factory_collect import paused_hold
 from enginery.cli.main import main
+from enginery.domain.errors import MissingPrerequisiteError
+from enginery.domain.ids import RunId
+from enginery.domain.runner import RunnerProfile, RunnerSelection
+from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
+from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
+from enginery.workflows.stage1 import stage1_request_from_state
 from tests.cli.test_factory_run import bound_project as bound_project
 from tests.cli.test_factory_run import invoke
 from tests.support.github import StandInGitHub
@@ -91,6 +101,8 @@ def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
     request = Path(run["request_path"])
     original = request.read_bytes()
     os.killpg(run["worker"]["process_group_id"], signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(run["worker"]["pid"], 0)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         _, observed = invoke(capsys, project, "status", run["run_id"])
@@ -98,7 +110,20 @@ def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
             break
         time.sleep(0.05)
     try:
-        _, recovered = invoke(capsys, project, "resume", run["run_id"])
+        recovered = {}
+        for _ in range(3):
+            _, recovered = invoke(capsys, project, "resume", run["run_id"])
+            ledger = LedgerService.open(Path(run["database"]))
+            try:
+                worker = ledger.read_process_manager_state(
+                    process_manager_name="worker-supervisor", state_key=run["run_id"] + ":implement"
+                )
+                assert worker is not None
+                if worker.state["status"] == "exit_reconciled":
+                    break
+                assert recovered["action_taken"] == "reconcile_worker"
+            finally:
+                ledger.close()
         assert recovered["run_id"] == run["run_id"]
         assert recovered["request_path"] == str(request) and request.read_bytes() == original
         ledger = LedgerService.open(Path(run["database"]))
@@ -122,3 +147,127 @@ def test_resume_unknown_run_does_not_create_a_ledger(
     assert main(["factory", "resume", "unknown", "--project", str(project), "--json"]) == 2
     assert "unknown factory run" in capsys.readouterr().err
     assert not factory_run.database_path(project).exists()
+
+
+@pytest.mark.parametrize(
+    ("isolated", "docker_context", "removal_fails"),
+    [
+        (True, "bound-worker-context", False),
+        (True, None, False),
+        (False, None, False),
+        (True, "bound-worker-context", True),
+    ],
+)
+def test_drain_resolves_container_cleanup_from_each_workers_bound_request(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    isolated: bool,
+    docker_context: str | None,
+    removal_fails: bool,
+) -> None:
+    project, _ = bound_project
+    _, bound = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    request = stage1_request_from_state(json.loads(Path(bound["request_path"]).read_text()))
+    runner = (
+        RunnerSelection.isolated(
+            image="sha256:" + "ab" * 32,
+            profile=RunnerProfile(),
+            docker_context=docker_context,
+        )
+        if isolated
+        else RunnerSelection.trusted_local()
+    )
+    request = replace(
+        request,
+        run=replace(request.run, id=RunId("cleanup-run")),
+        runner=runner,
+        workspace_path=request.workspace_path.with_name("cleanup-workspace"),
+    )
+    ledger = LedgerService.open(Path(bound["database"]))
+    runtime = CoordinatorRuntime(ledger, owner="factory")
+    worker_group = None
+    try:
+        now = datetime.now(UTC)
+        runtime.register_run(
+            run_id=str(request.run.id),
+            initial_state=request.initial_state(),
+            now=now,
+            heartbeat_window=timedelta(seconds=120),
+        )
+        tick = runtime.tick(
+            now=now,
+            heartbeat_window=timedelta(seconds=120),
+            lease_window=timedelta(seconds=120),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+            requests=(
+                FixtureDispatch(
+                    run_id=str(request.run.id),
+                    node_id="implement",
+                    attempt_id="cleanup-attempt",
+                    repository_id=request.repository_id,
+                    repository_path=project,
+                    workspace_path=request.workspace_path,
+                    base_revision=request.run.base_revision,
+                    command=(sys.executable, "-c", "import time; time.sleep(60)"),
+                    expected_attempt_version=0,
+                    operation_id="cleanup-operation",
+                ),
+            ),
+        )
+        assert len(tick.dispatched) == 1
+        worker_group = tick.dispatched[0].identity.process_group_id
+    finally:
+        ledger.close()
+
+    contexts: list[str | None] = []
+    removed: list[str] = []
+
+    class Engine:
+        exists = True
+
+        def container_exists(self, name: str) -> bool:
+            assert name == container_name_for("cleanup-operation")
+            return self.exists
+
+        def remove(self, name: str, *, force: bool = True) -> None:
+            assert force
+            removed.append(name)
+            if removal_fails:
+                raise MissingPrerequisiteError("container removal refused")
+            self.exists = False
+
+    engine = Engine()
+
+    def engine_factory(*, context: str | None) -> Engine:
+        contexts.append(context)
+        return engine
+
+    monkeypatch.setattr(factory_control, "OciEngine", engine_factory)
+    try:
+        code, drained = invoke(capsys, project, "drain", "--stop")
+        cleanup = drained["container_cleanup"]
+        assert len(cleanup) == 1
+        assert cleanup[0]["run_id"] == str(request.run.id)
+        assert drained["stopped"][0]["stopped"] and drained["remaining"] == []
+        assert contexts == ([docker_context] if isolated else [])
+        assert removed == ([container_name_for("cleanup-operation")] if isolated else [])
+        if removal_fails:
+            assert code == 5 and drained["released"].startswith("partial")
+            assert cleanup[0]["status"] == "failed"
+            assert cleanup[0]["error"] == "container removal refused"
+            assert drained["stopped"][0]["container_error"] == "container removal refused"
+        else:
+            assert code == 0 and drained["released"] == "now"
+            assert cleanup[0]["status"] == (
+                "performed" if isolated else "skipped: trusted-local run has no container"
+            )
+            assert cleanup[0]["containers_removed"] == (
+                [container_name_for("cleanup-operation")] if isolated else []
+            )
+    finally:
+        if worker_group is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(worker_group, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(tick.dispatched[0].identity.pid, 0)

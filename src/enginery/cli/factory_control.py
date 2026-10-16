@@ -10,8 +10,12 @@ from enginery.adapters.oci.engine import OciEngine
 from enginery.cli.factory_collect import require_state_path
 from enginery.cli.factory_run import database_path, workspace_documents
 from enginery.cli.operator import _drain_exit_code, _stop_workers
-from enginery.engine.operator_control import OperatorControl, drain_wait
+from enginery.domain.ids import RunId
+from enginery.domain.runner import RunnerSelection
+from enginery.engine.operator_control import OperatorControl, WorkerView, drain_wait
+from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.service import LedgerService
+from enginery.workflows.stage1 import Stage1RunService
 
 
 def _now() -> datetime:
@@ -51,9 +55,21 @@ def drain(
     try:
         cleanup = None
         if stop:
+            service = Stage1RunService(
+                runtime=CoordinatorRuntime(ledger, owner="factory"), ledger=ledger
+            )
+
+            def context_for(worker: WorkerView) -> RunnerSelection | None:
+                runner = service.read(RunId(worker.run_id)).request.runner
+                return runner if runner.isolated_mode else None
+
             args = argparse.Namespace(owner="factory", docker_context=None)
             report, cleanup = _stop_workers(
-                args, ledger, _now, lambda context: OciEngine(context=context)
+                args,
+                ledger,
+                _now,
+                lambda context: OciEngine(context=context),
+                context_for=context_for,
             )
         else:
             assert wait_seconds is not None

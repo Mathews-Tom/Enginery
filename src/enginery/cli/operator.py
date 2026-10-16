@@ -213,7 +213,9 @@ def _stop_workers(
     ledger: LedgerService,
     clock: Callable[[], datetime],
     engine_factory: Callable[[str | None], OciEngine],
-) -> tuple[DrainReport, str]:
+    *,
+    context_for: Callable[[WorkerView], RunnerSelection | None] | None = None,
+) -> tuple[DrainReport, str | list[dict[str, object]]]:
     runtime = CoordinatorRuntime(ledger, owner=args.owner)
 
     def stop_worker(worker: WorkerView) -> None:
@@ -222,17 +224,30 @@ def _stop_workers(
             run_id=worker.run_id, node_id=worker.node_id, epoch=epoch.epoch, now=clock()
         )
 
-    selected = read_control_state(ledger).selected_runner
-    if args.docker_context is not None:
-        context: str | None = args.docker_context
-    elif selected is not None:
-        context = selected.docker_context
-    else:
-        report = drain_stop(ledger, now=clock(), stop_worker=stop_worker)
-        return report, "skipped: no engine context given and no runner selected"
+    per_worker = context_for is not None
+    context: str | None = None
+    if context_for is None:
+        selected = read_control_state(ledger).selected_runner
+        if args.docker_context is not None:
+            context = args.docker_context
+        elif selected is not None:
+            context = selected.docker_context
+        else:
+            report = drain_stop(ledger, now=clock(), stop_worker=stop_worker)
+            return report, "skipped: no engine context given and no runner selected"
+    contexts: dict[str, str | None] = {}
+    skipped: set[str] = set()
 
     def remove_containers(worker: WorkerView) -> tuple[str, ...]:
-        engine = engine_factory(context)
+        worker_context = context
+        if context_for is not None:
+            runner = context_for(worker)
+            if runner is None:
+                skipped.add(worker.operation_id)
+                return ()
+            worker_context = runner.docker_context
+        contexts[worker.operation_id] = worker_context
+        engine = engine_factory(worker_context)
         name = container_name_for(worker.operation_id)
         existed = not worker_container_gone(engine, worker.operation_id)
         engine.remove(name, force=True)
@@ -246,7 +261,28 @@ def _stop_workers(
     report = drain_stop(
         ledger, now=clock(), stop_worker=stop_worker, remove_containers=remove_containers
     )
-    return report, "performed"
+    if not per_worker:
+        return report, "performed"
+    return report, [
+        {
+            "run_id": result.worker.run_id,
+            "node_id": result.worker.node_id,
+            "operation_id": result.worker.operation_id,
+            "docker_context": contexts.get(result.worker.operation_id),
+            "status": (
+                "skipped: worker stop failed"
+                if not result.stopped
+                else "failed"
+                if result.container_error is not None
+                else "skipped: trusted-local run has no container"
+                if result.worker.operation_id in skipped
+                else "performed"
+            ),
+            "containers_removed": list(result.containers_removed),
+            "error": result.container_error,
+        }
+        for result in report.stopped
+    ]
 
 
 def _drain_exit_code(report: DrainReport) -> int:

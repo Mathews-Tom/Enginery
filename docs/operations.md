@@ -864,10 +864,13 @@ explicitly released. `status` and `drain` show that retention and its release co
 A timeout reports the workers still running.
 `factory drain --stop` pauses and stops live workers using the existing supervisor
 path; successful stop cleanup reports `released: now` for those stopped workers,
-releases their leases/workspace reservations, and removes isolated worker containers.
-Workers that had already exited still require resume/reconciliation. Partial cleanup
-is reported explicitly, never called complete. Neither form cancels or reverses
-external effects, and the pause remains until explicitly lifted.
+releases their leases/workspace reservations, and removes isolated worker containers
+using each run's bound engine context. Per-worker `container_cleanup` reports removal
+or that a trusted-local run has no container. Removal failures produce partial release
+and a non-success exit code. Workers that had already exited still require
+resume/reconciliation. Partial cleanup is reported explicitly, never called complete.
+Neither form cancels or reverses external effects, and the pause remains until
+explicitly lifted.
 
 Terminal review remains `enginery stage1 review` against the returned database and
 run ID. The independent review gate reports `next_decision` with

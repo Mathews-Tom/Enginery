@@ -66,8 +66,6 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
     assert effects["github_reads"] > 0
     for name in (
         "hosted_inference_calls",
-        "hosted_sessions",
-        "container_engine_calls",
         "issue_label_mutations",
         "merges",
         "releases",
@@ -84,10 +82,19 @@ def test_manual_path_exercises_every_recovery_and_authority_assertion(
         "commands.json",
         "gh-calls.json",
         "harness-launches.json",
+        "container-engine-calls.json",
         "pull-request.json",
         "request.json",
     ):
         assert (raw / name).is_file()
+    engine_calls = json.loads((raw / "container-engine-calls.json").read_text(encoding="utf-8"))
+    launches = json.loads((raw / "harness-launches.json").read_text(encoding="utf-8"))
+    assert effects["container_engine_calls"] == len(engine_calls) == 0
+    assert (
+        effects["hosted_sessions"]
+        == sum(bool(launch["hosted_session_requested"]) for launch in launches)
+        == 0
+    )
     commands = json.loads((raw / "commands.json").read_text(encoding="utf-8"))
     assert all(
         "exit_code" in command and "stdout" in command and "stderr" in command

@@ -210,7 +210,8 @@ if args in (["--help"], ["--version"]):
     raise SystemExit(0)
 workspace = Path.cwd()
 with (here.parent / "harness-launches.jsonl").open("a", encoding="utf-8") as log:
-    log.write(json.dumps({"pid": os.getpid(), "workspace": str(workspace), "argv": args}) + "\n")
+    log.write(json.dumps({"pid": os.getpid(), "workspace": str(workspace), "argv": args,
+                          "hosted_session_requested": False}) + "\n")
 print(json.dumps({"type": "session"}), flush=True)
 print(json.dumps({"type": "agent_start"}), flush=True)
 (workspace / "manual-path-result.txt").write_text("one bounded local change\n", encoding="utf-8")
@@ -226,6 +227,15 @@ while not (here / "release-worker").exists():
         raise SystemExit("worker window timed out")
     time.sleep(0.02)
 print(json.dumps({"type": "agent_end"}), flush=True)
+"""
+
+_CONTAINER_ENGINE = r"""#!__PYTHON__
+import json, sys
+from pathlib import Path
+here = Path(__file__).resolve().parent
+with (here / "container-engine-calls.jsonl").open("a", encoding="utf-8") as log:
+    log.write(json.dumps({"engine": Path(sys.argv[0]).name, "argv": sys.argv[1:]}) + "\n")
+raise SystemExit(1)
 """
 
 
@@ -272,7 +282,12 @@ class ManualPathGate(SetupGate):
         self.database = self.state / "ledger.sqlite"
 
     def _write_stand_ins(self) -> None:
-        for name, body in (("gh", _GH), ("omp", _OMP)):
+        for name, body in (
+            ("gh", _GH),
+            ("omp", _OMP),
+            ("docker", _CONTAINER_ENGINE),
+            ("podman", _CONTAINER_ENGINE),
+        ):
             executable = self.bin / name
             executable.write_text(body.replace("__PYTHON__", sys.executable), encoding="utf-8")
             executable.chmod(0o755)
@@ -519,7 +534,7 @@ def step_collect(gate: ManualPathGate) -> None:
 
 
 def step_client_recovery(gate: ManualPathGate) -> None:
-    client = gate.launch("run", ISSUE, "--wait-seconds", "30")
+    client = gate.launch("run", ISSUE, "--wait-seconds", "600")
     _wait(lambda: bool(gate.launches()) or client.poll() is not None, "implementation launch")
     if not gate.launches():
         gate.kill_client(client)
@@ -728,7 +743,7 @@ def step_inspection_review(gate: ManualPathGate) -> None:
 
 
 def step_pr_recovery(gate: ManualPathGate) -> None:
-    coordinator = gate.launch("resume", gate.run_id, "--wait-seconds", "30")
+    coordinator = gate.launch("resume", gate.run_id, "--wait-seconds", "600")
     window = gate.bin / "pr-created.json"
     _wait(lambda: window.exists() or coordinator.poll() is not None, "PR creation response window")
     if not window.exists():
@@ -1033,6 +1048,13 @@ def step_boundaries(
         if call not in posts and call not in updates and call not in lifecycle
     ]
     launches = gate.launches()
+    engine_log = gate.bin / "container-engine-calls.jsonl"
+    engine_calls = (
+        [json.loads(line) for line in engine_log.read_text(encoding="utf-8").splitlines()]
+        if engine_log.exists()
+        else []
+    )
+    hosted_sessions = sum(bool(launch["hosted_session_requested"]) for launch in launches)
     gate.effects.update(
         github_reads=len(reads),
         github_mutations=len(mutations),
@@ -1045,8 +1067,8 @@ def step_boundaries(
         releases=sum(any("/releases" in value for value in call) for call in mutations),
         deployments=sum(any("/deployments" in value for value in call) for call in mutations),
         hosted_inference_calls=0,
-        hosted_sessions=0,
-        container_engine_calls=0,
+        hosted_sessions=hosted_sessions,
+        container_engine_calls=len(engine_calls),
         harness_launches_recorded=len(launches),
         global_location_changes=len(global_changes),
     )
@@ -1054,6 +1076,10 @@ def step_boundaries(
         "local-only-effect-counts",
         shutil.which("gh", path=gate.environment()["PATH"]) == str(gate.bin / "gh")
         and shutil.which("omp", path=gate.environment()["PATH"]) == str(gate.bin / "omp")
+        and shutil.which("docker", path=gate.environment()["PATH"]) == str(gate.bin / "docker")
+        and shutil.which("podman", path=gate.environment()["PATH"]) == str(gate.bin / "podman")
+        and not engine_calls
+        and hosted_sessions == 0
         and len(launches) == 2
         and len(posts) == 1
         and not unexpected
@@ -1063,15 +1089,17 @@ def step_boundaries(
         {
             "gh_calls": calls,
             "launches": launches,
+            "container_engine_calls": engine_calls,
             "stand_in_sha256": {
                 name: hashlib.sha256((gate.bin / name).read_bytes()).hexdigest()
-                for name in ("gh", "omp")
+                for name in ("gh", "omp", "docker", "podman")
             },
         },
     )
     gate.raw_write("commands.json", gate.completed)
     gate.raw_write("gh-calls.json", calls)
     gate.raw_write("harness-launches.json", launches)
+    gate.raw_write("container-engine-calls.json", engine_calls)
     pr = gate.bin / "gh-pr.json"
     if pr.exists():
         gate.raw_write("pull-request.json", _read(pr))
