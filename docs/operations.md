@@ -812,9 +812,10 @@ Issue numbers use positive ASCII digits without leading zeroes; `OWNER/REPO#01` 
 review, terminal state or wait boundary; `--wait-seconds` defaults to zero, returning
 at the first wait while the supervised worker may keep running. The wait must be a
 finite non-negative number. Idle or unchanged actions back off for 0.5, 1, 2, then
-5 seconds between read-only passes; unchanged waits advance the coordinator no more
-often than every 15 seconds. CI waits poll no more often than every 15 seconds. The
-command returns at the deadline rather than making another idle advance.
+5 seconds between read-only passes; unchanged actions, including verification while
+CI is pending, advance the coordinator no more often than every 15 seconds.
+CI waits poll no more often than every 15 seconds. The command returns at the deadline
+rather than making another idle advance.
 Repeating `factory run` for the same bound issue continues that durable run.
 `status` never advances it: without RUN it lists project runs; with RUN it reports
 current nodes, next action, worker PID or container identity, selection and winning
@@ -832,9 +833,10 @@ run ID. The independent review gate reports `next_decision` with
 `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
 --repair-attempt N`, using the current implementation's repair index (zero initially).
 Supply the review report in the existing Stage 1 format. Other human-wait nodes
-report matching `stage1 approve` and `stage1 reject` commands with the waiting node ID;
-a failed implementation without a human-wait node reports its failure and repair as
-a hold rather than suggesting an inapplicable review. A `blocked` action instead
+report matching `stage1 approve` and `stage1 reject` commands with the waiting node ID
+and required `--reason REASON`; a failed implementation without a human-wait node reports
+its failure as a hold with an `enginery factory run ISSUE --project P` repair using
+the bound issue rather than suggesting an inapplicable review. A `blocked` action instead
 reports a hold with its recorded reason and matching repair; it is not an approval
 or a successful validation. The other Stage 1 commands retain their flags and output.
 There is no factory review UI. This path ends at a verified open PR plus outcome
@@ -859,15 +861,18 @@ Holds report the exact repair command. Common cases are:
   Superseding requires a terminal run, or a terminal latest implementation with no
   active lease or live worker and no pending `open_pr` node. It also accepts an
   implementation never registered when no active lease, live worker or `open_pr`
-  node exists. Cancellation repairs name only existing live nodes. An unchanged
-  snapshot with `--supersede` is an input error: use `factory run`/`factory resume`.
+  node exists. Cancellation repairs name only this run's queued or running agent nodes,
+  never human or deterministic nodes. An unchanged snapshot with `--supersede` is an
+  input error: use `enginery factory run ISSUE --project P` with the bound issue.
   The refusal names those durable read fields for inspection.
   Cancellation does not invent a run-state transition. Superseding explicitly records
-  a new binding and run; the old run remains durable and visible in status.
+  a new binding and run; the old run remains durable and visible in status, with
+  `superseded_by` naming the new run. Advancing the old run holds without dispatch.
 - Paused dispatch: `enginery-operator resume --database DB` lifts the project-ledger
   pause. Inspection retains any other execution holds alongside this pause.
 - Catalog, configuration or runner drift: `enginery factory doctor --project P`, then
-  restore the run's bound configuration rather than silently rebinding it.
+  restore the run's bound configuration rather than silently rebinding it, then
+  continue with `enginery factory run ISSUE --project P` using the bound issue reference.
 - Unprovable worker identity: resolve the worker on its launching host. This host
   cannot safely signal or release a worker whose identity it cannot prove.
 - Other execution or blocked-node holds: a repair supplied by the service is reported

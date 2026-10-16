@@ -15,7 +15,7 @@ from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
 from enginery.application.factory_intake import derive_run_id
 from enginery.cli import factory_run
 from enginery.cli.config_locations import private_state_directory, project_identity
-from enginery.cli.main import main
+from enginery.cli.main import _build_parser, main
 from enginery.domain.errors import InvalidInputError
 from enginery.engine.operator_control import OperatorControl
 from enginery.engine.runtime import CoordinatorRuntime
@@ -221,13 +221,18 @@ def test_normalized_issue_spellings_share_one_bound_run(
         (Stage1ProgressionAction.DISPATCH_QUEUED, 9.0, 1, [0.5, 1.0, 2.0, 5.0, 0.5]),
         (Stage1ProgressionAction.RECONCILE_WORKER, 0.0, 1, []),
         (Stage1ProgressionAction.WAIT_FOR_CI, 31.0, 3, [15.0, 15.0, 1.0]),
-        (Stage1ProgressionAction.QUALIFY, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.IMPLEMENT, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.COLLECT_IMPLEMENTATION, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.VALIDATE, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.OPEN_PR, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.VERIFY, 3.0, 3, [0.5, 1.0, 1.5]),
-        (Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION, 3.0, 3, [0.5, 1.0, 1.5]),
+        (Stage1ProgressionAction.QUALIFY, 3.0, 1, [0.5, 1.0, 1.5]),
+        (Stage1ProgressionAction.IMPLEMENT, 3.0, 1, [0.5, 1.0, 1.5]),
+        (Stage1ProgressionAction.COLLECT_IMPLEMENTATION, 3.0, 1, [0.5, 1.0, 1.5]),
+        (Stage1ProgressionAction.VALIDATE, 3.0, 1, [0.5, 1.0, 1.5]),
+        (Stage1ProgressionAction.OPEN_PR, 3.0, 1, [0.5, 1.0, 1.5]),
+        (
+            Stage1ProgressionAction.VERIFY,
+            31.0,
+            2,
+            [0.5, 1.0, 2.0, 5.0, 5.0, 5.0, 5.0, 5.0, 2.5],
+        ),
+        (Stage1ProgressionAction.REGISTER_OUTCOME_OBSERVATION, 3.0, 1, [0.5, 1.0, 1.5]),
         (Stage1ProgressionAction.HOLD, 30.0, 0, []),
         (Stage1ProgressionAction.BLOCKED, 30.0, 0, []),
         (Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, 30.0, 0, []),
@@ -293,6 +298,7 @@ def test_wait_loop_backs_off_and_stops_at_deadline_without_spinning(
     result = factory_run.advance_run(project, report["run_id"], wait_seconds=wait_seconds)
     assert result["next_action"] == action.value
     assert len(calls) == expected_calls
+    assert all(later - earlier >= 15.0 for earlier, later in pairwise(calls))
     assert sleeps == expected_sleeps
     assert clock == sum(expected_sleeps)
 
@@ -314,25 +320,12 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     assert f"node_leases[{original['run_id']}:implement].expires_at=" in held["holds"][0]["detail"]
     assert f"runtime_node[{original['run_id']}:open_pr].status=" in held["holds"][0]["detail"]
     assert len(list(Path(original["request_path"]).parent.parent.glob("*/request.json"))) == 1
-    assert (
-        main(
-            [
-                "stage1",
-                "cancel",
-                "--database",
-                original["database"],
-                "--owner",
-                "factory",
-                "--run-id",
-                original["run_id"],
-                "--node-id",
-                "implement",
-            ]
-        )
-        == 0
-    )
-    code, replacement = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
-    assert code == 0
+    for command in held["holds"][0]["resolve"].split("; "):
+        capsys.readouterr()
+        assert main(shlex.split(command)[1:]) == 0
+        capsys.readouterr()
+    _, listing = invoke(capsys, project, "status")
+    replacement = next(run for run in listing["runs"] if run["run_id"] != original["run_id"])
     assert replacement["run_id"] != original["run_id"]
     _, old = invoke(capsys, project, "status", original["run_id"])
     assert old["status"] == "created"
@@ -473,7 +466,7 @@ def test_status_preserves_service_hold_diagnostics_and_matching_repairs(
         == {
             "restore": (
                 f"{doctor}; restore the run's bound configuration; "
-                f"enginery factory resume {original['run_id']} "
+                f"enginery factory run {shlex.quote(original['issue'])} "
                 f"--project {shlex.quote(str(project))}"
             ),
             "message": f"{doctor}; {hold['message']}",
@@ -731,8 +724,7 @@ def test_supersede_accepts_never_registered_implementation(
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 5
     assert "--node-id implement" not in held["holds"][0]["resolve"]
-    if risk == "medium":
-        assert "--node-id qualify" in held["holds"][0]["resolve"]
+    assert "--node-id qualify" not in held["holds"][0]["resolve"]
     code, replacement = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
     assert code == 0
     assert replacement["run_id"] != original["run_id"]
@@ -798,7 +790,8 @@ def test_supersede_unchanged_snapshot_is_invalid(
     assert code == 2
     assert (
         f"issue snapshot unchanged since run {original['run_id']} was bound; "
-        "use `factory run`/`factory resume`"
+        f"use enginery factory run {shlex.quote('owner/repo#1')} "
+        f"--project {shlex.quote(str(project))}"
     ) in capsys.readouterr().err
 
 
@@ -813,6 +806,8 @@ def test_medium_risk_wait_names_approve_and_reject(
     decision = report["next_decision"]
     for key, action in (("command", "approve"), ("reject_command", "reject")):
         argv = shlex.split(decision[key])
+        parsed = _build_parser().parse_args(argv[1:])
+        assert parsed.reason == "REASON"
         assert argv[:3] == ["enginery", "stage1", action]
         assert argv[argv.index("--node-id") + 1] == "qualify"
         assert argv[argv.index("--run-id") + 1] == report["run_id"]
@@ -1001,6 +996,9 @@ def test_failed_implementation_human_wait_names_its_decision(
     assert "--node-id implement" in decision["command"]
     assert "--node-id implement" in decision["reject_command"]
     assert decision["action"] == "stage1 approve|reject"
+    for key in ("command", "reject_command"):
+        parsed = _build_parser().parse_args(shlex.split(decision[key])[1:])
+        assert parsed.reason == "REASON"
 
 
 def test_repeated_action_with_node_progress_advances_without_sleep(
@@ -1067,3 +1065,73 @@ def test_repeated_action_with_node_progress_advances_without_sleep(
     monkeypatch.setattr(factory_run.time, "sleep", unexpected)
     factory_run.advance_run(project, original["run_id"], wait_seconds=30)
     assert generation == 3
+
+
+@pytest.mark.parametrize("risk", ("low", "medium"))
+def test_changed_snapshot_repairs_execute_and_superseded_run_cannot_advance(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    risk: str,
+) -> None:
+    project, github = bound_project
+    github.serve(labels=("enginery/work-kind/issue", f"enginery/risk/{risk}"))
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    github.serve(
+        labels=("enginery/work-kind/issue", f"enginery/risk/{risk}"),
+        updated_at="2026-10-17T00:00:00Z",
+    )
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    commands = held["holds"][0]["resolve"].split("; ")
+    assert all("--node-id qualify" not in command for command in commands)
+    for command in commands:
+        capsys.readouterr()
+        assert main(shlex.split(command)[1:]) == 0
+        capsys.readouterr()
+    _, replacement = invoke(capsys, project, "status")
+    new_run = next(run for run in replacement["runs"] if run["run_id"] != original["run_id"])
+    assert new_run["superseded_by"] is None
+    _, old = invoke(capsys, project, "status", original["run_id"])
+    assert old["superseded_by"] == new_run["run_id"]
+
+    def unexpected_service(**_kwargs: object) -> None:
+        pytest.fail("a superseded run must not construct an advancing service")
+
+    monkeypatch.setattr(factory_run, "advancing_service", unexpected_service)
+    report = factory_run.advance_run(project, original["run_id"])
+    assert report["status"] == old["status"]
+    assert report["holds"][-1] == {
+        "prerequisite": "superseded binding",
+        "detail": f"superseded by run {new_run['run_id']}",
+        "resolve": (
+            f"enginery factory status {new_run['run_id']} --project {shlex.quote(str(project))}"
+        ),
+    }
+
+
+def test_intake_failure_repair_uses_configured_github(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, github = bound_project
+
+    def fail_fetch(_issue: str) -> None:
+        raise InvalidInputError("issue unavailable")
+
+    monkeypatch.setattr(
+        factory_run, "github_ledger", lambda *_args: SimpleNamespace(fetch=fail_fetch)
+    )
+    code, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    auth, collect = report["holds"][0]["resolve"].split("; ")
+    assert shlex.split(auth) == [str(github.executable), "auth", "status"]
+    assert shlex.split(collect) == [
+        "enginery",
+        "factory",
+        "collect",
+        "--dry-run",
+        "--project",
+        str(project),
+    ]
