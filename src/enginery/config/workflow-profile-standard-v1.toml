@@ -1,0 +1,4 @@
+# Workflow profile "standard": the issue-to-pull-request workflow with the factory's
+# own limits. It states no value, so it never overrides the factory layer.
+
+schema_version = 1

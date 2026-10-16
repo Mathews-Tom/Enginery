@@ -1,0 +1,35 @@
+# Factory layer: the packaged defaults every Stage 1 request starts from, the lowest
+# of the five configuration layers (run > project > user > workflow > factory). Nothing
+# here chooses a trust mode: a run is only ever trusted-local or isolated-oci because a
+# higher layer said so.
+
+schema_version = 1
+
+[execution]
+harness = "omp"
+
+[validation]
+# The trusted-local default. An isolated run must name its own commands.
+commands = ["uv run pytest -q"]
+required_checks = ["CI"]
+repair_limit = 1
+
+[runner]
+model_access = "none"
+
+[implementation]
+time_budget_seconds = 1800
+permitted_capabilities = ["git"]
+evidence_requirements = ["redacted harness transcript"]
+
+[credentials]
+github = "operator-gh-cli"
+harness = "operator-harness-session"
+
+[executables]
+github = "gh"
+
+# The executable each supported harness is run as when no layer names one.
+[provider_executables]
+omp = "omp"
+claude-code = "claude"
