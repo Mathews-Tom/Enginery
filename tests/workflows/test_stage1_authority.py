@@ -50,7 +50,7 @@ from enginery.application.branch_publication import (
 )
 from enginery.application.work_ports import PullRequestPort, PullRequestRequest, PullRequestSnapshot
 from enginery.application.worker_environment import LAUNCHER_KEYS, TRUSTED_LOCAL_WORKER_KEYS
-from enginery.cli.stage1 import _branch_publisher
+from enginery.cli.stage1_composition import branch_publisher
 from enginery.domain.errors import (
     ExternalConflictError,
     HumanActionRequiredError,
@@ -711,7 +711,7 @@ def _isolated_ready_to_open(
     )
     events: list[str] = []
     pulls = EventfulPullRequests(events)
-    real = _branch_publisher(built.request)
+    real = branch_publisher(built.request)
     assert real is not None
     publisher = EventfulPublisher(real, events)
     service = replace(
@@ -1034,7 +1034,7 @@ def test_a_run_persisted_before_trust_modes_is_given_no_publisher(
 ) -> None:
     built = _build(ledger_service, tmp_path, runner=RunnerSelection.trusted_local())
 
-    assert _branch_publisher(replace(built.request, runner=LEGACY_RUNNER_SELECTION)) is None
+    assert branch_publisher(replace(built.request, runner=LEGACY_RUNNER_SELECTION)) is None
 
 
 def test_the_cli_wires_the_publisher_to_the_repository_the_worker_cannot_write(
@@ -1047,8 +1047,8 @@ def test_the_cli_wires_the_publisher_to_the_repository_the_worker_cannot_write(
         ledger_service, tmp_path / "trusted", runner=RunnerSelection.trusted_local()
     ).request
 
-    isolated_publisher = _branch_publisher(isolated)
-    trusted_publisher = _branch_publisher(trusted)
+    isolated_publisher = branch_publisher(isolated)
+    trusted_publisher = branch_publisher(trusted)
 
     assert isinstance(isolated_publisher, GitBranchPublisher)
     assert isolated_publisher.source_path == intake_path_for(isolated.workspace_path)
@@ -1089,7 +1089,7 @@ def test_a_trusted_local_run_publishes_the_verified_head_from_its_workspace(
     _complete_through_implement(built)
     _record_verified_head(ledger_service, "implement-0", head, correlation="verified-head-trusted")
     events: list[str] = []
-    real = _branch_publisher(built.request)
+    real = branch_publisher(built.request)
     assert real is not None
     service = replace(
         built.service,
@@ -1464,7 +1464,7 @@ def test_a_trusted_local_candidate_editing_ci_configuration_is_held_before_any_p
     _complete_through_implement(built)
     _record_verified_head(ledger_service, "implement-0", head, correlation="verified-head-held")
     events: list[str] = []
-    real = _branch_publisher(built.request)
+    real = branch_publisher(built.request)
     assert real is not None
     service = replace(
         built.service,
@@ -1628,7 +1628,7 @@ def test_a_missing_tool_validation_hold_cannot_be_approved_into_a_publication(
         ledger_service, tmp_path, runner, command=("pytest", "-q", "tests")
     )
     remote, pushes = _give_origin(built.repository)
-    publisher = _branch_publisher(built.request)
+    publisher = branch_publisher(built.request)
     assert publisher is not None
     service = replace(built.service, branch_publisher=cast(BranchPublicationPort, publisher))
     with pytest.raises(HumanActionRequiredError):
@@ -1677,7 +1677,7 @@ def test_a_validation_approved_while_it_never_ran_still_never_reaches_review_or_
         ledger_service, tmp_path, runner, command=("pytest", "-q", "tests")
     )
     remote, pushes = _give_origin(built.repository)
-    publisher = _branch_publisher(built.request)
+    publisher = branch_publisher(built.request)
     assert publisher is not None
     service = replace(built.service, branch_publisher=cast(BranchPublicationPort, publisher))
     complete_node = CoordinatorRuntime.complete_node

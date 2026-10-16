@@ -143,11 +143,15 @@ Enginery protects **workflow integrity** first. Its `trusted-local` backend is d
 
 Every public claim must name its boundary. "Reconciliation before retry" applies only to adapter operations with a stable provider-visible operation ID and a deterministic reconciliation query. It does not make a provider operation atomic, revoke an already-issued request, or establish that competing products lack an equivalent mechanism.
 
-### Shipped setup and proposed factory direction
+### Shipped manual factory path and proposed controls
 
-The shipped `v0.6.0` substrate (published to PyPI and GitHub Releases on 2026-10-13) exposes the CLI surface listed in the operator guide. Guided configuration and issue intake are shipped as `enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect`. The wider manual-first factory layer remains **proposed and not shipped**: `run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`. The rest of this subsection describes that wider proposal only, not current behavior.
+The operator guide lists the shipped CLI surface. Guided configuration ships as `enginery factory init`, `doctor`, `explain`, and `uninstall`; manual intake and execution ship as `collect`, `run`, `status`, and `explain RUN`. Factory `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`, and scheduled collection, remain proposed.
 
-The proposal adds no second engine. It keeps one deterministic engine and ledger, and its boundary is manual-first, local-first, and deterministic: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. The harness, the model it reports, the session, and the worker machine are separate axes; none is inferred from another. Reference projects inform patterns only; no upstream skills or code are vendored.
+Factory and Stage 1 commands share one composition boundary for bound start, read-only inspection, runtime selection and advancing services. The coordinator owns progression through `Stage1RunService.advance`; the CLI adds neither a second scheduler nor another state store. The private project `ledger.sqlite` has owner `factory` and is also accessible to Stage 1 commands with `--database`. Terminal review remains `stage1 review`, with unchanged Stage 1 flags and output.
+
+A run ID is `fr-` plus the first 20 hexadecimal characters of SHA-256 over canonical JSON containing project identity, issue reference and bound issue snapshot digest. The private intake index binds the issue to that ID and digest. The same snapshot reuses the durable run and request; a changed snapshot holds instead of silently rebinding. Explicit `--supersede` creates a new binding while retaining the old run for status inspection. Requests, workspaces and artifacts live under private project state, not in tracked policy.
+
+`factory explain` without RUN retains the current compiled-configuration explanation. With RUN it reads the immutable request/configuration binding, field sources, execution selection, runner, permitted capabilities, node states and hold repairs; it does not recompile current settings. Models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. Harness, model, session and worker machine remain separate axes. Reference projects inform independently re-implemented patterns only; no upstream skills or code are vendored.
 
 ## 5. Domain model
 

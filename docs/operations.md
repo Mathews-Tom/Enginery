@@ -226,7 +226,7 @@ positional arguments:
     workspace           Inspect and release run-scoped workspace reservations.
     runner              Build and qualify the isolated worker image and engine.
     capability          Capability lock and scoped install commands.
-    factory             Guided project setup and prerequisite diagnostics.
+    factory             Guided setup, manual issue intake, execution and inspection.
 ```
 
 This is materially narrower than the full command-family list in the system
@@ -254,8 +254,11 @@ script against a command that is not listed above.
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
 | `enginery factory init --runner MODE [--apply] [--project PATH] [choices...] [--json]` | Preview, or with `--apply` perform, guided project setup (below). |
 | `enginery factory doctor [--project PATH] [--json]` | Report the prerequisites the project's compiled selection needs, read-only (below). |
-| `enginery factory explain [--project PATH] [--json]` | Show where every compiled field comes from, which files setup owns and what is held, read-only (below). |
+| `enginery factory explain [RUN] [--project PATH] [--json]` | Without RUN, explain current compiled configuration and setup ownership; with RUN, explain its immutable binding. |
 | `enginery factory uninstall [--apply] [--project PATH] [--json]` | Preview, or with `--apply` perform, removal of exactly the unmodified files setup created (below). |
+| `enginery factory collect [--dry-run] [--project PATH] [--json]` | Preview eligible GitHub issues; without `--dry-run`, record only private intake state. |
+| `enginery factory run OWNER/REPO#N [--project PATH] [--once] [--wait-seconds N] [--json]` | Compile, bind and advance an issue through the existing Stage 1 coordinator. |
+| `enginery factory status [RUN] [--project PATH] [--json]` | List durable project runs or inspect one run without advancing it. |
 | `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
 
 ### Capability packages
@@ -695,8 +698,8 @@ with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or
 `enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
 
 
-`factory explain` answers "why does this run use that value, and what did setup leave
-behind?" from the same compiler output `doctor` and `build-request` use. For every
+`factory explain` without RUN answers "why would a new run use that value, and what
+did setup leave behind?" from the same compiler output `doctor` and `build-request` use. For every
 compiled field it prints the value, the winning layer, each shadowed lower-layer value
 with its source file and sha256, then the hard constraints that applied, every layer
 file with its digest, each file setup created with its status (`owned`,
@@ -749,6 +752,99 @@ record is removed last, so a second run reports nothing to uninstall. It never t
 the ledger, evidence and artifacts, the capability store or lockfile, or authentication
 state; a record that names any path other than the two setup creates is refused rather
 than obeyed, and a symbolic link on the way to either path or the ownership record is refused.
+
+## Manual factory path
+
+After choosing a runner and completing guided setup, collect and run manually:
+
+```sh
+enginery factory init --runner trusted-local --apply --project .
+enginery factory collect --dry-run --project . --json
+enginery factory collect --project . --json
+enginery factory run OWNER/REPO#N --project . --json
+enginery factory status --project . --json
+enginery factory status RUN --project . --json
+enginery factory explain RUN --project . --json
+```
+
+Use the returned `run_id` in place of RUN. Setup does not install capabilities or
+authenticate: resolve its reported holds before running. Collect, run, status and
+explain do not call a model; an implementation worker dispatched by the coordinator
+can use the selected coding harness and model. Collection never dispatches a worker.
+
+`factory run` uses the same request compiler and bound-start path as `stage1 start`.
+The shared Stage 1 composition supplies runtime selection, inspection and advancing
+services; only `Stage1RunService.advance` progresses the run. There is one coordinator,
+not a second factory scheduler. The private project ledger uses owner `factory`;
+existing Stage 1 commands can open that same database with `--database`.
+
+The command resolves the project repository from `origin`, uses the current branch
+and its current commit as the base, and uses the project capability lockfile when
+present. `--base-branch` selects a different base branch. Run-layer overrides are
+`--model`, `--effort`, `--runner`, `--profile`, `--validation-command`,
+`--required-check`, `--protected-path` and `--time-budget-seconds`, with the same
+meaning and defaults as `stage1 build-request`; all other settings come from the
+compiled project/user/workflow/factory layers. A bound run is not recompiled by
+repeating `run` with different overrides.
+
+The project-specific private state directory contains:
+
+```text
+ledger.sqlite
+intake/index.json
+runs/<run_id>/request.json
+runs/<run_id>/workspace/
+artifacts/
+```
+
+The command reports the database and request paths; these are local runtime state,
+not tracked policy. Intake and request writes are atomic and link-safe. The intake
+index stores each issue's run ID and bound snapshot digest, plus the repository cursor.
+The run ID is `fr-` followed by the first 20 hexadecimal characters of SHA-256 over
+canonical JSON with keys `project`, `issue`, and `snapshot`: project identity, issue
+reference and bound snapshot digest. The same project/issue/snapshot reuses the same
+durable run, request and workspace rather than creating another run.
+
+`run --once` performs one advance. Otherwise it advances until a hold, block, human
+review, terminal state or wait boundary; `--wait-seconds` defaults to zero, returning
+at the first wait while the supervised worker may keep running. Repeating `factory run`
+for the same bound issue continues that durable run. `status` never advances it:
+without RUN it lists project runs; with RUN it reports current nodes, next action,
+worker PID or container identity, selection and winning layers, runner, budget basis,
+and holds with repairs. Time budgets are reported in seconds; cost remains unenforced.
+
+`factory explain RUN` reads the immutable binding: request and configuration digests,
+embedded field sources, harness/model/effort, runner, permitted capability subset,
+node states and current hold repairs. It does not recompile today's configuration.
+Without RUN, `factory explain` retains the current configuration and setup-ownership
+explanation described above.
+
+Terminal review remains `enginery stage1 review` against the returned database and
+run ID, using its existing flags and report format; the other Stage 1 commands retain
+their flags and output. There is no factory review UI. This path ends at a verified
+open PR plus outcome observation. Merge, release and deployment are separate human
+actions, never actions performed by this factory path.
+
+### Manual-path holds
+
+Holds report the exact repair command. Common cases are:
+
+- Missing or unparseable `origin`: configure the GitHub remote with
+  `git remote add origin …` (or correct the existing remote).
+- Missing or unauthenticated `gh`: install it or run `gh auth login`.
+- Missing, duplicate or unknown canonical issue labels: apply exactly one supported
+  work-kind and risk label using the reported GitHub label command.
+- Missing or unapproved selected capability: follow the reported capability
+  lock/install or policy approval command; collection does not install it.
+- Changed issue snapshot: the command holds with "issue changed since run … was
+  bound". Inspect the old run with `factory status RUN`; cancel it with
+  `enginery stage1 cancel --database PATH --run-id RUN` as appropriate before
+  `enginery factory run OWNER/REPO#N --supersede`. Superseding explicitly records a
+  new binding and run; the old run remains durable and visible in status.
+
+Factory `resume`, `pause`, `drain`, `review`, `watch` and `evidence` remain proposed
+and must not be scripted against. Scheduled collection/watch is not shipped.
+Use existing Stage 1 and operator controls for their documented lifecycle operations.
 
 ## Running a Stage 1 workflow
 

@@ -372,9 +372,11 @@ Stage 1 binds two checks. `stage1.validate` runs the validation commands supplie
 
 Current supported behavior is frozen in a versioned, digest-verified acceptance baseline (`acceptance-baseline-v1.toml`, package data). It lists the Stage 1 to 3 local gates, the doctor command, and fail-closed G4 status, with each assertion mapped to a typed check and to the script or test that exercises it. Acceptance for a new feature is defined separately by that feature's task and is never added to the baseline. Calibration outcomes are `caught`, `escaped`, `not_injected`, or `inconclusive`; private calibration scenarios are held by the operator or evaluator outside worker-readable mounts.
 
-### Proposed factory direction (not shipped)
+### Manual factory path and proposed controls
 
-Harness, model, session, and worker machine are separate axes in every example above. A proposed manual-first factory layer would keep control deterministic and local: models never poll, schedule, keep books, or decide whether a check is complete, and routine control uses no model. This is not shipped behavior. No upstream skills or code are vendored; reference projects are independently re-implemented patterns only, and trusted-local operation is not containment.
+The shipped `enginery factory collect --dry-run` previews issue eligibility, deduplication and compiled execution selection without writes or GitHub mutations. `factory collect` records only private intake state. `factory run OWNER/REPO#N` starts or continues the bound issue through the existing Stage 1 coordinator; `factory status [RUN]` reads progress. `factory explain RUN` reads the immutable run binding, whereas `factory explain` without RUN still explains current configuration. Review stays on the terminal `stage1 review` path. See the [Manual factory path](operations.md#manual-factory-path) for the journey and holds.
+
+Factory `resume`, `pause`, `drain`, `review`, `watch`, and `evidence`, and scheduled collection, remain proposed and not shipped. Harness, model, session and worker machine are separate axes. Shipped control is deterministic and local: models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. No upstream skills or code are vendored; reference projects inform independently re-implemented patterns only, and trusted-local operation is not containment.
 
 ## 8. Source grounding
 

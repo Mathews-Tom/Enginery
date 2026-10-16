@@ -16,7 +16,7 @@ import pytest
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
-from enginery.cli.stage1 import _harness_for
+from enginery.cli.stage1_composition import harness_for
 from enginery.domain.digests import Digest
 from enginery.domain.errors import ExternalConflictError, MissingPrerequisiteError
 from enginery.engine.runtime import CoordinatorRuntime
@@ -562,7 +562,7 @@ class _Run:
                 ledger=ledger,
                 work_ledger=cast(WorkLedgerPort, TerminalWorkLedger(request.work_snapshot)),
                 pull_requests=cast(PullRequestPort, RecordingPullRequests()),
-                harness=_harness_for(request.execution_configuration),
+                harness=harness_for(request.execution_configuration),
             ),
             request,
         )

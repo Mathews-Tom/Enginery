@@ -27,7 +27,7 @@ factory self-improvement) is gate-deferred with no committed date; run
 are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
-### Guided setup shipped; the rest of the factory direction proposed
+### Guided setup and manual factory execution
 
 `enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped: guided,
 preview-first project setup, read-only prerequisite diagnostics, an explanation of where
@@ -44,15 +44,18 @@ repository cursor, never issue-to-run bindings, and never skips held issues. JSO
 reports GitHub authentication probes separately from issue reads; neither form calls
 a model or changes GitHub.
 
-A manual-first software-factory layer on top of the shipped substrate is
-otherwise **proposed and not shipped**: the remaining proposed command family
-(`run`, `status`, `resume`, `pause`, `drain`, `review`, `watch`,
-`evidence`) does not exist yet and must not be scripted against. The
-proposal keeps the same boundary the shipped substrate already has: control is
-manual-first, local-first, and deterministic. Models never poll, schedule, keep
-books, or decide whether a check is complete; routine control uses no model.
-Harness, model, session, and worker machine are separate axes and none implies
-another.
+`enginery factory run OWNER/REPO#N` compiles a bound request and advances the
+existing Stage 1 coordinator, not a second scheduler. `factory status [RUN]`
+reports durable progress; `factory explain RUN` explains the run's immutable
+binding, while `factory explain` without RUN still explains current configuration.
+See the [Manual factory path](docs/operations.md#manual-factory-path) for private
+state, run identity, overrides and holds. Terminal review remains `stage1 review`.
+
+Factory `resume`, `pause`, `drain`, `review`, `watch`, and `evidence` remain
+**proposed and not shipped**; scheduled collection is not shipped either.
+The shipped boundary is manual-first, local-first, and deterministic: models never
+poll, schedule, keep books, or decide whether a check is complete; routine control
+uses no model. Harness, model, session, and worker machine are separate axes.
 
 ### Licensing and security limits
 

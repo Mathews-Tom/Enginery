@@ -405,6 +405,18 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
     return document
 
 
+def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
+    database = private_state_directory(project) / "ledger.sqlite"
+    return {
+        "prerequisite": "bound snapshot",
+        "detail": f"issue changed since run {run_id} was bound",
+        "resolve": (
+            f"enginery factory drain --stop --project {project}; "
+            f"enginery stage1 cancel --database {database} --owner factory "
+            f"--run-id {run_id} --node-id implement; "
+            f"enginery factory run {issue} --supersede --project {project}"
+        ),
+    }
 def document_lines(document: Mapping[str, object]) -> list[str]:
     """Render all external text with terminal controls escaped, preserving JSON types."""
     return [text(line) for line in json.dumps(document, indent=2, sort_keys=True).splitlines()]
