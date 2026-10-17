@@ -713,14 +713,6 @@ def step_prepare(gate: ManualPathGate) -> None:
             "initial_commits": 2,
         },
     )
-    from factory_gate_behavioral import _toml
-
-    policy.write_text(
-        policy_text + "\n[acceptance]\nchecks = " + _toml(gate.acceptance_checks()) + "\n",
-        encoding="utf-8",
-    )
-    gate.git(project, "add", ".enginery/project.toml")
-    gate.git(project, "commit", "-qm", "operator declares changed-result behavioral check")
     gate.git(project, "push", "-q", "origin", branch)
 
 
