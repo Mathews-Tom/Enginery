@@ -141,7 +141,8 @@ class _Process:
             return
 
     def kill(self) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        # macOS reports EPERM for a group whose members have all exited but are unreaped.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self.process.pid, signal.SIGKILL)
 
     def check(self) -> None:
