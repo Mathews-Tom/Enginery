@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
 from tests.support.execution import selection_for
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger, _snapshot
@@ -72,6 +73,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-dogfood"),

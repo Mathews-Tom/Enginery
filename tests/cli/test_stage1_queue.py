@@ -165,6 +165,9 @@ def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledg
     first_path, second_path = tmp_path / "first.json", tmp_path / "second.json"
     assert main(_build_argv(tmp_path, output=first_path)) == 0
     second = _occupier(tmp_path)  # a second repository with a commit, reused as run 2's
+    from tests.support.behavioral import declare_behavioral_policy
+
+    second_base = declare_behavioral_policy(second.repository_path)
     assert (
         main(
             _build_argv(
@@ -178,7 +181,7 @@ def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledg
                 "--repository-path",
                 str(second.repository_path),
                 "--base-revision",
-                second.base_revision,
+                second_base,
                 "--workspace-path",
                 str(tmp_path / "workspace-2"),
                 "--artifact-root",

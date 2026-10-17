@@ -256,7 +256,9 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     (repository / "README").write_text("fixture\n", encoding="utf-8")
     _git("add", "README", cwd=repository)
     _git("commit", "-q", "-m", "fixture", cwd=repository)
-    return repository, _git("rev-parse", "HEAD", cwd=repository)
+    from tests.support.behavioral import declare_behavioral_policy
+
+    return repository, declare_behavioral_policy(repository)
 
 
 def _build_argv(

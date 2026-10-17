@@ -79,6 +79,7 @@ def _drifted_catalog() -> ExecutionCatalog:
 def _legacy(request: Stage1RunRequest) -> Stage1RunRequest:
     return replace(
         request,
+        behavioral_checks=None,
         execution_selection=ExecutionSelection.legacy_host_default("omp"),
         runner=LEGACY_RUNNER_SELECTION,
     )
@@ -118,7 +119,11 @@ def test_a_new_run_must_bind_an_explicit_selection(
     request, service, _, _, now = _check_disposition_fixture(ledger_service, tmp_path, start=False)
 
     with pytest.raises(InvalidInputError, match="execution selection"):
-        service.start(_legacy(request), now=now, heartbeat_window=_WINDOW)
+        service.start(
+            replace(_legacy(request), behavioral_checks=request.behavioral_checks),
+            now=now,
+            heartbeat_window=_WINDOW,
+        )
 
     assert (
         ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))

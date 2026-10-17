@@ -310,6 +310,23 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
         bound = _projection_status(project, run_id) is not None
         if not bound:
             built = compile_request(request_inputs(project, issue, run_id, args))
+            if not built.request.behavioral_checks:
+                branch = shlex.quote(built.request.base_branch)
+                return _held(
+                    project,
+                    [
+                        {
+                            "prerequisite": "behavioral checks",
+                            "reason": "no_behavioral_checks",
+                            "detail": "no behavioral checks were bound; nothing was started",
+                            "resolve": (
+                                f"add [acceptance] checks to .enginery/project.toml, commit on "
+                                f"{branch}, then enginery factory run {shlex.quote(issue)} "
+                                f"--project {shlex.quote(str(project))}"
+                            ),
+                        }
+                    ],
+                )
             if str(built.request.work_snapshot.bound_digest) != digest:
                 return _held(
                     project,

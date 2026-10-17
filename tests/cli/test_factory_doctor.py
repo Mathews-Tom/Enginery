@@ -40,7 +40,12 @@ def toolbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls.log"
-    _script(bin_dir, "git", f'echo "git $*" >> {calls}; echo "git version 2.99.0"')
+    _script(
+        bin_dir,
+        "git",
+        f'echo "git $*" >> {calls}; '
+        'if [ "$1" = "--version" ]; then echo "git version 2.99.0"; else exit 1; fi',
+    )
     _script(
         bin_dir,
         "gh",
@@ -321,6 +326,9 @@ def test_doctor_digest_matches_build_request_without_run_overrides(
 ) -> None:
     from enginery.workflows.stage1 import stage1_request_from_state
     from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
+    from tests.support.behavioral import declare_behavioral_policy
+
+    _script(toolbox, "git", 'exec /usr/bin/git "$@"')
 
     with monkeypatch.context() as context:
         context.setenv("PATH", os.defpath)
@@ -331,6 +339,7 @@ def test_doctor_digest_matches_build_request_without_run_overrides(
         'schema_version = 1\n[execution]\nmodel = "openai/gpt-5.4"\neffort = "high"\n'
         '[runner]\nmode = "trusted-local"\n'
     )
+    base = declare_behavioral_policy(repository)
     output = tmp_path / "request.json"
     argv = _minimal_argv(
         tmp_path=tmp_path, repository=repository, base_revision=base, output=output

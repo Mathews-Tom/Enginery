@@ -571,6 +571,17 @@ def _submit(
     init = gate.cli(*_init_args(project, *init_extra), "--apply")
     if init.returncode != 0:
         raise RuntimeError(f"factory init failed: {init.stderr.strip()[:300]}")
+    # New runs require operator-owned behavioral checks bound at the base revision.
+    policy = project / ".enginery" / "project.toml"
+    with policy.open("a", encoding="utf-8") as stream:
+        stream.write(
+            '\n[[acceptance.checks]]\nname = "project-content"\nobserver = "command"\n'
+            'argv = ["cat", "README"]\nfault_classes = ["constant_result"]\n'
+            '[[acceptance.checks.assertions]]\nkind = "stdout"\n'
+            'contains = "disposable project"\n'
+        )
+    gate.git(project, "add", ".enginery/project.toml")
+    gate.git(project, "commit", "-q", "-m", "declare project behavioral acceptance")
     run_dir = gate.runs / name
     run_dir.mkdir()
     request = run_dir / "request.json"
@@ -610,6 +621,7 @@ def _submit(
         if step.returncode != 0:
             raise RuntimeError(f"stage1 watch failed: {step.stderr.strip()[:300]}")
         state = json.loads(step.stdout.strip().splitlines()[-1])
+        gate.raw_write(f"submission/{name}-state.json", state)
         implement = next((n for n in state["nodes"] if n["node_id"] == "implement"), None)
         if implement is not None and implement["status"] in ("failed", "passed"):
             break

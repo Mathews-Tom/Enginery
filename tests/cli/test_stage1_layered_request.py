@@ -12,9 +12,20 @@ from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_selection import SelectionLayer, SelectionMode
 from enginery.workflows.stage1 import stage1_request_from_state
-from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
+from tests.cli.test_stage1_request_builder import _minimal_argv
+from tests.cli.test_stage1_request_builder import _repository as _empty_repository
+from tests.support.behavioral import declare_behavioral_policy
 
 INVALID = exit_code_for(FailureClass.INVALID_INPUT)
+
+
+def _repository(tmp_path: Path) -> tuple[Path, str]:
+    repository, _ = _empty_repository(tmp_path)
+    base = declare_behavioral_policy(repository)
+    # Live-layer absence and edits remain independent of the committed assertion set.
+    (repository / ".enginery" / "project.toml").unlink()
+    (repository / ".enginery").rmdir()
+    return repository, base
 
 
 def _write_project(repository: Path, text: str) -> Path:

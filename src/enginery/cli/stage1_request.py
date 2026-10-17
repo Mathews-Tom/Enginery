@@ -43,7 +43,7 @@ from enginery.application.layered_config import (
     run_layer,
 )
 from enginery.capabilities.serialization import read_lock
-from enginery.cli.config_binding import EFFECTIVE_CONFIG_KEY
+from enginery.cli.config_binding import EFFECTIVE_CONFIG_KEY, checks_at_base
 from enginery.cli.config_locations import (
     read_project_layer,
     read_user_layer,
@@ -396,6 +396,7 @@ def compile_request(inputs: RequestInputs) -> BuiltRequest:
         user=read_user_layer(),
         run=_run_layer(args),
         probe_host=_probe_host,
+        behavioral_checks=checks_at_base(args.repository_path.resolve(), args.base_revision),
     )
     compiled = record_absent_sources(compiled, args.repository_path)
     config = compiled.config
@@ -499,6 +500,7 @@ def compile_request(inputs: RequestInputs) -> BuiltRequest:
         execution_selection=selection,
         runner=compiled.runner,
         protected_paths=config.strings("protected_paths"),
+        behavioral_checks=config.behavioral_checks,
     )
     require_explicit_isolated_validation(request)
     return BuiltRequest(request=request, compiled=compiled)

@@ -50,9 +50,21 @@ def bound_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     )
     harness.chmod(0o755)
     (project / ".enginery").mkdir()
+    readme_command = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; print(Path('README').read_text().strip())",
+    ]
     (project / ".enginery" / "project.toml").write_text(
-        'schema_version = 1\n[runner]\nmode = "trusted-local"\n', encoding="utf-8"
+        'schema_version = 1\n[runner]\nmode = "trusted-local"\n'
+        '[[acceptance.checks]]\nname = "fixture.readme"\nobserver = "command"\n'
+        f"argv = {json.dumps(readme_command)}\n"
+        'fault_classes = ["constant_result", "wrong_build"]\n'
+        '[[acceptance.checks.assertions]]\nkind = "stdout"\nequals = "fixture\\n"\n',
+        encoding="utf-8",
     )
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "configure operator acceptance", cwd=project)
     user = Path(os.environ["XDG_CONFIG_HOME"]) / "enginery" / "user.toml"
     user.parent.mkdir(parents=True, exist_ok=True)
     user.write_text(
@@ -70,6 +82,32 @@ def invoke(capsys: pytest.CaptureFixture[str], project: Path, *arguments: str) -
     output = capsys.readouterr()
     assert output.out, output.err
     return code, json.loads(output.out)
+
+
+def test_empty_checks_hold_before_binding_and_documented_repair_recompiles(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    policy = project / ".enginery" / "project.toml"
+    original = policy.read_text()
+    policy.write_text('schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "remove acceptance", cwd=project)
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    assert held["holds"][0]["reason"] == "no_behavioral_checks"
+    assert shlex.quote(str(project)) in held["holds"][0]["resolve"]
+    assert "stage1 build-request" not in held["holds"][0]["resolve"]
+    assert "run_id" not in held
+    assert not factory_run.read_index(project).repositories
+    policy.write_text(original)
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "restore acceptance", cwd=project)
+    code, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 0
+    raw = json.loads(Path(run["request_path"]).read_text())
+    assert stage1_request_from_state(raw).behavioral_checks
 
 
 def test_run_binds_compiler_request_and_status_explains_embedded_selection(

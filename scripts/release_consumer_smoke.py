@@ -208,6 +208,20 @@ def _stand_in_github(root: Path) -> Path:
 
 
 def _build_request_command(executable: Path, *, root: Path, output: Path) -> list[str]:
+    repository = root / "repository"
+    if not (repository / ".git").exists():
+        repository.mkdir(parents=True, exist_ok=True)
+        _require_success(["git", "init", "-q", str(repository)], cwd=root)
+        _require_success(["git", "config", "user.name", "consumer smoke"], cwd=repository)
+        _require_success(
+            ["git", "config", "user.email", "consumer-smoke@example.invalid"], cwd=repository
+        )
+        (repository / "README").write_text("consumer smoke fixture\n", encoding="utf-8")
+        _require_success(["git", "add", "README"], cwd=repository)
+        _require_success(["git", "commit", "-qm", "consumer smoke base"], cwd=repository)
+    base_revision = _require_success(
+        ["git", "rev-parse", "--verify", "HEAD"], cwd=repository
+    ).stdout.strip()
     return [
         str(executable),
         "stage1",
@@ -225,7 +239,7 @@ def _build_request_command(executable: Path, *, root: Path, output: Path) -> lis
         "--github-executable",
         str(_stand_in_github(root)),
         "--base-revision",
-        "89abcdef0123456789abcdef0123456789abcdef",
+        base_revision,
         "--repository-path",
         str(root / "repository"),
         "--workspace-path",
