@@ -1830,8 +1830,8 @@ class Stage1RunService:
                             "cannot pass. Fix the behavior and start a new run: for factory "
                             "runs, change the issue snapshot and use enginery factory run "
                             "ISSUE --project PROJECT --supersede; for Stage 1 runs, rebuild "
-                            "with enginery stage1 build-request and start with enginery "
-                            "stage1 start using a new run id.",
+                            "with enginery stage1 build-request --run-id NEW_RUN_ID "
+                            "then enginery stage1 start --request REQUEST.",
                         },
                     ) from error
                 raise
