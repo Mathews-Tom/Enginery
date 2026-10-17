@@ -234,22 +234,34 @@ class GitBranchPublisher:
             raise ExternalConflictError(
                 "the verified repository does not contain the base revision"
             )
-        git_bytes(
-            self.source_path,
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            f"{head_revision}^{{commit}}",
-        )
-        changed = git_bytes(
-            self.source_path,
-            "diff",
-            "--name-only",
-            "-z",
-            *DIFF_FLAGS,
-            f"{base}..{head_revision}",
-            "--",
-        )
+        try:
+            git_bytes(
+                self.source_path,
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{head_revision}^{{commit}}",
+            )
+        except InvalidInputError as error:
+            raise ExternalConflictError(
+                "the verified repository does not contain the revision to publish",
+                details={"head_revision": head_revision},
+            ) from error
+        try:
+            changed = git_bytes(
+                self.source_path,
+                "diff",
+                "--name-only",
+                "-z",
+                *DIFF_FLAGS,
+                f"{base}..{head_revision}",
+                "--",
+            )
+        except InvalidInputError as error:
+            raise ExternalConflictError(
+                "the changed paths of the verified branch could not be read",
+                details={"base_revision": base_revision, "head_revision": head_revision},
+            ) from error
         return tuple(entry.decode("utf-8", "replace") for entry in changed.split(b"\x00") if entry)
 
     def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:

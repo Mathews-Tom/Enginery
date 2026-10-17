@@ -685,10 +685,28 @@ def test_changed_paths_resolves_a_branch_name_base_and_refuses_a_missing_one(rig
     )
     with pytest.raises(ExternalConflictError, match="base revision"):
         rig.publisher().changed_paths(base_revision="no-such-branch", head_revision=head)
+    with pytest.raises(ExternalConflictError, match="revision to publish"):
+        rig.publisher().changed_paths(base_revision="main", head_revision="e" * 40)
     with pytest.raises(InvalidInputError):
         rig.publisher().changed_paths(base_revision="--upload-pack=x", head_revision=head)
     with pytest.raises(InvalidInputError):
         rig.publisher().changed_paths(base_revision="main", head_revision="main")
+
+
+def test_changed_paths_maps_diff_read_failure(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = _implement(rig)
+    original = git_publication.git_bytes
+
+    def read(repository: Path, *arguments: str) -> bytes:
+        if arguments[0] == "diff":
+            raise InvalidInputError("cannot read host-owned Git repository")
+        return original(repository, *arguments)
+
+    monkeypatch.setattr(git_publication, "git_bytes", read)
+    with pytest.raises(ExternalConflictError, match="changed paths"):
+        rig.publisher().changed_paths(base_revision="main", head_revision=head)
 
 
 def test_a_planted_diff_driver_or_textconv_never_runs_while_paths_are_read(rig: Rig) -> None:
