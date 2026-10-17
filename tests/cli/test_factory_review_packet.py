@@ -328,11 +328,19 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     observed["result"] = "failed"
     newer = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
     assert newer.subject_digest != packet.subject_digest
-    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:verify_merge_ready")] = {
-        "head_revision": "c" * 40,
+    ci_state: dict[str, object] = {
+        "head_revision": head,
         "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
-        "status": "passed",
+        "github_evidence": {"status": "passed"},
     }
+    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:verify")] = ci_state
+    current = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+    assert json.loads(current.ci_evidence_json)["availability"] == "current_head"
+    ci_state["configuration_snapshot_digest"] = str(Digest.of_bytes(b"old configuration"))
+    stale_config = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+    assert json.loads(stale_config.ci_evidence_json)["persisted"] == {}
+    ci_state["configuration_snapshot_digest"] = str(request.run.configuration_snapshot_digest)
+    ci_state["head_revision"] = "c" * 40
     observed["head_revision"] = "c" * 40
     stale = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
     assert stale.evidence_receipt_digests == ()
