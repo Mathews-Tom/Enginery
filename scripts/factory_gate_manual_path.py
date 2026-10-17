@@ -738,6 +738,10 @@ def step_inspection_review(gate: ManualPathGate) -> None:
         {"exit": code, "json": repeated},
         {"intake": gate.index(), "launches": gate.launches()},
     )
+    calibration_code, _ = gate.factory("calibrate", gate.run_id)
+    check_code, checked = gate.factory("check", gate.run_id)
+    if calibration_code != 0 or check_code != 0 or checked.get("result") != "pass":
+        raise RuntimeError("current behavioral evidence did not pass: " + json.dumps(checked))
     report_path = gate.root / "approving-review.json"
     report_path.write_text(
         json.dumps(
