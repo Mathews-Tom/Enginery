@@ -1095,8 +1095,15 @@ uv run enginery stage1 build-request \
   --base-revision <real base revision> \
   --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
-  --artifact-root <absolute path to an artifact directory>
+  --artifact-root "${XDG_STATE_HOME:-$HOME/.local/state}/enginery/artifacts/issue-142"
 ```
+
+Choose an absolute artifact directory under `$XDG_STATE_HOME` (default
+`~/.local/state`), with no symlink components; the example uses its `enginery/`
+subdirectory. Request construction and `stage1 start` require an absolute path,
+but the trusted behavioral observer enforces the state-home boundary during
+verification. An arbitrary absolute directory outside that home cannot complete
+behavioral verification.
 
 What the issue decides is not a flag. `build-request` reads the issue named by
 `--external-reference` (`OWNER/REPO#N`, not an issue URL) through the same GitHub

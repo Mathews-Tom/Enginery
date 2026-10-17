@@ -129,7 +129,8 @@ uv run enginery stage1 build-request --runner trusted-local \
   --output request.json --run-id issue-1 \
   --repository owner/repo --external-reference "owner/repo#1" \
   --base-revision "..." --repository-path /path/to/repo \
-  --workspace-path /path/to/workspace --artifact-root /path/to/artifacts
+  --workspace-path /path/to/workspace \
+  --artifact-root "${XDG_STATE_HOME:-$HOME/.local/state}/enginery/artifacts/issue-1"
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json
 uv run enginery stage2 status --database ledger.db --owner operator --stack-id ID
 uv run enginery workspace inspect --database ledger.db --owner operator --json
