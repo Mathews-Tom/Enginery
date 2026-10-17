@@ -11,7 +11,6 @@ from pathlib import Path
 from enginery.adapters.git_reader import DIFF_FLAGS, git_bytes
 from enginery.adapters.review_presenters import LavishPresenter, PresenterError
 from enginery.application.branch_publication import ProtectedPathPolicy
-from enginery.application.git_environment import repository_isolated_environment
 from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
 from enginery.cli.config_locations import private_state_directory, read_user_layer
 from enginery.cli.factory_collect import (
