@@ -288,7 +288,11 @@ def decide_in_ledger(
             database=database or None,
             owner=owner,
         )
-        repair = review if isinstance(error, ActionMismatchError) else (f"{review}; {decide}")
+        repair = (
+            review
+            if isinstance(error, ActionMismatchError) or action not in _actions(ledger, request)
+            else f"{review}; {decide}"
+        )
         raise type(error)(error.args[0], details={**error.details, "repair": repair}) from error
 
 

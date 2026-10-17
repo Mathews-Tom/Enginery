@@ -49,7 +49,7 @@ uv run enginery stage1 build-request --runner trusted-local \
   --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
-  --artifact-root <absolute path to a private artifact directory outside the checkout>
+  --artifact-root <absolute path to a private artifact directory under the Enginery state home>
 ```
 
 A trusted-local run validates with `uv run pytest -q` unless you pass

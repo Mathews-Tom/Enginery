@@ -129,6 +129,7 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
     else:
         assert "budget is exhausted" in str(caught.value.details["repair"])
         repair = str(caught.value.details["repair"])
+        assert f"repair: {repair}" in str(caught.value)
         assert "this run cannot pass" in repair
         assert "decision" not in repair
         assert "change the issue snapshot" in repair

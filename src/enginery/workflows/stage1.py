@@ -1772,18 +1772,18 @@ class Stage1RunService:
                         database=database or None,
                         owner=self.runtime.coordinator.owner,
                     )
+                    repair = (
+                        "The behavioral repair budget is exhausted; this run "
+                        "cannot pass and is terminal. Inspect its evidence with "
+                        f"{review_command}. Fix the behavior and start a new run: for "
+                        "factory runs, change the issue snapshot and use enginery factory "
+                        "run ISSUE --project PROJECT --supersede; for Stage 1 runs, "
+                        "rebuild with enginery stage1 build-request --run-id NEW_RUN_ID "
+                        "then enginery stage1 start --request REQUEST."
+                    )
                     raise HumanActionRequiredError(
-                        str(error),
-                        details={
-                            **error.details,
-                            "repair": "The behavioral repair budget is exhausted; this run "
-                            "cannot pass and is terminal. Inspect its evidence with "
-                            f"{review_command}. Fix the behavior and start a new run: for "
-                            "factory runs, change the issue snapshot and use enginery factory "
-                            "run ISSUE --project PROJECT --supersede; for Stage 1 runs, "
-                            "rebuild with enginery stage1 build-request and start with "
-                            "enginery stage1 start using a new run id.",
-                        },
+                        f"{error}; repair: {repair}",
+                        details={**error.details, "repair": repair},
                     ) from error
                 raise
         verification_request = Stage1VerificationRequest(
