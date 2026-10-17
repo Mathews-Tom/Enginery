@@ -261,7 +261,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
         )
         assert result.outcome.value == "merge_ready"
 
-        # This is the exact tick a real `enginery stage1 watch --advance`
+        # This is the exact tick a real `enginery engine next --advance`
         # invocation performs: at most one durable next action.
         service.advance(
             request.run.id,

@@ -125,7 +125,7 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
     assert str(refused.value) == f"decision_required: review required; repair: {review}; {decide}"
     for command, verb in ((review, "review"), (decide, "decide")):
         argv = shlex.split(command)
-        assert argv[:4] == ["enginery", "factory", verb, str(request.run.id)]
+        assert argv[:3] == ["enginery", verb, str(request.run.id)]
         assert argv[argv.index("--database") + 1] == str(database)
         assert argv[argv.index("--owner") + 1] == owner
 
@@ -138,10 +138,9 @@ def test_shared_decision_commands_preserve_every_interpolated_shell_argument(act
     owner = "owner ' ; $(touch bad)"
     review, decide = decision_commands(run_id, project, action, database=database, owner=owner)
     common = ["--project", project, "--database", database, "--owner", owner]
-    assert shlex.split(review) == ["enginery", "factory", "review", run_id, *common]
+    assert shlex.split(review) == ["enginery", "review", run_id, *common]
     expected = [
         "enginery",
-        "factory",
         "decide",
         run_id,
         *common,

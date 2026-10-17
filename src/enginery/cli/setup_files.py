@@ -27,7 +27,7 @@ from enginery.domain.errors import ExternalConflictError, InvalidInputError
 
 OWNERSHIP_SCHEMA_VERSION = 1
 OWNERSHIP_FILE = "setup-ownership.json"
-CREATED_BY = "enginery factory init"
+CREATED_BY = "enginery init"
 
 
 def _typed_file_errors[**P, T](function: Callable[P, T]) -> Callable[P, T]:

@@ -18,7 +18,6 @@ from enginery.application.factory_intake import IntakeEntry
 from enginery.cli import factory_collect
 from enginery.cli.factory_collect import collect, index_path, intake_prerequisites, read_index
 from enginery.cli.main import _build_parser
-from enginery.cli.operator import _build_parser as _build_operator_parser
 from enginery.domain.errors import (
     AuthenticationFailureError,
     EngineryError,
@@ -178,8 +177,6 @@ def assert_repair(command: str, *, github_executable: str = "gh") -> None:
         argv = shlex.split(part)
         if argv[0] == "enginery":
             _build_parser().parse_args(argv[1:])
-        elif argv[0] == "enginery-operator":
-            _build_operator_parser().parse_args(argv[1:])
         elif argv[:3] == [github_executable, "issue", "edit"]:
             assert argv[3].isascii() and argv[3].isdigit()
             assert argv[4:6] == ["--repo", "owner/repo"]

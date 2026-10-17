@@ -1200,11 +1200,11 @@ def test_a_candidate_editing_a_ci_workflow_is_held_and_nothing_is_pushed(
 
     message = str(caught.value)
     assert "decision_required" in message
-    assert f"enginery factory review {RUN_ID}" in message
-    assert f"enginery factory decide {RUN_ID}" in message
+    assert f"enginery review {RUN_ID}" in message
+    assert f"enginery decide {RUN_ID}" in message
     assert "--action pull_request.open" in message
     assert caught.value.details["reason"] == "decision_required"
-    assert caught.value.details["repair"].startswith("enginery factory review ")
+    assert caught.value.details["repair"].startswith("enginery review ")
     assert ready.remote_branch() is None, "nothing reached the remote"
     assert ready.accepted_pushes() == []
     assert ready.publisher.requests == [], "the publisher was never asked to push"

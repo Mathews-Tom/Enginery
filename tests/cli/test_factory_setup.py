@@ -42,7 +42,6 @@ def _init(
     capsys.readouterr()
     code = main(
         [
-            "factory",
             "init",
             "--project",
             str(project),
@@ -431,7 +430,6 @@ def test_old_harness_model_preview_and_apply_are_nonwriting_holds(
     assert (
         main(
             [
-                "factory",
                 "init",
                 "--project",
                 str(project),
@@ -541,7 +539,6 @@ def test_oversized_existing_policy_is_a_typed_nonwriting_refusal(
     assert (
         main(
             [
-                "factory",
                 "init",
                 "--project",
                 str(project),

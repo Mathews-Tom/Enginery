@@ -78,7 +78,7 @@ def bound_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
 
 def invoke(capsys: pytest.CaptureFixture[str], project: Path, *arguments: str) -> tuple[int, dict]:
     capsys.readouterr()
-    code = main(["factory", *arguments, "--project", str(project), "--json"])
+    code = main([*arguments, "--project", str(project), "--json"])
     output = capsys.readouterr()
     assert output.out, output.err
     return code, json.loads(output.out)
@@ -98,7 +98,7 @@ def test_empty_checks_hold_before_binding_and_documented_repair_recompiles(
     assert code == 5
     assert held["holds"][0]["reason"] == "no_behavioral_checks"
     assert shlex.quote(str(project)) in held["holds"][0]["resolve"]
-    assert "stage1 build-request" not in held["holds"][0]["resolve"]
+    assert "engine build-request" not in held["holds"][0]["resolve"]
     assert "run_id" not in held
     assert not factory_run.read_index(project).repositories
     policy.write_text(original)
@@ -131,7 +131,7 @@ def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     assert code == 0 and status["request_digest"] == str(request.digest)
     assert status["budget"]["cost"] == "unenforced"
     assert status["selection"] == run["selection"]
-    code, explanation = invoke(capsys, project, "explain", run["run_id"])
+    code, explanation = invoke(capsys, project, "status", run["run_id"])
     assert code == 0 and explanation["fields"] == run["fields"]
     assert (
         next(field for field in explanation["fields"] if field["name"] == "runner_mode")["winner"]
@@ -143,7 +143,7 @@ def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "build-request",
                 "--output",
                 str(rebuilt),
@@ -184,11 +184,10 @@ def test_changed_issue_holds_without_replacing_request(
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 5
     assert held["holds"][0]["detail"] == f"issue changed since run {run['run_id']} was bound"
-    assert "stage1 cancel" not in held["holds"][0]["resolve"]
+    assert "engine cancel" not in held["holds"][0]["resolve"]
     repairs = held["holds"][0]["resolve"].split("; ")
     assert shlex.split(repairs[0]) == [
         "enginery",
-        "factory",
         "drain",
         "--stop",
         "--project",
@@ -196,15 +195,12 @@ def test_changed_issue_holds_without_replacing_request(
     ]
     assert shlex.split(repairs[1]) == [
         "enginery",
-        "factory",
-        "pause",
-        "--lift",
+        "resume",
         "--project",
         str(project),
     ]
     assert shlex.split(repairs[2]) == [
         "enginery",
-        "factory",
         "run",
         "owner/repo#1",
         "--supersede",
@@ -229,7 +225,7 @@ def test_repeat_run_reuses_durable_request_and_workspace(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "cancel",
                 "--database",
                 run["database"],
@@ -252,7 +248,6 @@ def test_invalid_wait_seconds_is_rejected_before_any_effect(
     with pytest.raises(SystemExit) as error:
         main(
             [
-                "factory",
                 "run",
                 "owner/repo#1",
                 "--project",
@@ -467,7 +462,7 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--supersede", "--once")
     assert code == 5
     assert held["holds"][0]["resolve"].startswith(
-        f"enginery factory drain --stop --project {shlex.quote(str(project))}; "
+        f"enginery drain --stop --project {shlex.quote(str(project))}; "
     )
     assert "run.status=" in held["holds"][0]["detail"]
     assert f"runtime_node[{original['run_id']}:implement].status=" in held["holds"][0]["detail"]
@@ -495,7 +490,7 @@ def test_supersede_refuses_live_run_and_accepts_cancelled_run(
             ):
                 main(
                     [
-                        "stage1",
+                        "engine",
                         "cancel",
                         "--database",
                         str(listing["database"]),
@@ -526,11 +521,11 @@ def test_changed_issue_repair_cancels_an_exited_unreconciled_implementation(
     code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
     assert code == 5
     repairs = held["holds"][0]["resolve"].split("; ")
-    cancel = [shlex.split(step) for step in repairs if " stage1 cancel " in f" {step} "]
+    cancel = [shlex.split(step) for step in repairs if " engine cancel " in f" {step} "]
     assert cancel == [
         [
             "enginery",
-            "stage1",
+            "engine",
             "cancel",
             "--database",
             original["database"],
@@ -633,9 +628,7 @@ def test_paused_run_preserves_execution_holds(
     assert report["holds"][0]["resolve"] == "Resolve the worker on its launching host"
     assert shlex.split(report["holds"][1]["resolve"]) == [
         "enginery",
-        "factory",
-        "pause",
-        "--lift",
+        "resume",
         "--project",
         str(project),
     ]
@@ -686,13 +679,13 @@ def test_status_preserves_service_hold_diagnostics_and_matching_repairs(
     code, report = invoke(capsys, project, "status", original["run_id"])
     assert code == 5
     assert report["holds"][0]["message"] == hold["message"]
-    doctor = f"enginery factory doctor --project {shlex.quote(str(project))}"
+    doctor = f"enginery preflight --project {shlex.quote(str(project))}"
     assert (
         report["holds"][0]["resolve"]
         == {
             "restore": (
                 f"{doctor}; restore the run's bound configuration; "
-                f"enginery factory resume {shlex.quote(original['run_id'])} "
+                f"enginery continue {shlex.quote(original['run_id'])} "
                 f"--project {shlex.quote(str(project))}"
             ),
             "message": f"{doctor}; {hold['message']}",
@@ -739,10 +732,10 @@ def test_human_review_reports_the_current_repair_decision_command(
     monkeypatch.setattr(factory_run, "watch_document", review_watch)
     code, report = invoke(capsys, project, "status", original["run_id"])
     assert code == 0 and report["holds"] == []
-    assert report["next_decision"]["action"] == "stage1 review"
+    assert report["next_decision"]["action"] == "engine review"
     assert shlex.split(report["next_decision"]["command"]) == [
         "enginery",
-        "stage1",
+        "engine",
         "review",
         "--database",
         original["database"],
@@ -785,7 +778,7 @@ def test_blocked_progression_without_execution_hold_reports_its_reason(
     assert code == 5
     assert report["holds"][0]["message"] == reason
     assert report["holds"][0]["resolve"] == (
-        f"enginery factory doctor --project {shlex.quote(str(project))}; {reason}"
+        f"enginery preflight --project {shlex.quote(str(project))}; {reason}"
     )
 
 
@@ -1031,7 +1024,6 @@ def test_supersede_unchanged_snapshot_is_invalid(
         ledger.close()
     code = main(
         [
-            "factory",
             "run",
             "owner/repo#1",
             "--supersede",
@@ -1044,7 +1036,7 @@ def test_supersede_unchanged_snapshot_is_invalid(
     assert code == 2
     assert (
         f"issue snapshot unchanged since run {original['run_id']} was bound; "
-        f"use enginery factory run {shlex.quote('owner/repo#1')} "
+        f"use enginery run {shlex.quote('owner/repo#1')} "
         f"--project {shlex.quote(str(project))}"
     ) in capsys.readouterr().err
 
@@ -1062,7 +1054,7 @@ def test_medium_risk_wait_names_approve_and_reject(
         argv = shlex.split(decision[key])
         parsed = _build_parser().parse_args(argv[1:])
         assert parsed.reason == "REASON"
-        assert argv[:3] == ["enginery", "factory", "decide"]
+        assert argv[:2] == ["enginery", "decide"]
         assert parsed.action == f"human_wait.qualify.{action}"
         assert parsed.run_id == report["run_id"]
         assert parsed.project == project
@@ -1109,7 +1101,7 @@ def test_failed_implementation_without_wait_reports_service_failure(
     assert report["holds"][0]["resolve"] == (
         repair
         or (
-            f"enginery factory resume {shlex.quote(original['run_id'])} "
+            f"enginery continue {shlex.quote(original['run_id'])} "
             f"--project {shlex.quote(str(project))}"
         )
     )
@@ -1291,7 +1283,7 @@ def test_exhausted_behavioral_failure_is_terminal_and_reviewable(
     repair = report["holds"][0]["resolve"]
     assert "--supersede" in repair
     assert "only after the issue snapshot changes" in repair
-    assert "factory decide" not in repair
+    assert "enginery decide" not in repair
     assert "requeue" not in repair
     review_command = repair.split("Inspect the evidence with ", 1)[1].split(". A new attempt", 1)[0]
     assert main(shlex.split(review_command)[1:]) == 0
@@ -1332,7 +1324,7 @@ def test_failed_implementation_human_wait_names_its_decision(
     decision = report["next_decision"]
     assert "--action human_wait.implement.approve" in decision["command"]
     assert "--action human_wait.implement.reject" in decision["reject_command"]
-    assert decision["action"] == "factory review|decide"
+    assert decision["action"] == "review|decide"
     for key in ("command", "reject_command"):
         parsed = _build_parser().parse_args(shlex.split(decision[key])[1:])
         assert parsed.reason == "REASON"
@@ -1441,9 +1433,7 @@ def test_changed_snapshot_repairs_execute_and_superseded_run_cannot_advance(
     assert report["holds"][-1] == {
         "prerequisite": "superseded binding",
         "detail": f"superseded by run {new_run['run_id']}",
-        "resolve": (
-            f"enginery factory status {new_run['run_id']} --project {shlex.quote(str(project))}"
-        ),
+        "resolve": f"enginery status {new_run['run_id']} --project {shlex.quote(str(project))}",
     }
 
 
@@ -1466,7 +1456,6 @@ def test_intake_failure_repair_uses_configured_github(
     assert shlex.split(auth) == [str(github.executable), "auth", "status"]
     assert shlex.split(collect) == [
         "enginery",
-        "factory",
         "collect",
         "--dry-run",
         "--project",
@@ -1754,7 +1743,7 @@ def test_behavioral_failure_with_stale_github_hold_resumes_repair(
             "attempt_id": f"verify-{generation}",
             "reason": "github_evidence_blocked",
             "message": "complete current-head GitHub evidence blocks readiness",
-            "repair": "Reopen the PR then run stage1 watch --advance",
+            "repair": "Reopen the PR then run enginery engine next --advance",
         }
         record("verify", stale_verify)
         record(
@@ -1775,7 +1764,7 @@ def test_behavioral_failure_with_stale_github_hold_resumes_repair(
         service = SimpleNamespace(next_action=lambda _: progression, advance=advance)
         monkeypatch.setattr(factory_run, "read_only_service", lambda **_: service)
         monkeypatch.setattr(factory_run, "advancing_service", lambda **_: service)
-    for command in ("status", "resume"):
+    for command in ("status", "continue"):
         code, report = invoke(capsys, project, command, run_id)
         assert code == 0
         assert report["status"] != "failed"

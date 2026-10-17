@@ -99,8 +99,8 @@ def drain(
                     else "wait observes exit only; it does not collect worker results"
                 ),
                 "reconcile": (
-                    f"enginery factory pause --lift --project {shlex.quote(str(project))}; "
-                    f"enginery factory resume RUN --project {shlex.quote(str(project))}"
+                    f"enginery resume --project {shlex.quote(str(project))}; "
+                    f"enginery continue RUN --project {shlex.quote(str(project))}"
                 ),
             }
         )

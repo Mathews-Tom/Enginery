@@ -4,7 +4,7 @@ Registration and capture happen through the coordinator-owned Stage 1
 progression service and, for the escaped-defect and reopened-issue kinds
 with no adapter read signal, an explicit human capture call -- neither is
 a CLI-driven mutation. This module's job is the same safe operator
-inspection role ``enginery stage2 status`` already established: list what
+inspection role ``enginery engine status`` already established: list what
 is pending, captured, or expired, and report the versioned completeness
 derivation over it.
 """

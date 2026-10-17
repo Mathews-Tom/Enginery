@@ -369,7 +369,7 @@ def test_decision_refusal_has_one_context_correct_quoted_repair(
     review, decide = message.split("; repair: ", 1)[1].split("; ", 1)
     for command, verb in ((review, "review"), (decide, "decide")):
         argv = shlex.split(command)
-        assert argv[:4] == ["enginery", "factory", verb, RUN]
+        assert argv[:3] == ["enginery", verb, RUN]
         assert argv[argv.index("--project") + 1] == str(ingress.project)
         assert argv[argv.index("--database") + 1] == str(ingress.database)
         assert argv[argv.index("--owner") + 1] == "stage1-cli"

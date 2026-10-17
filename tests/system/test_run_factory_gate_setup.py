@@ -146,7 +146,7 @@ def test_setup_apply_rejects_an_unpreviewed_created_path(
 
     def cli(gate: factory_gate_setup.SetupGate, *arguments: str, **kwargs: Any) -> Any:
         process = original(gate, *arguments, **kwargs)
-        if arguments[:2] == ("factory", "init") and "--apply" in arguments:
+        if arguments[:1] == ("init",) and "--apply" in arguments:
             project = Path(arguments[arguments.index("--project") + 1])
             (project / "unpreviewed").write_text("unexpected\n", encoding="utf-8")
         return process
@@ -166,7 +166,7 @@ def test_setup_apply_rejects_changes_to_an_existing_project_file(
 
     def cli(gate: factory_gate_setup.SetupGate, *arguments: str, **kwargs: Any) -> Any:
         process = original(gate, *arguments, **kwargs)
-        if arguments[:2] == ("factory", "init") and "--apply" in arguments:
+        if arguments[:1] == ("init",) and "--apply" in arguments:
             project = Path(arguments[arguments.index("--project") + 1])
             (project / "README").write_text("unexpected replacement\n", encoding="utf-8")
         return process

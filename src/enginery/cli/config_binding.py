@@ -1,7 +1,7 @@
 """Bind a Stage 1 request to the configuration snapshot it was compiled from.
 
-``stage1 build-request`` writes the compiled snapshot into the request document beside the
-request. ``stage1 start`` calls :func:`require_bound_configuration` before it runs anything:
+``engine build-request`` writes the compiled snapshot into the request document beside the
+request. ``engine start`` calls :func:`require_bound_configuration` before it runs anything:
 the snapshot's sha256 must be the request's ``configuration_snapshot_digest`` and every
 compiled field must equal the value the request actually carries. Inconsistent,
 policy-violating or drifted requests are refused with an instruction to rebuild.
@@ -51,7 +51,7 @@ from enginery.domain.execution_selection import SelectionLayer
 from enginery.workflows.stage1 import Stage1RunRequest
 
 EFFECTIVE_CONFIG_KEY = "effective_config"
-_REBUILD = "rebuild it with `enginery stage1 build-request`"
+_REBUILD = "rebuild it with `enginery engine build-request`"
 
 _CUSTODY_WHAT = "behavioral evaluator custody"
 
@@ -121,7 +121,7 @@ def behavioral_checks_path(request: Stage1RunRequest) -> Path | None:
 def _custody_repair(request: Stage1RunRequest, path: Path) -> str:
     if str(request.run.id).startswith("fr-"):
         command = (
-            f"enginery factory run "
+            f"enginery run "
             f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
             f"--project {shlex.quote(str(request.repository_path))}"
         )

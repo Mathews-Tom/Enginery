@@ -197,8 +197,8 @@ def verify_for_stage1(
         retry = shlex.join(
             (
                 "enginery",
-                "stage1",
-                "watch",
+                "engine",
+                "next",
                 "--database",
                 database,
                 "--owner",
@@ -219,7 +219,6 @@ def verify_for_stage1(
                 + shlex.join(
                     (
                         "enginery",
-                        "factory",
                         "calibrate",
                         str(request.run.id),
                         "--project",

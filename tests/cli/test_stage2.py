@@ -40,7 +40,7 @@ def test_status_reports_an_existing_stack(
 
     exit_code = main(
         [
-            "stage2",
+            "engine",
             "status",
             "--database",
             str(database),
@@ -65,7 +65,7 @@ def test_status_reports_a_missing_stack(tmp_path: Path, capsys: pytest.CaptureFi
 
     exit_code = main(
         [
-            "stage2",
+            "engine",
             "status",
             "--database",
             str(database),

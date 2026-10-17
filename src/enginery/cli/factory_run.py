@@ -97,7 +97,7 @@ def nonnegative_seconds(value: str) -> float:
 
 
 def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
-    repairs = [f"enginery factory drain --stop --project {shlex.quote(str(project))}"]
+    repairs = [f"enginery drain --stop --project {shlex.quote(str(project))}"]
     connection = read_ledger(project)
     if connection is not None:
         try:
@@ -116,17 +116,16 @@ def changed_hold(project: Path, issue: str, run_id: str) -> dict[str, str]:
                     and node_id not in live_node_ids
                 ):
                     repairs.append(
-                        f"enginery stage1 cancel "
+                        f"enginery engine cancel "
                         f"--database {shlex.quote(str(database_path(project)))} "
                         f"--owner factory --run-id {shlex.quote(run_id)} "
                         f"--node-id {shlex.quote(node_id)}"
                     )
         finally:
             connection.close()
-    repairs.append(f"enginery factory pause --lift --project {shlex.quote(str(project))}")
+    repairs.append(f"enginery resume --project {shlex.quote(str(project))}")
     repairs.append(
-        f"enginery factory run {shlex.quote(issue)} --supersede "
-        f"--project {shlex.quote(str(project))}"
+        f"enginery run {shlex.quote(issue)} --supersede --project {shlex.quote(str(project))}"
     )
     return {
         "prerequisite": "bound snapshot",
@@ -263,6 +262,19 @@ def _held(project: Path, holds: list[dict[str, str]]) -> dict[str, object]:
     }
 
 
+def _project_command(project: Path, command: str, *arguments: str) -> str:
+    """Render the project-scoped command used in repair instructions."""
+    return shlex.join(["enginery", command, *arguments, "--project", str(project)])
+
+
+def _review_ingress_command(project: Path, run_id: str, repair_attempt: int) -> str:
+    return (
+        f"enginery engine review --database {shlex.quote(str(database_path(project)))} "
+        f"--owner factory --run-id {shlex.quote(run_id)} --report REPORT.json "
+        f"--repair-attempt {repair_attempt}"
+    )
+
+
 def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
     configuration = load_project_configuration(project)
     holds = factory_repairs(project, intake_prerequisites(configuration))
@@ -282,7 +294,7 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
                     "detail": str(error),
                     "resolve": (
                         f"{shlex.quote(executable)} auth status; "
-                        f"enginery factory collect --dry-run --project {shlex.quote(str(project))}"
+                        + _project_command(project, "collect", "--dry-run")
                     ),
                 }
             ],
@@ -298,8 +310,7 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
             if previous.bound_digest == digest and args.supersede:
                 raise InvalidInputError(
                     f"issue snapshot unchanged since run {previous.run_id} was bound; "
-                    f"use enginery factory run {shlex.quote(issue)} "
-                    f"--project {shlex.quote(str(project))}"
+                    f"use {_project_command(project, 'run', issue)}"
                 )
             if previous.bound_digest != digest and not args.supersede:
                 return _held(project, [changed_hold(project, issue, previous.run_id)])
@@ -324,8 +335,7 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
                             "detail": "no behavioral checks were bound; nothing was started",
                             "resolve": (
                                 f"add [acceptance] checks to .enginery/project.toml, commit on "
-                                f"{branch}, then enginery factory run {shlex.quote(issue)} "
-                                f"--project {shlex.quote(str(project))}"
+                                f"{branch}, then {_project_command(project, 'run', issue)}"
                             ),
                         }
                     ],
@@ -337,10 +347,7 @@ def run_issue(project: Path, args: argparse.Namespace) -> dict[str, object]:
                         {
                             "prerequisite": "issue snapshot",
                             "detail": "issue changed during request compilation",
-                            "resolve": (
-                                f"enginery factory run {shlex.quote(issue)} "
-                                f"--project {shlex.quote(str(project))}"
-                            ),
+                            "resolve": _project_command(project, "run", issue),
                         }
                     ],
                 )
@@ -516,7 +523,7 @@ def factory_repairs(project: Path, holds: list[dict[str, str]]) -> list[dict[str
     return [
         {
             **hold,
-            "resolve": f"enginery factory pause --lift --project {shlex.quote(str(project))}",
+            "resolve": f"enginery resume --project {shlex.quote(str(project))}",
         }
         if hold.get("prerequisite") == "dispatch"
         else hold
@@ -657,10 +664,6 @@ def _enrich(
                 break
     node_states = cast(list[dict[str, object]], report["nodes"])
     awaiting = next((node for node in node_states if node["status"] == "awaiting_human"), None)
-    prefix = (
-        f"--database {shlex.quote(str(database_path(project)))} "
-        f"--owner factory --run-id {shlex.quote(run_id)}"
-    )
     verification = ledger.read_projection(
         aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:verify"
     )
@@ -678,16 +681,8 @@ def _enrich(
     elif exhausted_behavior:
         assert verification is not None
         review_command, _ = decision_commands(run_id, str(project), "pull_request.open")
-        new_run_command = shlex.join(
-            [
-                "enginery",
-                "factory",
-                "run",
-                request.work_snapshot.work_item.external_reference,
-                "--supersede",
-                "--project",
-                str(project),
-            ]
+        new_run_command = _project_command(
+            project, "run", request.work_snapshot.work_item.external_reference, "--supersede"
         )
         report.update(
             status="failed",
@@ -709,7 +704,7 @@ def _enrich(
         review_command, decide_command = decision_commands(run_id, str(project), action)
         _, reject_command = decision_commands(run_id, str(project), f"human_wait.{node_id}.reject")
         report["next_decision"] = {
-            "action": "factory review|decide",
+            "action": "review|decide",
             "review_command": review_command,
             "command": decide_command,
             "reject_command": reject_command,
@@ -739,11 +734,8 @@ def _enrich(
                 else 0
             )
             report["next_decision"] = {
-                "action": "stage1 review",
-                "command": (
-                    f"enginery stage1 review {prefix} --report REPORT.json "
-                    f"--repair-attempt {repair_attempt}"
-                ),
+                "action": "engine review",
+                "command": _review_ingress_command(project, run_id, repair_attempt),
             }
         elif hold is None:
             failed = next(
@@ -778,10 +770,7 @@ def _enrich(
             if isinstance(details, Mapping):
                 supplied_repair = supplied_repair or details.get("repair") or details.get("resolve")
             if not supplied_repair:
-                hold["resolve"] = (
-                    f"enginery factory resume {shlex.quote(run_id)} "
-                    f"--project {shlex.quote(str(project))}"
-                )
+                hold["resolve"] = _project_command(project, "continue", run_id)
     holds = [] if not isinstance(hold, Mapping) else [_hold_with_repair(project, hold, run_id)]
     node_index = {str(node["node_id"]): node for node in node_states}
     graph = [
@@ -902,7 +891,7 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object], run_id: str) ->
         if reason == "worker_identity_unprovable":
             repair = "Resolve the worker on its launching host"
         else:
-            doctor = f"enginery factory doctor --project {shlex.quote(str(project))}"
+            doctor = f"enginery preflight --project {shlex.quote(str(project))}"
             message = (
                 "restore the run's bound configuration"
                 if reason
@@ -918,7 +907,7 @@ def _hold_with_repair(project: Path, hold: Mapping[str, object], run_id: str) ->
             repair = f"{doctor}; {message}"
             if message == "restore the run's bound configuration":
                 repair += (
-                    f"; enginery factory resume {shlex.quote(run_id)} "
+                    f"; enginery continue {shlex.quote(run_id)} "
                     f"--project {shlex.quote(str(project))}"
                 )
     return {**hold, "resolve": repair}
@@ -945,7 +934,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
     connection = read_ledger(project)
     if connection is None:
         if run_id is not None:
-            raise InvalidInputError(f"unknown factory run: {run_id}")
+            raise InvalidInputError(f"unknown project run: {run_id}")
         return {"database": str(path), "runs": [], "paused": False, "local_writes": []}
     ledger = LedgerService(connection)
     try:
@@ -964,7 +953,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
         try:
             run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id))
         except EngineryError as error:
-            raise InvalidInputError(f"unknown factory run: {run_id}") from error
+            raise InvalidInputError(f"unknown project run: {run_id}") from error
         service = read_only_service(runtime=runtime, ledger=ledger, request=run.request)
         progression = service.next_action(RunId(run_id))
         report = watch_document(ledger, runtime, progression)
@@ -980,10 +969,7 @@ def status(project: Path, run_id: str | None = None) -> dict[str, object]:
                 {
                     "prerequisite": "superseded binding",
                     "detail": f"superseded by run {superseded_by}",
-                    "resolve": (
-                        f"enginery factory status {shlex.quote(superseded_by)} "
-                        f"--project {shlex.quote(str(project))}"
-                    ),
+                    "resolve": _project_command(project, "status", superseded_by),
                 }
             )
         report["local_writes"] = _created_sidecars(project, existing_sidecars)

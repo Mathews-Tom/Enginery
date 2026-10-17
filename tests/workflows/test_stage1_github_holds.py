@@ -78,9 +78,9 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
     repair = str(projection.state["repair"])
     assert "--database" in repair
     assert "--owner" in repair
-    assert "stage1 watch" in repair
-    assert "factory resume" not in repair
-    assert "factory review" in repair
+    assert "engine next" in repair
+    assert "enginery continue" not in repair
+    assert "enginery review" in repair
     assert projection.state["head_revision"] == "head-revision"
     assert projection.state["configuration_snapshot_digest"] == str(
         request.run.configuration_snapshot_digest
@@ -195,7 +195,7 @@ def test_verify_block_repairs_describe_the_actual_cause(
         "conflicts": "resolve its merge conflicts",
     }[kind] in str(projection.state["repair"])
     if kind == "required":
-        assert "stage1 watch" not in str(projection.state["repair"])
+        assert "engine next" not in str(projection.state["repair"])
 
 
 @pytest.mark.parametrize("node_id", ["wait_for_ci", "verify"])
@@ -228,7 +228,7 @@ def test_externally_merged_pr_is_terminal(
     assert projection.state["reason"] == "github_pull_request_merged"
     assert "merged outside Enginery before verification" in str(projection.state["repair"])
     assert "reopen" not in str(projection.state["repair"])
-    assert "stage1 watch" not in str(projection.state["repair"])
+    assert "engine next" not in str(projection.state["repair"])
     assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
 
 
@@ -262,4 +262,4 @@ def test_required_check_failure_without_repair_budget_has_no_advance_command(
     assert "this run cannot advance" in str(projection.state["repair"])
     assert "--supersede" in str(projection.state["repair"])
     assert "new run id" in str(projection.state["repair"])
-    assert "stage1 watch" not in str(projection.state["repair"])
+    assert "engine next" not in str(projection.state["repair"])

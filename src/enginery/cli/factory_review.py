@@ -325,7 +325,7 @@ def _open(
     if database is None:
         connection = read_ledger(project)
         if connection is None:
-            raise MissingPrerequisiteError("factory review requires an existing project run")
+            raise MissingPrerequisiteError("enginery review requires an existing project run")
         if writable:
             connection.close()
             path = database_path(project)
@@ -337,7 +337,7 @@ def _open(
         path = database.expanduser().absolute()
         refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
         if not path.is_file():
-            raise MissingPrerequisiteError("factory review requires an existing Stage 1 ledger")
+            raise MissingPrerequisiteError("enginery review requires an existing engine ledger")
         if writable:
             ledger = LedgerService.open(path)
         else:
@@ -426,7 +426,7 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
                 "finding_id": str(Digest.of_json(payload)),
             }
         if subject_digest != packet.subject_digest:
-            raise InvalidInputError("feedback subject is stale; run factory review again")
+            raise InvalidInputError("feedback subject is stale; run enginery review again")
         finding_ids = tuple(dict.fromkeys((*prior_ids, finding_id)))
         _json(list(finding_ids))
         runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
@@ -498,7 +498,7 @@ def lavish_feedback(
     packet = read_packet(project, run_id)
     presenter = _presenter(project, run_id=run_id, port=port, no_open=True)
     if packet.subject_digest != subject_digest:
-        raise InvalidInputError("feedback subject is stale; run factory review again")
+        raise InvalidInputError("feedback subject is stale; run enginery review again")
     path = _packet_path(project, packet)
     try:
         findings = presenter.poll(path)

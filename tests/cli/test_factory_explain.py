@@ -28,7 +28,7 @@ def _tree(*roots: Path) -> dict[str, str]:
 
 def _explain(capsys: pytest.CaptureFixture[str], project: Path) -> tuple[int, dict[str, object]]:
     capsys.readouterr()
-    code = main(["factory", "explain", "--project", str(project), "--json"])
+    code = main(["explain", "--project", str(project), "--json"])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -122,10 +122,7 @@ def test_setup_owned_files_are_reported_owned_modified_or_missing(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    assert (
-        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
-        == 0
-    )
+    assert main(["init", "--project", str(project), "--runner", "trusted-local", "--apply"]) == 0
     policy = project.resolve() / ".enginery" / "project.toml"
 
     _, document = _explain(capsys, project)
@@ -177,7 +174,7 @@ def test_current_holds_are_listed_and_explain_changes_nothing(
     assert code == HOLD
     assert document["fields"] == []
     assert document["holds"][0]["prerequisite"] == "trust mode"  # type: ignore[index]
-    assert document["holds"][0]["resolve"].startswith("enginery factory init")  # type: ignore[index]
+    assert document["holds"][0]["resolve"].startswith("enginery init")  # type: ignore[index]
 
     code, document = _explain(capsys, with_capability)
     assert code == HOLD
@@ -191,9 +188,7 @@ def test_a_malformed_policy_is_invalid_input(
     project = tmp_path / "project"
     _write(project / ".enginery" / "project.toml", "schema_version = 9\n")
 
-    assert main(["factory", "explain", "--project", str(project)]) == exit_code_for(
-        FailureClass.INVALID_INPUT
-    )
+    assert main(["explain", "--project", str(project)]) == exit_code_for(FailureClass.INVALID_INPUT)
     assert "schema_version" in capsys.readouterr().err
 
 
@@ -206,10 +201,7 @@ def test_invalid_ownership_entries_are_never_reported_owned(
 
     project = tmp_path / "project"
     project.mkdir()
-    assert (
-        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
-        == 0
-    )
+    assert main(["init", "--project", str(project), "--runner", "trusted-local", "--apply"]) == 0
     record_path = private_state_directory(project.resolve()) / OWNERSHIP_FILE
     record = json.loads(record_path.read_text(encoding="utf-8"))
     outside = tmp_path / "outside"
@@ -227,7 +219,7 @@ def test_invalid_ownership_entries_are_never_reported_owned(
     record_path.write_text(json.dumps(record), encoding="utf-8")
     capsys.readouterr()
 
-    assert main(["factory", "explain", "--project", str(project), "--json"]) == exit_code_for(
+    assert main(["explain", "--project", str(project), "--json"]) == exit_code_for(
         FailureClass.INVALID_INPUT
     )
     captured = capsys.readouterr()
@@ -247,7 +239,7 @@ def test_existing_policy_trust_hold_names_an_actionable_edit(
     resolution = document["holds"][0]["resolve"]  # type: ignore[index]
     assert str(policy) in resolution
     assert "trusted-local" in resolution and "isolated-oci" in resolution
-    assert "factory init" not in resolution
+    assert "enginery init" not in resolution
 
 
 @pytest.mark.parametrize("locked", [False, True])
@@ -294,7 +286,7 @@ def test_invalid_capability_name_is_invalid_input_naming_its_file_and_key(
     _write(source, prefix + '[implementation]\npermitted_capabilities = ["bad;command"]\n')
     capsys.readouterr()
 
-    code = main(["factory", "explain", "--project", str(project), "--json"])
+    code = main(["explain", "--project", str(project), "--json"])
 
     assert code == exit_code_for(FailureClass.INVALID_INPUT)
     error = capsys.readouterr().err
