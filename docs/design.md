@@ -640,7 +640,7 @@ Comparisons must use compatible cohorts and show sample size, exclusions, confid
 
 ### Command families
 
-The `enginery` executable exposes the shipped surface, which separates scopes:
+The only executable is `enginery`. The shipped surface separates scopes:
 
 - Project: `init`, `preflight`, `collect`, `run`, `status`, `explain`,
   `check`, `calibrate`, `review`, `feedback`, `decide`, `continue`,

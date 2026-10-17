@@ -10,12 +10,6 @@ from importlib import metadata
 from pathlib import Path
 
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
-from enginery.cli.ledger import (
-    run_backup,
-    run_rebuild_projections_command,
-    run_restore,
-    run_verify_command,
-)
 from enginery.domain.errors import EngineryError, FailureClass, InvalidInputError
 
 _DISTRIBUTION = "enginery"
@@ -60,35 +54,6 @@ def _build_parser() -> argparse.ArgumentParser:
     adapter_doctor_parser.add_argument("--deployment-state-root", type=Path, default=None)
     adapter_doctor_parser.add_argument("--deployment-python-executable", default=None)
 
-    ledger_parser = subparsers.add_parser(
-        "ledger", help="Operator ledger: Check consistency and manage storage."
-    )
-    ledger_subparsers = ledger_parser.add_subparsers(dest="ledger_command")
-
-    verify_parser = ledger_subparsers.add_parser(
-        "verify", help="Check ledger and artifact-store consistency."
-    )
-    verify_parser.add_argument("--database", required=True, type=Path)
-    verify_parser.add_argument("--artifacts", type=Path, default=None)
-    verify_parser.add_argument("--json", action="store_true")
-
-    backup_parser = ledger_subparsers.add_parser("backup", help="Snapshot a ledger to a directory.")
-    backup_parser.add_argument("--database", required=True, type=Path)
-    backup_parser.add_argument("--output", required=True, type=Path)
-    backup_parser.add_argument("--artifacts", type=Path, default=None)
-
-    restore_parser = ledger_subparsers.add_parser(
-        "restore", help="Restore a ledger from a backup directory."
-    )
-    restore_parser.add_argument("--backup", required=True, type=Path)
-    restore_parser.add_argument("--database", required=True, type=Path)
-    restore_parser.add_argument("--artifacts", type=Path, default=None)
-
-    rebuild_parser = ledger_subparsers.add_parser(
-        "rebuild-projections", help="Rebuild ledger projections from stored events."
-    )
-    rebuild_parser.add_argument("--database", required=True, type=Path)
-
     policy_parser = subparsers.add_parser("policy", help="Policy: Explain policy decisions.")
     policy_subparsers = policy_parser.add_subparsers(dest="policy_command")
     explain_parser = policy_subparsers.add_parser(
@@ -96,10 +61,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explain a policy request without authorizing it.",
     )
     explain_parser.add_argument("request", type=Path)
-    stage1_parser = subparsers.add_parser(
-        "stage1", help="Engine ledger: Run an issue-to-PR lifecycle."
-    )
-    _add_lifecycle_parsers(stage1_parser.add_subparsers(dest="stage1_command"), legacy=True)
 
     engine_parser = subparsers.add_parser(
         "engine",
@@ -110,12 +71,6 @@ def _build_parser() -> argparse.ArgumentParser:
     engine_commands = engine_parser.add_subparsers(dest="engine_command")
     _add_lifecycle_parsers(engine_commands)
     _add_stack_status_parser(engine_commands)
-
-    stage2_parser = subparsers.add_parser(
-        "stage2", help="Engine ledger: Inspect plan-to-release stack state."
-    )
-    stage2_subparsers = stage2_parser.add_subparsers(dest="stage2_command")
-    _add_stack_status_parser(stage2_subparsers)
 
     outcome_parser = subparsers.add_parser(
         "outcome", help="Engine ledger: Inspect outcome observations and completeness."
@@ -217,7 +172,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_capability_parser(subparsers)
     add_factory_parser(subparsers)
-    add_factory_parser(subparsers, legacy=True)
     add_operator_parser(subparsers)
 
     explain_parser.add_argument("--json", action="store_true")
@@ -246,37 +200,23 @@ def _describe_scope(parser: argparse.ArgumentParser, scope: str, synopsis: str |
 
 
 def _add_lifecycle_parsers(
-    commands: argparse._SubParsersAction[argparse.ArgumentParser], *, legacy: bool = False
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     from enginery.cli.stage1_request import add_build_request_parser
 
-    names = [
-        "start",
-        "watch" if legacy else "next",
-        "review",
-        "approve",
-        "reject",
-        "cancel",
-        "evidence",
-    ]
-    if legacy:
-        names.append("resume")
-    descriptions = {
-        "start": "Start a durable run from a request document.",
-        "watch": "Report the next durable-run action and optionally advance it.",
-        "review": "Ingest a review report for a durable run.",
-        "approve": "Authenticated human-wait decision; requires a project review challenge.",
-        "reject": "Authenticated human-wait decision; requires a project review challenge.",
-        "cancel": "Cancel one durable-run node.",
-        "evidence": "Report the evidence retained for a durable run.",
-        "resume": "Refuse unsupported human-wait requeue with human_wait_requeue_unsupported.",
-    }
-    for name in names:
-        command = "watch" if name == "next" else name
+    for command, synopsis in (
+        ("start", "Start a durable run from a request document."),
+        ("next", "Report the next durable-run action and optionally advance it."),
+        ("review", "Ingest a review report for a durable run."),
+        ("approve", "Authenticated human-wait decision; requires a project review challenge."),
+        ("reject", "Authenticated human-wait decision; requires a project review challenge."),
+        ("cancel", "Cancel one durable-run node."),
+        ("evidence", "Report the evidence retained for a durable run."),
+    ):
         lifecycle = commands.add_parser(
-            name,
-            help=f"Engine ledger: {descriptions[command]}",
-            description=f"Engine ledger: {descriptions[command]}",
+            command,
+            help=f"Engine ledger: {synopsis}",
+            description=f"Engine ledger: {synopsis}",
         )
         lifecycle.set_defaults(stage1_command=command)
         lifecycle.add_argument("--database", required=True, type=Path)
@@ -285,21 +225,18 @@ def _add_lifecycle_parsers(
             lifecycle.add_argument("--request", required=True, type=Path)
         else:
             lifecycle.add_argument("--run-id", required=True)
-        if command == "watch":
+        if command == "next":
             lifecycle.add_argument("--advance", action="store_true")
         if command == "review":
             lifecycle.add_argument("--report", required=True, type=Path)
             lifecycle.add_argument("--repair-attempt", required=True, type=int)
-        if command in {"approve", "reject", "cancel", "resume"}:
+        if command in {"approve", "reject", "cancel"}:
             lifecycle.add_argument("--node-id", required=True)
-        if command in {"approve", "reject", "resume"}:
+        if command in {"approve", "reject"}:
             lifecycle.add_argument("--subject-digest", required=True)
             lifecycle.add_argument("--challenge", required=True)
             lifecycle.add_argument("--principal-id", default=None)
             lifecycle.add_argument("--reason", required=True)
-        if command == "resume":
-            lifecycle.add_argument("--attempt-id", required=True)
-            lifecycle.add_argument("--operation-id", required=True)
     add_build_request_parser(commands)
     commands.choices["build-request"].set_defaults(stage1_command="build-request")
 
@@ -382,40 +319,6 @@ def _run_adapter_doctor(args: argparse.Namespace) -> int:
     return SUCCESS if ok else exit_code_for(FailureClass.MISSING_PREREQUISITE)
 
 
-def _run_ledger_verify(args: argparse.Namespace) -> int:
-    return run_verify_command(database=args.database, artifacts=args.artifacts, as_json=args.json)
-
-
-def _run_ledger_backup(args: argparse.Namespace) -> int:
-    manifest = run_backup(database=args.database, output=args.output, artifacts=args.artifacts)
-    print(f"backup written to {args.output} (schema version {manifest.schema_version})")
-    return SUCCESS
-
-
-def _run_ledger_restore(args: argparse.Namespace) -> int:
-    manifest = run_restore(backup=args.backup, database=args.database, artifacts=args.artifacts)
-    print(f"restored {args.database} (schema version {manifest.schema_version})")
-    return SUCCESS
-
-
-def _run_ledger_rebuild_projections(args: argparse.Namespace) -> int:
-    return run_rebuild_projections_command(database=args.database)
-
-
-def _run_ledger(args: argparse.Namespace) -> int:
-    if args.ledger_command is None:
-        raise InvalidInputError("a ledger subcommand is required", details={"command": "ledger"})
-    if args.ledger_command == "verify":
-        return _run_ledger_verify(args)
-    if args.ledger_command == "backup":
-        return _run_ledger_backup(args)
-    if args.ledger_command == "restore":
-        return _run_ledger_restore(args)
-    if args.ledger_command == "rebuild-projections":
-        return _run_ledger_rebuild_projections(args)
-    raise AssertionError(f"unhandled ledger command: {args.ledger_command}")  # pragma: no cover
-
-
 def _run_policy(args: argparse.Namespace) -> int:
     from enginery.domain.policy_decision import PolicyResult
     from enginery.policy.evaluator import PolicyEvaluator
@@ -482,18 +385,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _run_doctor(as_json=args.json)
-        if args.command == "ledger":
-            return _run_ledger(args)
         if args.command == "policy":
             return _run_policy(args)
         if args.command == "capability":
             return run_capability(args)
-        if args.command == "factory" or hasattr(args, "factory_command"):
+        if hasattr(args, "factory_command"):
             return run_factory(args)
-        if args.command == "stage1":
-            return run_stage1(args)
-        if args.command == "stage2":
-            return run_stage2(args)
         if args.command == "engine":
             if args.engine_command is None:
                 raise InvalidInputError("engine requires a subcommand")

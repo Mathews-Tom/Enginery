@@ -32,11 +32,9 @@ from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_stat
 def run_stage1(args: argparse.Namespace) -> int:
     """Run one engine lifecycle operation and emit a machine-readable result."""
     command = args.stage1_command
-    if command is None:
-        raise InvalidInputError("engine requires a subcommand")
     if command == "start":
         _start(args)
-    elif command == "watch":
+    elif command == "next":
         _watch(args)
     elif command == "review":
         _review(args)
@@ -44,8 +42,6 @@ def run_stage1(args: argparse.Namespace) -> int:
         _resolve_human_wait(args, approved=command == "approve")
     elif command == "cancel":
         _cancel(args)
-    elif command == "resume":
-        _resume(args)
     elif command == "evidence":
         _evidence(args)
     elif command == "build-request":
@@ -196,25 +192,6 @@ def _cancel(args: argparse.Namespace) -> None:
         epoch = runtime.claim_epoch(now=_now(), heartbeat_window=HEARTBEAT_WINDOW)
         runtime.cancel_node(run_id=args.run_id, node_id=args.node_id, epoch=epoch.epoch, now=_now())
         _print({"run_id": args.run_id, "node_id": args.node_id, "status": "cancelled"})
-    finally:
-        ledger.close()
-
-
-def _resume(args: argparse.Namespace) -> None:
-    ledger = LedgerService.open(args.database)
-    try:
-        runtime = runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
-        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
-        decide_in_ledger(
-            ledger,
-            request,
-            action=f"human_wait.{args.node_id}.requeue",
-            subject_digest=args.subject_digest,
-            challenge=args.challenge,
-            principal_id=args.principal_id,
-            reason=args.reason,
-            owner=args.owner,
-        )
     finally:
         ledger.close()
 

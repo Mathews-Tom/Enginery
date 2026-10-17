@@ -23,6 +23,6 @@ max_seconds = 2.0
 min_events_per_second = 1000.0
 
 [ledger_verify]
-# `enginery ledger verify` wall-clock against the ledger produced by the
+# `enginery operator verify` wall-clock against the ledger produced by the
 # append-throughput measurement above. Observed range: 0.003-0.016s.
 max_seconds = 0.5

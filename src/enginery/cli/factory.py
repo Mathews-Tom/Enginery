@@ -61,28 +61,18 @@ CONFLICT_EXIT = exit_code_for(FailureClass.EXTERNAL_CONFLICT)
 
 
 def add_factory_parser(
-    subparsers: argparse._SubParsersAction[argparse.ArgumentParser], *, legacy: bool = False
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    """Register project verbs at the root, or the legacy ``factory`` group."""
-    commands = subparsers
-    if legacy:
-        synopsis = "Project: Guided project setup and prerequisite diagnostics."
-        parser = subparsers.add_parser("factory", help=synopsis, description=synopsis)
-        commands = parser.add_subparsers(dest="factory_command")
+    """Register the guided project verbs directly on the root parser."""
 
     def add_project_command(
         name: str,
         *,
         help_text: str,
         description: str | None = None,
-        public_name: str | None = None,
     ) -> argparse.ArgumentParser:
-        if public_name is None:
-            public_name = name
-            if not legacy:
-                public_name = {"doctor": "preflight", "resume": "continue"}.get(name, name)
-        command = commands.add_parser(
-            public_name,
+        command = subparsers.add_parser(
+            name,
             help=f"Project: {help_text}",
             description=f"Project: {description if description is not None else help_text}",
         )
@@ -129,7 +119,7 @@ def add_factory_parser(
     init.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
     doctor = add_project_command(
-        "doctor", help_text="Report the prerequisites the project's selection needs; read-only."
+        "preflight", help_text="Report the prerequisites the project's selection needs; read-only."
     )
     _add_project(doctor)
     doctor.add_argument("--json", action="store_true", help="Emit canonical JSON.")
@@ -225,7 +215,7 @@ def add_factory_parser(
     findings.add_argument("--json", action="store_true")
 
     resume = add_project_command(
-        "resume", help_text="Reconcile workers and continue a durable run."
+        "continue", help_text="Reconcile workers and continue a durable run."
     )
     _add_project(resume)
     resume.add_argument("run_id")
@@ -235,19 +225,12 @@ def add_factory_parser(
     pause_parser = add_project_command("pause", help_text="Pause project-ledger dispatch only.")
     _add_project(pause_parser)
     pause_parser.add_argument("--reason", default=None)
-    if legacy:
-        pause_parser.add_argument("--lift", action="store_true")
-    else:
-        pause_parser.set_defaults(lift=False)
     pause_parser.add_argument("--json", action="store_true")
 
-    if not legacy:
-        resume_dispatch = add_project_command(
-            "pause", public_name="resume", help_text="Resume project-ledger dispatch."
-        )
-        _add_project(resume_dispatch)
-        resume_dispatch.set_defaults(factory_command="pause", lift=True, reason=None)
-        resume_dispatch.add_argument("--json", action="store_true")
+    resume_dispatch = add_project_command("resume", help_text="Resume project-ledger dispatch.")
+    _add_project(resume_dispatch)
+    resume_dispatch.set_defaults(reason=None)
+    resume_dispatch.add_argument("--json", action="store_true")
 
     drain_parser = add_project_command(
         "drain", help_text="Pause, then wait for or stop project workers."
@@ -264,10 +247,6 @@ def add_factory_parser(
         "is held; read-only.",
     )
     _add_project(explain_parser)
-    if legacy:
-        explain_parser.add_argument("run_id", nargs="?")
-    else:
-        explain_parser.set_defaults(run_id=None)
     explain_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
     uninstall = add_project_command(
@@ -402,10 +381,6 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 def _run_explain(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
-    if args.run_id is not None:
-        document = status(project, args.run_id)
-        _emit(args, document, document_lines(document))
-        return HOLD_EXIT if document["holds"] else SUCCESS
     document = explain(load_project_configuration(project))
     _emit(args, document, explain_lines(document))
     return HOLD_EXIT if document["holds"] else SUCCESS
@@ -437,7 +412,7 @@ def run_factory(args: argparse.Namespace) -> int:
     document: Mapping[str, object]
     if command == "init":
         return _run_init(args)
-    if command == "doctor":
+    if command == "preflight":
         return _run_doctor(args)
     if command == "review":
         project = resolve_project(args.project)
@@ -505,12 +480,14 @@ def run_factory(args: argparse.Namespace) -> int:
         document = {**collected, "holds": factory_repairs(project, holds)}
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document["holds"] else SUCCESS
-    if command == "resume":
+    if command == "continue":
         document = resume_run(resolve_project(args.project), args.run_id, args.wait_seconds)
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document.get("holds") else SUCCESS
-    if command == "pause":
-        document = pause(resolve_project(args.project), lift=args.lift, reason=args.reason)
+    if command in {"pause", "resume"}:
+        document = pause(
+            resolve_project(args.project), lift=command == "resume", reason=args.reason
+        )
         _emit(args, document, document_lines(document))
         return SUCCESS
     if command == "drain":
@@ -532,10 +509,7 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_explain(args)
     if command == "uninstall":
         return _run_uninstall(args)
-    raise InvalidInputError(
-        "a project subcommand is required; see enginery --help",
-        details={"command": str(command)},
-    )
+    raise AssertionError(f"unhandled project command: {command}")  # pragma: no cover
 
 
 __all__ = ["add_factory_parser", "run_factory"]
