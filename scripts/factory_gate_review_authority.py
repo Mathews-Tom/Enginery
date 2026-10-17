@@ -165,7 +165,7 @@ class ReviewAuthorityGate(ManualPathGate):
                 "observer": "command",
                 "argv": [sys.executable, "validate_candidate.py"],
                 "assertions": [{"kind": "stdout", "equals": "5\n"}],
-                "fault_classes": ["wrong_build"],
+                "fault_classes": ["constant_result", "wrong_build"],
             }
         ]
 
