@@ -423,6 +423,8 @@ def advance_run(
             )
             if once or (_finished(report) and not _retryable_github_hold(report)):
                 return report
+            if wait_seconds == 0 and _retryable_github_hold(report):
+                return report
             digest = _node_digest(cast(list[dict[str, object]], report["nodes"]))
             if progression.action in _EXECUTES_NOW and (
                 progression.action != previous.action or digest != before

@@ -1552,4 +1552,7 @@ def test_status_github_view_is_optional_display_only(
         "display_only": True,
         "note": "gh-axi is not configured in user preferences [executables].gh_axi",
     }
+    # Opening a WAL ledger can create sidecars on the first status read only.
+    plain.pop("local_writes")
+    viewed.pop("local_writes")
     assert viewed == plain
