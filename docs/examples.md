@@ -27,7 +27,7 @@ fixture provider in this release), a `Stage1RunService` wired to
 in-script `WorkLedgerPort`/`PullRequestPort` fixtures, and the real
 `review_implementation` → `open_pull_request` → `wait_for_ci` →
 `verify_merge_ready` → `advance` (outcome registration) call sequence the
-`enginery stage1` CLI commands use. This is the fastest way to see the
+`enginery engine` CLI commands use. This is the fastest way to see the
 full lifecycle's shape without touching any external credential.
 
 ## Example B: real GitHub issue with an OMP or Claude Code harness
@@ -44,7 +44,7 @@ fault classes must describe the changed behavior; see
 Without these base-bound checks a new run holds with `no_behavioral_checks`.
 
 ```bash
-uv run enginery stage1 build-request --runner trusted-local \
+uv run enginery engine build-request --runner trusted-local \
   --output request.json --run-id issue-142 \
   --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
@@ -59,8 +59,8 @@ image (`python3`, `node`, `git`, `uv`, `sh`), so a tool the image lacks, such as
 `pytest`, holds the run with a reason naming it. An explicit
 `--implementation-attempt-id` must end in `-<number>` (that number is the run's
 first generation), and `--protected-path GLOB` (repeatable) adds paths whose change
-holds the branch for `factory review RUN --project PROJECT` followed by an
-authenticated `factory decide` with action `pull_request.open` (or
+holds the branch for `review RUN --project PROJECT` followed by an
+authenticated `decide` with action `pull_request.open` (or
 `human_wait.open_pr.reject` with a reason) before publication.
 
 `build-request` reads the issue through the GitHub adapter (the work item,
@@ -69,10 +69,10 @@ classification come from the issue, not from flags) — see
 [`docs/operations.md`](operations.md#composing-a-request). The Python script
 below is for inspection only: it shows the exact domain objects a request is
 made of. It types the work item by hand, so the snapshot it binds carries no
-declared classification and is not what `stage1 watch --advance` re-reads from
+declared classification and is not what `engine next --advance` re-reads from
 a labelled GitHub issue; a request it writes does not qualify, and because it is
 built through the library rather than compiled from layered configuration it carries
-no configuration snapshot, so `stage1 start` refuses its `request.json`. It is the
+no configuration snapshot, so `engine start` refuses its `request.json`. It is the
 shape [`docs/migration-sage-dev.md`](migration-sage-dev.md#step-3-build-one-enginery-request-per-active-ticket)
 adapts for a migrated ticket.
 
@@ -188,18 +188,18 @@ passing validation/current-head CI and no actionable review findings; repair any
 reported hold rather than treating a transient `wait` as completion.
 
 ```bash
-uv run enginery stage1 start --database ledger.db --owner operator --request request.json
-uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
-# repeat watch --advance until next_action is `await_human_review`
-uv run enginery stage1 review --database ledger.db --owner operator --run-id issue-142 \
+uv run enginery engine start --database ledger.db --owner operator --request request.json
+uv run enginery engine next --database ledger.db --owner operator --run-id issue-142 --advance
+# repeat engine next --advance until next_action is `await_human_review`
+uv run enginery engine review --database ledger.db --owner operator --run-id issue-142 \
   --report review.json --repair-attempt 0
-uv run enginery factory review issue-142 --project <repository> --database ledger.db --owner operator
+uv run enginery review issue-142 --project <repository> --database ledger.db --owner operator
 # copy DIGEST and SECRET from that terminal review
-uv run enginery factory decide issue-142 --project <repository> --database ledger.db --owner operator \
+uv run enginery decide issue-142 --project <repository> --database ledger.db --owner operator \
   --action pull_request.open --subject-digest DIGEST --challenge SECRET
-uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
+uv run enginery engine next --database ledger.db --owner operator --run-id issue-142 --advance
 # repeat until next_action is wait and the verify node's status is passed
-uv run enginery stage1 evidence --database ledger.db --owner operator --run-id issue-142
+uv run enginery engine evidence --database ledger.db --owner operator --run-id issue-142
 ```
 
 Prerequisites: an authenticated `gh` CLI session with access to the target
@@ -208,7 +208,7 @@ authenticated for the chosen `harness_provider`. `enginery adapter doctor`
 reports the local fixture providers only; there is no `enginery doctor`
 check for GitHub/OMP/Claude Code availability in this release — probe them
 directly (`gh auth status`, `omp --help`, `claude --version`) before
-starting a real run. `stage1 review --report review.json` expects
+starting a real run. `engine review --report review.json` expects
 `{"producer": "<agent or reviewer id>", "reviewer": "<reviewer id>",
 "findings": [{"finding_id": "<id>", "actionable": false, "blocking": false}]}`
 — an empty `findings` array means an approved review with no findings.

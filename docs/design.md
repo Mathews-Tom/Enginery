@@ -153,24 +153,25 @@ Enginery protects **workflow integrity** first. Its `trusted-local` backend is d
 
 Every public claim must name its boundary. "Reconciliation before retry" applies only to adapter operations with a stable provider-visible operation ID and a deterministic reconciliation query. It does not make a provider operation atomic, revoke an already-issued request, or establish that competing products lack an equivalent mechanism.
 
-### Shipped manual factory path and proposed controls
+### Manual project path
 
 The operator guide lists the shipped CLI surface. Guided configuration ships as
-`enginery factory init`, `doctor`, `explain`, and `uninstall`; manual intake and
-execution ship as `collect`, `run`, `status`, `explain RUN`, `resume`, `pause`, and
+`enginery init`, `preflight`, `explain`, and `uninstall`; manual intake and
+execution ship as `collect`, `run`, `status RUN`, `continue RUN`, `pause`, `resume`, and
 `drain`. `calibrate`/`check` perform independent behavioral verification.
 `review RUN` renders one safe terminal/HTML packet from durable truth and issues
 an expiring challenge only to the operator's genuine same stdin/stdout TTY.
 `decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET` records
 authenticated action-specific authority. Feedback and Stage 1 review reports
-record findings without granting authority. Only factory `watch` and `evidence`
-remain proposed; scheduled collection/watch is not shipped.
+record findings without granting authority. Inspect retained evidence with
+`enginery engine evidence --database DB --owner OWNER --run-id RUN`.
+Scheduled collection is not shipped.
 
-Factory and Stage 1 commands share one composition boundary for bound start,
+Project and engine-ledger commands share one composition boundary for bound start,
 inspection, runtime selection and advancing services. The coordinator owns
 progression through `Stage1RunService.advance`; the CLI adds neither a second
 scheduler nor another state store. The private project ledger has owner `factory`
-and is also accessible to Stage 1 commands with `--database`.
+and is also accessible to engine-ledger commands with `--database`.
 
 The operator registers principal ID, OS login and UID in user preferences
 `[review_authority]`; project policy cannot register an approver. Challenges are
@@ -182,17 +183,18 @@ changed actual inputs supersede authority. Publication requires `pull_request.op
 including protected-path publication. Other human waits require
 `human_wait.NODE.approve` or `.reject`; open-PR rejection is
 `human_wait.open_pr.reject`. Stage 1 approve/reject use the same authenticated
-protocol, not report scores or reason-only overrides. `stage1 resume` refuses
-with `human_wait_requeue_unsupported`; no human-wait requeue is supported.
+protocol, not report scores or reason-only overrides. Human-wait requeue via
+`enginery decide RUN --action human_wait.NODE.requeue` is refused with
+`human_wait_requeue_unsupported`; no human-wait requeue is supported.
 This protects workflow integrity within trusted-local assumptions, not against
 another same-user process.
 
 
-`factory resume RUN` reconciles exited workers and pending broker operations from the durable ledger before continuing that same run, without creating another request or workspace. This differs from `stage1 resume`, which refuses with `human_wait_requeue_unsupported`. `factory pause` pauses dispatch for the project ledger only, leaving running workers untouched; `factory pause --lift` lifts it. `factory drain --wait-seconds N` pauses and waits, leaving exited-worker result and lease reconciliation to the subsequent `factory resume` after the pause is lifted. Successful implementation workspaces remain retained until explicit `enginery workspace release`; status/drain report the retention state, and a blocked new run names that release command as its hold repair. `factory drain --stop` uses the existing operator stop callbacks to stop live workers, release their leases/reservations and remove isolated containers; previously exited workers still require resume/reconciliation. Neither form reverses an external effect. The factory ends at a verified open PR and outcome observation; merge, release and deploy are separate human actions, never automatic factory actions.
+`continue RUN` reconciles exited workers and pending broker operations from the durable ledger before continuing that same run, without creating another request or workspace. Human-wait requeue remains unsupported (`human_wait_requeue_unsupported`). `pause` pauses dispatch for the project ledger only, leaving running workers untouched; `resume` lifts it. `drain --wait-seconds N` pauses and waits, leaving exited-worker result and lease reconciliation to the subsequent `continue RUN` after the pause is lifted. Successful implementation workspaces remain retained until explicit `enginery workspace release`; status/drain report the retention state, and a blocked new run names that release command as its hold repair. `drain --stop` uses the existing operator stop callbacks to stop live workers, release their leases/reservations and remove isolated containers; previously exited workers still require continuation/reconciliation. Neither form reverses an external effect. The factory ends at a verified open PR and outcome observation; merge, release and deploy are separate human actions, never automatic factory actions.
 
 A run ID is `fr-` plus the first 20 hexadecimal characters of SHA-256 over canonical JSON containing project identity, issue reference and bound issue snapshot digest. The private intake index binds the issue to that ID and digest. The same snapshot reuses the durable run and request; a changed snapshot holds instead of silently rebinding. Explicit `--supersede` creates a new binding while retaining the old run for status inspection. Requests, workspaces and artifacts live under private project state, not in tracked policy.
 
-`factory explain` without RUN retains the current compiled-configuration explanation. With RUN it reads the immutable request/configuration binding, field sources, execution selection, runner, permitted capabilities, node states and hold repairs; it does not recompile current settings. Models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. Harness, model, session and worker machine remain separate axes. Reference projects inform independently re-implemented patterns only; no upstream skills or code are vendored.
+`enginery explain` takes no run ID and explains current compiled configuration. `enginery status RUN` reads the immutable request/configuration binding, field sources, execution selection, runner, permitted capabilities, node states and hold repairs; it does not recompile current settings. Models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. Harness, model, session and worker machine remain separate axes. Reference projects inform independently re-implemented patterns only; no upstream skills or code are vendored.
 
 ## 5. Domain model
 
@@ -290,7 +292,7 @@ Workspace reservation and node execution leases are separate. A run reserves its
 
 SQLite is the authoritative local event ledger and projection store. Large artifact bytes reside in a content-addressed filesystem store. This is narrow event sourcing: events and projections are durable runtime facts, while repository contents, configuration files, and artifact bytes remain ordinary files.
 
-Artifact publication uses a two-phase protocol. Bytes are written to a unique temporary path, streamed through the digest calculator, `fsync`ed, and atomically renamed to the digest path before any SQLite command may reference them. The transaction then records immutable metadata and references only the completed digest path. A startup and `ledger verify` sweep deletes abandoned temporary files, detects a metadata reference with absent or digest-mismatched bytes, and blocks evidence use or run resumption until an operator restores or discards the affected state. Cleanup never deletes a digest referenced by retained ledger metadata.
+Artifact publication uses a two-phase protocol. Bytes are written to a unique temporary path, streamed through the digest calculator, `fsync`ed, and atomically renamed to the digest path before any SQLite command may reference them. The transaction then records immutable metadata and references only the completed digest path. A startup and `operator verify` sweep deletes abandoned temporary files, detects a metadata reference with absent or digest-mismatched bytes, and blocks evidence use or run resumption until an operator restores or discards the affected state. Cleanup never deletes a digest referenced by retained ledger metadata.
 
 A local state-changing command uses one SQLite transaction to:
 
@@ -638,51 +640,42 @@ Comparisons must use compatible cohorts and show sample size, exclusions, confid
 
 ### Command families
 
-```text
-enginery init
-enginery doctor
+The `enginery` executable exposes the shipped surface, which separates scopes:
 
-enginery work ingest
-enginery work list
-enginery work show
-enginery work reconcile
+- Project: `init`, `preflight`, `collect`, `run`, `status`, `explain`,
+  `check`, `calibrate`, `review`, `feedback`, `decide`, `continue`,
+  `pause`, `resume`, `drain`, `uninstall`, and the `capability` group.
+  Project root verbs default to the current directory and accept `--project`;
+  capability commands use their own source and lockfile options.
+  `enginery explain` explains current configuration; `enginery status RUN`
+  inspects a bound run. `enginery continue RUN` reconciles and advances that
+  run; `enginery resume` only lifts the project's dispatch pause.
+- Host: `enginery doctor`, `enginery adapter doctor`, and `enginery runner`.
+  Host diagnostics are distinct from `enginery preflight` project prerequisites.
+- Engine ledger: `enginery engine` provides `build-request`, `start`,
+  `next`, `review`, `approve`, `reject`, `cancel`, `evidence`, and
+  `status`. These commands use explicit database/owner selection where required;
+  `next --advance` advances a run and `status --stack-id ID` inspects a stack.
+  The `outcome`, `gate`, and `workspace` groups remain ledger-scoped.
+- Operator ledger: `enginery operator` provides `status`, `pause`, `resume`,
+  `drain`, `select-runner`, `backup`, `restore`, `verify`, and
+  `rebuild-projections`, selecting an explicit `--database` without loading
+  workflows. Backup and restore verify their inputs/results and return JSON;
+  restore requires a paused ledger (restore's explicit `--force-unpaused`
+  override is documented in the operator guide).
+- Policy: `enginery policy explain REQUEST` inspects a policy request.
 
-enginery run start
-enginery run list
-enginery run inspect
-enginery run watch
-enginery run approve
-enginery run reject
-enginery run cancel
-enginery run resume
-
-enginery evidence list
-enginery evidence show
-enginery evidence verify
-
-enginery workflow list
-enginery workflow validate
-enginery workflow inspect
-enginery workflow replay
-enginery workflow compare
-
-enginery factory-change propose
-enginery factory-change evaluate
-enginery factory-change canary
-enginery factory-change promote
-enginery factory-change rollback
-
-enginery adapter list
-enginery adapter doctor
-enginery policy explain
-enginery gc
-```
-
-The executable name is `enginery`. Each milestone in the private development plan implements only the command families its scope covers; `M1` ships `--version` and `doctor` only.
+See [operations](operations.md) for complete arguments and runnable journeys.
+Work ingestion/reconciliation, generic workflow inspection/replay/comparison,
+governed factory-change evaluation/canary/promotion/rollback, and garbage
+collection remain application/API design responsibilities where not shipped.
+They are not additional executable command families.
 
 ### Output contract
 
-Human-readable output goes to the terminal. `--json` returns one documented result object for bounded commands. `--events jsonl` emits versioned events for long-running commands. Stdout carries requested machine output; diagnostics go to stderr. Exit codes distinguish success, policy denial, human action required, blocked prerequisites, external conflict, cancellation, and internal failure. Mutating commands accept an idempotency key. Watch commands can resume from an event cursor.
+Human-readable output goes to the terminal. Commands that advertise `--json` return one documented result object; operator maintenance returns JSON directly. Stdout carries requested machine output; diagnostics go to stderr. See the operator guide for each shipped command's exit behavior and supported options.
+
+Versioned JSON Lines event streaming, cursor-based observation, a universal idempotency-key input, and a unified exit taxonomy remain interface/API design targets, not additional shipped CLI flags. Durable operations already bind their identities through the workflow and ledger contracts; this does not imply a generic command-line override.
 
 ## 15. Scalability, failure handling, and limits
 
@@ -708,7 +701,7 @@ Configuration layers, from lowest to highest precedence:
 
 Run overrides may reduce concurrency, time, cost, or other operational ceilings within the policy-approved envelope. They cannot change normalized work kind or risk, evidence requirements, validation profile, requested capabilities, credential scope, release target, deployment target, or any policy input. Soft policy-relevant changes require a `policy.override` decision and produce a new effective configuration digest; the hard-rule set in Section 8 cannot be overridden. Every effective configuration is materialized, redacted, digested, and stored as an artifact. Environment variables supply secrets by reference or explicit ephemeral operational overrides, not durable workflow policy.
 
-Shipped today: `enginery stage1 build-request` compiles strictly (unknown keys, wrong types and unsupported schema versions are refused), in descending precedence: run > project > user > workflow profile > factory defaults. These layers come from command-line flags, `.enginery/project.toml`, `$XDG_CONFIG_HOME/enginery/user.toml`, a packaged workflow profile and packaged factory defaults. It binds the sha256 of the canonical effective configuration to the request as its `configuration_snapshot_digest`; `stage1 start` refuses a request that disagrees with its bound snapshot. This is narrower than the design text in three ways: the shipped workflow profile is below user and project configuration rather than above them; run overrides are bounded by the hard `[constraints]` any layer states rather than by a `policy.override` decision; and the effective configuration travels inside the request document instead of being stored as a separate redacted artifact. The operator-facing schema is in [`docs/operations.md`](operations.md#layered-configuration).
+Shipped today: `enginery engine build-request` compiles strictly (unknown keys, wrong types and unsupported schema versions are refused), in descending precedence: run > project > user > workflow profile > factory defaults. These layers come from command-line flags, `.enginery/project.toml`, `$XDG_CONFIG_HOME/enginery/user.toml`, a packaged workflow profile and packaged factory defaults. It binds the sha256 of the canonical effective configuration to the request as its `configuration_snapshot_digest`; `engine start` refuses a request that disagrees with its bound snapshot. This is narrower than the design text in three ways: the shipped workflow profile is below user and project configuration rather than above them; run overrides are bounded by the hard `[constraints]` any layer states rather than by a `policy.override` decision; and the effective configuration travels inside the request document instead of being stored as a separate redacted artifact. The operator-facing schema is in [`docs/operations.md`](operations.md#layered-configuration).
 
 ## 17. Verification strategy and staged proof
 
