@@ -489,6 +489,7 @@ def step_prepare(gate: ManualPathGate) -> None:
     )
     gate.git(project, "add", ".enginery/project.toml")
     gate.git(project, "commit", "-q", "-m", "chore: bind operator behavioral checks")
+    gate.git(project, "push", "-q", "origin", branch)
     policy_text = policy.read_text(encoding="utf-8")
     gate.state = private_state_directory(project, gate.environment())
     with patch.dict(os.environ, gate.environment(), clear=True):
