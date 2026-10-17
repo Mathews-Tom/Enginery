@@ -899,6 +899,9 @@ enginery factory status RUN --project . --json
 enginery factory explain RUN --project . --json
 enginery stage1 review --database DATABASE --owner factory --run-id RUN \
   --report review.json --repair-attempt 0
+enginery factory review RUN --project .
+enginery factory decide RUN --project . --action pull_request.open \
+  --subject-digest DIGEST --challenge SECRET
 enginery factory resume RUN --project . --json
 enginery factory pause --reason "operator maintenance" --project . --json
 enginery factory drain --wait-seconds 30 --project . --json
@@ -1076,6 +1079,12 @@ serialized lines), HTML, feedback, or persisted packet artifacts; only its hash
 is stored. Redirected, piped, HTTP, or fabricated terminal contexts cannot issue
 or submit authenticated decisions. A noninteractive review can still display a
 packet but grants no authority.
+An unregistered operator also receives the packet and subject digest, with a
+notice to register `[review_authority]` in user preferences; no challenge is issued.
+For a run started with `stage1 --database DB --owner OWNER`, pass those same
+`--database DB --owner OWNER` flags to both `factory review` and `factory decide`.
+Pre-implementation waits bind the verified base, request, issue snapshot,
+configuration and findings with an empty diff; they offer only their wait actions.
 
 ```text
 enginery factory decide RUN --project PROJECT --action pull_request.open --subject-digest DIGEST --challenge SECRET
@@ -1103,9 +1112,9 @@ review/status. `factory decide` resolves the selected wait atomically.
 **Breaking change:** `stage1 approve`, `stage1 reject`, and human-wait
 `stage1 resume` also require `--subject-digest DIGEST --challenge SECRET`
 and optionally `--principal-id ID`, using the same authentication and node-scoped
-actions. Retain their database/owner/run/node flags and required reason; resume
-also retains its attempt/operation flags. A legacy report or reason-only command
-no longer authorizes publication or releases work.
+actions. Retain their database/owner/run/node flags and required `--reason REASON`;
+`stage1 resume --reason REASON` also retains its attempt/operation flags.
+A legacy report or reason-only command no longer authorizes publication or releases work.
 
 This is a **trusted-local** protocol, not same-user process containment: another
 process with the operator's account privileges can access that account's resources.
@@ -1161,7 +1170,7 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | Issue changed since the run was bound | Inspect `enginery factory status RUN --project .`; drain with `enginery factory drain --stop --project .`. Follow the reported `enginery stage1 cancel --database DATABASE --owner factory --run-id RUN --node-id NODE` commands only for queued/running agent nodes without a live worker: drain already cancels live-worker nodes, and human-waiting non-agent nodes are not cancelled. A never-registered implementation has nothing to cancel. Lift the pause with `enginery factory pause --lift --project .`, then explicitly create the new binding with `enginery factory run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
 | Supersede cannot prove the old run safe | `--supersede` accepts terminal `run.status`, or a terminal latest implementation with no active node lease, no live worker-supervisor attempt and no pending `open_pr` node. It also accepts a never-registered implementation with no active lease, live worker or `open_pr` node. Otherwise the hold reports the blocking statuses, implementation/lease attempt IDs and lease expiry, with cancellation commands only for queued/running agent nodes without a live worker; drain/cancel as directed, lift pause, then retry the explicit supersede repair above. Human-waiting non-agent nodes are not cancelled. An unchanged issue snapshot is refused; use `factory run` or `factory resume` for its existing binding. |
 | `superseded binding` | `status` reports `superseded_by` when the issue binding points at a newer run. The old run remains visible but cannot advance or resume, with no run-state transition or dispatch. Inspect the replacement with the reported `enginery factory status NEW_RUN --project .` command. |
-| Awaiting a human decision | `next_decision` names the node that waits: the independent review gate reports the exact `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` command; a human-wait node (a qualification decision, a failed implementation awaiting a decision) reports `enginery stage1 approve --database DB --owner factory --run-id RUN --node-id NODE --reason REASON` and the matching `stage1 reject … --reason REASON`. This is a decision boundary, not a hold or successful validation; a failed implementation with no waiting node is reported as a hold with `enginery factory resume RUN --project .` unless the service supplies a more specific repair. |
+| Awaiting a human decision | `next_decision` names the waiting node. Independent review reports `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` to record findings, not authority. Other waits report `enginery factory review RUN --project PROJECT` and `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET`: publication uses `pull_request.open`; node waits use `human_wait.NODE.approve` or `human_wait.NODE.reject` with `--reason REASON`. Custom Stage 1 ledgers additionally require `--database DB --owner OWNER` on both commands. This boundary is not successful validation. A failed implementation with no wait reports `factory resume` unless a more specific repair exists. |
 | Blocked progression | The hold preserves the recorded reason and its matching repair; resolve that cause before resuming. |
 | Catalog, host fingerprint or runner drift | Run `enginery factory doctor --project .`; restore the run's bound configuration, then `enginery factory resume RUN --project .`. Resume never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
 | Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
@@ -2784,9 +2793,11 @@ surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
 `enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
 [Guided project setup](#guided-project-setup)), as are `collect`, `run`, `status`,
-`resume`, `pause` and `drain` (see [Manual factory path](#manual-factory-path)).
+`resume`, `pause`, `drain`, `review`, `feedback`, `decide`, `calibrate` and `check`
+(see [Manual factory path](#manual-factory-path)).
 `factory explain` without RUN retains its existing configuration/setup explanation;
-with RUN it explains the durable binding. Terminal review stays on `stage1 review`.
+with RUN it explains the durable binding. `stage1 review` records independent
+findings; `factory review` presents the packet and offers authenticated decisions.
 `gate status` accepts `--gate G4` only, and `stage1` retains `start`, `watch`,
 `review`, `approve`, `reject`, `cancel`, `resume`, `evidence`, and `build-request`.
 

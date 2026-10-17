@@ -53,7 +53,9 @@ image (`python3`, `node`, `git`, `uv`, `sh`), so a tool the image lacks, such as
 `pytest`, holds the run with a reason naming it. An explicit
 `--implementation-attempt-id` must end in `-<number>` (that number is the run's
 first generation), and `--protected-path GLOB` (repeatable) adds paths whose change
-holds the branch for `stage1 approve` / `stage1 reject` before it is published.
+holds the branch for `factory review RUN --project PROJECT` followed by an
+authenticated `factory decide` with action `pull_request.open` (or
+`human_wait.open_pr.reject` with a reason) before publication.
 
 `build-request` reads the issue through the GitHub adapter (the work item,
 source revision, and declared `enginery/work-kind/*` and `enginery/risk/*`

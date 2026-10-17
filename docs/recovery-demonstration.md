@@ -114,8 +114,10 @@ attempt and return `wait`, never launch a second worker.
 
 8. **Continue advancing** until the worker's result file appears and the
    run collects it (`"action_taken": "collect_implementation"`), then
-   continues through `validate`, a real human `stage1 review`, `open_pr`,
-   `wait_for_ci`, and `verify`:
+   continues through `validate`, a real independent `stage1 review` report,
+   `factory review RUN --project PROJECT` and authenticated `factory decide RUN
+   --project PROJECT --action pull_request.open --subject-digest DIGEST
+   --challenge SECRET`, then `open_pr`, `wait_for_ci`, and `verify`:
 
    ```bash
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
