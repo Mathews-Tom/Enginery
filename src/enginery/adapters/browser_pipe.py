@@ -222,7 +222,7 @@ class _Pipe:
 
     def close(self) -> None:
         if self.pid is not None:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.pid, signal.SIGKILL)
             with contextlib.suppress(ChildProcessError):
                 os.waitpid(self.pid, 0)

@@ -127,6 +127,24 @@ def test_command_output_is_bounded(tmp_path: Path, stream: str) -> None:
     assert len(data.stdout.encode()) + len(data.stderr.encode()) <= 1024 * 1024
 
 
+def test_output_limit_survives_exited_group_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS raises EPERM when every member of the killed group exited but is unreaped."""
+    real_killpg = os.killpg
+
+    def killpg_then_eperm(pid: int, signal_number: int) -> None:
+        with suppress(ProcessLookupError, PermissionError):
+            real_killpg(pid, signal_number)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", killpg_then_eperm)
+    code = "import sys; sys.stdout.write('x' * (2 * 1024 * 1024)); sys.stdout.flush()"
+    data = observe(_check("command", argv=(sys.executable, "-c", code)), cwd=tmp_path)
+    assert data.infrastructure_error is not None
+    assert data.infrastructure_error.startswith("observer_output_limit:")
+
+
 def test_command_timeout_is_inconclusive_and_stops_process_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
