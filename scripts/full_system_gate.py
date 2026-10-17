@@ -110,6 +110,7 @@ from enginery.adapters.local_service import (
     build_local_service_artifact,
 )
 from enginery.adapters.pypi import PyPiAdapter, PyPiAdapterConfig
+from enginery.application.behavioral_checks import BehavioralCheck
 from enginery.application.branch_publication import (
     BranchPublicationPort,
     BranchPublicationRequest,
@@ -346,6 +347,17 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     compiled = compile_effective_config(
         project=None,
         user=None,
+        behavioral_checks=(
+            BehavioralCheck.from_state(
+                {
+                    "name": "fixture-content",
+                    "observer": "command",
+                    "argv": ["cat", "README"],
+                    "fault_classes": ["constant_result"],
+                    "assertions": [{"kind": "stdout", "contains": "fixture"}],
+                }
+            ),
+        ),
         run=run_layer(
             {
                 "harness": "omp",
@@ -365,6 +377,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     )
     config = compiled.config
     request = Stage1RunRequest(
+        behavioral_checks=config.behavioral_checks,
         runner=compiled.runner,
         run=Run(
             id=RunId(run_id),

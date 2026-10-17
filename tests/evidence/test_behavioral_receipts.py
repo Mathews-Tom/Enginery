@@ -419,7 +419,19 @@ def test_repository_refuses_raw_artifact_symlink(tmp_path: Path) -> None:
     outside.write_bytes(_png())
     artifact_path.unlink()
     artifact_path.symlink_to(outside)
-    with pytest.raises(OSError):
+    with pytest.raises(InvalidInputError, match="non-link"):
         repository.load(digest)
     with pytest.raises(InvalidInputError, match="non-link"):
         repository.publish_capture(_png(), media_type="image/png")
+
+
+def test_receipt_store_accepts_symlink_above_trusted_root(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    store = ArtifactStore(alias / "artifacts")
+    repository = EvidenceReceiptRepository(store, media_validator=validate_media)
+    capture = repository.publish_capture(_png(), media_type="image/png")
+    receipt = _receipt(capture)
+    assert repository.load(repository.publish(receipt)) == receipt

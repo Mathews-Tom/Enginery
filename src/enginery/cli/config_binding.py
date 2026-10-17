@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import stat
-import subprocess
-import threading
 from pathlib import Path
 
+from enginery.adapters.git_reader import git_bytes as _git_bytes
 from enginery.application.behavioral_checks import (
     BehavioralCheck,
     BehavioralChecksBinding,
@@ -31,7 +31,7 @@ from enginery.application.layered_config import (
     load_workflow_layer,
     parse_layer_document,
 )
-from enginery.capabilities.atomic import fsync_directory
+from enginery.capabilities.atomic import fsync_directory, write_temporary
 from enginery.cli.config_locations import (
     MAX_CONFIG_BYTES,
     PROJECT_POLICY_RELATIVE,
@@ -51,51 +51,6 @@ EFFECTIVE_CONFIG_KEY = "effective_config"
 _REBUILD = "rebuild it with `enginery stage1 build-request`"
 
 _CUSTODY_WHAT = "behavioral evaluator custody"
-
-
-def _git_bytes(repository: Path, *arguments: str) -> bytes:
-    """Read bounded plumbing output without hooks, replacement objects or ambient Git config."""
-    environment = {
-        "PATH": os.environ.get("PATH", os.defpath),
-        "LC_ALL": "C",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_TERMINAL_PROMPT": "0",
-    }
-    try:
-        with subprocess.Popen(
-            [
-                "git",
-                "--no-replace-objects",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                *arguments,
-            ],
-            cwd=repository,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-        ) as process:
-            timer = threading.Timer(15, process.kill)
-            timer.start()
-            try:
-                assert process.stdout is not None
-                raw = process.stdout.read(MAX_CONFIG_BYTES + 1)
-                if len(raw) > MAX_CONFIG_BYTES:
-                    process.kill()
-                    raise InvalidInputError("base project policy exceeds the 1 MiB limit")
-                if process.wait() != 0:
-                    raise InvalidInputError("cannot read behavioral checks from the base revision")
-                return bytes(raw)
-            finally:
-                timer.cancel()
-    except OSError as error:
-        raise InvalidInputError("cannot read behavioral checks from the base revision") from error
 
 
 def read_base_project_layer(repository: Path, base_revision: str) -> LayerDocument | None:
@@ -184,7 +139,11 @@ def _read_binding(path: Path) -> BehavioralChecksBinding:
     try:
         return BehavioralChecksBinding.from_state(json.loads(raw))
     except (ValueError, UnicodeError) as error:
-        raise InvalidInputError("behavioral evaluator custody is not valid JSON") from error
+        raise InvalidInputError(
+            f"behavioral evaluator custody is not valid JSON: {path}; "
+            f"repair: rm -- {shlex.quote(str(path))}; then {_REBUILD} "
+            "before starting the unbound run again"
+        ) from error
 
 
 def read_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding | None:
@@ -220,22 +179,20 @@ def bind_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding
         if directory.stat().st_mode & 0o077:
             raise InvalidInputError("behavioral evaluator custody directories must have mode 0700")
     require_private_path(path, what=_CUSTODY_WHAT)
+    temporary = write_temporary(path.parent, raw, prefix=".checks-")
     try:
-        descriptor = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
-        )
-    except FileExistsError:
-        return read_behavioral_checks(request)
-    except OSError as error:
-        raise InvalidInputError("cannot create behavioral evaluator custody") from error
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            temporary.unlink()
+            return read_behavioral_checks(request)
+        temporary.unlink()
         fsync_directory(path.parent)
     except OSError as error:
-        raise InvalidInputError("cannot persist behavioral evaluator custody") from error
+        raise InvalidInputError(f"cannot persist behavioral evaluator custody: {path}") from error
+    finally:
+        temporary.unlink(missing_ok=True)
     return expected
 
 

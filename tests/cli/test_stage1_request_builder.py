@@ -21,6 +21,7 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_catalog import SupportTier
 from enginery.workflows.stage1 import stage1_request_from_state
+from tests.support.behavioral import declare_behavioral_policy
 from tests.support.capabilities import lock_of, locked_entry
 from tests.support.github import (
     CANONICAL_LABELS,
@@ -90,6 +91,7 @@ def test_build_request_output_round_trips_through_stage1_start_unmodified(
     tmp_path: Path,
 ) -> None:
     repository, base_revision = _repository(tmp_path)
+    base_revision = declare_behavioral_policy(repository)
     output = tmp_path / "request.json"
 
     build_exit = main(

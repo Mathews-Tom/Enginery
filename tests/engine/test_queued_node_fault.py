@@ -56,6 +56,7 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     _implementation_result_path,
 )
+from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.execution import selection_for
 
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)
@@ -126,6 +127,7 @@ def _qualified_request(tmp_path: Path, name: str = "fault") -> Stage1RunRequest:
     )
     snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="1")
     return Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(f"run-{name}"),

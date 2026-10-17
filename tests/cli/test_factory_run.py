@@ -84,6 +84,32 @@ def invoke(capsys: pytest.CaptureFixture[str], project: Path, *arguments: str) -
     return code, json.loads(output.out)
 
 
+def test_empty_checks_hold_before_binding_and_documented_repair_recompiles(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    policy = project / ".enginery" / "project.toml"
+    original = policy.read_text()
+    policy.write_text('schema_version = 1\n[runner]\nmode = "trusted-local"\n')
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "remove acceptance", cwd=project)
+    code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 5
+    assert held["holds"][0]["reason"] == "no_behavioral_checks"
+    assert shlex.quote(str(project)) in held["holds"][0]["resolve"]
+    assert "stage1 build-request" not in held["holds"][0]["resolve"]
+    assert "run_id" not in held
+    assert not factory_run.read_index(project).repositories
+    policy.write_text(original)
+    _git("add", ".enginery/project.toml", cwd=project)
+    _git("commit", "-m", "restore acceptance", cwd=project)
+    code, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    assert code == 0
+    raw = json.loads(Path(run["request_path"]).read_text())
+    assert stage1_request_from_state(raw).behavioral_checks
+
+
 def test_run_binds_compiler_request_and_status_explains_embedded_selection(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],

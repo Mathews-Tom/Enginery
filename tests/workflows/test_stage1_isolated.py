@@ -21,6 +21,7 @@ import pytest
 from tests.adapters.oci.support import IMAGE_ID as FAKE_IMAGE_ID
 from tests.adapters.oci.support import FakeDocker
 from tests.engine.test_isolated_workspace import _WORKER as WORKER_SCRIPT
+from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.execution import selection_for
 from tests.support.verified_implementation import verified_head
 
@@ -233,6 +234,7 @@ def _request(
         )
     snapshot = _snapshot()
     return Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=runner,
         run=Run(
             id=RunId(RUN_ID),

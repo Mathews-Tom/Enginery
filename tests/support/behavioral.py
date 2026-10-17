@@ -5,6 +5,23 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from enginery.application.behavioral_checks import BehavioralCheck, checks_from_state
+
+
+def fixture_behavioral_checks() -> tuple[BehavioralCheck, ...]:
+    """A nonempty operator contract for in-process workflow adapter fixtures."""
+    return checks_from_state(
+        [
+            {
+                "name": "fixture-content",
+                "observer": "command",
+                "argv": ["cat", "README"],
+                "fault_classes": ["constant_result"],
+                "assertions": [{"kind": "stdout", "contains": "fixture"}],
+            }
+        ]
+    )
+
 
 def declare_behavioral_policy(repository: Path) -> str:
     policy = repository / ".enginery" / "project.toml"

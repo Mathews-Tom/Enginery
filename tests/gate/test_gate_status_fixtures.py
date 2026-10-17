@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.execution import selection_for
 
 from enginery.application.work_ports import DeclaredWorkClassification, WorkLedgerSnapshot
@@ -76,6 +77,7 @@ def _stage1_request(
     )
     root = tmp_path / run_id
     return Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId(run_id),

@@ -40,7 +40,12 @@ def toolbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls.log"
-    _script(bin_dir, "git", f'echo "git $*" >> {calls}; echo "git version 2.99.0"')
+    _script(
+        bin_dir,
+        "git",
+        f'echo "git $*" >> {calls}; '
+        'if [ "$1" = "--version" ]; then echo "git version 2.99.0"; else exit 1; fi',
+    )
     _script(
         bin_dir,
         "gh",

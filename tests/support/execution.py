@@ -76,6 +76,8 @@ def bound_document(request: Stage1RunRequest) -> dict[str, object]:
             for name, value in values.items()
         },
     }
+    if request.behavioral_checks is not None:
+        state["acceptance"] = {"checks": [check.to_state() for check in request.behavioral_checks]}
     config = EffectiveConfig.from_state(state)
     bound = replace(
         request,

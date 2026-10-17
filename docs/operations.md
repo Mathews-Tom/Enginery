@@ -127,7 +127,7 @@ stream; successful decoding alone says nothing about semantic behavior.
 
 | Hold | Repair |
 |---|---|
-| `no_behavioral_checks` | Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, rebuild with `enginery stage1 build-request`, and start a new run with `enginery factory run ISSUE --project PROJECT`. Existing immutable runs are never rebound. |
+| `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery factory run ISSUE --project PROJECT`. For `stage1 start`, rebuild with `enginery stage1 build-request` first. Existing immutable runs are never rebound. |
 
 Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
 commands use the project's private `ledger.sqlite` and report its path; pass that

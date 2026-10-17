@@ -421,6 +421,18 @@ class Stage1RunService:
             )
             is None
         ):
+            if request.behavioral_checks is None:
+                raise InvalidInputError(
+                    "new runs require bound behavioral checks; rebuild with "
+                    "enginery stage1 build-request"
+                )
+            if not request.behavioral_checks:
+                raise HumanActionRequiredError(
+                    "no behavioral checks were bound; add [acceptance] checks to "
+                    ".enginery/project.toml, commit on the base branch, then rebuild "
+                    "with enginery stage1 build-request and start the unbound run again",
+                    details={"reason": "no_behavioral_checks"},
+                )
             _require_current_check_contracts(request)
             _require_bound_selection(request)
             _require_bound_runner(request)

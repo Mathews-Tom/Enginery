@@ -26,6 +26,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from enginery.adapters.git_reader import git_bytes
+from enginery.application.behavioral_checks import BehavioralCheck
 from enginery.application.effective_config import CompiledConfig, compile_effective_config
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.layered_config import (
@@ -41,6 +43,7 @@ from enginery.application.project_policy import (
 )
 from enginery.capabilities.install import load_owned_manifest
 from enginery.capabilities.manifest import validate_name, validate_version
+from enginery.cli.config_binding import checks_at_base
 from enginery.cli.config_locations import (
     PROJECT_POLICY_RELATIVE,
     private_state_directory,
@@ -107,14 +110,30 @@ def load_project_configuration(
     project_layer = read_project_layer(project)
     user_layer = read_user_layer(env)
     harness_probe_failure: str | None = None
+    checks: tuple[BehavioralCheck, ...]
+    try:
+        base = git_bytes(project, "rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    except InvalidInputError:
+        # Setup also diagnoses directories that have not yet become repositories.
+        checks = ()
+    else:
+        checks = checks_at_base(project, base)
     try:
         compiled = compile_effective_config(
-            project=project_layer, user=user_layer, run=run_layer({}), probe_host=_probe_host
+            project=project_layer,
+            user=user_layer,
+            run=run_layer({}),
+            probe_host=_probe_host,
+            behavioral_checks=checks,
         )
     except MissingPrerequisiteError as error:
         harness_probe_failure = str(error)
         compiled = compile_effective_config(
-            project=project_layer, user=user_layer, run=run_layer({}), probe_host=None
+            project=project_layer,
+            user=user_layer,
+            run=run_layer({}),
+            probe_host=None,
+            behavioral_checks=checks,
         )
     except ConfigError as error:
         if error.key == "runner.mode" and error.file == "<all layers>":

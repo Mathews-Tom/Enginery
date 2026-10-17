@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
 from tests.support.execution import selection_for
 
@@ -633,6 +634,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-stage1"),
@@ -890,6 +892,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-pr"),
@@ -1097,6 +1100,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-repair-gate"),
@@ -1256,6 +1260,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-repair"),
@@ -1455,6 +1460,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-outcomes"),
@@ -1644,6 +1650,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
     )
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-no-outcomes"),
@@ -1801,6 +1808,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
     manifest = stage1_work_manifest()
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-dispatch-repair"),
@@ -2069,6 +2077,7 @@ def _check_disposition_fixture(
         manifest = manifest_transform(manifest)
     snapshot = _snapshot()
     request = Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-check"),

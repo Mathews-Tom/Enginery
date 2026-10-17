@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,6 +29,7 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     stage1_request_from_state,
 )
+from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
 
 
@@ -399,6 +401,25 @@ def _dispatch(
 
 
 def _request(tmp_path: Path) -> Stage1RunRequest:
+    repository = tmp_path / "repository"
+    repository.mkdir(exist_ok=True)
+    if not (repository / ".git").exists():
+        for arguments in (
+            ("init", "--initial-branch=main"),
+            ("config", "user.name", "Test"),
+            ("config", "user.email", "test@example.invalid"),
+        ):
+            subprocess.run(("git", *arguments), cwd=repository, check=True, capture_output=True)
+        (repository / "README").write_text("fixture\n")
+        subprocess.run(("git", "add", "README"), cwd=repository, check=True, capture_output=True)
+        subprocess.run(
+            ("git", "commit", "-m", "fixture"), cwd=repository, check=True, capture_output=True
+        )
+        base = declare_behavioral_policy(repository)
+    else:
+        base = subprocess.check_output(
+            ("git", "rev-parse", "HEAD"), cwd=repository, text=True
+        ).strip()
     manifest = stage1_work_manifest()
     work_item = WorkItem(
         id=WorkItemId("work-1"),
@@ -417,6 +438,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
     )
     snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="issue-revision-1")
     return Stage1RunRequest(
+        behavioral_checks=fixture_behavioral_checks(),
         runner=RunnerSelection.trusted_local(),
         run=Run(
             id=RunId("run-stage1"),
@@ -425,7 +447,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
             workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
             workflow_definition_digest=manifest.content_digest,
             repository="Mathews-Tom/Enginery",
-            base_revision="base-revision",
+            base_revision=base,
             policy_set_version="policy-v1",
             adapter_versions={},
             adapter_fingerprints={},
@@ -437,7 +459,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
         work_snapshot=snapshot,
         manifest=manifest,
         repository_id="Mathews-Tom/Enginery",
-        repository_path=tmp_path.resolve(),
+        repository_path=repository.resolve(),
         workspace_path=(tmp_path / "workspace").resolve(),
         execution_selection=selection_for("omp"),
         execution_configuration=Stage1ExecutionConfiguration(

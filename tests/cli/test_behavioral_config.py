@@ -15,6 +15,7 @@ from enginery.application.behavioral_checks import (
 )
 from enginery.application.effective_config import EffectiveConfig, compile_effective_config
 from enginery.application.layered_config import ConfigError, parse_layer_document, run_layer
+from enginery.cli import config_binding
 from enginery.cli.config_binding import (
     behavioral_checks_path,
     bind_behavioral_checks,
@@ -22,6 +23,7 @@ from enginery.cli.config_binding import (
     read_behavioral_checks,
     require_bound_configuration,
 )
+from enginery.cli.factory_setup import load_project_configuration
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -74,6 +76,60 @@ def _build(
     )
     document = json.loads(output.read_text(encoding="utf-8"))
     return stage1_request_from_state(document), document
+
+
+def test_doctor_uses_committed_checks_not_working_tree(tmp_path: Path) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository, expected="base")
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    _policy(repository, expected="uncommitted")
+    configuration = load_project_configuration(repository)
+    assert configuration.compiled is not None
+    assert configuration.compiled.config.behavioral_checks == checks_at_base(
+        repository, _git("rev-parse", "HEAD", cwd=repository)
+    )
+
+
+def test_corrupt_custody_names_file_and_repair(tmp_path: Path) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository)
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    request, _ = _build(tmp_path, repository, _git("rev-parse", "HEAD", cwd=repository))
+    bind_behavioral_checks(request)
+    path = behavioral_checks_path(request)
+    assert path is not None
+    path.write_text("{")
+    with pytest.raises(InvalidInputError, match="not valid JSON") as caught:
+        bind_behavioral_checks(request)
+    assert str(path) in str(caught.value)
+    assert "rm --" in str(caught.value)
+    assert "enginery stage1 build-request" in str(caught.value)
+
+
+def test_custody_publication_only_exposes_complete_private_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository)
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    request, _ = _build(tmp_path, repository, _git("rev-parse", "HEAD", cwd=repository))
+    path = behavioral_checks_path(request)
+    assert path is not None and not path.exists()
+    original = config_binding.os.link
+
+    def publish(source: Path, destination: Path) -> None:
+        assert destination == path and not destination.exists()
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+        assert json.loads(source.read_bytes())["checks"]
+        original(source, destination)
+
+    monkeypatch.setattr(config_binding.os, "link", publish)
+    binding = bind_behavioral_checks(request)
+    assert read_behavioral_checks(request) == binding
+    assert not list(path.parent.glob(".checks-*"))
 
 
 def test_typed_observer_inputs_and_assertions_round_trip() -> None:

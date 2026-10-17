@@ -25,17 +25,22 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 
 
 @contextlib.contextmanager
-def _directory(path: Path) -> Iterator[int]:
-    """Open every directory component without following links."""
-    if not path.is_absolute() or ".." in path.parts:
-        raise InvalidInputError("evidence artifact store requires an absolute, link-safe path")
-    descriptor = os.open(path.anchor, _DIRECTORY_FLAGS)
+def _directory(path: Path, *, root: Path) -> Iterator[int]:
+    """Follow trusted root ancestors, then refuse links below the resolved root."""
+    relative = path.relative_to(root)
+    descriptor = os.open(root, _DIRECTORY_FLAGS)
     try:
-        for component in path.parts[1:]:
+        for component in relative.parts:
             next_descriptor = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = next_descriptor
         yield descriptor
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise InvalidInputError(
+            "evidence artifact path must be a non-link path below its root"
+        ) from error
     finally:
         os.close(descriptor)
 
@@ -52,14 +57,15 @@ class EvidenceReceiptRepository:
     def __init__(self, store: ArtifactStore, *, media_validator: MediaValidator) -> None:
         self._store = store
         self._media_validator = media_validator
-        for path in (store.root, store.root / "objects", store.root / "tmp"):
-            with _directory(path) as descriptor:
+        self._root = Path(os.path.realpath(store.root))
+        for path in (self._root, self._root / "objects", self._root / "tmp"):
+            with _directory(path, root=self._root) as descriptor:
                 os.fchmod(descriptor, 0o700)
 
     def _prepare(self, digest: Digest) -> None:
         path = self._store.path_for(digest)
         relative = path.relative_to(self._store.root)
-        with _directory(self._store.root) as root:
+        with _directory(self._root, root=self._root) as root:
             descriptor = os.dup(root)
             try:
                 for part in relative.parts[:-1]:
@@ -83,7 +89,9 @@ class EvidenceReceiptRepository:
     def _read(self, digest: Digest) -> bytes:
         path = self._store.path_for(digest)
         try:
-            with _directory(path.parent) as parent:
+            with _directory(
+                self._root / path.parent.relative_to(self._store.root), root=self._root
+            ) as parent:
                 descriptor = os.open(
                     path.name,
                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK,
