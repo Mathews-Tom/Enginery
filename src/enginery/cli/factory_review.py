@@ -119,10 +119,16 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         if value
     )
     policy = ProtectedPathPolicy(request.protected_paths)
-    protected_digest = str(Digest.of_json({
-        "patterns": list(policy.patterns), "base_revision": base, "head_revision": head,
-        "matched_paths": list(policy.matched(changed_paths)),
-    }))
+    protected_digest = str(
+        Digest.of_json(
+            {
+                "patterns": list(policy.patterns),
+                "base_revision": base,
+                "head_revision": head,
+                "matched_paths": list(policy.matched(changed_paths)),
+            }
+        )
+    )
     observed = _projection(ledger, "behavioral_acceptance", run_id)
     configuration_digest = str(request.run.configuration_snapshot_digest)
     if (
@@ -143,9 +149,14 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     raw = request.initial_state()
     findings = states["review"].get("finding_ids", [])
     ci = {
-        key: value for key, value in states["verify"].items()
-        if key in {
-            "head_revision", "configuration_snapshot_digest", "base_revision", "evidence_bundle_digest",
+        key: value
+        for key, value in states["verify"].items()
+        if key
+        in {
+            "head_revision",
+            "configuration_snapshot_digest",
+            "base_revision",
+            "evidence_bundle_digest",
             "evidence_digest",
             "behavioral_receipt_digests",
             "github_evidence",
@@ -175,7 +186,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
                     ),
                 }
             ),
-        })),
+        ),
         (
             "Reproduction evidence",
             _json(

@@ -468,6 +468,9 @@ def test_presenter_failure_preserves_terminal_packet(
 
     monkeypatch.setattr(factory, "resolve_project", lambda value: tmp_path)
     monkeypatch.setattr(factory, "review", lambda *args: {"lines": ["terminal packet survives"]})
+    monkeypatch.setattr(
+        factory, "issue_for_review", lambda project, run_id, packet, **kwargs: packet
+    )
 
     def fail(*args: object, **kwargs: object) -> None:
         raise PresenterError("presenter unavailable")
@@ -481,6 +484,7 @@ def test_presenter_failure_preserves_terminal_packet(
         lavish=True,
         port=3210,
         no_open=True,
+        principal_id=None,
     )
     with pytest.raises(PresenterError, match="unavailable"):
         factory.run_factory(args)
