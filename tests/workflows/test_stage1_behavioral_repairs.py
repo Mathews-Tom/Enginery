@@ -12,13 +12,16 @@ from types import SimpleNamespace
 import pytest
 from tests.evidence.test_behavioral_acceptance import _repository
 from tests.workflows.test_stage1_behavioral import _ready_to_verify
+from tests.workflows.test_stage1_runtime import RecordingPullRequests
 
 from enginery.application.behavioral_checks import (
     BehavioralAssertion,
     BehavioralCheck,
     BehavioralChecksBinding,
 )
+from enginery.application.work_ports import PullRequestEvidence
 from enginery.cli import factory_behavioral, factory_collect
+from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
@@ -202,3 +205,50 @@ def test_missing_composed_observer_does_not_suggest_unconsumed_factory_check(
         )
     assert "factory check" not in str(caught.value)
     assert "stage1 watch" in str(caught.value)
+
+
+def test_behavioral_failure_clears_retryable_github_hold(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, service, now = _ready_to_verify(ledger_service, tmp_path, repair_limit=1)
+    original = RecordingPullRequests.evidence
+    closed = True
+    passing = True
+
+    def observe(provider: RecordingPullRequests, number: int) -> PullRequestEvidence:
+        evidence = original(provider, number)
+        return (
+            replace(evidence, pull_request=replace(evidence.pull_request, state="closed"))
+            if closed
+            else evidence
+        )
+
+    def verifier(bound: Stage1RunRequest, head: str) -> Digest:
+        if passing:
+            return Digest.of_bytes(b"passing-receipt")
+        raise HumanActionRequiredError(
+            "behavioral_acceptance_failed: behavioral_assertion_failed:check:0",
+            details={
+                "reason": "behavioral_acceptance_failed",
+                "findings": ("behavioral_assertion_failed:check:0",),
+            },
+        )
+
+    monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
+    service = replace(service, behavioral_verifier=verifier)
+    heartbeat = timedelta(seconds=60)
+    service.verify_merge_ready(request, now=now, heartbeat_window=heartbeat)
+    held = service._node_state(request.run.id, "verify")
+    assert held["status"] == "queued"
+    assert held["reason"] == "github_evidence_blocked"
+    closed = False
+    passing = False
+    with pytest.raises(HumanActionRequiredError, match="behavioral_acceptance_failed"):
+        service.verify_merge_ready(request, now=now, heartbeat_window=heartbeat)
+    state = service._node_state(request.run.id, "verify")
+    assert state["status"] == "failed"
+    assert state["behavioral_findings"] == ["behavioral_assertion_failed:check:0"]
+    assert all(state.get(field) is None for field in ("reason", "repair", "message"))
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.IMPLEMENT

@@ -155,7 +155,7 @@ def test_terminal_github_review_offers_no_authority(
     node: str,
     reason: str,
 ) -> None:
-    ingress.replace_request(repair_limit=0)
+    ingress.replace_request(repair_limit=1 if node == "verify" else 0)
     ingress.update_node("open_pr", status="passed")
     if node == "verify":
         ingress.register("wait_for_ci", outcome="passed")

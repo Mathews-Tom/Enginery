@@ -1608,14 +1608,25 @@ def test_status_github_view_is_optional_display_only(
     assert viewed == plain
 
 
-@pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
-@pytest.mark.parametrize("reason", ["github_pull_request_merged", "github_evidence_blocked"])
+@pytest.mark.parametrize(
+    ("node", "reason", "budget_used"),
+    [
+        ("wait_for_ci", "github_pull_request_merged", True),
+        ("wait_for_ci", "github_pull_request_merged", False),
+        ("wait_for_ci", "github_evidence_blocked", True),
+        ("verify", "github_pull_request_merged", True),
+        ("verify", "github_pull_request_merged", False),
+        ("verify", "github_evidence_blocked", True),
+        ("verify", "github_evidence_blocked", False),
+    ],
+)
 def test_terminal_github_outcome_reports_failed_without_decision(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     node: str,
     reason: str,
+    budget_used: bool,
 ) -> None:
     project, _ = bound_project
     _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
@@ -1626,6 +1637,7 @@ def test_terminal_github_outcome_reports_failed_without_decision(
         run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
         request = run.request
         generation = factory_run.first_attempt_generation(request.implementation.attempt_id)
+        generation += request.repair_limit if budget_used else 0
 
         def version(name: str) -> int:
             projection = ledger.read_projection(
@@ -1650,14 +1662,14 @@ def test_terminal_github_outcome_reports_failed_without_decision(
                             "implement",
                             {
                                 "status": "passed",
-                                "attempt_id": f"implement-{generation + request.repair_limit}",
+                                "attempt_id": f"implement-{generation}",
                             },
                         ),
                         (
                             "validate",
                             {
                                 "status": "passed",
-                                "attempt_id": f"validate-{generation + request.repair_limit}",
+                                "attempt_id": f"validate-{generation}",
                                 "validation_artifact_digest": "sha256:" + "a" * 64,
                             },
                         ),
@@ -1665,7 +1677,8 @@ def test_terminal_github_outcome_reports_failed_without_decision(
                             node,
                             {
                                 "status": "failed",
-                                "attempt_id": f"{node}-{generation + request.repair_limit}",
+                                "node_id": node,
+                                "attempt_id": f"{node}-{generation}",
                                 "pull_request_outcome": "blocked",
                                 "reason": reason,
                                 "message": "The GitHub outcome is terminal.",
@@ -1689,3 +1702,83 @@ def test_terminal_github_outcome_reports_failed_without_decision(
     assert report["status"] == "failed"
     assert report["holds"][0]["reason"] == reason
     assert report["next_decision"] is None
+
+
+def test_behavioral_failure_with_stale_github_hold_resumes_repair(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    with LedgerService.open(Path(original["database"])) as ledger:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+        request = run.request
+        assert request.repair_limit >= 1
+        generation = factory_run.first_attempt_generation(request.implementation.attempt_id)
+
+        def record(name: str, payload: dict[str, object]) -> None:
+            previous = ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id=f"{run_id}:{name}"
+            )
+            ledger.append(
+                AppendCommand(
+                    correlation_id=f"behavioral-after-github-hold:{name}:{payload['status']}",
+                    events=(
+                        EventWrite(
+                            aggregate_type="runtime_node",
+                            aggregate_id=f"{run_id}:{name}",
+                            expected_version=0 if previous is None else previous.aggregate_version,
+                            event_type="runtime_node.fixture_updated",
+                            schema_version=1,
+                            payload=payload,
+                        ),
+                    ),
+                )
+            )
+
+        record("implement", {"status": "passed", "attempt_id": request.implementation.attempt_id})
+        record(
+            "validate",
+            {
+                "status": "passed",
+                "attempt_id": f"validate-{generation}",
+                "validation_artifact_digest": "sha256:" + "a" * 64,
+            },
+        )
+        stale_verify = {
+            "status": "queued",
+            "node_id": "verify",
+            "attempt_id": f"verify-{generation}",
+            "reason": "github_evidence_blocked",
+            "message": "complete current-head GitHub evidence blocks readiness",
+            "repair": "Reopen the PR then run stage1 watch --advance",
+        }
+        record("verify", stale_verify)
+        record(
+            "verify",
+            {
+                **stale_verify,
+                "status": "failed",
+                "behavioral_findings": ["behavioral_assertion_failed:check:0"],
+            },
+        )
+        progression = Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
+        advances: list[object] = []
+
+        def advance(*args: object, **kwargs: object) -> Stage1Progression:
+            advances.append(args)
+            return progression
+
+        service = SimpleNamespace(next_action=lambda _: progression, advance=advance)
+        monkeypatch.setattr(factory_run, "read_only_service", lambda **_: service)
+        monkeypatch.setattr(factory_run, "advancing_service", lambda **_: service)
+    for command in ("status", "resume"):
+        code, report = invoke(capsys, project, command, run_id)
+        assert code == 0
+        assert report["status"] != "failed"
+        assert report["next_action"] == "implement"
+        assert not report["holds"]
+    assert len(advances) == 1

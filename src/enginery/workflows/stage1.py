@@ -1930,7 +1930,12 @@ class Stage1RunService:
                     epoch=epoch.epoch,
                     now=now,
                     outcome="failed",
-                    extra={"behavioral_findings": [str(finding) for finding in findings]},
+                    extra={
+                        "behavioral_findings": [str(finding) for finding in findings],
+                        "reason": None,
+                        "repair": None,
+                        "message": None,
+                    },
                 )
                 if (
                     generation - _generation(request.implementation.attempt_id)
@@ -2302,7 +2307,7 @@ def github_outcome_terminal(
     observation: Mapping[str, object],
 ) -> bool:
     """Recognize terminal GitHub outcomes only for the current implementation."""
-    if observation.get("status") != "failed":
+    if observation.get("status") != "failed" or observation.get("behavioral_findings"):
         return False
     current = implementation.get("attempt_id", request.implementation.attempt_id)
     observed = observation.get("attempt_id")
