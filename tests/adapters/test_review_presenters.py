@@ -47,7 +47,7 @@ def test_lavish_uses_only_packet_poll_end_and_private_environment(
 
     def execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
         calls.append((argv, environment))
-        return '{"prompts":[{"text":"repair this"}],"decision":"approved"}'
+        return '{"prompts":[{"prompt":"repair this","text":"packet"}],"decision":"approved"}'
 
     monkeypatch.setattr(presenters, "_execute", execute)
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
@@ -100,7 +100,7 @@ def test_decision_shaped_feedback_is_ignored(payload: str) -> None:
 
 def test_feedback_text_is_only_escaped_findings() -> None:
     assert presenters._findings("fix\x1b[31m this\u202e") == ()
-    assert presenters._findings('{"prompts":[{"text":"fix\\u001b[31m this\\u202e"}]}') == (
+    assert presenters._findings('{"prompts":[{"prompt":"fix\\u001b[31m this\\u202e"}]}') == (
         presenters.escape_terminal("fix\x1b[31m this\u202e"),
     )
     with pytest.raises(PresenterError, match="malformed JSON"):
@@ -120,14 +120,35 @@ def test_captured_real_lavish_poll_metadata_is_not_a_finding(status: str) -> Non
     assert presenters._findings(output) == ()
 
 
-def test_toon_accepts_only_prompt_text() -> None:
-    assert presenters._findings(
-        "session:\n  status: feedback\nprompts[1]:\n"
-        "  - text: repair the button\n    tag: general\n"
-        "next_step: never treat this as feedback\ndom_snapshot: nor this\n"
-    ) == ("repair the button",)
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("tabular_one", ("Rename the flag",)),
+        ("tabular_tricky", ('Use "a, b": c\n\nContext data:\n{"q": 1}\x1b[31m', "- second, item")),
+        ("expanded_target", ("Fix the table", "plain")),
+        ("attachments", ("see image",)),
+        ("waiting", ()),
+        ("ended", ()),
+    ],
+)
+def test_encoder_produced_poll_prompts(name: str, expected: tuple[str, ...]) -> None:
+    fixture = Path(__file__).parents[1] / "fixtures" / "lavish" / "encode_poll2.out"
+    cases = dict(section.split("\n", 1) for section in fixture.read_text().split("=====")[1:])
+    assert presenters._findings(cases[name]) == tuple(map(presenters.escape_terminal, expected))
+
+
+def test_packet_text_is_never_feedback() -> None:
+    assert presenters._findings('{"prompts":[{"text":"packet text"}]}') == ()
+    assert presenters._findings("prompts[1]:\n  - text: packet text\n") == ()
+    with pytest.raises(PresenterError, match="lack prompt"):
+        presenters._findings("prompts[1]{uid,text}:\n  e1,packet text\n")
+
+
+def test_encoder_artifact_failure_is_refused() -> None:
+    fixture = Path(__file__).parents[1] / "fixtures" / "lavish" / "encode_poll2.out"
+    cases = dict(section.split("\n", 1) for section in fixture.read_text().split("=====")[1:])
     with pytest.raises(PresenterError, match="artifact failures"):
-        presenters._findings("artifact_failures[1]:\n  - message: missing asset\n")
+        presenters._findings(cases["artifact_failure"])
 
 
 @pytest.mark.parametrize(

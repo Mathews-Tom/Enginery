@@ -1,0 +1,73 @@
+=====tabular_one
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  e1,Rename the flag,main > pre,pre,Risk
+next_step: x
+dom_snapshot: ""
+=====tabular_tricky
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  e1,"Use \"a, b\": c\n\nContext data:\n{\"q\": 1}\u001b[31m",main > pre,pre,Risk
+  e1,"- second, item",main > pre,pre,""
+next_step: x
+dom_snapshot: <main>
+=====expanded_target
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]:
+  - uid: e1
+    prompt: Fix the table
+    selector: main > pre
+    tag: pre
+    text: cell
+    target:
+      type: table-cell
+      row: 2
+  - uid: e1
+    prompt: plain
+    selector: main > pre
+    tag: pre
+    text: Risk
+next_step: x
+dom_snapshot: ""
+=====attachments
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]:
+  - uid: e1
+    prompt: see image
+    selector: main > pre
+    tag: pre
+    text: ""
+    attachments[1]{id,name}:
+      a1,x.png
+next_step: x
+dom_snapshot: ""
+=====artifact_failure
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts: []
+artifact_failures[1]{kind,message}:
+  load,missing
+next_step: x
+dom_snapshot: ""
+=====waiting
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: waiting
+next_step: No user feedback arrived
+=====ended
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: ended
+  ended_by: user
+next_step: Stop polling

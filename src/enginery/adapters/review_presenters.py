@@ -195,6 +195,46 @@ def _packet(path: Path, private_state: Path) -> Path:
     return path
 
 
+def _toon_value(token: str) -> str:
+    token = token.strip()
+    if token.startswith('"'):
+        try:
+            value = json.loads(token)
+        except ValueError as error:
+            raise PresenterError("Lavish prompt text is malformed") from error
+        if not isinstance(value, str):
+            raise PresenterError("Lavish prompt text is malformed")
+        return value
+    return token
+
+
+def _toon_row(line: str) -> list[str]:
+    cells: list[str] = []
+    current: list[str] = []
+    quoted = escaped = False
+    for char in line:
+        if quoted:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+            current.append(char)
+        elif char == ",":
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if quoted:
+        raise PresenterError("Lavish prompt row is malformed")
+    cells.append("".join(current))
+    return [_toon_value(cell) for cell in cells]
+
+
 def _findings(text: str) -> tuple[str, ...]:
     """Accept prompt text only, never session instructions or DOM snapshots."""
     if len(text.encode("utf-8")) > MAX_BYTES:
@@ -214,32 +254,42 @@ def _findings(text: str) -> tuple[str, ...]:
         if not isinstance(prompts, list):
             raise PresenterError("Lavish prompts must be a list")
         return tuple(
-            escape_terminal(item["text"])
+            escape_terminal(item["prompt"])
             for item in prompts
-            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip()
+            if isinstance(item, dict) and isinstance(item.get("prompt"), str) and item["prompt"].strip()
         )
-    # TOON's expanded object-array form. Top-level metadata is never feedback.
+    # TOON uses tables for primitive objects and lists for nested targets/attachments.
     result: list[str] = []
-    in_prompts = False
+    mode = ""
+    fields: list[str] = []
     for line in text.splitlines():
         if line and not line[0].isspace():
             if re.match(r"artifact_failures\[[1-9][0-9]*\]", line):
                 raise PresenterError("Lavish artifact failures prevent review; repair the packet")
-            in_prompts = re.fullmatch(r"prompts\[[0-9]+\]:", line) is not None
+            table = re.fullmatch(r"prompts\[[0-9]+\]\{([^}]*)\}:", line)
+            if table:
+                mode, fields = "table", table.group(1).split(",")
+                if "prompt" not in fields:
+                    raise PresenterError("Lavish prompts lack prompt text")
+            elif re.fullmatch(r"prompts\[[0-9]+\]:", line):
+                mode = "list"
+            else:
+                mode = ""
             continue
-        if in_prompts:
-            match = re.fullmatch(r"  (?:- )?text: (.*)", line)
+        if mode == "table" and line.startswith("  ") and not line.startswith("   "):
+            row = _toon_row(line[2:])
+            if len(row) != len(fields):
+                raise PresenterError("Lavish prompt row is malformed")
+            value = row[fields.index("prompt")]
+        elif mode == "list":
+            match = re.fullmatch(r"  - prompt: (.*)|    prompt: (.*)", line)
             if match is None:
-                match = re.fullmatch(r"    text: (.*)", line)
-            if match:
-                value = match.group(1)
-                if value.startswith('"'):
-                    try:
-                        value = json.loads(value)
-                    except ValueError as error:
-                        raise PresenterError("Lavish prompt text is malformed") from error
-                if isinstance(value, str) and value.strip():
-                    result.append(escape_terminal(value))
+                continue
+            value = _toon_value(match.group(1) or match.group(2) or "")
+        else:
+            continue
+        if value.strip():
+            result.append(escape_terminal(value))
     return tuple(result)
 
 
