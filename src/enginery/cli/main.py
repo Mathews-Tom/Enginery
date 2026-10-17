@@ -125,8 +125,10 @@ def _build_parser() -> argparse.ArgumentParser:
         lifecycle_parser = stage1_subparsers.add_parser(
             command,
             help=(
-                "Authenticated terminal human-wait decision; requires a factory review challenge."
-                if command in {"approve", "reject", "resume"}
+                "Unsupported human-wait requeue; refuses with human_wait_requeue_unsupported."
+                if command == "resume"
+                else "Authenticated human-wait decision; requires a factory review challenge."
+                if command in {"approve", "reject"}
                 else None
             ),
         )

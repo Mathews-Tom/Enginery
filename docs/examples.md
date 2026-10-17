@@ -37,13 +37,19 @@ to end. Label the issue with exactly one `enginery/work-kind/issue` (or
 `plan`) label and one `enginery/risk/low` (or `medium`) label, then build the
 request from it:
 
+Before building the request, commit project policy containing non-empty
+`[acceptance]` checks at the selected base revision. Checks and their declared
+fault classes must describe the changed behavior; see
+[behavioral acceptance](operations.md#behavioral-acceptance-and-calibration).
+Without these base-bound checks a new run holds with `no_behavioral_checks`.
+
 ```bash
 uv run enginery stage1 build-request --runner trusted-local \
   --output request.json --run-id issue-142 \
   --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
-  --artifact-root <absolute path to an artifact directory>
+  --artifact-root <absolute path to a private artifact directory outside the checkout>
 ```
 
 A trusted-local run validates with `uv run pytest -q` unless you pass

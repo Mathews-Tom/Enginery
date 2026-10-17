@@ -42,7 +42,7 @@ from enginery.ledger.service import LedgerService
 from enginery.policy.human_decisions import decision_verifier
 from enginery.policy.rules import HardRuleEnforcer, HardRuleError
 from enginery.policy.schemas import ApprovalSchema
-from enginery.workflows.stage1 import Stage1RunRequest
+from enginery.workflows.stage1 import Stage1RunRequest, behavioral_repair_exhausted
 
 _PUBLICATION = PolicyAction.PULL_REQUEST_OPEN.value
 
@@ -115,6 +115,12 @@ def _waits(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
 
 
 def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
+    if behavioral_repair_exhausted(
+        request,
+        _state(ledger, str(request.run.id), "implement"),
+        _state(ledger, str(request.run.id), "verify"),
+    ):
+        return ()
     waiting = preimplementation_waits(ledger, request) or _waits(ledger, request)
     actions: list[str] = []
     publication = _state(ledger, str(request.run.id), "open_pr")
@@ -282,11 +288,7 @@ def decide_in_ledger(
             database=database or None,
             owner=owner,
         )
-        repair = (
-            review
-            if error.details.get("reason") == "human_wait_requeue_unsupported"
-            else (f"{review}; {decide}")
-        )
+        repair = review if isinstance(error, ActionMismatchError) else (f"{review}; {decide}")
         raise type(error)(error.args[0], details={**error.details, "repair": repair}) from error
 
 
@@ -302,7 +304,6 @@ def _decide_in_ledger(
     owner: str,
 ) -> dict[str, object]:
     """Consume and release an exact wait under ONE write transaction, including its event."""
-    registration, context = _authenticate(principal_id)
     scope = wait_scope(action)
     if scope is not None and scope[1] == "requeue":
         raise ActionMismatchError(
@@ -310,6 +311,7 @@ def _decide_in_ledger(
             "the wait is unchanged",
             details={"reason": "human_wait_requeue_unsupported", "node_id": scope[0]},
         )
+    registration, context = _authenticate(principal_id)
     bounded_json(reason)
     assert_no_raw_credentials(reason)
     run_id = str(request.run.id)

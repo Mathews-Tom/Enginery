@@ -62,6 +62,7 @@ from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,
+    behavioral_repair_exhausted,
     first_attempt_generation,
     stage1_request_from_state,
 )
@@ -598,8 +599,11 @@ def _enrich(
     exhausted_behavior = (
         report["next_action"] == "await_human_review"
         and verification is not None
-        and verification.state.get("status") == "failed"
-        and bool(verification.state.get("behavioral_findings"))
+        and behavioral_repair_exhausted(
+            request,
+            next((node for node in node_states if node["node_id"] == "implement"), {}),
+            verification.state,
+        )
     )
     if exhausted_behavior:
         assert verification is not None

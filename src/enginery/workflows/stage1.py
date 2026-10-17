@@ -1764,16 +1764,21 @@ class Stage1RunService:
                     generation - _generation(request.implementation.attempt_id)
                     >= request.repair_limit
                 ):
+                    database = self.ledger.connection.execute("PRAGMA database_list").fetchone()[2]
+                    review_command, _ = decision_commands(
+                        str(request.run.id),
+                        str(request.repository_path),
+                        "pull_request.open",
+                        database=database or None,
+                        owner=self.runtime.coordinator.owner,
+                    )
                     raise HumanActionRequiredError(
                         str(error),
                         details={
                             **error.details,
-                            "repair": "The behavioral repair budget is exhausted; this run "
-                            "cannot pass. Fix the behavior and start a new run: for factory "
-                            "runs, change the issue snapshot and use enginery factory run "
-                            "ISSUE --project PROJECT --supersede; for Stage 1 runs, rebuild "
-                            "with enginery stage1 build-request --run-id NEW_RUN_ID "
-                            "then enginery stage1 start --request REQUEST.",
+                            "repair": "The behavioral repair budget is exhausted; this run is "
+                            f"terminal. Inspect its evidence with {review_command}. A new attempt "
+                            "requires stage1 build-request and stage1 start with a new run id.",
                         },
                     ) from error
                 raise
@@ -2048,6 +2053,26 @@ def implementation_attempt_id(run_id: str, generation: int) -> str:
             details={"run_id": run_id, "attempt_id": attempt_id},
         ) from error
     return attempt_id
+
+
+def behavioral_repair_exhausted(
+    request: Stage1RunRequest,
+    implementation: Mapping[str, object],
+    verification: Mapping[str, object],
+) -> bool:
+    """Only a failed verify of the current, budget-exhausting generation is terminal."""
+    if verification.get("status") != "failed" or not verification.get("behavioral_findings"):
+        return False
+    current = implementation.get("attempt_id")
+    verified = verification.get("attempt_id")
+    if not isinstance(current, str) or not isinstance(verified, str):
+        return False
+    generation = first_attempt_generation(current)
+    return (
+        first_attempt_generation(verified) == generation
+        and generation - first_attempt_generation(request.implementation.attempt_id)
+        >= request.repair_limit
+    )
 
 
 def first_attempt_generation(attempt_id: str) -> int:

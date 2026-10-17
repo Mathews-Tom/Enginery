@@ -41,6 +41,11 @@ attempt and return `wait`, never launch a second worker.
   stores, or requests a literal secret value; every credential field in a
   request is an opaque reference the GitHub/harness CLI resolves itself
   (see [`docs/operations.md`](operations.md#configuration)).
+- Commit project policy with non-empty `[acceptance]` checks at the selected
+  base revision before `stage1 build-request`. Include assertions and declared
+  fault classes for the changed behavior, as described in
+  [behavioral acceptance](operations.md#behavioral-acceptance-and-calibration);
+  without base-bound checks a new run holds with `no_behavioral_checks`.
 
 ## Procedure
 

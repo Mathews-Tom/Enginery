@@ -212,8 +212,9 @@ and issues a one-time challenge only on a genuine same stdin/stdout TTY.
 `factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
 authenticates the registered local operator; publication uses `pull_request.open`.
 Decisions expire and changed bound inputs supersede them. Feedback and Stage 1
-review reports supply findings, never authority. Human-wait approve/reject/requeue
-commands require the same node-scoped authenticated protocol; see
+review reports supply findings, never authority. Human-wait approve/reject
+commands require the same node-scoped authenticated protocol; `stage1 resume`
+refuses with `human_wait_requeue_unsupported` (no supported requeue nodes). See
 [operator registration and decisions](operations.md#authenticated-terminal-decisions).
 This trusted-local protocol does not contain another process running as the same
 OS user. Only factory `watch` and `evidence` remain proposed; scheduled

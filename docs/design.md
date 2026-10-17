@@ -180,13 +180,15 @@ actual request/configuration/base/head/diff/protected/evidence/CI/findings input
 and expire within 30 minutes. Lifecycle bookkeeping is not part of the subject;
 changed actual inputs supersede authority. Publication requires `pull_request.open`,
 including protected-path publication. Other human waits require
-`human_wait.NODE.approve`, `.reject`, or `.requeue`; open-PR rejection is
-`human_wait.open_pr.reject`. Stage 1 approve/reject/resume use the same authenticated
-protocol, not report scores or reason-only overrides. This protects workflow
-integrity within trusted-local assumptions, not against another same-user process.
+`human_wait.NODE.approve` or `.reject`; open-PR rejection is
+`human_wait.open_pr.reject`. Stage 1 approve/reject use the same authenticated
+protocol, not report scores or reason-only overrides. `stage1 resume` refuses
+with `human_wait_requeue_unsupported`; no human-wait requeue is supported.
+This protects workflow integrity within trusted-local assumptions, not against
+another same-user process.
 
 
-`factory resume RUN` reconciles exited workers and pending broker operations from the durable ledger before continuing that same run, without creating another request or workspace. This differs from `stage1 resume`, which requeues a human-wait node and now requires a current node-scoped authenticated decision with subject digest and challenge. `factory pause` pauses dispatch for the project ledger only, leaving running workers untouched; `factory pause --lift` lifts it. `factory drain --wait-seconds N` pauses and waits, leaving exited-worker result and lease reconciliation to the subsequent `factory resume` after the pause is lifted. Successful implementation workspaces remain retained until explicit `enginery workspace release`; status/drain report the retention state, and a blocked new run names that release command as its hold repair. `factory drain --stop` uses the existing operator stop callbacks to stop live workers, release their leases/reservations and remove isolated containers; previously exited workers still require resume/reconciliation. Neither form reverses an external effect. The factory ends at a verified open PR and outcome observation; merge, release and deploy are separate human actions, never automatic factory actions.
+`factory resume RUN` reconciles exited workers and pending broker operations from the durable ledger before continuing that same run, without creating another request or workspace. This differs from `stage1 resume`, which refuses with `human_wait_requeue_unsupported`. `factory pause` pauses dispatch for the project ledger only, leaving running workers untouched; `factory pause --lift` lifts it. `factory drain --wait-seconds N` pauses and waits, leaving exited-worker result and lease reconciliation to the subsequent `factory resume` after the pause is lifted. Successful implementation workspaces remain retained until explicit `enginery workspace release`; status/drain report the retention state, and a blocked new run names that release command as its hold repair. `factory drain --stop` uses the existing operator stop callbacks to stop live workers, release their leases/reservations and remove isolated containers; previously exited workers still require resume/reconciliation. Neither form reverses an external effect. The factory ends at a verified open PR and outcome observation; merge, release and deploy are separate human actions, never automatic factory actions.
 
 A run ID is `fr-` plus the first 20 hexadecimal characters of SHA-256 over canonical JSON containing project identity, issue reference and bound issue snapshot digest. The private intake index binds the issue to that ID and digest. The same snapshot reuses the durable run and request; a changed snapshot holds instead of silently rebinding. Explicit `--supersede` creates a new binding while retaining the old run for status inspection. Requests, workspaces and artifacts live under private project state, not in tracked policy.
 

@@ -983,9 +983,8 @@ run. A killed client or coordinator does not require a new request, workspace or
 ID; retrying pending PR publication reconciles its operation identity rather than
 creating a second PR. Binding, catalog or runner drift still holds; resume does not
 rewrite the binding or bypass those checks. `--wait-seconds` has the same wait-boundary
-meaning as on `run`. This is distinct from `stage1 resume`, which requeues a
-human-wait node and now requires authenticated, node-scoped authority as described
-below; a reason or an owner label alone cannot release a wait.
+meaning as on `run`. This is distinct from `stage1 resume`, which refuses with
+`human_wait_requeue_unsupported`: no human-wait node supports end-to-end requeue.
 
 `factory pause` reports its scope as the **project ledger**, not the whole host or
 another project's ledger. Running workers are untouched. Both `run` and `resume`
@@ -1316,9 +1315,9 @@ The diagram's approved edge requires a separate authenticated `pull_request.open
 decision before publication; a report alone cannot traverse it.
 `stage1 approve` / `stage1 reject` resolve a human-wait node only with the
 authenticated subject/challenge protocol above; `stage1 cancel` terminates a
-running or human-waiting node. `stage1 resume` requeues a human-wait node using
-authenticated node-scoped requeue authority and its existing attempt/operation
-flags. `stage1 evidence` prints the run's current
+running or human-waiting node. `stage1 resume` refuses with
+`human_wait_requeue_unsupported`; no human-wait requeue is supported.
+`stage1 evidence` prints the run's current
 status, request digest, source revision, every runtime node's state, and an
 `execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
 — the operator's read path for "what is this run doing and why."

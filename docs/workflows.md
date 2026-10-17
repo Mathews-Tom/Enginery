@@ -384,9 +384,9 @@ without GitHub mutations or writes except disclosed SQLite sidecars. `collect`
 records private intake; `run`, `status`, `explain RUN` and `resume` share the
 existing coordinator and immutable binding. `explain` without RUN still explains
 current configuration. `pause` and `drain` control project dispatch; lift the pause
-with `factory pause --lift`. Unlike factory recovery, `stage1 resume` requeues a
-human-wait node and requires a node-scoped authenticated decision, including
-`--subject-digest DIGEST --challenge SECRET` (optional `--principal-id ID`).
+with `factory pause --lift`. Unlike factory recovery, `stage1 resume` refuses
+with `human_wait_requeue_unsupported`: no human-wait node supports end-to-end
+requeue. Use review to inspect the available approve/reject actions.
 
 `factory calibrate RUN` qualifies deliberate-fault sensitivity; `factory check RUN`
 observes the verified candidate and requires semantic assertions. `factory review
