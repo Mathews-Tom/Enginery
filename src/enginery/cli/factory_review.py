@@ -121,10 +121,12 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     result = attempt.get("result")
     result = dict(result) if isinstance(result, Mapping) else {}
     head = result.get("head_revision")
-    preimplementation = not isinstance(head, str) and bool(preimplementation_waits(ledger, request))
+    early_waits = preimplementation_waits(ledger, request)
+    preimplementation = not isinstance(head, str) and bool(early_waits)
     if preimplementation:
         repository = request.repository_path
-        base = head = _revision(repository, request.run.base_revision)
+        base = _revision(repository, request.run.base_revision)
+        head = ""
         diff = ""
         changed_paths: tuple[str, ...] = ()
     else:
@@ -225,6 +227,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
                 {
                     "artifact_root": str(request.execution_configuration.artifact_root),
                     "implementation_result": result,
+                    "preimplementation_waits": list(early_waits) if preimplementation else [],
                     "validation": states["validate"],
                 }
             ),
@@ -282,6 +285,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         findings_json=_json(findings),
         sections=sections,
         protected_publication_digest=protected_digest,
+        preimplementation_waits=early_waits if preimplementation else (),
     )
     # No packet, even a display-only one, may leak credential-shaped worker text.
     assert_no_raw_credentials(_json(packet.to_state()))

@@ -57,10 +57,10 @@ class HumanDecisionError(InvalidInputError):
     code: ClassVar[str] = "human_decision_refused"
 
     def __str__(self) -> str:
+        review, decide = decision_commands("RUN", "PROJECT", "ACTION")
         return (
             f"{self.code}: {super().__str__()}; repair: in the registered operator's terminal, "
-            "run enginery factory review RUN --project PROJECT, then enginery factory decide "
-            "RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge CHALLENGE"
+            f"run {review}, then {decide}"
         )
 
 

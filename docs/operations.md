@@ -1084,7 +1084,8 @@ notice to register `[review_authority]` in user preferences; no challenge is iss
 For a run started with `stage1 --database DB --owner OWNER`, pass those same
 `--database DB --owner OWNER` flags to both `factory review` and `factory decide`.
 Pre-implementation waits bind the verified base, request, issue snapshot,
-configuration and findings with an empty diff; they offer only their wait actions.
+configuration, waiting node IDs and findings with an empty head and diff; they
+offer only their wait actions. No implementation commit is invented for review.
 
 ```text
 enginery factory decide RUN --project PROJECT --action pull_request.open --subject-digest DIGEST --challenge SECRET

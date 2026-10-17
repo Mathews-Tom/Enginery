@@ -30,6 +30,7 @@ class ReviewPacket:
     findings_json: str
     sections: tuple[tuple[str, str], ...]
     protected_publication_digest: str = ""
+    preimplementation_waits: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if len({name for name, _ in self.sections}) != len(self.sections):
@@ -66,6 +67,7 @@ class ReviewPacket:
             "ci_evidence_digest": str(Digest.of_json(ci)),
             "ci_evidence": ci,
             "findings": findings,
+            "preimplementation_waits": list(self.preimplementation_waits),
         }
 
     @property
