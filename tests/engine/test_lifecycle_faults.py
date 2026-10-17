@@ -450,7 +450,7 @@ def test_a_launching_process_returns_promptly_while_its_worker_keeps_running(
         """
     )
     started = time.monotonic()
-    # Piped stdout, as in `stage1 watch --advance | jq`: EOF must arrive when the
+    # Piped stdout, as in `engine next --advance | jq`: EOF must arrive when the
     # launcher exits, not when the worker it started exits.
     launched = subprocess.run(
         [

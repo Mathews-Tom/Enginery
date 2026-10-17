@@ -32,10 +32,9 @@ def decision_commands(
     scope = ["--project", project]
     if database is not None:
         scope.extend(("--database", database, "--owner", owner))
-    review = shlex.join(["enginery", "factory", "review", run_id, *scope])
+    review = shlex.join(["enginery", "review", run_id, *scope])
     decide = [
         "enginery",
-        "factory",
         "decide",
         run_id,
         *scope,

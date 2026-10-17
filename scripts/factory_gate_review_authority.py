@@ -274,7 +274,7 @@ class ReviewAuthorityGate(ManualPathGate):
             )
         )
         return self.cli(
-            "stage1",
+            "engine",
             "review",
             "--database",
             str(self.database),
@@ -297,7 +297,6 @@ class ReviewAuthorityGate(ManualPathGate):
         if self.terminal is None:
             raise RuntimeError("a real challenge must precede noninteractive submissions")
         args = [
-            "factory",
             "decide",
             self.run_id,
             "--project",
@@ -681,7 +680,7 @@ def _supersession_and_publication(gate: ReviewAuthorityGate, issued: TerminalRes
     fresh = gate.challenge()
     approved = gate.decide(fresh)
     (gate.bin / "release-pr").touch()
-    publish_code, published = gate.factory("resume", gate.run_id, "--wait-seconds", "30")
+    publish_code, published = gate.factory("continue", gate.run_id, "--wait-seconds", "30")
     pr_path = gate.bin / "gh-pr.json"
     posts = [
         call for call in gate.gh_calls() if "POST" in call and "repos/owner/repo/pulls" in call
@@ -739,8 +738,7 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
             (probe.bin / "release-pr").touch()
             before = len(probe.gh_calls())
             resumed = probe.cli(
-                "factory",
-                "resume",
+                "continue",
                 probe.run_id,
                 "--wait-seconds",
                 "0",
@@ -753,8 +751,7 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
             # Zero wait publishes first, then stops before the first CI poll. Advance that
             # existing node once more; this is the sole machine evidence collection.
             resumed = probe.cli(
-                "factory",
-                "resume",
+                "continue",
                 probe.run_id,
                 "--wait-seconds",
                 "0",

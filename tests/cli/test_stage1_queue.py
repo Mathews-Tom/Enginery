@@ -1,4 +1,4 @@
-"""``stage1 watch --advance`` redispatches durably queued implementation work.
+"""``engine next --advance`` redispatches durably queued implementation work.
 
 The scenario runs the real CLI entry point against a real SQLite ledger, a real git
 worktree and real worker subprocesses; the harness is a local stand-in executable that
@@ -65,7 +65,7 @@ def _occupier(tmp_path: Path) -> FixtureDispatch:
 
 def _watch(capsys: pytest.CaptureFixture[str], run: _Run, *, advance: bool) -> dict[str, object]:
     capsys.readouterr()
-    argv = ["stage1", "watch", "--database", str(run.database), "--owner", "op"]
+    argv = ["engine", "next", "--database", str(run.database), "--owner", "op"]
     argv += ["--run-id", "run-1"]
     if advance:
         argv.append("--advance")
@@ -196,7 +196,7 @@ def test_two_runs_built_without_an_attempt_id_flag_can_both_dispatch_on_one_ledg
         assert (
             main(
                 [
-                    "stage1",
+                    "engine",
                     "start",
                     "--database",
                     str(database),

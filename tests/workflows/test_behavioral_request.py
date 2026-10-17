@@ -34,7 +34,7 @@ def test_new_empty_check_request_holds_without_rebinding(
     request = replace(historical, behavioral_checks=())
     assert request.digest != historical.digest
     assert stage1_request_from_state(request.initial_state()) == request
-    with pytest.raises(HumanActionRequiredError, match="enginery stage1 build-request"):
+    with pytest.raises(HumanActionRequiredError, match="enginery engine build-request"):
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert (
         ledger_service.read_projection(aggregate_type="run", aggregate_id=str(request.run.id))
@@ -63,7 +63,7 @@ def test_bound_empty_check_run_names_replacement_not_same_factory_run(
     assert str(request.repository_path / ".enginery/project.toml") in message
     assert request.base_branch in message
     assert "new --run-id" in message
-    assert "factory run ISSUE" not in message
+    assert "enginery run ISSUE" not in message
 
 
 def test_absent_checks_refused_for_new_run_but_history_restarts(

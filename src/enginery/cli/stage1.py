@@ -1,4 +1,4 @@
-"""Durable Stage 1 lifecycle commands backed by the coordinator runtime."""
+"""Durable engine lifecycle commands backed by the coordinator runtime."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_stat
 
 
 def run_stage1(args: argparse.Namespace) -> int:
-    """Run one Stage 1 lifecycle operation and emit a machine-readable result."""
+    """Run one engine lifecycle operation and emit a machine-readable result."""
     command = args.stage1_command
     if command is None:
-        raise InvalidInputError("stage1 requires a subcommand")
+        raise InvalidInputError("engine requires a subcommand")
     if command == "start":
         _start(args)
     elif command == "watch":

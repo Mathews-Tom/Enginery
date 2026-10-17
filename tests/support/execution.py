@@ -43,7 +43,7 @@ def selection_for(
 
 
 def bound_document(request: Stage1RunRequest) -> dict[str, object]:
-    """The ``--request`` document ``stage1 start`` accepts for a hand-constructed request.
+    """The ``--request`` document ``engine start`` accepts for a hand-constructed request.
 
     A library-built request is not compiled, so it carries no configuration snapshot of its
     own. This binds one to the values the request actually carries (every field attributed to

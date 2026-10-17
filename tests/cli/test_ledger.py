@@ -57,7 +57,7 @@ def test_ledger_verify_reports_healthy_and_exits_zero(
     _seed_ledger_with_artifact(database, artifacts)
 
     exit_code = main(
-        ["ledger", "verify", "--database", str(database), "--artifacts", str(artifacts)]
+        ["operator", "verify", "--database", str(database), "--artifacts", str(artifacts)]
     )
 
     assert exit_code == 0
@@ -70,7 +70,7 @@ def test_ledger_verify_json_output_reports_schema_version(
     database = tmp_path / "ledger.db"
     LedgerService.open(database).close()
 
-    exit_code = main(["ledger", "verify", "--database", str(database), "--json"])
+    exit_code = main(["operator", "verify", "--database", str(database), "--json"])
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -90,7 +90,7 @@ def test_ledger_verify_detects_tampered_artifact_and_exits_nonzero(
             path.write_bytes(b"tampered bytes")
 
     exit_code = main(
-        ["ledger", "verify", "--database", str(database), "--artifacts", str(artifacts)]
+        ["operator", "verify", "--database", str(database), "--artifacts", str(artifacts)]
     )
 
     assert exit_code != 0
@@ -104,7 +104,7 @@ def test_ledger_verify_on_unmigrated_database_reports_schema_stale(
 ) -> None:
     database = tmp_path / "fresh.db"
 
-    exit_code = main(["ledger", "verify", "--database", str(database)])
+    exit_code = main(["operator", "verify", "--database", str(database)])
 
     assert exit_code != 0
     assert "unhealthy" in capsys.readouterr().out
@@ -120,7 +120,7 @@ def test_ledger_backup_and_restore_round_trip(
     backup_dir = tmp_path / "backup"
     backup_exit = main(
         [
-            "ledger",
+            "operator",
             "backup",
             "--database",
             str(database),
@@ -131,13 +131,21 @@ def test_ledger_backup_and_restore_round_trip(
         ]
     )
     assert backup_exit == 0
-    assert "backup written to" in capsys.readouterr().out
+    backup_report = json.loads(capsys.readouterr().out)
+    assert backup_report["backup"] == str(backup_dir)
+    assert backup_report["includes_artifacts"] is True
+    assert backup_report["verified_before"]["healthy"] is True
+    assert backup_report["verified_after"]["healthy"] is True
 
     restored_database = tmp_path / "restored" / "ledger.db"
     restored_artifacts = tmp_path / "restored" / "artifacts"
+    restored_database.parent.mkdir()
+    LedgerService.open(restored_database).close()
+    assert main(["operator", "pause", "--database", str(restored_database)]) == 0
+    assert json.loads(capsys.readouterr().out)["paused"] is True
     restore_exit = main(
         [
-            "ledger",
+            "operator",
             "restore",
             "--backup",
             str(backup_dir),
@@ -148,11 +156,18 @@ def test_ledger_backup_and_restore_round_trip(
         ]
     )
     assert restore_exit == 0
-    assert "restored" in capsys.readouterr().out
+    restore_report = json.loads(capsys.readouterr().out)
+    assert restore_report["restored"] == str(restored_database)
+    assert restore_report["backup"] == str(backup_dir)
+    assert restore_report["prior"] == "paused"
+    assert restore_report["paused"] is True
+    assert Path(restore_report["prior_ledger_kept_at"]).is_file()
+    assert restore_report["verified_backup"]["healthy"] is True
+    assert restore_report["verified_restored"]["healthy"] is True
 
     verify_exit = main(
         [
-            "ledger",
+            "operator",
             "verify",
             "--database",
             str(restored_database),
@@ -171,17 +186,17 @@ def test_ledger_rebuild_projections_reports_count(
     artifacts = tmp_path / "artifacts"
     _seed_ledger_with_artifact(database, artifacts)
 
-    exit_code = main(["ledger", "rebuild-projections", "--database", str(database)])
+    exit_code = main(["operator", "rebuild-projections", "--database", str(database)])
 
     assert exit_code == 0
     assert "rebuilt 1 projection" in capsys.readouterr().out
 
 
 def test_ledger_without_subcommand_errors(capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(["ledger"])
+    exit_code = main(["operator"])
 
-    assert exit_code != 0
-    assert "ledger subcommand is required" in capsys.readouterr().err
+    assert exit_code == 2
+    assert "enginery operator" in capsys.readouterr().err
 
 
 def test_ledger_verify_against_the_checked_in_fixture(
@@ -198,7 +213,7 @@ def test_ledger_verify_against_the_checked_in_fixture(
     with LedgerService.open(fixture):
         pass
 
-    exit_code = main(["ledger", "verify", "--database", str(fixture)])
+    exit_code = main(["operator", "verify", "--database", str(fixture)])
 
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == "healthy"

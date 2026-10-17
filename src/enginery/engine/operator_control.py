@@ -1,6 +1,6 @@
 """Operator control: the durable pause flag, the selected runner image, and worker draining.
 
-The operator's recovery entry point (``enginery-operator``) is a fixed command that runs outside
+The operator's recovery entry point (``enginery operator``) is a fixed command that runs outside
 any coding-agent session. This module is its engine side. The control state is one durable
 process-manager record (``operator-control``/``control``) written together with an auditable
 ledger event in a single atomic append, so a pause, a resume or a runner selection either

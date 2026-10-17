@@ -1,11 +1,11 @@
-"""``enginery stage1 build-request``: compose a valid ``--request`` document.
+"""``enginery engine build-request``: compose a valid ``--request`` document.
 
-The command builds the same `Stage1RunRequest` that `stage1 start` decodes
+The command builds the same `Stage1RunRequest` that `engine start` decodes
 (`enginery.workflows.stage1.stage1_request_from_state`) and writes the identical
 JSON shape. The source issue is read, not typed: the work item, its source
 revision, and its declared classification (the canonical `enginery/work-kind/*`
 and `enginery/risk/*` labels) come through the same GitHub adapter that
-`stage1 watch --advance` uses to qualify the run, and are bound exactly as the
+`engine next --advance` uses to qualify the run, and are bound exactly as the
 adapter returns them, so the request carries the digest qualification
 recomputes from the labelled issue. An issue whose labels are missing,
 ambiguous, or outside the declared vocabulary is refused with the adapter's own
@@ -15,7 +15,7 @@ Flags are the run layer of the layered configuration: omitted, the project
 (``.enginery/project.toml``), user (``user.toml``), workflow-profile and factory layers
 decide, and :mod:`enginery.application.effective_config` compiles them. The sha256 of the
 compiled snapshot is the request's ``configuration_snapshot_digest`` (never supplied by
-the operator) and the snapshot travels in the request document so ``stage1 start`` can
+the operator) and the snapshot travels in the request document so ``engine start`` can
 verify the request against it. ``cost_budget=None`` (no supported harness enforces a
 hard-dollar budget, so one is refused rather than carried). The ``no-capabilities-locked``
 and ``local-environment`` digest sentinels stand for a run with no bound capability lock
@@ -74,7 +74,7 @@ _DEFAULT_CAPABILITY_LOCKFILE = Path(".enginery/capabilities.lock.json")
 class RequestInputs:
     """Compiler inputs shared by the CLI and factory callers.
 
-    Defaults match ``stage1 build-request``. Compilation reads the source issue and
+    Defaults match ``engine build-request``. Compilation reads the source issue and
     configuration but does not write ``output``; the calling command owns that write.
     """
 
@@ -122,7 +122,7 @@ class RequestInputs:
 def add_build_request_parser(
     stage1_subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    """Register ``stage1 build-request``'s flags on the shared ``stage1`` subparsers."""
+    """Register ``engine build-request``'s flags on the shared engine subparsers."""
     parser = stage1_subparsers.add_parser(
         "build-request",
         help="Engine ledger: Write a bound request document for one GitHub issue.",
@@ -374,7 +374,7 @@ class BuiltRequest:
     compiled: CompiledConfig
 
     def document(self) -> dict[str, object]:
-        """The ``--request`` document: the request plus the snapshot ``stage1 start`` verifies."""
+        """The ``--request`` document: the request plus the snapshot ``engine start`` verifies."""
         return {
             **self.request.initial_state(),
             EFFECTIVE_CONFIG_KEY: self.compiled.config.to_state(),

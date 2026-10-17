@@ -1,4 +1,4 @@
-"""``enginery factory uninstall``: reversible removal of exactly what setup created.
+"""``enginery uninstall``: reversible removal of exactly what setup created.
 
 The plan comes from the private ownership record alone. A file is removed only when its
 current sha256 still equals the one setup recorded; a file the user changed is kept and

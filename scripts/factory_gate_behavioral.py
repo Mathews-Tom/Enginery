@@ -154,7 +154,7 @@ class BehavioralGate(SetupGate):
         request = self.state / "runs" / run_id / "request.json"
         request.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         code, built = self.cli_json(
-            "stage1",
+            "engine",
             "build-request",
             "--output",
             str(request),
@@ -176,7 +176,7 @@ class BehavioralGate(SetupGate):
         if code:
             raise RuntimeError(f"request refused: {built}")
         started = self.cli(
-            "stage1",
+            "engine",
             "start",
             "--database",
             str(self.database),
@@ -242,9 +242,7 @@ class BehavioralGate(SetupGate):
         return run_id
 
     def factory(self, command: str, run_id: str, *args: str) -> tuple[int, dict[str, Any]]:
-        return self.cli_json(
-            "factory", command, run_id, "--project", str(self.project), "--json", *args
-        )
+        return self.cli_json(command, run_id, "--project", str(self.project), "--json", *args)
 
     def artifact(self, digest: str) -> dict[str, Any]:
         algorithm, value = digest.split(":", 1)

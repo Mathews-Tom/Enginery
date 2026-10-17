@@ -1,8 +1,8 @@
-"""``enginery factory``: guided project setup and prerequisite diagnostics.
+"""Guided project setup and prerequisite diagnostics.
 
 * ``init`` previews (default) or, with ``--apply``, performs guided setup: a project policy
   file and a private ownership record, nothing else (see :mod:`enginery.cli.factory_setup`).
-* ``doctor`` reports the prerequisites the project's compiled selection needs, read-only.
+* ``preflight`` reports the prerequisites the project's compiled selection needs, read-only.
 * ``explain`` shows, per compiled field, the winning layer, the shadowed values, the hard
   constraints and the source files, plus the setup-owned files and the offline holds.
 * ``uninstall`` previews (default) or, with ``--apply``, removes exactly the files setup
@@ -382,7 +382,7 @@ def _run_init(args: argparse.Namespace) -> int:
 
 
 def _doctor_lines(report: DoctorReport) -> list[str]:
-    lines = [f"factory doctor for {report.project}"]
+    lines = [f"preflight for {report.project}"]
     for check in report.checks:
         lines.append(f"[{check.status}] {check.name}: {check.detail}")
         if check.resolve is not None and check.status == "hold":
@@ -533,7 +533,7 @@ def run_factory(args: argparse.Namespace) -> int:
     if command == "uninstall":
         return _run_uninstall(args)
     raise InvalidInputError(
-        "factory requires a subcommand; see enginery factory --help",
+        "a project subcommand is required; see enginery --help",
         details={"command": str(command)},
     )
 

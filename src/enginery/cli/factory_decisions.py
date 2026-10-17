@@ -84,14 +84,14 @@ def _authenticate(principal_id: str | None) -> tuple[ReviewAuthority, Authentica
             "HTTP-originated decisions are not supported; use the local terminal"
         )
     if not _interactive():
-        raise AuthenticationError("run factory review and decide in the same interactive terminal")
+        raise AuthenticationError("run enginery review and decide in the same interactive terminal")
     registration = _registered_identity(principal_id)
     try:
         tty_name = os.ttyname(sys.stdin.fileno())
         output_tty = os.ttyname(sys.stdout.fileno())
     except (OSError, ValueError) as error:
         raise AuthenticationError(
-            "run factory review and decide in a real local terminal"
+            "run enginery review and decide in a real local terminal"
         ) from error
     if tty_name != output_tty:
         raise AuthenticationError("decision input and output must use the same local terminal")
@@ -221,7 +221,7 @@ def issue_for_review(
         result["challenge_reason"] = error.code
         notice = (
             f"No decision challenge: {error}. Register principal_id, os_user and os_uid "
-            "in operator user preferences [review_authority], then run factory review "
+            "in operator user preferences [review_authority], then run enginery review "
             "again in a real local terminal."
         )
         result["notice"] = notice
@@ -232,7 +232,7 @@ def issue_for_review(
     try:
         packet = build_packet(project, ledger, request)
         if report.get("subject_digest") != packet.subject_digest:
-            raise SubjectMismatchError("the reviewed packet changed; run factory review again")
+            raise SubjectMismatchError("the reviewed packet changed; run enginery review again")
         actions = _actions(ledger, request)
         if not actions:
             result["challenge_issued"] = False
@@ -339,11 +339,13 @@ def _decide_in_ledger(
     def verify(decided_at: datetime, expires_at: datetime) -> HumanDecision:
         current = build_packet(request.repository_path, ledger, request)
         if current.subject_digest != packet.subject_digest:
-            raise StaleSubjectError("the packet changed while recording; run factory review again")
+            raise StaleSubjectError("the packet changed while recording; run enginery review again")
         if action not in _actions(ledger, request):
-            raise ActionMismatchError("the action is no longer available; run factory review again")
+            raise ActionMismatchError(
+                "the action is no longer available; run enginery review again"
+            )
         if _registered_identity(context.principal.id) != registration:
-            raise PrincipalMismatchError("operator registration changed; run factory review again")
+            raise PrincipalMismatchError("operator registration changed; run enginery review again")
         schema = _schema(
             ledger,
             request,

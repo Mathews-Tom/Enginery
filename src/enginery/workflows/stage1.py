@@ -427,14 +427,14 @@ class Stage1RunService:
             if request.behavioral_checks is None:
                 raise InvalidInputError(
                     "new runs require bound behavioral checks; rebuild with "
-                    "enginery stage1 build-request"
+                    "enginery engine build-request"
                 )
             if not request.behavioral_checks:
                 raise HumanActionRequiredError(
                     "no behavioral checks were bound; add [acceptance] checks to "
                     f"{shlex.quote(str(request.repository_path / '.enginery/project.toml'))}, "
                     f"commit on {shlex.quote(request.base_branch)}, then rebuild "
-                    "with enginery stage1 build-request and start the unbound run again",
+                    "with enginery engine build-request and start the unbound run again",
                     details={"reason": "no_behavioral_checks"},
                 )
             _require_current_check_contracts(request)
@@ -536,7 +536,7 @@ class Stage1RunService:
                         "add [acceptance] checks to "
                         f"{shlex.quote(str(request.repository_path / '.enginery/project.toml'))}, "
                         f"commit on {shlex.quote(request.base_branch)}, then supersede this run "
-                        "with enginery stage1 build-request using a new --run-id and start "
+                        "with enginery engine build-request using a new --run-id and start "
                         "the resulting request"
                     ),
                 )
@@ -1059,7 +1059,7 @@ class Stage1RunService:
         host rebooted since it launched -- is reconciled to a bounded state; the reconcile step
         looks once more for a result the worker wrote after this was derived. A worker that is
         alive keeps the run waiting, including after the coordinator epoch that launched it
-        lapsed: with no daemon that is the normal state between ``watch --advance`` calls, and
+        lapsed: with no daemon that is the normal state between ``engine next --advance`` calls,
         it is only reported as ``lease_epoch_active: false`` in the worker report. An
         interrupted cancel is finished. Whatever cannot be proven -- a worker recorded on
         another machine, or an unreadable identity -- is an explicit hold with its reason,
@@ -1438,7 +1438,7 @@ class Stage1RunService:
             ):
                 raise SubjectMismatchError(
                     "publication protected paths differ from the authenticated decision; "
-                    "run factory review and decide again"
+                    "run enginery review and decide again"
                 )
             published = self._publish_verified_branch(request, publisher, generation=generation)
             publication["published_revision"] = published.revision
@@ -1744,8 +1744,8 @@ class Stage1RunService:
         advance = shlex.join(
             (
                 "enginery",
-                "stage1",
-                "watch",
+                "engine",
+                "next",
                 "--database",
                 database,
                 "--owner",
@@ -1771,11 +1771,11 @@ class Stage1RunService:
                 "reason": "github_pull_request_merged" if merged else "github_evidence_blocked",
                 "repair": (
                     f"{explanation} Inspect its evidence with {review}. "
-                    "For factory runs, a new attempt requires enginery factory run "
+                    "For project runs, a new attempt requires enginery run "
                     f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
                     f"--supersede --project {shlex.quote(str(request.repository_path))} "
-                    "after the issue snapshot changes. For stage1 --database/--owner runs, "
-                    "use stage1 build-request and stage1 start with a new run id."
+                    "after the issue snapshot changes. For engine --database/--owner runs, "
+                    "use engine build-request and engine start with a new run id."
                 ),
                 "message": explanation,
             }
@@ -1888,7 +1888,7 @@ class Stage1RunService:
             if self.behavioral_verifier is None:
                 raise HumanActionRequiredError(
                     "behavioral acceptance is required but no trusted observer is configured; "
-                    "use enginery stage1 watch with the run's --database, --owner and "
+                    "use enginery engine next with the run's --database, --owner and "
                     "--run-id options and --advance to compose the trusted observer",
                     details={"reason": "behavioral_verifier_unconfigured"},
                 )
@@ -1949,15 +1949,7 @@ class Stage1RunService:
                         database=database or None,
                         owner=self.runtime.coordinator.owner,
                     )
-                    repair = (
-                        "The behavioral repair budget is exhausted; this run "
-                        "cannot pass and is terminal. Inspect its evidence with "
-                        f"{review_command}. Fix the behavior and start a new run: for "
-                        "factory runs, change the issue snapshot and use enginery factory "
-                        "run ISSUE --project PROJECT --supersede; for Stage 1 runs, "
-                        "rebuild with enginery stage1 build-request --run-id NEW_RUN_ID "
-                        "then enginery stage1 start --request REQUEST."
-                    )
+                    repair = _exhausted_behavioral_repair(review_command)
                     raise HumanActionRequiredError(
                         f"{error}; repair: {repair}",
                         details={**error.details, "repair": repair},
@@ -2203,6 +2195,18 @@ class Stage1RunService:
                 "verified branch cannot be published"
             )
         return self.branch_publisher
+
+
+def _exhausted_behavioral_repair(review_command: str) -> str:
+    return (
+        "The behavioral repair budget is exhausted; this run "
+        "cannot pass and is terminal. Inspect its evidence with "
+        f"{review_command}. Fix the behavior and start a new run: for "
+        "project runs, change the issue snapshot and use enginery "
+        "run ISSUE --project PROJECT --supersede; for engine-ledger runs, "
+        "rebuild with enginery engine build-request --run-id NEW_RUN_ID "
+        "then enginery engine start --request REQUEST."
+    )
 
 
 def _implementation_task(
@@ -2495,7 +2499,7 @@ def _require_bound_selection(request: Stage1RunRequest) -> None:
     if request.execution_selection.legacy:
         raise InvalidInputError(
             "a new Stage 1 run must bind an execution selection; rebuild the request with "
-            "the current `enginery stage1 build-request`",
+            "the current `enginery engine build-request`",
             details={"run_id": str(request.run.id)},
         )
 
@@ -2513,7 +2517,7 @@ def _require_bound_runner(request: Stage1RunRequest) -> None:
     if request.runner.legacy:
         raise InvalidInputError(
             "a new Stage 1 run must bind a trust mode (--runner trusted-local or isolated-oci); "
-            "rebuild the request with the current `enginery stage1 build-request`",
+            "rebuild the request with the current `enginery engine build-request`",
             details={"run_id": str(request.run.id)},
         )
 
@@ -2584,7 +2588,7 @@ def _require_current_check_contracts(request: Stage1RunRequest) -> None:
         raise InvalidInputError(
             "a new Stage 1 run must bind check contracts: its manifest declares "
             f"schema_version {manifest.schema_version}, below {CHECK_BINDING_SCHEMA_VERSION}; "
-            "rebuild the request with the current `enginery stage1 build-request`",
+            "rebuild the request with the current `enginery engine build-request`",
             details={"run_id": str(request.run.id)},
         )
     load_acceptance_baseline().require_manifest_checks(manifest)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """(Re)generate ``tests/fixtures/ledger.db``: a freshly migrated, healthy
-ledger checked into the repository for ``enginery ledger verify`` to
+ledger checked into the repository for ``enginery operator verify`` to
 exercise directly, without depending on any other test's setup.
 """
 

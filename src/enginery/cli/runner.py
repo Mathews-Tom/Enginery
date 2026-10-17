@@ -1,7 +1,7 @@
 """``enginery runner``: build, pin and qualify the isolated worker image.
 
 ``build-image`` builds the pinned worker image from the packaged recipe on a qualified engine and
-prints its exact id; that id is what a run pins with ``stage1 build-request --runner-image``.
+prints its exact id; that id is what a run pins with ``engine build-request --runner-image``.
 ``status`` reports whether an engine, image and profile are admitted for isolated runs, with the
 named hold when they are not. Neither command runs a worker or touches a ledger.
 ``build-relay-image`` and ``relay up|down|status`` (in ``runner_relay``) build and run the
