@@ -200,11 +200,21 @@ The planned first backend binds supported external actions to stable operation I
 
 ### Shipped manual factory path and proposed controls
 
-Guided configuration is available through `enginery factory init`, `doctor`, `explain`, and `uninstall`. `factory collect` ships read-only GitHub intake with optional private index writes; `collect --dry-run` writes nothing except disclosed SQLite sidecars. `factory run` compiles a bound request and advances the same authoritative Stage 1 coordinator. `factory status [RUN]` reads durable progress, and `factory explain RUN` explains the immutable run binding rather than recompiling today's settings. Without RUN, `factory explain` retains its current-configuration explanation. Terminal review remains `stage1 review`.
+Guided configuration ships through `enginery factory init`, `doctor`, `explain`,
+and `uninstall`. `collect --dry-run` previews GitHub intake; `collect` records
+private cursors. `run`, `status`, `explain RUN` and `resume` share the existing
+Stage 1 coordinator and immutable request binding. `pause` and `drain` control
+project-ledger dispatch; `factory pause --lift` lifts the pause.
 
-Factory `resume`, `pause`, and `drain` are shipped. Resume reconciles durable workers and pending external operations before continuing the same run; pause affects project-ledger dispatch without touching running workers, and drain waits for or stops them through the existing cleanup path. `factory pause --lift` lifts that pause. Unlike factory recovery, `stage1 resume` requeues a human-wait node.
-
-Only factory `review`, `watch`, and `evidence` remain proposed and not shipped; scheduled collection/watch is not shipped. The shipped boundary is manual-first, local-first, and deterministic: models never poll, schedule, keep books, or decide whether a check is complete; routine control uses no model. Harness, model, session, and worker machine are separate axes. Trusted-local operation is not containment. This manual path ends at a verified open PR and outcome observation, never merge, release or deployment; those remain separate human actions using their respective workflows. The shipped Stage 2 merge policy allows low- and medium-risk merges with current-head merge-ready evidence and denies high-risk merges by default; publication, deployment and rollback require current interactive human approval. Enginery never triggers external reviewer bots. Reference projects inform independently re-implemented patterns only; no upstream skills or source are vendored.
+`factory calibrate` and `check` bind independent observations and semantic verdicts
+to the current build. `factory review RUN` renders safe local terminal/HTML packets;
+`factory feedback RUN` queues repairs and grants no approval. Only factory `watch`
+and `evidence` remain proposed; scheduled collection/watch is not shipped.
+The manual path ends at a verified open PR and outcome observation, never merge,
+release or deployment. Those actions retain their separate workflow policy gates.
+Shipped control is deterministic and local; models do not poll, schedule or decide
+whether a check is complete. Harness, model, session and worker machine remain
+separate axes, and trusted-local operation is not containment.
 
 [^copilot]: GitHub Docs, [About GitHub Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent), accessed 2026-07-14.
 [^codex]: OpenAI, [Introducing Codex](https://openai.com/index/introducing-codex/), 2025-05-16, accessed 2026-07-14.

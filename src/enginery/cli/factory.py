@@ -30,6 +30,7 @@ from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_control import drain, pause
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
+from enginery.cli.factory_review import feedback, lavish_feedback, present_review, review
 from enginery.cli.factory_run import (
     factory_repairs,
     nonnegative_seconds,
@@ -149,6 +150,23 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
                 choices=("constant_result", "skipped_persistence", "wrong_build"),
                 help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
             )
+
+    packet = commands.add_parser("review", help="Render a safe private packet; no approval.")
+    _add_project(packet)
+    packet.add_argument("run_id")
+    packet.add_argument("--lavish", action="store_true")
+    packet.add_argument("--port", type=int, default=8799)
+    packet.add_argument("--no-open", action="store_true")
+    packet.add_argument("--json", action="store_true")
+    findings = commands.add_parser("feedback", help="Queue repair findings, never approvals.")
+    _add_project(findings)
+    findings.add_argument("run_id")
+    findings.add_argument("--subject-digest", required=True)
+    feedback_source = findings.add_mutually_exclusive_group(required=True)
+    feedback_source.add_argument("--text")
+    feedback_source.add_argument("--lavish-poll", action="store_true")
+    findings.add_argument("--port", type=int, default=8799)
+    findings.add_argument("--json", action="store_true")
 
     resume = commands.add_parser("resume", help="Reconcile workers and continue a durable run.")
     _add_project(resume)
@@ -348,6 +366,24 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_init(args)
     if command == "doctor":
         return _run_doctor(args)
+    if command == "review":
+        project = resolve_project(args.project)
+        document = review(project, args.run_id)
+        _emit(args, document, cast(list[str], document["lines"]))
+        if args.lavish:
+            present_review(project, document, port=args.port, no_open=args.no_open)
+        return SUCCESS
+    if command == "feedback":
+        project = resolve_project(args.project)
+        document = (
+            lavish_feedback(
+                project, args.run_id, subject_digest=args.subject_digest, port=args.port
+            )
+            if args.lavish_poll
+            else feedback(project, args.run_id, subject_digest=args.subject_digest, text=args.text)
+        )
+        _emit(args, document, [json.dumps(document, sort_keys=True)])
+        return SUCCESS
     if command in {"calibrate", "check"}:
         document = run_behavioral_command(
             resolve_project(args.project),

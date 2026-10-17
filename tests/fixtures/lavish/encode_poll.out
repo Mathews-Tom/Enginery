@@ -1,0 +1,32 @@
+=====annotation_tabular
+session:
+  file: /Users/op/.local/state/enginery/projects/p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  e12,Rename the flag before merge,"main > section:nth-of-type(4) > pre",pre,"{\"protected_paths\":[\".github/**\"]}"
+next_step: Apply every listed fix in one pass before saving.
+dom_snapshot: ""
+=====two_prompts
+session:
+  file: /Users/op/.local/state/enginery/projects/p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  e12,Rename the flag before merge,"main > section:nth-of-type(4) > pre",pre,"{\"protected_paths\":[\".github/**\"]}"
+  "",Add a regression test,"","",""
+next_step: Apply every listed fix in one pass before saving.
+dom_snapshot: ""
+=====with_target_expanded
+session:
+  file: /Users/op/.local/state/enginery/projects/p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]:
+  - uid: e12
+    prompt: Rename the flag before merge
+    selector: "main > section:nth-of-type(4) > pre"
+    tag: pre
+    text: "{\"protected_paths\":[\".github/**\"]}"
+    target:
+      type: table-cell
+      row: 1
+next_step: Apply every listed fix in one pass before saving.
+dom_snapshot: ""

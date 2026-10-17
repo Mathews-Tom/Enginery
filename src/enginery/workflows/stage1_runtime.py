@@ -266,6 +266,7 @@ class Stage1ReviewExecutor:
         execution_selection_digest: Digest | None,
         now: datetime,
         heartbeat_window: timedelta,
+        packet_feedback: bool = False,
     ) -> Stage1ReviewResult:
         """Record a review decision after its human-owned node is durable."""
         outcome = route_review(report, repair_attempt=repair_attempt, repair_limit=repair_limit)
@@ -273,7 +274,7 @@ class Stage1ReviewExecutor:
             self.runtime.register_node(
                 dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
             )
-            if repair_attempt == 0
+            if repair_attempt == 0 or packet_feedback
             else self.runtime.retry_workflow_node(
                 dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
             )

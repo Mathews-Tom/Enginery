@@ -1274,6 +1274,7 @@ class Stage1RunService:
         repair_attempt: int,
         now: datetime,
         heartbeat_window: timedelta,
+        packet_feedback_digest: str | None = None,
     ) -> Stage1ReviewResult:
         """Record an independent review only after passed validation.
 
@@ -1295,13 +1296,21 @@ class Stage1RunService:
                 _fixture_dispatch(
                     request,
                     node_id="review",
-                    attempt_id=f"review-{generation}",
+                    attempt_id=(
+                        f"review-{generation}"
+                        if packet_feedback_digest is None
+                        else f"review-feedback-{packet_feedback_digest}-{generation}"
+                    ),
                     operation_id=str(
                         OperationId.derive(
                             run_id=request.run.id,
                             node_id=NodeId("review"),
                             side_effect_kind="review",
-                            target_scope=request.repository_id,
+                            target_scope=(
+                                request.repository_id
+                                if packet_feedback_digest is None
+                                else f"{request.repository_id}:{packet_feedback_digest}"
+                            ),
                             ordinal=repair_attempt,
                         )
                     ),
@@ -1316,6 +1325,7 @@ class Stage1RunService:
             execution_selection_digest=_selection_digest(request),
             now=now,
             heartbeat_window=heartbeat_window,
+            packet_feedback=packet_feedback_digest is not None,
         )
 
     def open_pull_request(
@@ -1881,7 +1891,11 @@ class Stage1RunService:
         ).verify(request=verification_request, observed_at=now)
         if result.outcome is PullRequestOutcome.WAITING:
             return result
-        extra: dict[str, object] = {"pull_request_outcome": result.outcome.value}
+        extra: dict[str, object] = {
+            "pull_request_outcome": result.outcome.value,
+            "head_revision": verification_request.requirements.expected_head_revision,
+            "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+        }
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
         if not request.execution_selection.legacy:
