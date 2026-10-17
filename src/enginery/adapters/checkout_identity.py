@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
-import subprocess
 import sys
 from pathlib import Path
 
-from enginery.application.git_environment import repository_isolated_environment
+from enginery.adapters.git_reader import git_bytes as _git
 from enginery.domain.behavioral_evidence import (
     MAX_EVIDENCE_BYTES,
     BuildIdentity,
@@ -19,23 +18,6 @@ from enginery.domain.behavioral_evidence import (
 )
 from enginery.domain.digests import Digest
 from enginery.domain.errors import StaleEvidenceError
-
-
-def _git(checkout: Path, *args: str) -> bytes:
-    with subprocess.Popen(
-        ("git", "-C", str(checkout), *args),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=repository_isolated_environment(),
-    ) as process:
-        assert process.stdout is not None
-        output = process.stdout.read(MAX_EVIDENCE_BYTES + 1)
-        if len(output) > MAX_EVIDENCE_BYTES:
-            process.kill()
-            raise StaleEvidenceError("checkout identity exceeds the 1 MiB bound")
-        if process.wait(timeout=30):
-            raise StaleEvidenceError("could not verify the behavioral checkout identity")
-        return bytes(output)
 
 
 def verified_build(checkout: Path, expected_head: str) -> BuildIdentity:

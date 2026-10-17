@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +15,7 @@ from enginery.application.behavioral_checks import FAULT_CLASSES, BehavioralChec
 from enginery.cli.config_binding import behavioral_checks_path, read_behavioral_checks
 from enginery.cli.config_locations import private_state_directory, read_user_layer
 from enginery.cli.factory_collect import database_path, ensure_private_directory
+from enginery.cli.stage1_runner import DriftedRunnerWiring, IsolatedWiring, isolated_wiring
 from enginery.domain.behavioral_evidence import EnvironmentFingerprint, EvaluatorIdentity
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
@@ -55,11 +58,25 @@ def _service(request: Stage1RunRequest) -> BehavioralAcceptanceService:
     )
     user = read_user_layer()
     programs = None if user is None else user.operator_executables
+    wiring = isolated_wiring(request, create_directories=True)
+    if isinstance(wiring, DriftedRunnerWiring):
+        raise HumanActionRequiredError(
+            "behavioral_observer_requires_isolation: restore the run's bound runner profile"
+        )
+    if isinstance(wiring, IsolatedWiring):
+        admission = wiring.admission.admit(request.runner)
+        if admission.hold is not None:
+            raise HumanActionRequiredError(
+                admission.hold.message, details=dict(admission.hold.details)
+            )
     return BehavioralAcceptanceService(
         ArtifactStore(request.execution_configuration.artifact_root),
         path.parent,
         browser_executable=None if programs is None else programs.browser,
         browser_expected_digest=None if programs is None else programs.browser_digest,
+        isolated=request.runner.isolated_mode,
+        command_runner=None if wiring is None else wiring.validation,
+        calibration_python="python3" if request.runner.isolated_mode else sys.executable,
     )
 
 
@@ -70,6 +87,7 @@ def execute_behavioral(
     head_revision: str,
     calibrate: bool = False,
     without_faults: tuple[str, ...] = (),
+    calibrate_when_required: bool = False,
 ) -> dict[str, object]:
     binding = read_behavioral_checks(request)
     if binding is None:
@@ -128,6 +146,9 @@ def execute_behavioral(
             }
         else:
             result = service.run(**arguments)
+            if calibrate_when_required and "behavioral_calibration_required" in result.holds:
+                service.calibrate(**arguments)
+                result = service.run(**arguments)
             state = {
                 "receipt_digest": str(result.receipt_digest),
                 "observation_receipt_digests": [
@@ -158,16 +179,39 @@ def execute_behavioral(
     return {"run_id": str(request.run.id), **state}
 
 
-def verify_for_stage1(ledger: LedgerService, request: Stage1RunRequest, head: str) -> Digest:
-    state = execute_behavioral(ledger, request, head_revision=head)
+def verify_for_stage1(
+    ledger: LedgerService, request: Stage1RunRequest, head: str, *, owner: str = "factory"
+) -> Digest:
+    # Stage 1 owns calibration for its current build; no sidecar CLI result is required.
+    state = execute_behavioral(ledger, request, head_revision=head, calibrate_when_required=True)
     if state["result"] != EvidenceResult.PASS.value:
+        failed = state["result"] == EvidenceResult.FAIL.value
+        reason = "behavioral_acceptance_failed" if failed else "behavioral_acceptance_indeterminate"
+        database = str(ledger.connection.execute("PRAGMA database_list").fetchone()[2])
+        retry = shlex.join(
+            (
+                "enginery",
+                "stage1",
+                "watch",
+                "--database",
+                database,
+                "--owner",
+                owner,
+                "--run-id",
+                str(request.run.id),
+                "--advance",
+            )
+        )
         raise HumanActionRequiredError(
-            "behavioral_acceptance_indeterminate: " + "; ".join(cast(list[str], state["holds"])),
+            reason + ": " + "; ".join(cast(list[str], state["holds"])),
             details={
+                "reason": reason,
                 "repair": (
-                    f"enginery factory calibrate {request.run.id}"
-                    f" --project {request.repository_path}"
+                    "Repair the named candidate behavior and commit the corrected head, then "
+                    if failed
+                    else "Repair the named observer/assertion or its declared semantic fault, then "
                 )
+                + retry,
             },
         )
     algorithm, value = str(state["receipt_digest"]).split(":", 1)

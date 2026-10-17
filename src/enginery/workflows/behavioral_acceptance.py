@@ -32,6 +32,7 @@ from enginery.application.behavioral_checks import (
     FaultClass,
 )
 from enginery.application.behavioral_observation import ObservationData
+from enginery.application.runner_ports import IsolatedCommandRunner
 from enginery.domain.behavioral_evidence import (
     MAX_EVIDENCE_BYTES,
     BuildIdentity,
@@ -47,6 +48,7 @@ from enginery.domain.behavioral_evidence import (
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, StaleEvidenceError
 from enginery.domain.node_attempt import EvidenceResult
+from enginery.engine.task_repository import materialize_task_local_repository
 from enginery.evidence.behavioral import (
     BehavioralEvaluation,
     ObservedCheck,
@@ -71,7 +73,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-spec = json.loads(Path(sys.argv[1]).read_text())
+spec = json.loads(sys.argv[1])
 constant = "enginery-calibration-constant"
 if spec["observer"] == "command":
     # The normal persistence fixture writes real bytes; the injected mode suppresses
@@ -206,6 +208,8 @@ class BehavioralAcceptanceService:
         browser_executable: str | None = None,
         browser_expected_digest: str | None = None,
         calibration_python: str = sys.executable,
+        isolated: bool = False,
+        command_runner: IsolatedCommandRunner | None = None,
     ) -> None:
         _private_directory(evaluator_directory)
         self.artifacts = artifacts
@@ -213,6 +217,8 @@ class BehavioralAcceptanceService:
         self.browser_executable = browser_executable
         self.browser_expected_digest = browser_expected_digest
         self.calibration_python = calibration_python
+        self.isolated = isolated
+        self.command_runner = command_runner
         self.receipts = EvidenceReceiptRepository(artifacts, media_validator=validate_media)
 
     def _inputs(
@@ -269,7 +275,24 @@ class BehavioralAcceptanceService:
             cwd=cwd,
             browser_executable=self.browser_executable,
             browser_expected_digest=self.browser_expected_digest,
+            isolated=self.isolated,
+            command_runner=self.command_runner,
         )
+
+    def _fresh_observe(
+        self, check: BehavioralCheck, source: Path, inputs: AcceptanceInputs
+    ) -> ObservationData:
+        """Every baseline, fault and real check starts from the same committed tree."""
+        with tempfile.TemporaryDirectory(prefix="observe-", dir=self.evaluator_directory) as root:
+            checkout = Path(root) / "candidate"
+            materialize_task_local_repository(
+                repository_path=source,
+                workspace_path=checkout,
+                base_revision=inputs.head_revision,
+            )
+            data = self._observe(check, checkout)
+            self._confirm_build(checkout, inputs)
+            return data
 
     def _record_observation(
         self,
@@ -303,6 +326,13 @@ class BehavioralAcceptanceService:
             self.receipts.publish_capture(content, media_type=media_type)
             for media_type, content in data.captures
         )
+        if data.runner_receipt_digest is not None:
+            extra_captures += (
+                self.receipts.publish_capture(
+                    self.artifacts.read_bytes(data.runner_receipt_digest),
+                    media_type="application/json",
+                ),
+            )
         transport = self._capture({"check": check.to_state()})
         receipt = _receipt(
             inputs,
@@ -371,7 +401,9 @@ class BehavioralAcceptanceService:
         observed: list[ObservedCheck] = []
         for check in checks:
             self._confirm_build(cwd, inputs)
-            observed.append(self._record_observation(check, self._observe(check, cwd), inputs))
+            observed.append(
+                self._record_observation(check, self._fresh_observe(check, cwd, inputs), inputs)
+            )
             self._confirm_build(cwd, inputs)
         evaluation = evaluate_behavioral(
             checks=checks,
@@ -456,7 +488,9 @@ class BehavioralAcceptanceService:
         references: list[Digest] = []
         for check in checks:
             self._confirm_build(cwd, inputs)
-            baseline = self._record_observation(check, self._observe(check, cwd), inputs)
+            baseline = self._record_observation(
+                check, self._fresh_observe(check, cwd, inputs), inputs
+            )
             self._confirm_build(cwd, inputs)
             references.append(baseline.receipt.digest)
             baseline_results = evaluate_observation(
@@ -481,7 +515,9 @@ class BehavioralAcceptanceService:
                         )
                         applied = True
                     else:
-                        observation = self._fault_observation(check, fault, inputs, fixture_capture)
+                        observation = self._fault_observation(
+                            check, fault, cwd, inputs, fixture_capture
+                        )
                         applied = observation.data.ran
                         infrastructure_error = observation.data.infrastructure_error
                     references.append(observation.receipt.digest)
@@ -569,6 +605,7 @@ class BehavioralAcceptanceService:
         self,
         check: BehavioralCheck,
         fault: FaultClass,
+        cwd: Path,
         inputs: AcceptanceInputs,
         fixture_capture: CaptureArtifact,
     ) -> ObservedCheck:
@@ -607,22 +644,27 @@ class BehavioralAcceptanceService:
                 "port": port,
                 "produced_files": produced_files,
             }
-            spec_path = root / "fault.json"
-            _write_private(spec_path, canonical_bytes(spec))
+            arguments = (
+                self.calibration_python,
+                "-I",
+                "-c",
+                _FIXTURE.decode(),
+                canonical_bytes(spec).decode(),
+            )
             fault_check = replace(
                 check,
-                argv=(self.calibration_python, "-I", str(fixture), str(spec_path)),
+                argv=arguments,
                 url=None if check.observer == "command" else f"http://127.0.0.1:{port}/",
             )
             references: tuple[Digest, ...] = ()
             if fault == "skipped_persistence":
-                baseline_root = root / "baseline"
-                baseline_root.mkdir(mode=0o700)
                 baseline_spec = {**spec, "fault": "baseline"}
-                _write_private(spec_path, canonical_bytes(baseline_spec))
+                baseline_check = replace(
+                    fault_check, argv=(*arguments[:-1], canonical_bytes(baseline_spec).decode())
+                )
                 normal = self._record_observation(
-                    fault_check,
-                    self._observe(fault_check, baseline_root),
+                    baseline_check,
+                    self._fresh_observe(baseline_check, cwd, inputs),
                     inputs,
                     extra_captures=(fixture_capture, self._capture(baseline_spec)),
                 )
@@ -652,12 +694,9 @@ class BehavioralAcceptanceService:
                         extra_captures=(fixture_capture,),
                         references=references,
                     )
-                _write_private(spec_path, canonical_bytes(spec))
             if _read_private(fixture) != _FIXTURE:
                 raise StaleEvidenceError("behavioral_calibration_fixture_changed")
-            injected_root = root / "injected"
-            injected_root.mkdir(mode=0o700)
-            data = self._observe(fault_check, injected_root)
+            data = self._fresh_observe(fault_check, cwd, inputs)
             return self._record_observation(
                 fault_check,
                 data,

@@ -67,7 +67,7 @@ def _check() -> BehavioralCheck:
         observer="command",
         argv=(sys.executable, "-c", "print('changed')"),
         assertions=(BehavioralAssertion("stdout", "contains", "changed"),),
-        fault_classes=("wrong_build",),
+        fault_classes=("constant_result",),
     )
 
 
@@ -155,10 +155,10 @@ def _unit_calibration(
             f"{check.name}:0",
             check.fault_classes[0],
             "caught",
-            "binding_identity",
+            "evaluator",
             True,
             EvidenceResult.PASS,
-            EvidenceResult.INDETERMINATE,
+            EvidenceResult.FAIL,
             baseline,
             observation,
         )
@@ -346,7 +346,7 @@ def test_decodable_browser_media_does_not_replace_a_semantic_assertion() -> None
         "browser",
         "browser",
         (BehavioralAssertion("dom", "contains", "changed", selector="#result"),),
-        ("wrong_build",),
+        ("constant_result",),
         url="http://127.0.0.1:1234/",
     )
     inputs = _inputs((check,))
@@ -362,7 +362,7 @@ def test_decodable_browser_media_does_not_replace_a_semantic_assertion() -> None
         observations=(observed,),
         calibration=_unit_calibration(inputs, check),
     )
-    assert result.holds == ()
+    assert result.holds == ("behavioral_assertion_failed:browser:0",)
     assert result.result is EvidenceResult.FAIL
 
 

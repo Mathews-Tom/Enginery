@@ -82,6 +82,9 @@ def observation_payload(data: ObservationData) -> dict[str, object]:
         "mock": data.mock,
         "ran": data.ran,
         "skipped": data.skipped,
+        "runner_receipt_digest": (
+            None if data.runner_receipt_digest is None else str(data.runner_receipt_digest)
+        ),
     }
 
 
@@ -263,6 +266,18 @@ def calibration_holds(
                     caught = True
             if not caught:
                 holds.append("behavioral_calibration_no_relevant_catch")
+        for index in range(len(check.assertions)):
+            if not any(
+                outcome.assertion_id == assertion_id(check, index)
+                and outcome.fault_class in {"constant_result", "skipped_persistence"}
+                and outcome.classification == "caught"
+                and outcome.rung == "evaluator"
+                and outcome.applied
+                and outcome.baseline_result is EvidenceResult.PASS
+                and outcome.fault_result is EvidenceResult.FAIL
+                for outcome in calibration.results
+            ):
+                holds.append("behavioral_calibration_semantic_catch_required")
     return tuple(dict.fromkeys(holds))
 
 
@@ -287,7 +302,7 @@ def _observation_holds(
     if not data.ran or data.skipped:
         holds.append("behavioral_assertion_not_run")
     if data.infrastructure_error is not None:
-        holds.append(data.infrastructure_error)
+        holds.append(data.infrastructure_error.partition(":")[0])
     if (
         receipt.observer.identity != f"enginery-{check.observer}-observer"
         or receipt.observer.version != EVALUATOR_VERSION
@@ -411,4 +426,11 @@ def evaluate_behavioral(
         if any(item.result is EvidenceResult.FAIL for item in outcomes)
         else EvidenceResult.PASS
     )
-    return BehavioralEvaluation(result, tuple(outcomes), tuple(dict.fromkeys(holds)))
+    reasons = tuple(dict.fromkeys(holds))
+    if result is EvidenceResult.FAIL:
+        reasons = tuple(
+            f"behavioral_assertion_failed:{item.assertion_id}"
+            for item in outcomes
+            if item.result is EvidenceResult.FAIL
+        )
+    return BehavioralEvaluation(result, tuple(outcomes), reasons)

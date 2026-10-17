@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import json
 import os
 import signal
 import socket
@@ -35,6 +36,8 @@ from enginery.adapters.browser_pipe import (
 )
 from enginery.application.behavioral_checks import BehavioralCheck
 from enginery.application.behavioral_observation import ObservationData
+from enginery.application.runner_ports import AttestedProcess, IsolatedCommandRunner
+from enginery.domain.errors import WorkerFailureError
 
 OBSERVATION_TIMEOUT_SECONDS = 30.0
 
@@ -279,12 +282,107 @@ def _produced_files(check: BehavioralCheck, cwd: Path) -> tuple[tuple[str, str],
     return tuple(values)
 
 
+def _require_fresh_outputs(check: BehavioralCheck, cwd: Path) -> None:
+    for assertion in check.assertions:
+        if assertion.kind != "produced_file" or assertion.path is None:
+            continue
+        path = PurePosixPath(assertion.path)
+        if path.is_absolute() or ".." in path.parts or not path.parts or "\\" in assertion.path:
+            raise _ObservationError("observer_produced_file_unsafe: require a relative output path")
+        target = cwd
+        for part in path.parts:
+            target /= part
+            if target.is_symlink():
+                raise _ObservationError("observer_produced_file_unsafe: linked output path")
+        if target.exists():
+            if target.stat().st_nlink != 1:
+                raise _ObservationError("observer_produced_file_unsafe: linked output file")
+            raise _ObservationError(
+                "behavioral_output_preexists: remove the declared output from the committed "
+                "candidate; the observer requires a freshly produced file"
+            )
+
+
+# This wrapper runs only inside the existing network-none validation container.
+# Temporary files bound collection without buffering arbitrary candidate output in memory.
+_ISOLATED_CAPTURE = r"""
+import json, subprocess, sys, tempfile
+limit = 1024 * 1024
+try:
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.run(json.loads(sys.argv[1]), stdin=subprocess.DEVNULL,
+                                 stdout=out, stderr=err, timeout=30, check=False)
+        out.seek(0); err.seek(0)
+        stdout, stderr = out.read(limit + 1), err.read(limit + 1)
+        if len(stdout) + len(stderr) > limit:
+            raise ValueError("observer_output_limit")
+        payload = json.dumps({"returncode": process.returncode,
+                              "stdout": stdout.decode(), "stderr": stderr.decode()})
+        if len(payload.encode()) > limit:
+            raise ValueError("observer_output_limit")
+        print(payload)
+except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+    print(json.dumps({"error": "observer_isolated_capture_failed",
+                      "detail": type(error).__name__}))
+"""
+
+
+def _isolated_observation(
+    check: BehavioralCheck, cwd: Path, runner: IsolatedCommandRunner | None
+) -> ObservationData:
+    start = _timestamp()
+    data = ObservationData(observer=check.observer, started_at=start, ran=False)
+    try:
+        if check.observer != "command" or runner is None:
+            raise _ObservationError(
+                "behavioral_observer_requires_isolation: isolated runs require the pinned "
+                "network-none command observer; configure a command check and rebuild the "
+                "request, or deliberately start a new trusted-local run"
+            )
+        _require_fresh_outputs(check, cwd)
+        result = runner(("python3", "-I", "-c", _ISOLATED_CAPTURE, json.dumps(check.argv)), cwd)
+        if not isinstance(result, AttestedProcess):
+            raise _ObservationError(
+                "behavioral_observer_receipt_missing: restore the isolated runner"
+            )
+        data = replace(data, runner_receipt_digest=result.runner_receipt.receipt_digest)
+        if result.returncode != 0 or len(result.stdout.encode()) > MAX_BYTES:
+            raise _ObservationError(
+                "observer_isolated_capture_failed: repair the pinned runner image"
+            )
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("capture is not an object")
+        code, stdout, stderr = (
+            payload.get("returncode"),
+            payload.get("stdout"),
+            payload.get("stderr"),
+        )
+        if type(code) is not int or not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise ValueError("capture lacks bounded command results")
+        data = replace(
+            data,
+            ran=True,
+            returncode=code,
+            stdout=stdout,
+            stderr=stderr,
+            produced_files=_produced_files(check, cwd),
+        )
+    except (_ObservationError, WorkerFailureError) as error:
+        data = replace(data, infrastructure_error=str(error))
+    except (OSError, ValueError):
+        data = replace(data, infrastructure_error="observer_isolated_capture_failed")
+    return replace(data, ended_at=_timestamp())
+
+
 def observe(
     check: BehavioralCheck,
     *,
     cwd: Path,
     browser_executable: str | None = None,
     browser_expected_digest: str | None = None,
+    isolated: bool = False,
+    command_runner: IsolatedCommandRunner | None = None,
 ) -> ObservationData:
     """Measure a command, service, or qualified browser under a bounded deadline.
 
@@ -293,6 +391,8 @@ def observe(
     errors and cancellation are not hidden. Optional service/browser argv starts
     a server, which is torn down with its whole process group on every exit.
     """
+    if isolated:
+        return _isolated_observation(check, cwd, command_runner)
     observation = ObservationData(observer=check.observer, started_at=_timestamp(), ran=False)
     process: _Process | None = None
     failure: str | None = None
@@ -304,6 +404,7 @@ def observe(
             )
         if check.observer not in {"command", "service", "browser"}:
             raise _ObservationError("observer_kind_invalid: configure command, service or browser")
+        _require_fresh_outputs(check, cwd)
         executable = None
         if check.observer == "browser":
             executable = qualify_browser(browser_executable, browser_expected_digest)

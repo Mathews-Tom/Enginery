@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from enginery.domain.digests import Digest
+
 
 @dataclass(frozen=True, slots=True)
 class ObservationData:
@@ -29,3 +31,4 @@ class ObservationData:
     mock: bool = False
     ran: bool = True
     skipped: bool = False
+    runner_receipt_digest: Digest | None = None

@@ -181,7 +181,9 @@ def advancing_service(
         runner_admission=None if wiring is None else wiring.admission,
         isolated_command_runner=isolated_validation,
         branch_publisher=branch_publisher(request),
-        behavioral_verifier=lambda bound, head: verify_for_stage1(ledger, bound, head),
+        behavioral_verifier=lambda bound, head: verify_for_stage1(
+            ledger, bound, head, owner=runtime.coordinator.owner
+        ),
     )
 
 
