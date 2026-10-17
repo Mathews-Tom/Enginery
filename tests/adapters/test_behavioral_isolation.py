@@ -13,6 +13,7 @@ from enginery.adapters.behavioral_observers import observe
 from enginery.application.behavioral_checks import BehavioralCheck
 from enginery.application.runner_ports import AttestedProcess
 from enginery.domain.digests import Digest
+from enginery.domain.errors import WorkerFailureError
 from enginery.domain.execution_receipt import RunnerReceiptRef
 
 
@@ -95,6 +96,17 @@ def test_isolated_command_without_runner_never_falls_back_to_host(tmp_path: Path
     assert not data.ran
     assert data.infrastructure_error is not None
     assert data.infrastructure_error.startswith("behavioral_observer_requires_isolation:")
+
+
+def test_isolated_launcher_failure_has_stable_hold_code(tmp_path: Path) -> None:
+    def runner(argv: tuple[str, ...], cwd: Path) -> AttestedProcess:
+        raise WorkerFailureError("unstructured launcher diagnostic")
+
+    data = observe(_check(), cwd=tmp_path, isolated=True, command_runner=runner)
+    assert not data.ran
+    assert data.infrastructure_error == (
+        "observer_isolated_capture_failed: repair the pinned isolated runner and retry"
+    )
 
 
 def test_isolated_request_composition_never_launches_candidate_on_host(

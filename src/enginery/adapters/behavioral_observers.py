@@ -368,8 +368,15 @@ def _isolated_observation(
             stderr=stderr,
             produced_files=_produced_files(check, cwd),
         )
-    except (_ObservationError, WorkerFailureError) as error:
+    except _ObservationError as error:
         data = replace(data, infrastructure_error=str(error))
+    except WorkerFailureError:
+        data = replace(
+            data,
+            infrastructure_error=(
+                "observer_isolated_capture_failed: repair the pinned isolated runner and retry"
+            ),
+        )
     except (OSError, ValueError):
         data = replace(data, infrastructure_error="observer_isolated_capture_failed")
     return replace(data, ended_at=_timestamp())
