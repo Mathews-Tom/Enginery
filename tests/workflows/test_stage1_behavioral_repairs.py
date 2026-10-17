@@ -23,6 +23,7 @@ from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
+from enginery.workflows import stage1
 from enginery.workflows.behavioral_acceptance import BehavioralAcceptanceService
 from enginery.workflows.stage1 import Stage1ProgressionAction, Stage1RunRequest
 
@@ -104,8 +105,17 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
         monkeypatch.setattr(
             service.runtime, "tick", lambda **kwargs: SimpleNamespace(dispatched=())
         )
+        # The terminal-consumer fixture models implement as deterministic. The
+        # scheduler envelope is outside this test; retain its real task/request.
+        monkeypatch.setattr(
+            stage1,
+            "WorkflowDispatch",
+            lambda dispatch, manifest: SimpleNamespace(request=dispatch, manifest=manifest),
+        )
         repairing = replace(
-            service, harness=SimpleNamespace(supervised_command=lambda *args, **kwargs: ("true",))
+            service,
+            host_probe=lambda: None,
+            harness=SimpleNamespace(supervised_command=lambda *args, **kwargs: ("true",)),
         )
         dispatch = repairing.dispatch_implementation(
             request,

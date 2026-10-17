@@ -67,8 +67,24 @@ def test_stage1_failure_repairs_retry_its_actual_ledger(
     assert caught.value.details["reason"] == reason
     assert "behavioral_assertion_failed:fixture:0" in str(caught.value)
     repair = str(caught.value.details["repair"])
-    assert "factory calibrate" not in repair
-    command = shlex.split(repair[repair.index("enginery stage1 watch") :])
+    if result is EvidenceResult.FAIL:
+        assert "factory calibrate" not in repair
+    else:
+        calibration = shlex.split(repair[repair.index("enginery factory calibrate") :])
+        assert calibration == [
+            "enginery",
+            "factory",
+            "calibrate",
+            str(request.run.id),
+            "--project",
+            str(request.repository_path),
+            "--database",
+            str(database),
+            "--owner",
+            "owner's terminal",
+        ]
+    retry = repair.partition(";")[0]
+    command = shlex.split(retry[retry.index("enginery stage1 watch") :])
     assert command == [
         "enginery",
         "stage1",
