@@ -16,10 +16,18 @@ from enginery.workflows.stage1 import Stage1ProgressionAction
 
 
 @pytest.mark.parametrize("kind", ["review", "status", "check"])
+@pytest.mark.parametrize("node_id", ["wait_for_ci", "verify"])
 def test_external_veto_is_queued_and_resume_rereads_without_implementation(
-    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    node_id: str,
 ) -> None:
-    request, service, now = _ready_to_verify(ledger_service, tmp_path)
+    request, service, now = _ready_to_verify(
+        ledger_service, tmp_path, observe_ci=node_id == "verify"
+    )
+    advance = service.wait_for_ci if node_id == "wait_for_ci" else service.verify_merge_ready
     original = RecordingPullRequests.evidence
     calls = 0
     resolved = False
@@ -46,20 +54,29 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
         )
 
     monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
-    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
-    assert result.outcome is PullRequestOutcome.BLOCKED
+    result = advance(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert (
+        result if isinstance(result, PullRequestOutcome) else result.outcome
+    ) is PullRequestOutcome.BLOCKED
     projection = ledger_service.read_projection(
-        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:verify"
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:{node_id}"
     )
     assert projection is not None
     assert projection.state["status"] == "queued"
     assert projection.state["reason"] == "github_evidence_blocked"
     assert projection.state["repair"]
-    assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
+    expected_action = (
+        Stage1ProgressionAction.WAIT_FOR_CI
+        if node_id == "wait_for_ci"
+        else Stage1ProgressionAction.VERIFY
+    )
+    assert service.next_action(request.run.id).action is expected_action
     resolved = True
-    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
-    assert result.outcome is PullRequestOutcome.MERGE_READY
-    assert calls == 3
+    result = advance(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert (
+        result if isinstance(result, PullRequestOutcome) else result.outcome
+    ) is PullRequestOutcome.MERGE_READY
+    assert calls == (2 if node_id == "wait_for_ci" else 3)
 
 
 @pytest.mark.parametrize(

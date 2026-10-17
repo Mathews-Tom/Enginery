@@ -157,6 +157,47 @@ def test_retains_original_raw_bytes_and_collection_proofs_without_writes(tmp_pat
     assert all("comments" not in arguments[-1] for arguments in calls)
 
 
+def test_raw_actor_identities_are_retained_in_normalized_evidence(tmp_path: Path) -> None:
+    check = {**_check(), "app": {"id": 123}}
+    status = {**_status(), "creator": {"id": 456}}
+    adapter, _, _, _ = _adapter(tmp_path, _responses(checks=[check], statuses=[status]))
+    evidence = adapter.evidence(11)
+    assert evidence.checks[0].app_id == 123
+    assert evidence.statuses[0].creator_id == 456
+    assert (
+        evidence.digest
+        != replace(evidence, checks=(replace(evidence.checks[0], app_id=124),)).digest
+    )
+    assert (
+        evidence.digest
+        != replace(evidence, statuses=(replace(evidence.statuses[0], creator_id=457),)).digest
+    )
+
+
+@pytest.mark.parametrize("kind", ["check", "status", "review", "combined"])
+def test_missing_required_api_fields_are_provider_holds(tmp_path: Path, kind: str) -> None:
+    responses = _responses()
+    if kind == "check":
+        check = _check()
+        del check["name"]
+        responses[2] = {"total_count": 1, "check_runs": [check]}
+    elif kind == "status":
+        status = _status()
+        del status["context"]
+        responses[3] = _combined([status])
+    elif kind == "review":
+        review = _review()
+        review["user"] = {}
+        responses[1] = [review]
+    else:
+        combined = _combined([])
+        del combined["state"]
+        responses[3] = combined
+    adapter, _, _, _ = _adapter(tmp_path, responses)
+    with pytest.raises(TransientProviderFailureError, match="malformed"):
+        adapter.evidence(11)
+
+
 def test_failing_check_after_first_full_page_blocks(tmp_path: Path) -> None:
     first_page = [_check(identity) for identity in range(1, 101)]
     responses = _responses()

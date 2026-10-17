@@ -486,7 +486,8 @@ def _retryable_github_hold(report: Mapping[str, object]) -> bool:
         and isinstance(holds, list)
         and len(holds) == 1
         and isinstance(holds[0], Mapping)
-        and holds[0].get("reason") in {"github_evidence_incomplete", "github_evidence_waiting"}
+        and holds[0].get("reason")
+        in {"github_evidence_incomplete", "github_evidence_waiting", "github_evidence_blocked"}
     )
 
 
