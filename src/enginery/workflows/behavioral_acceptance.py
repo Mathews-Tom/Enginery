@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from enginery.adapters.behavioral_observers import observe
-from enginery.adapters.checkout_identity import verified_build
+from enginery.adapters.checkout_identity import verified_build, verified_returned_build
 from enginery.application.behavioral_calibration import (
     CALIBRATION_DRIVER,
     AcceptanceInputs,
@@ -290,8 +290,15 @@ class BehavioralAcceptanceService:
                 workspace_path=checkout,
                 base_revision=inputs.head_revision,
             )
+            if self.isolated:
+                # Metadata never enters the runner and is never read from its returned tree.
+                (checkout / ".git").rename(Path(root) / "host-git")
             data = self._observe(check, checkout)
-            self._confirm_build(checkout, inputs)
+            if self.isolated:
+                if verified_returned_build(checkout, source, inputs.head_revision) != inputs.build:
+                    raise StaleEvidenceError("behavioral_build_mismatch: returned checkout changed")
+            else:
+                self._confirm_build(checkout, inputs)
             return data
 
     def _record_observation(

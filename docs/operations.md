@@ -145,6 +145,10 @@ cannot stand in for newly persisted behavior. Trusted-local observers execute
 candidate code as the operator, with argv and a minimal environment but no OS
 containment. Isolated runs use the existing pinned validation runner with network
 none and retain its verified runner receipt; they never fall back to host execution.
+Git metadata stays outside the isolated workspace. Returned trees containing
+`.git` are refused without running Git there; tracked files are opened relative
+to pinned directories without following links, must be singly linked regular
+files, and must match the host-owned commit's blob hashes and executable modes.
 Service/browser observations are not supported in isolated runs and hold until
 the operator binds command checks in a new request or deliberately starts a new
 trusted-local run. HTTP redirects, non-loopback targets and a preexisting listener
