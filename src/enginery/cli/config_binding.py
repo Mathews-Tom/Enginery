@@ -11,11 +11,14 @@ pass through this check.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shlex
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from enginery.adapters.git_reader import git_bytes as _git_bytes
@@ -115,7 +118,42 @@ def behavioral_checks_path(request: Stage1RunRequest) -> Path | None:
     return path
 
 
-def _read_binding(path: Path) -> BehavioralChecksBinding:
+def _custody_repair(request: Stage1RunRequest, path: Path) -> str:
+    if str(request.run.id).startswith("fr-"):
+        command = (
+            f"enginery factory run "
+            f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
+            f"--project {shlex.quote(str(request.repository_path))}"
+        )
+    else:
+        command = f"{_REBUILD} before starting the unbound run again"
+    return f"repair: rm -- {shlex.quote(str(path))}; then {command}"
+
+
+@contextmanager
+def _custody_lock(path: Path) -> Iterator[None]:
+    """Serialize publication and reads, including the temporary hard-link window."""
+    lock_path = path.parent / ".lock"
+    require_private_path(lock_path, what=_CUSTODY_WHAT)
+    descriptor = os.open(
+        lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o077
+        ):
+            raise InvalidInputError(f"behavioral evaluator custody lock is not private: {lock_path}")
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _read_binding(path: Path, *, repair: str) -> BehavioralChecksBinding:
     require_private_path(path, what=_CUSTODY_WHAT)
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -127,7 +165,8 @@ def _read_binding(path: Path) -> BehavioralChecksBinding:
                 or metadata.st_mode & 0o077
             ):
                 raise InvalidInputError(
-                    "behavioral evaluator custody requires a private regular file"
+                    f"behavioral evaluator custody requires a private regular file: {path}; "
+                    f"{repair}"
                 )
             raw = stream.read(MAX_CONFIG_BYTES + 1)
     except OSError as error:
@@ -140,9 +179,7 @@ def _read_binding(path: Path) -> BehavioralChecksBinding:
         return BehavioralChecksBinding.from_state(json.loads(raw))
     except (ValueError, UnicodeError) as error:
         raise InvalidInputError(
-            f"behavioral evaluator custody is not valid JSON: {path}; "
-            f"repair: rm -- {shlex.quote(str(path))}; then {_REBUILD} "
-            "before starting the unbound run again"
+            f"behavioral evaluator custody is not valid JSON: {path}; {repair}"
         ) from error
 
 
@@ -152,7 +189,13 @@ def read_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding
     path = behavioral_checks_path(request)
     if expected is None or path is None:
         return None
-    actual = _read_binding(path)
+    try:
+        with _custody_lock(path):
+            actual = _read_binding(path, repair=_custody_repair(request, path))
+    except OSError as error:
+        raise InvalidInputError(
+            f"behavioral evaluator custody is unavailable: {path}; {_REBUILD}"
+        ) from error
     if actual != expected:
         raise InvalidInputError("behavioral evaluator custody does not match the bound request")
     return actual
@@ -181,14 +224,19 @@ def bind_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding
     require_private_path(path, what=_CUSTODY_WHAT)
     temporary = write_temporary(path.parent, raw, prefix=".checks-")
     try:
-        temporary.chmod(0o600)
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
+        with _custody_lock(path):
+            temporary.chmod(0o600)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                actual = _read_binding(path, repair=_custody_repair(request, path))
+                if actual != expected:
+                    raise InvalidInputError(
+                        "behavioral evaluator custody does not match the bound request"
+                    )
+                return actual
             temporary.unlink()
-            return read_behavioral_checks(request)
-        temporary.unlink()
-        fsync_directory(path.parent)
+            fsync_directory(path.parent)
     except OSError as error:
         raise InvalidInputError(f"cannot persist behavioral evaluator custody: {path}") from error
     finally:

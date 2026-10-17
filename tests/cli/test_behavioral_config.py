@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import signal
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -130,6 +135,85 @@ def test_custody_publication_only_exposes_complete_private_bytes(
     binding = bind_behavioral_checks(request)
     assert read_behavioral_checks(request) == binding
     assert not list(path.parent.glob(".checks-*"))
+
+
+def test_killed_custody_publisher_names_repair_and_can_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository)
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    request, _ = _build(tmp_path, repository, _git("rev-parse", "HEAD", cwd=repository))
+    path = behavioral_checks_path(request)
+    assert path is not None
+    original = config_binding.os.link
+    pid = os.fork()
+    if pid == 0:
+        def link_then_die(source: Path, destination: Path) -> None:
+            original(source, destination)
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        monkeypatch.setattr(config_binding.os, "link", link_then_die)
+        bind_behavioral_checks(request)
+        os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
+    assert path.stat().st_nlink == 2
+    assert list(path.parent.glob(".checks-*"))
+    for operation in (bind_behavioral_checks, read_behavioral_checks):
+        with pytest.raises(InvalidInputError, match="requires a private regular file") as caught:
+            operation(request)
+        assert str(path) in str(caught.value)
+        assert f"rm -- {shlex.quote(str(path))}" in str(caught.value)
+        assert "enginery stage1 build-request" in str(caught.value)
+    path.unlink()
+    assert bind_behavioral_checks(request) == read_behavioral_checks(request)
+    assert path.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("operation", [bind_behavioral_checks, read_behavioral_checks])
+def test_custody_readers_wait_for_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: object
+) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository)
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    request, _ = _build(tmp_path, repository, _git("rev-parse", "HEAD", cwd=repository))
+    path = behavioral_checks_path(request)
+    assert path is not None
+    linked = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    original_link = config_binding.os.link
+    original_flock = config_binding.fcntl.flock
+
+    def publish(source: Path, destination: Path) -> None:
+        original_link(source, destination)
+        linked.set()
+        assert release.wait(timeout=10)
+
+    def flock(descriptor: int, mode: int) -> None:
+        if mode == config_binding.fcntl.LOCK_EX and linked.is_set():
+            waiting.set()
+        original_flock(descriptor, mode)
+
+    monkeypatch.setattr(config_binding.os, "link", publish)
+    monkeypatch.setattr(config_binding.fcntl, "flock", flock)
+    assert callable(operation)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        publisher = pool.submit(bind_behavioral_checks, request)
+        try:
+            assert linked.wait(timeout=10)
+            assert path.stat().st_nlink == 2
+            reader = pool.submit(operation, request)
+            assert waiting.wait(timeout=10)
+            assert not reader.done()
+        finally:
+            release.set()
+        assert reader.result(timeout=10) == publisher.result(timeout=10)
+    assert path.stat().st_nlink == 1
 
 
 def test_typed_observer_inputs_and_assertions_round_trip() -> None:
