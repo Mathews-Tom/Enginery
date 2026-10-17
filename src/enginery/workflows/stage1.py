@@ -1689,6 +1689,7 @@ class Stage1RunService:
         extra: dict[str, object] = {
             "pull_request_outcome": outcome.value,
             "head_revision": expected_head_revision,
+            "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
             "github_evidence": evidence.to_state(),
             "github_evidence_digest": str(evidence.digest),
             "reason": None,
@@ -1808,6 +1809,7 @@ class Stage1RunService:
                 "github_evidence_observations": None,
                 "pull_request_outcome": None,
                 "head_revision": None,
+                "configuration_snapshot_digest": None,
             },
         )
 

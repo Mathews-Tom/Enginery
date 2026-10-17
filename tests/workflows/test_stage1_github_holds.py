@@ -65,6 +65,10 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
     assert projection.state["status"] == "queued"
     assert projection.state["reason"] == "github_evidence_blocked"
     assert projection.state["repair"]
+    assert projection.state["head_revision"] == "head-revision"
+    assert projection.state["configuration_snapshot_digest"] == str(
+        request.run.configuration_snapshot_digest
+    )
     expected_action = (
         Stage1ProgressionAction.WAIT_FOR_CI
         if node_id == "wait_for_ci"
@@ -77,16 +81,32 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
         result if isinstance(result, PullRequestOutcome) else result.outcome
     ) is PullRequestOutcome.MERGE_READY
     assert calls == (2 if node_id == "wait_for_ci" else 3)
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:{node_id}"
+    )
+    assert projection is not None
+    assert projection.state["head_revision"] == "head-revision"
+    assert projection.state["configuration_snapshot_digest"] == str(
+        request.run.configuration_snapshot_digest
+    )
 
 
+@pytest.mark.parametrize("node_id", ["wait_for_ci", "verify"])
 @pytest.mark.parametrize(
     "error",
     [StaleEvidenceError("status changed"), TransientProviderFailureError("malformed review")],
 )
 def test_incomplete_observation_clears_previous_current_head_evidence(
-    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    node_id: str,
 ) -> None:
-    request, service, now = _ready_to_verify(ledger_service, tmp_path)
+    request, service, now = _ready_to_verify(
+        ledger_service, tmp_path, observe_ci=node_id == "verify"
+    )
+    advance = service.wait_for_ci if node_id == "wait_for_ci" else service.verify_merge_ready
     original = RecordingPullRequests.evidence
     broken = False
 
@@ -96,12 +116,14 @@ def test_incomplete_observation_clears_previous_current_head_evidence(
         return replace(original(provider, number), mergeable=None)
 
     monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
-    service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
+    advance(request, now=now, heartbeat_window=timedelta(seconds=60))
     broken = True
-    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
-    assert result.outcome is PullRequestOutcome.WAITING
+    result = advance(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert (
+        result if isinstance(result, PullRequestOutcome) else result.outcome
+    ) is PullRequestOutcome.WAITING
     projection = ledger_service.read_projection(
-        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:verify"
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:{node_id}"
     )
     assert projection is not None
     state = projection.state
@@ -114,5 +136,6 @@ def test_incomplete_observation_clears_previous_current_head_evidence(
         "github_evidence_observations",
         "pull_request_outcome",
         "head_revision",
+        "configuration_snapshot_digest",
     ):
         assert state[key] is None

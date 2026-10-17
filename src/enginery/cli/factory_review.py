@@ -182,12 +182,13 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         receipts.append(calibration)
     raw = request.initial_state()
     findings = states["review"].get("finding_ids", [])
-    ci_state = (
-        states["verify"]
+    ci_node = (
+        "verify"
         if states["verify"].get("github_evidence")
         or states["verify"].get("reason") == "github_evidence_incomplete"
-        else states["wait_for_ci"]
+        else "wait_for_ci"
     )
+    ci_state = states[ci_node]
     ci = {
         key: value
         for key, value in ci_state.items()
@@ -208,17 +209,24 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
             "message",
         }
     }
-    ci_head = ci.get("head_revision")
-    ci_view: dict[str, object] = {
-        "availability": "current_head"
-        if ci
-        and ci_head == head
+    incomplete_collection = ci.get("reason") == "github_evidence_incomplete"
+    ci_is_current = (
+        bool(ci)
+        and not incomplete_collection
+        and ci.get("head_revision") == head
         and ci.get("configuration_snapshot_digest") == configuration_digest
-        else "not_persisted_for_current_head",
-        "persisted": ci
-        if ci_head == head and ci.get("configuration_snapshot_digest") == configuration_digest
-        else {},
+    )
+    ci_view: dict[str, object] = {
+        "availability": "current_head" if ci_is_current else "not_persisted_for_current_head",
+        "persisted": ci if ci_is_current else {},
     }
+    if incomplete_collection:
+        # A failed collection is diagnostic state, never current-subject evidence.
+        collection_hold: dict[str, object] = {"node_id": ci_node}
+        collection_hold.update(
+            {key: ci[key] for key in ("reason", "repair", "message") if key in ci}
+        )
+        ci_view["collection_hold"] = collection_hold
     sections = (
         (
             "Intent",
