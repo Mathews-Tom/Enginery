@@ -1,4 +1,4 @@
-"""Ingress tests use real PTYs; fake packets isolate composition, not authentication."""
+"""Authenticated terminal ingress over real requests, Git objects and persisted packets."""
 
 from __future__ import annotations
 
@@ -8,12 +8,13 @@ import io
 import json
 import os
 import pty
+import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -29,17 +30,21 @@ from enginery.application.human_decisions import (
 )
 from enginery.application.layered_config import ConfigError, parse_layer_document
 from enginery.application.review_packet import ReviewPacket
-from enginery.cli import factory_decisions
+from enginery.cli import factory_decisions, factory_review
 from enginery.domain.digests import Digest
 from enginery.domain.execution_selection import SelectionLayer
+from enginery.domain.ids import NodeId
+from enginery.domain.workflow.node import ActorType
+from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch, _request_state
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.policy.rules import HardRuleError
-from enginery.workflows.stage1 import Stage1RunRequest
+from enginery.workflows.stage1 import Stage1RunRequest, Stage1RunService
+from tests.cli.test_stage1 import _dispatch, _start_request
 
 ACTION = "pull_request.open"
-RUN = "run-decisions"
+RUN = "run-stage1"
 
 
 def _preferences(**changes: object) -> bytes:
@@ -54,35 +59,110 @@ def _preferences(**changes: object) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def _packet() -> ReviewPacket:
-    return ReviewPacket(
-        run_id=RUN,
-        request_digest=str(Digest.of_bytes(b"request")),
-        configuration_snapshot_digest=str(Digest.of_bytes(b"config")),
-        base_revision="a" * 40,
-        head_revision="b" * 40,
-        diff="+persist the changed result",
-        evidence_receipt_digests=(str(Digest.of_bytes(b"receipt")),),
-        ci_evidence_json='{"head":"bbbb","status":"passed"}',
-        findings_json="[]",
-        sections=(("Intent", '{"objective":"persist the changed result"}'),),
-    )
-
-
 @dataclass
 class Ingress:
     project: Path
     ledger: LedgerService
     request: Stage1RunRequest
-    packet: ReviewPacket
+    database: Path
     preferences: Path
-    states: dict[str, dict[str, object]]
+
+    @property
+    def packet(self) -> ReviewPacket:
+        return factory_decisions.build_packet(self.project, self.ledger, self.request)
+
+    def persist(self, aggregate_type: str, aggregate_id: str, state: dict[str, object]) -> None:
+        projection = self.ledger.read_projection(
+            aggregate_type=aggregate_type, aggregate_id=aggregate_id
+        )
+        version = 0 if projection is None else projection.aggregate_version
+        self.ledger.append(
+            AppendCommand(
+                correlation_id=f"fixture:{aggregate_type}:{aggregate_id}:{version}",
+                events=(
+                    EventWrite(
+                        aggregate_type=aggregate_type,
+                        aggregate_id=aggregate_id,
+                        expected_version=version,
+                        event_type=f"{aggregate_type}.fixture_persisted",
+                        schema_version=1,
+                        payload=state,
+                    ),
+                ),
+            )
+        )
+
+    def state(self, node_id: str) -> dict[str, object]:
+        return dict(factory_decisions._state(self.ledger, RUN, node_id))
+
+    def update_node(self, node_id: str, **changes: object) -> None:
+        self.persist("runtime_node", f"{RUN}:{node_id}", {**self.state(node_id), **changes})
+
+    def replace_request(self, **changes: Any) -> None:
+        request = replace(self.request, **changes)
+        projection = self.ledger.read_projection(aggregate_type="run", aggregate_id=RUN)
+        assert projection is not None
+        self.persist("run", RUN, {**projection.state, **request.initial_state()})
+        self.request = request
+
+    def register(self, node_id: str, *, outcome: str | None = None) -> None:
+        runtime = CoordinatorRuntime(self.ledger, owner="stage1-cli")
+        node = self.request.manifest.nodes[NodeId(node_id)]
+        dispatch = _dispatch(
+            self.request,
+            node_id=node_id,
+            dependencies=tuple(str(dependency) for dependency in node.dependencies),
+        )
+        projection = self.ledger.read_projection(
+            aggregate_type="runtime_node", aggregate_id=f"{RUN}:{node_id}"
+        )
+        if projection is not None:
+            dispatch = replace(
+                dispatch,
+                attempt_id=f"{node_id}-{projection.aggregate_version}",
+                operation_id=f"{node_id}:{RUN}:{projection.aggregate_version}",
+            )
+        now = datetime.now(UTC)
+        epoch = runtime.register_node(
+            dispatch=WorkflowNodeDispatch(dispatch, self.request.manifest),
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+        )
+        if outcome == "awaiting_human":
+            runtime.await_human_node(
+                run_id=RUN,
+                node_id=node_id,
+                epoch=epoch.epoch,
+                now=now,
+                reason="operator decision required",
+            )
+        elif outcome is not None:
+            runtime.complete_node(
+                run_id=RUN, node_id=node_id, epoch=epoch.epoch, now=now, outcome=outcome
+            )
+
+    def git(self, *arguments: str) -> str:
+        return subprocess.check_output(
+            ("git", *arguments), cwd=self.request.workspace_path, text=True
+        ).strip()
+
+    def commit(self, *, text: str | None = None) -> str:
+        if text is not None:
+            (self.request.workspace_path / "README").write_text(text)
+            self.git("add", "README")
+        self.git("commit", "--allow-empty", "-m", "persist implementation evidence")
+        head = self.git("rev-parse", "HEAD")
+        attempt_id = str(self.state("implement")["attempt_id"])
+        self.persist("node_attempt", attempt_id, {"result": {"head_revision": head}})
+        return head
 
     def issue(self, **kwargs: Any) -> dict[str, Any]:
         return factory_decisions.issue_for_review(
             self.project,
             RUN,
             {"subject_digest": self.packet.subject_digest, "lines": ["Review"]},
+            database=self.database,
+            owner="stage1-cli",
             **kwargs,
         )
 
@@ -93,55 +173,61 @@ class Ingress:
             "challenge": issued["challenge"],
             **changes,
         }
-        return factory_decisions.decide(self.project, RUN, **arguments)
+        return factory_decisions.decide(
+            self.project, RUN, database=self.database, owner="stage1-cli", **arguments
+        )
 
 
 @pytest.fixture
-def ingress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ingress]:
+def unimplemented_ingress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Ingress]:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     preferences = tmp_path / "config" / "enginery" / "user.toml"
     preferences.parent.mkdir(parents=True)
     preferences.write_bytes(_preferences())
-    ledger = LedgerService.open(tmp_path / "ledger.sqlite")
-    request = cast(
-        Stage1RunRequest,
-        SimpleNamespace(
-            run=SimpleNamespace(id=RUN, configuration_snapshot_digest=Digest.of_bytes(b"config")),
-            repository_path=tmp_path,
-            repository_id="owner/repository",
-            execution_selection=SimpleNamespace(legacy=True),
-            implementation=SimpleNamespace(attempt_id="implement-1"),
-            manifest=SimpleNamespace(
-                nodes={"implement": None, "review": None, "open_pr": None, "validate": None},
-                content_digest=Digest.of_bytes(b"manifest"),
-            ),
-            work_snapshot=SimpleNamespace(bound_digest=Digest.of_bytes(b"source")),
+    database = tmp_path / "ledger.sqlite"
+    original = _start_request(database, tmp_path)
+    with LedgerService.open(database) as ledger:
+        request = (
+            Stage1RunService(runtime=CoordinatorRuntime(ledger, owner="stage1-cli"), ledger=ledger)
+            .read(original.run.id)
+            .request
+        )
+        yield Ingress(request.repository_path, ledger, request, database, preferences)
+
+
+@pytest.fixture
+def ingress(unimplemented_ingress: Ingress) -> Ingress:
+    value = unimplemented_ingress
+    value.register("qualify", outcome="passed")
+    subprocess.run(
+        (
+            "git",
+            "clone",
+            "--local",
+            str(value.request.repository_path),
+            str(value.request.workspace_path),
         ),
+        check=True,
+        capture_output=True,
     )
-    value = Ingress(
-        tmp_path,
-        ledger,
-        request,
-        _packet(),
-        preferences,
-        {
-            "implement": {"status": "passed", "attempt_id": "implement-2"},
-            "review": {"status": "passed"},
-            "open_pr": {"status": "queued"},
-        },
+    value.git("config", "user.name", "Test")
+    value.git("config", "user.email", "test@example.invalid")
+    dispatch = replace(
+        _dispatch(value.request, node_id="implement", dependencies=("qualify",)),
+        attempt_id="implement-2",
     )
-    monkeypatch.setattr(factory_decisions, "build_packet", lambda *args: value.packet)
-    monkeypatch.setattr(
-        factory_decisions, "_state", lambda ledger, run, node: value.states.get(node, {})
+    # The host-owned completed attempt is persisted, not substituted by a packet double.
+    value.persist(
+        "runtime_node",
+        f"{RUN}:implement",
+        _request_state(dispatch, status="passed", actor_type=ActorType.AGENT),
     )
-    # Keep one real migrated connection open across simulated CLI invocations.
-    monkeypatch.setattr(factory_decisions, "_open", lambda *args, **kwargs: (ledger, request))
-    monkeypatch.setattr(ledger, "close", lambda: None)
-    try:
-        yield value
-    finally:
-        ledger.connection.close()
+    value.commit(text="fixture\npersist the changed result\n")
+    value.register("validate", outcome="passed")
+    value.register("review", outcome="passed")
+    value.register("open_pr")
+    return value
 
 
 @pytest.fixture
@@ -231,6 +317,8 @@ def test_noninteractive_review_preserves_display_without_issuing_authority(
             action=ACTION,
             subject_digest=ingress.packet.subject_digest,
             challenge="f" * 64,
+            database=ingress.database,
+            owner="stage1-cli",
         )
 
 
@@ -250,9 +338,9 @@ def test_real_terminal_issues_hash_only_and_consumes_once(
         ingress.decide(issued)
     decisions = list_decisions(ingress.ledger.connection, RUN)
     assert len(decisions) == 1 and decisions[0].id == result["decision_id"]
-    assert decisions[0].normalized_inputs["requesting_principal_id"] == "implement-1"
+    assert decisions[0].normalized_inputs["requesting_principal_id"] == "implement-0"
     producers = decisions[0].normalized_inputs["producer_principal_ids"]
-    assert producers == ("implement-1", "implement-2")
+    assert producers == ("implement-0", "implement-2")
     assert "operator" not in producers
     assert issued["challenge"] not in "\n".join(ingress.ledger.connection.iterdump())
     # Durable gate deliberately runs with NO interactive terminal after ingestion.
@@ -260,7 +348,7 @@ def test_real_terminal_issues_hash_only_and_consumes_once(
     monkeypatch.setattr(factory_decisions.sys, "stdout", io.StringIO())
     authorized = factory_decisions.require_for_effect(ingress.ledger, ingress.request, ACTION)
     assert authorized.id == result["decision_id"]
-    with LedgerService.open(ingress.project / "ledger.sqlite") as reopened:
+    with LedgerService.open(ingress.database) as reopened:
         assert list_decisions(reopened.connection, RUN)[0] == decisions[0]
 
 
@@ -299,6 +387,8 @@ def test_unregistered_operator_still_receives_packet_without_challenge(
             action=ACTION,
             subject_digest=ingress.packet.subject_digest,
             challenge="unissued",
+            database=ingress.database,
+            owner="stage1-cli",
         )
     assert not list_decisions(ingress.ledger.connection, RUN)
 
@@ -334,33 +424,75 @@ def test_wrong_action_and_forged_subject_leave_challenge_unconsumed(
     assert ingress.decide(issued)["outcome"] == "approved"
 
 
+def _change_bound_input(ingress: Ingress, field: str) -> None:
+    packet = ingress.packet
+    if field == "head_revision":
+        ingress.commit()
+    elif field == "diff":
+        ingress.commit(text="fixture\na different protected change\n")
+    elif field == "protected_publication_digest":
+        ingress.replace_request(protected_paths=("README",))
+    elif field == "evidence_receipt_digests":
+        raw = b'{"outcome":"new persisted evidence"}'
+        digest = Digest.of_bytes(raw)
+        root = ingress.request.execution_configuration.artifact_root
+        path = root / "objects" / digest.algorithm / digest.hex_value[:2] / digest.hex_value
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        ingress.persist(
+            "behavioral_acceptance",
+            RUN,
+            {
+                "head_revision": packet.head_revision,
+                "configuration_snapshot_digest": packet.configuration_snapshot_digest,
+                "receipt_digest": str(digest),
+            },
+        )
+    elif field == "ci_evidence_json":
+        ingress.update_node(
+            "verify",
+            head_revision=packet.head_revision,
+            configuration_snapshot_digest=packet.configuration_snapshot_digest,
+            github_evidence={"status": "failed"},
+        )
+    elif field == "findings_json":
+        ingress.update_node("review", finding_ids=["new finding"])
+    else:
+        raise AssertionError(f"unknown bound input: {field}")
+
+
 @pytest.mark.parametrize(
-    "change",
+    "field",
     [
-        {"head_revision": "c" * 40},
-        {"diff": "+different protected change"},
-        {"protected_publication_digest": str(Digest.of_bytes(b"new protected matched set"))},
-        {"evidence_receipt_digests": (str(Digest.of_bytes(b"new evidence")),)},
-        {"ci_evidence_json": '{"status":"failed"}'},
-        {"findings_json": '["new finding"]'},
+        "head_revision",
+        "diff",
+        "protected_publication_digest",
+        "evidence_receipt_digests",
+        "ci_evidence_json",
+        "findings_json",
     ],
 )
+@pytest.mark.parametrize("durable", [False, True], ids=["challenge", "approval"])
 def test_changed_bound_inputs_refuse_challenge_and_supersede_durable_approval(
     ingress: Ingress,
     terminal: None,
-    change: dict[str, Any],
+    field: str,
+    durable: bool,
 ) -> None:
     old_packet = ingress.packet
     issued = ingress.issue()
-    ingress.packet = replace(old_packet, **change)
-    with pytest.raises(StaleSubjectError):
-        ingress.decide(issued)
-    assert not list_decisions(ingress.ledger.connection, RUN)
-    ingress.packet = old_packet
-    current = ingress.issue()
-    result = ingress.decide(current)
-    original = list_decisions(ingress.ledger.connection, RUN)[0]
-    ingress.packet = replace(old_packet, **change)
+    if durable:
+        result = ingress.decide(issued)
+        original = list_decisions(ingress.ledger.connection, RUN)[0]
+    _change_bound_input(ingress, field)
+    current = ingress.packet
+    assert getattr(current, field) != getattr(old_packet, field)
+    assert current.subject_digest != old_packet.subject_digest
+    if not durable:
+        with pytest.raises(StaleSubjectError):
+            ingress.decide(issued)
+        assert not list_decisions(ingress.ledger.connection, RUN)
+        return
     with pytest.raises(SupersededDecisionError):
         factory_decisions.require_for_effect(ingress.ledger, ingress.request, ACTION)
     retained = list_decisions(ingress.ledger.connection, RUN)[0]
@@ -368,7 +500,7 @@ def test_changed_bound_inputs_refuse_challenge_and_supersede_durable_approval(
         retained.id == result["decision_id"] and retained.subject_digest == original.subject_digest
     )
     assert retained.normalized_inputs == original.normalized_inputs
-    assert retained.superseded_by == ingress.packet.subject_digest
+    assert retained.superseded_by == current.subject_digest
 
 
 def test_expired_challenge_cannot_record_authority(
@@ -402,45 +534,16 @@ def test_current_registration_change_invalidates_effect_authority(
 def test_policy_override_is_reasoned_expiring_and_exactly_node_scoped(
     ingress: Ingress,
     terminal: None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from enginery.cli import stage1_composition
-
-    ingress.states["validate"] = {"status": "awaiting_human"}
+    ingress.register("validate", outcome="awaiting_human")
     action = "human_wait.validate.approve"
     issued = ingress.issue()
     assert action in issued["actions"] and ACTION not in issued["actions"]
     with pytest.raises(HardRuleError):
         ingress.decide(issued, action=action)
-
-    class Runtime:
-        def claim_epoch(self, **kwargs: Any) -> Any:
-            assert ingress.ledger.connection.in_transaction
-            return SimpleNamespace(epoch=1)
-
-        def resolve_human_wait(self, **kwargs: Any) -> None:
-            assert ingress.ledger.connection.in_transaction
-            ingress.ledger.append(
-                AppendCommand(
-                    correlation_id="resolve-wait",
-                    events=(
-                        EventWrite(
-                            aggregate_type="runtime_node",
-                            aggregate_id=f"{RUN}:validate",
-                            expected_version=0,
-                            event_type="runtime_node.human_wait_resolved",
-                            schema_version=1,
-                            payload=kwargs["extra"],
-                        ),
-                    ),
-                )
-            )
-            ingress.states["validate"]["status"] = kwargs["outcome"]
-
-    monkeypatch.setattr(stage1_composition, "runtime_for_run", lambda *args, **kwargs: Runtime())
     result = ingress.decide(issued, action=action, reason="operator investigated the wait")
     assert result["node_id"] == "validate"
-    assert ingress.states["validate"]["status"] == "passed"
+    assert ingress.state("validate")["status"] == "passed"
     event = ingress.ledger.read_projection(
         aggregate_type="runtime_node",
         aggregate_id=f"{RUN}:validate",
@@ -467,9 +570,19 @@ def test_self_approval_and_hard_rule_scope_are_never_overridden(
     with pytest.raises(HardRuleError, match="producer separation"):
         ingress.decide(issued)
     ingress.preferences.write_bytes(_preferences())
-    nodes = cast(dict[str, object], ingress.request.manifest.nodes)
-    nodes["evidence.current_subject"] = None
-    ingress.states["evidence.current_subject"] = {"status": "awaiting_human"}
+    node_id = NodeId("evidence.current_subject")
+    manifest = replace(
+        ingress.request.manifest,
+        nodes={
+            **ingress.request.manifest.nodes,
+            node_id: replace(ingress.request.manifest.nodes[NodeId("review")], node_id=node_id),
+        },
+    )
+    ingress.replace_request(
+        manifest=manifest,
+        run=replace(ingress.request.run, workflow_definition_digest=manifest.content_digest),
+    )
+    ingress.register(str(node_id), outcome="awaiting_human")
     issued = ingress.issue()
     with pytest.raises(HardRuleError, match="hard rule"):
         ingress.decide(
@@ -528,7 +641,7 @@ def test_review_without_an_available_action_issues_no_challenge(
     ingress: Ingress,
     terminal: None,
 ) -> None:
-    ingress.states["review"] = {"status": "queued"}
+    ingress.update_node("review", status="queued")
     report = ingress.issue()
     assert report["challenge_issued"] is False and "challenge" not in report
     assert not list_decisions(ingress.ledger.connection, RUN)
@@ -539,8 +652,7 @@ def test_stale_subject_precedes_changed_action_availability(
     terminal: None,
 ) -> None:
     issued = ingress.issue()
-    ingress.packet = replace(ingress.packet, findings_json='["repair first"]')
-    ingress.states["review"] = {"status": "failed"}
+    ingress.update_node("review", status="failed", finding_ids=["repair first"])
     with pytest.raises(StaleSubjectError):
         ingress.decide(issued)
     assert not list_decisions(ingress.ledger.connection, RUN)
@@ -552,20 +664,139 @@ def test_subject_is_checked_again_under_the_nonce_consumption_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     issued = ingress.issue()
-    builds = 0
+    packet = ingress.packet
+    real_projection = factory_review._projection
+    observation_reads = 0
 
-    def changing_packet(*args: object) -> ReviewPacket:
-        nonlocal builds
-        builds += 1
-        if builds == 2:
-            ingress.packet = replace(ingress.packet, head_revision="c" * 40)
-        return ingress.packet
+    def changing_observation(
+        ledger: LedgerService, aggregate_type: str, aggregate_id: str
+    ) -> dict[str, object]:
+        nonlocal observation_reads
+        value = real_projection(ledger, aggregate_type, aggregate_id)
+        if aggregate_type == "behavioral_acceptance" and aggregate_id == RUN:
+            observation_reads += 1
+            if observation_reads == 2:
+                assert ledger.connection.in_transaction
+                return {
+                    "head_revision": packet.head_revision,
+                    "configuration_snapshot_digest": packet.configuration_snapshot_digest,
+                    "receipt_digest": str(Digest.of_bytes(b"changed during nonce consumption")),
+                }
+        return value
 
-    monkeypatch.setattr(factory_decisions, "build_packet", changing_packet)
+    monkeypatch.setattr(factory_review, "_projection", changing_observation)
     with pytest.raises(StaleSubjectError, match="while recording"):
         ingress.decide(issued)
+    assert observation_reads == 2
     assert not list_decisions(ingress.ledger.connection, RUN)
     row = ingress.ledger.connection.execute(
         "SELECT consumed_at FROM human_decision_challenges",
     ).fetchone()
     assert row["consumed_at"] is None
+
+
+@pytest.mark.parametrize("node_id", ["qualify", "no_change_confirmation"])
+@pytest.mark.parametrize("outcome", ["approve", "reject", "requeue"])
+def test_preimplementation_wait_has_real_packet_and_authenticated_node_decision(
+    unimplemented_ingress: Ingress,
+    terminal: None,
+    node_id: str,
+    outcome: str,
+) -> None:
+    ingress = unimplemented_ingress
+    if node_id != "qualify":
+        ingress.register("qualify", outcome="passed")
+    ingress.register(node_id, outcome="awaiting_human")
+    assert not ingress.request.workspace_path.exists()
+    assert ingress.state("implement") == {}
+    assert not ingress.ledger.list_projections(aggregate_type="node_attempt")
+    packet = ingress.packet
+    assert packet.base_revision == ingress.request.run.base_revision
+    assert packet.head_revision == ""
+    assert packet.diff == ""
+    assert packet.preimplementation_waits == (node_id,)
+    assert packet.subject_fields()["preimplementation_waits"] == [node_id]
+    assert packet.request_digest == str(ingress.request.digest)
+    reproduction = json.loads(dict(packet.sections)["Reproduction evidence"])
+    assert reproduction["implementation_result"] == {}
+    assert reproduction["preimplementation_waits"] == [node_id]
+
+    issued = ingress.issue()
+    action = f"human_wait.{node_id}.{outcome}"
+    assert set(issued["actions"]) == {
+        f"human_wait.{node_id}.{choice}" for choice in ("approve", "reject", "requeue")
+    }
+    assert ACTION not in issued["actions"]
+    result = ingress.decide(issued, action=action, reason="operator reviewed the source intent")
+    decision = list_decisions(ingress.ledger.connection, RUN)[0]
+    assert decision.id == result["decision_id"]
+    assert decision.action == action
+    assert decision.subject_digest == packet.subject_digest
+    state = ingress.state(node_id)
+    assert (
+        state["status"]
+        == {
+            "approve": "passed",
+            "reject": "failed",
+            "requeue": "queued",
+        }[outcome]
+    )
+    assert state["decision_id"] == decision.id
+    assert state["decision_action"] == action
+    assert state["execution_selection_digest"] == str(ingress.request.execution_selection.digest)
+    assert ingress.state("implement") == {}
+    row = ingress.ledger.connection.execute(
+        "SELECT consumed_at FROM human_decision_challenges"
+    ).fetchone()
+    assert row["consumed_at"] is not None
+    with LedgerService.open(ingress.database) as reopened:
+        assert list_decisions(reopened.connection, RUN) == (decision,)
+
+
+def test_preimplementation_subject_binds_the_actual_waiting_node(
+    unimplemented_ingress: Ingress,
+    terminal: None,
+) -> None:
+    ingress = unimplemented_ingress
+    ingress.register("qualify", outcome="passed")
+    ingress.register("no_change_confirmation", outcome="awaiting_human")
+    old_packet = ingress.packet
+    issued = ingress.issue()
+    ingress.update_node("no_change_confirmation", status="passed")
+    ingress.register("plan_approval", outcome="awaiting_human")
+    current = ingress.packet
+    assert current.head_revision == old_packet.head_revision == ""
+    assert current.diff == old_packet.diff == ""
+    assert old_packet.preimplementation_waits == ("no_change_confirmation",)
+    assert current.preimplementation_waits == ("plan_approval",)
+    assert {
+        key: value
+        for key, value in old_packet.subject_fields().items()
+        if key != "preimplementation_waits"
+    } == {
+        key: value
+        for key, value in current.subject_fields().items()
+        if key != "preimplementation_waits"
+    }
+    assert current.subject_digest != old_packet.subject_digest
+    with pytest.raises(StaleSubjectError):
+        ingress.decide(
+            issued,
+            action="human_wait.no_change_confirmation.approve",
+            reason="the previous wait cannot release a different node",
+        )
+    assert not list_decisions(ingress.ledger.connection, RUN)
+    row = ingress.ledger.connection.execute(
+        "SELECT consumed_at FROM human_decision_challenges"
+    ).fetchone()
+    assert row["consumed_at"] is None
+
+
+def test_missing_implementation_head_without_an_early_wait_is_not_a_review_packet(
+    unimplemented_ingress: Ingress,
+) -> None:
+    from enginery.domain.errors import MissingPrerequisiteError
+
+    with pytest.raises(MissingPrerequisiteError, match="host-verified implementation head"):
+        unimplemented_ingress.issue()
+    assert not list_decisions(unimplemented_ingress.ledger.connection, RUN)

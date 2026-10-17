@@ -735,9 +735,12 @@ def test_factory_explicit_stage1_ledger_requeues_real_decision_with_numeric_gene
     capsys.readouterr()
     _register_qualify_and_human_node(database, request, node_id="no_change_confirmation")
     scope = [
-        "--project", str(request.repository_path),
-        "--database", str(database),
-        "--owner", "stage1-cli",
+        "--project",
+        str(request.repository_path),
+        "--database",
+        str(database),
+        "--owner",
+        "stage1-cli",
     ]
     assert main(["factory", "review", "run-stage1", *scope, "--json"]) == 0
     report_text, challenge_line = capsys.readouterr().out.strip().rsplit("\n", 1)
@@ -745,23 +748,31 @@ def test_factory_explicit_stage1_ledger_requeues_real_decision_with_numeric_gene
     assert report["challenge_issued"] is True
     challenge = challenge_line.removeprefix("Decision challenge: ")
     assert challenge_line != challenge
-    assert main([
-        "factory", "decide", "run-stage1", *scope,
-        "--action", "human_wait.no_change_confirmation.requeue",
-        "--subject-digest", report["subject_digest"],
-        "--challenge", challenge,
-        "--reason", "reconsider the implementation",
-        "--json",
-    ]) == 0
+    assert (
+        main(
+            [
+                "factory",
+                "decide",
+                "run-stage1",
+                *scope,
+                "--action",
+                "human_wait.no_change_confirmation.requeue",
+                "--subject-digest",
+                report["subject_digest"],
+                "--challenge",
+                challenge,
+                "--reason",
+                "reconsider the implementation",
+                "--json",
+            ]
+        )
+        == 0
+    )
     decision = json.loads(capsys.readouterr().out)
     with LedgerService.open(database) as ledger:
         runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
-        resumed = runtime.read_node_request(
-            run_id="run-stage1", node_id="no_change_confirmation"
-        )
-    assert resumed.attempt_id == (
-        f"no_change_confirmation-requeue-{decision['decision_id'][:8]}-0"
-    )
+        resumed = runtime.read_node_request(run_id="run-stage1", node_id="no_change_confirmation")
+    assert resumed.attempt_id == (f"no_change_confirmation-requeue-{decision['decision_id'][:8]}-0")
     assert int(resumed.attempt_id.rsplit("-", 1)[1]) == 0
     assert resumed.operation_id != "no_change_confirmation:run-stage1:0"
     assert _node_state(database, "no_change_confirmation")["status"] == "queued"

@@ -30,7 +30,8 @@ def publication_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Stage1RunService, "_open_pr_binding", lambda *args, **kwargs: "open_pr-0")
     monkeypatch.setattr(Stage1RunService, "_require_branch_publisher", lambda *args: object())
     monkeypatch.setattr(
-        CoordinatorRuntime, "register_node",
+        CoordinatorRuntime,
+        "register_node",
         lambda *args, **kwargs: SimpleNamespace(epoch=1),
     )
 
@@ -45,11 +46,13 @@ def test_publication_requires_record_bound_by_decided_protected_digest(
     request = _request(tmp_path)
     fields = {} if decided_digest is None else {"protected_publication_digest": decided_digest}
     monkeypatch.setattr(
-        stage1, "list_decisions",
+        stage1,
+        "list_decisions",
         lambda *args: [SimpleNamespace(id="authenticated-decision", subject_fields=fields)],
     )
     monkeypatch.setattr(
-        Stage1RunService, "_require_protected_publication_decision",
+        Stage1RunService,
+        "_require_protected_publication_decision",
         lambda *args, **kwargs: {"digest": "actual-protected-digest"},
     )
     effects: list[str] = []
@@ -60,12 +63,14 @@ def test_publication_requires_record_bound_by_decided_protected_digest(
 
     monkeypatch.setattr(Stage1RunService, "_publish_verified_branch", publish)
     monkeypatch.setattr(
-        Stage1RunService, "_require_pull_requests",
+        Stage1RunService,
+        "_require_pull_requests",
         lambda *args: effects.append("pull_request"),
     )
     with LedgerService.open(tmp_path / "ledger.db") as ledger:
         service = Stage1RunService(
-            runtime=CoordinatorRuntime(ledger, owner="stage1-cli"), ledger=ledger,
+            runtime=CoordinatorRuntime(ledger, owner="stage1-cli"),
+            ledger=ledger,
             publication_authorizer=lambda request: "authenticated-decision",
         )
         expected_error = (
@@ -98,7 +103,8 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
 
     with LedgerService.open(database) as ledger:
         service = Stage1RunService(
-            runtime=CoordinatorRuntime(ledger, owner=owner), ledger=ledger,
+            runtime=CoordinatorRuntime(ledger, owner=owner),
+            ledger=ledger,
             publication_authorizer=refuse,
         )
         with pytest.raises(stage1.HumanActionRequiredError):
@@ -106,11 +112,15 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
                 request, now=datetime.now(tz=UTC), heartbeat_window=timedelta(seconds=60)
             )
     review, decide = decision_commands(
-        str(request.run.id), str(request.repository_path), "pull_request.open",
-        database=str(database), owner=owner,
+        str(request.run.id),
+        str(request.repository_path),
+        "pull_request.open",
+        database=str(database),
+        owner=owner,
     )
     assert held[0]["extra"] == {
-        "reason": "decision_required", "repair": f"{review}; {decide}",
+        "reason": "decision_required",
+        "repair": f"{review}; {decide}",
     }
     for command, verb in ((review, "review"), (decide, "decide")):
         argv = shlex.split(command)
@@ -129,8 +139,17 @@ def test_shared_decision_commands_preserve_every_interpolated_shell_argument(act
     common = ["--project", project, "--database", database, "--owner", owner]
     assert shlex.split(review) == ["enginery", "factory", "review", run_id, *common]
     expected = [
-        "enginery", "factory", "decide", run_id, *common,
-        "--action", action, "--subject-digest", "DIGEST", "--challenge", "CHALLENGE",
+        "enginery",
+        "factory",
+        "decide",
+        run_id,
+        *common,
+        "--action",
+        action,
+        "--subject-digest",
+        "DIGEST",
+        "--challenge",
+        "CHALLENGE",
     ]
     if action.startswith("human_wait."):
         expected.extend(("--reason", "REASON"))
