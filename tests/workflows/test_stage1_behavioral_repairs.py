@@ -128,6 +128,13 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
         assert str(dispatch.task.attempt_id) != request.implementation.attempt_id
     else:
         assert "budget is exhausted" in str(caught.value.details["repair"])
+        repair = str(caught.value.details["repair"])
+        assert "this run cannot pass" in repair
+        assert "decision" not in repair
+        assert "change the issue snapshot" in repair
+        assert "enginery factory run ISSUE --project PROJECT --supersede" in repair
+        assert "enginery stage1 build-request" in repair
+        assert "enginery stage1 start using a new run id" in repair
 
 
 def test_inconclusive_calibration_retries_after_observer_recovers(

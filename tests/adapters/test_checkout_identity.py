@@ -26,7 +26,9 @@ def test_build_identity_verifies_actual_current_head_bytes(tmp_path: Path) -> No
     head = _git(tmp_path, "rev-parse", "HEAD")
     original = verified_build(tmp_path, head)
     source.write_text("print('constant')\n")
-    with pytest.raises(StaleEvidenceError, match="modified"):
+    with pytest.raises(
+        StaleEvidenceError, match="behavioral_build_mismatch: checkout differs from bound tree"
+    ):
         verified_build(tmp_path, head)
     _git(tmp_path, "add", "app.py")
     _git(tmp_path, "commit", "-qm", "changed")
