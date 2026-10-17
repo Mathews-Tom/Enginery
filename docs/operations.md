@@ -1883,8 +1883,9 @@ run resumes unchanged.
   `stage1 build-request
   --protected-path GLOB` (repeatable) adds patterns bound into the request; the
   defaults cannot be narrowed. A match puts the `open_pr` node into a human wait
-  (`awaiting_human`) with the set, the matched paths and a digest recorded, raises a
-  human-action-required error, and pushes nothing. Review it with
+  (`awaiting_human`), raises a human-action-required error, and pushes nothing.
+  The review packet's Risk section shows the protected set, matched paths and digest.
+  Review it with
   `enginery factory review RUN --project PROJECT`, then authenticate the exact
   `pull_request.open` decision with the returned subject digest and terminal
   challenge. `stage1 approve --node-id open_pr` requires the same authentication;
