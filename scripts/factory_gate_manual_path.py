@@ -466,6 +466,22 @@ def step_prepare(gate: ManualPathGate) -> None:
     )
     policy = project / ".enginery" / "project.toml"
     policy_text = policy.read_text(encoding="utf-8") if policy.exists() else ""
+    policy.write_text(
+        policy_text
+        + "\n[acceptance]\n"
+        + 'checks = [{name = "changed-result", observer = "command", '
+        + "argv = ["
+        + json.dumps(sys.executable)
+        + ', "-c", "from pathlib import Path; '
+        + "print(Path('manual-path-result.txt').read_text(), end='')\"], "
+        + 'assertions = [{kind = "stdout", equals = "one bounded local change\\n"}], '
+        + 'fault_classes = ["constant_result", "wrong_build"]}]\n',
+        encoding="utf-8",
+    )
+    gate.git(project, "add", ".enginery/project.toml")
+    gate.git(project, "commit", "-q", "-m", "chore: bind operator behavioral checks")
+    gate.git(project, "push", "-q", "origin", branch)
+    policy_text = policy.read_text(encoding="utf-8")
     gate.state = private_state_directory(project, gate.environment())
     with patch.dict(os.environ, gate.environment(), clear=True):
         gate.database = database_path(project)
@@ -474,13 +490,13 @@ def step_prepare(gate: ManualPathGate) -> None:
         code == 0
         and policy.exists()
         and "executables" not in policy_text
-        and gate.git(project, "rev-list", "--count", "HEAD") == "1",
+        and gate.git(project, "rev-list", "--count", "HEAD") == "2",
         {"exit": code, "json": report},
         {
             "policy": policy_text,
             "user": gate.user_file().read_text(encoding="utf-8"),
             "origin": str(origin),
-            "initial_commits": 1,
+            "initial_commits": 2,
         },
     )
 
