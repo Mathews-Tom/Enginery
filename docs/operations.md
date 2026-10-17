@@ -1113,8 +1113,9 @@ review/status. `factory decide` resolves the selected wait atomically.
 **Breaking change:** `stage1 approve`, `stage1 reject`, and human-wait
 `stage1 resume` also require `--subject-digest DIGEST --challenge SECRET`
 and optionally `--principal-id ID`, using the same authentication and node-scoped
-actions. Retain their database/owner/run/node flags and required `--reason REASON`;
-`stage1 resume --reason REASON` also retains its attempt/operation flags.
+actions. Retain their database/owner/run/node flags. All three commands now require
+`--reason REASON`, including `stage1 resume`, which previously did not; resume
+retains its attempt/operation flags.
 A legacy report or reason-only command no longer authorizes publication or releases work.
 
 This is a **trusted-local** protocol, not same-user process containment: another

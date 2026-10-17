@@ -724,3 +724,44 @@ def test_watch_never_presents_a_legacy_carried_dollar_number_as_enforcement(
 
     assert watched["cost_budget"] == {"value": "5.0", "enforced": False}
     assert evidence["request_digest"] == str(legacy.digest)
+
+
+@pytest.mark.usefixtures("authenticated_decisions")
+def test_factory_explicit_stage1_ledger_requeues_real_decision_with_numeric_generation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "operator's ledger.db"
+    request = _start_request(database, tmp_path)
+    capsys.readouterr()
+    _register_qualify_and_human_node(database, request, node_id="no_change_confirmation")
+    scope = [
+        "--project", str(request.repository_path),
+        "--database", str(database),
+        "--owner", "stage1-cli",
+    ]
+    assert main(["factory", "review", "run-stage1", *scope, "--json"]) == 0
+    report_text, challenge_line = capsys.readouterr().out.strip().rsplit("\n", 1)
+    report = json.loads(report_text)
+    assert report["challenge_issued"] is True
+    challenge = challenge_line.removeprefix("Decision challenge: ")
+    assert challenge_line != challenge
+    assert main([
+        "factory", "decide", "run-stage1", *scope,
+        "--action", "human_wait.no_change_confirmation.requeue",
+        "--subject-digest", report["subject_digest"],
+        "--challenge", challenge,
+        "--reason", "reconsider the implementation",
+        "--json",
+    ]) == 0
+    decision = json.loads(capsys.readouterr().out)
+    with LedgerService.open(database) as ledger:
+        runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
+        resumed = runtime.read_node_request(
+            run_id="run-stage1", node_id="no_change_confirmation"
+        )
+    assert resumed.attempt_id == (
+        f"no_change_confirmation-requeue-{decision['decision_id'][:8]}-0"
+    )
+    assert int(resumed.attempt_id.rsplit("-", 1)[1]) == 0
+    assert resumed.operation_id != "no_change_confirmation:run-stage1:0"
+    assert _node_state(database, "no_change_confirmation")["status"] == "queued"
