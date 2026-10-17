@@ -317,6 +317,7 @@ def _build(
     runtime = CoordinatorRuntime(ledger, owner="coordinator")
     harness = harness or RecordingHarness(ArtifactStore(tmp_path / "artifacts"))
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger,
         work_ledger=cast(WorkLedgerPort, StaticWorkLedger(_snapshot())),

@@ -684,6 +684,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
     )
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(
@@ -751,6 +752,7 @@ def test_stage1_run_qualifies_and_launches_omp_only_after_durable_intent(
         time.sleep(0.01)
     assert service.next_action(request.run.id).action.value == "collect_implementation"
     recovered = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=CoordinatorRuntime(ledger_service, owner="coordinator"),
         ledger=ledger_service,
         harness=OmpHarness(
@@ -947,6 +949,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     )
     work_ledger = TerminalWorkLedger(snapshot, terminal_snapshot=terminal_snapshot)
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -1152,6 +1155,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -1312,6 +1316,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -1515,6 +1520,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
         ledger=ledger_service, pull_requests=cast(PullRequestPort, pull_requests)
     )
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -1702,6 +1708,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -1860,6 +1867,7 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
     pull_requests = RecordingPullRequests()
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(WorkLedgerPort, work_ledger),
@@ -2131,6 +2139,7 @@ def _check_disposition_fixture(
         replace(snapshot, source_revision="superseding-issue") if source_drift else None
     )
     service = Stage1RunService(
+        behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
         runtime=runtime,
         ledger=ledger_service,
         work_ledger=cast(

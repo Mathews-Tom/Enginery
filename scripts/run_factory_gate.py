@@ -94,7 +94,14 @@ SCENARIO_BOUNDARY = "runner-boundary"
 SCENARIO_AUTH = "runner-auth"
 SCENARIO_SETUP = "setup"
 SCENARIO_MANUAL_PATH = "manual-path"
-SCENARIO_NAMES = (SCENARIO_BOUNDARY, SCENARIO_AUTH, SCENARIO_SETUP, SCENARIO_MANUAL_PATH)
+SCENARIO_BEHAVIORAL = "behavioral-acceptance"
+SCENARIO_NAMES = (
+    SCENARIO_BOUNDARY,
+    SCENARIO_AUTH,
+    SCENARIO_SETUP,
+    SCENARIO_MANUAL_PATH,
+    SCENARIO_BEHAVIORAL,
+)
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -117,6 +124,7 @@ class ScenarioSpec:
 
 def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_auth as auth
+    import factory_gate_behavioral as behavioral
     import factory_gate_boundary as boundary
     import factory_gate_manual_path as manual_path
     import factory_gate_setup as setup
@@ -139,6 +147,13 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             manual_path.run,
             manual_path.finalize,
             prepare=manual_path.prepare,
+        ),
+        SCENARIO_BEHAVIORAL: ScenarioSpec(
+            behavioral.required_assertions,
+            False,
+            behavioral.run,
+            behavioral.finalize,
+            prepare=behavioral.prepare,
         ),
     }
 
@@ -202,7 +217,7 @@ def parse_options(
     scenario: str = args.scenario
     if scenario == SCENARIO_AUTH and args.harness is None:
         parser.error("--harness {omp,claude} is required for --scenario runner-auth")
-    if scenario in {SCENARIO_SETUP, SCENARIO_MANUAL_PATH}:
+    if scenario in {SCENARIO_SETUP, SCENARIO_MANUAL_PATH, SCENARIO_BEHAVIORAL}:
         local_only = {
             "--harness": args.harness,
             "--model": args.model,

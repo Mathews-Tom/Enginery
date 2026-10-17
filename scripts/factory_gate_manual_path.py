@@ -31,6 +31,7 @@ from enginery.engine.operator_control import live_workers
 from enginery.engine.recovery import assess_worker
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import stage1_request_from_state
+from factory_gate_behavioral import _toml
 from factory_gate_context import GateHoldError, GateOptions
 from factory_gate_evidence import EvidenceBuilder
 from factory_gate_setup import SetupGate, _changed, snapshot
@@ -323,6 +324,22 @@ class ManualPathGate(SetupGate):
             raise RuntimeError(f"factory {command} exited {result.returncode}: {result.stderr}")
         return result.returncode, dict(json.loads(result.stdout))
 
+    def acceptance_checks(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "changed-result",
+                "observer": "command",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "print(Path('manual-path-result.txt').read_text(), end='')",
+                ],
+                "assertions": [{"kind": "stdout", "equals": "one bounded local change\n"}],
+                "fault_classes": ["constant_result", "wrong_build"],
+            }
+        ]
+
     def launch(self, command: str, *arguments: str) -> subprocess.Popen[str]:
         args = ("factory", command, *arguments, "--project", str(self.project), "--json")
         self.commands.append("enginery " + shlex.join(args))
@@ -467,15 +484,7 @@ def step_prepare(gate: ManualPathGate) -> None:
     policy = project / ".enginery" / "project.toml"
     policy_text = policy.read_text(encoding="utf-8") if policy.exists() else ""
     policy.write_text(
-        policy_text
-        + "\n[acceptance]\n"
-        + 'checks = [{name = "changed-result", observer = "command", '
-        + "argv = ["
-        + json.dumps(sys.executable)
-        + ', "-c", "from pathlib import Path; '
-        + "print(Path('manual-path-result.txt').read_text(), end='')\"], "
-        + 'assertions = [{kind = "stdout", equals = "one bounded local change\\n"}], '
-        + 'fault_classes = ["constant_result", "wrong_build"]}]\n',
+        policy_text + "\n[acceptance]\nchecks = " + _toml(gate.acceptance_checks()) + "\n",
         encoding="utf-8",
     )
     gate.git(project, "add", ".enginery/project.toml")
@@ -730,6 +739,10 @@ def step_inspection_review(gate: ManualPathGate) -> None:
         {"exit": code, "json": repeated},
         {"intake": gate.index(), "launches": gate.launches()},
     )
+    calibration_code, _ = gate.factory("calibrate", gate.run_id)
+    check_code, checked = gate.factory("check", gate.run_id)
+    if calibration_code != 0 or check_code != 0 or checked.get("result") != "pass":
+        raise RuntimeError("current behavioral evidence did not pass: " + json.dumps(checked))
     report_path = gate.root / "approving-review.json"
     report_path.write_text(
         json.dumps(

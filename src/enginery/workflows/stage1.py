@@ -398,6 +398,7 @@ class Stage1RunService:
     runner_admission: RunnerAdmissionPort | None = None
     isolated_command_runner: IsolatedCommandRunner | None = None
     branch_publisher: BranchPublicationPort | None = None
+    behavioral_verifier: Callable[[Stage1RunRequest, str], Digest] | None = None
 
     def start(
         self,
@@ -790,6 +791,14 @@ class Stage1RunService:
             return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
         if verify_state.get("status") == "queued":
             return Stage1Progression(Stage1ProgressionAction.VERIFY, run)
+        if verify_state.get("status") == "failed" and verify_state.get("behavioral_findings"):
+            action = (
+                Stage1ProgressionAction.IMPLEMENT
+                if generation - _generation(run.request.implementation.attempt_id)
+                < run.request.repair_limit
+                else Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+            )
+            return Stage1Progression(action, run)
         if verify_state.get("status") != "passed":
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
         if self.outcomes is not None and not self._outcome_observation_registered(run_id):
@@ -927,12 +936,21 @@ class Stage1RunService:
                     "Stage 1 implementation repair requires a terminal prior attempt"
                 )
             wait_state = self._node_state(request.run.id, "wait_for_ci")
+            verify_state = self._node_state_optional(request.run.id, "verify")
             if (
+                verify_state is not None
+                and verify_state.get("status") == "failed"
+                and verify_state.get("behavioral_findings")
+                and _generation(_string(verify_state, "attempt_id"))
+                == _generation(_string(existing, "attempt_id"))
+            ):
+                wait_state = verify_state
+            elif (
                 wait_state.get("status") != "failed"
                 or wait_state.get("pull_request_outcome") != PullRequestOutcome.BLOCKED.value
             ):
                 raise ExternalConflictError(
-                    "Stage 1 implementation repair requires a blocked CI observation"
+                    "Stage 1 implementation repair requires failed CI or behavioral assertions"
                 )
             generation = _generation(_string(existing, "attempt_id")) + 1
             if generation - _generation(request.implementation.attempt_id) > request.repair_limit:
@@ -1751,6 +1769,72 @@ class Stage1RunService:
             _string(self._node_state(request.run.id, "implement"), "attempt_id")
         )
         validation = self._node_state(request.run.id, "validate")
+        behavioral_receipts: tuple[Digest, ...] = ()
+        if request.behavioral_checks is not None:
+            if self.behavioral_verifier is None:
+                raise HumanActionRequiredError(
+                    "behavioral acceptance is required but no trusted observer is configured; "
+                    "use enginery stage1 watch with the run's --database, --owner and "
+                    "--run-id options and --advance to compose the trusted observer",
+                    details={"reason": "behavioral_verifier_unconfigured"},
+                )
+            try:
+                behavioral_receipts = (
+                    self.behavioral_verifier(request, _string(open_pr, "head_revision")),
+                )
+            except HumanActionRequiredError as error:
+                if error.details.get("reason") != "behavioral_acceptance_failed":
+                    raise
+                findings = error.details.get("findings")
+                if not isinstance(findings, (list, tuple)) or not findings:
+                    raise
+                dispatch = WorkflowNodeDispatch(
+                    _fixture_dispatch(
+                        request,
+                        node_id="verify",
+                        attempt_id=f"verify-{generation}",
+                        operation_id=str(
+                            OperationId.derive(
+                                run_id=request.run.id,
+                                node_id=NodeId("verify"),
+                                side_effect_kind="publish_merge_ready",
+                                target_scope=request.work_snapshot.work_item.external_reference,
+                                ordinal=generation,
+                            )
+                        ),
+                        command=("verify_merge_ready",),
+                        dependencies=((str(request.run.id), "wait_for_ci"),),
+                    ),
+                    request.manifest,
+                )
+                epoch = self.runtime.register_node(
+                    dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
+                )
+                self.runtime.complete_node(
+                    run_id=str(request.run.id),
+                    node_id="verify",
+                    epoch=epoch.epoch,
+                    now=now,
+                    outcome="failed",
+                    extra={"behavioral_findings": [str(finding) for finding in findings]},
+                )
+                if (
+                    generation - _generation(request.implementation.attempt_id)
+                    >= request.repair_limit
+                ):
+                    raise HumanActionRequiredError(
+                        str(error),
+                        details={
+                            **error.details,
+                            "repair": "The behavioral repair budget is exhausted; this run "
+                            "cannot pass. Fix the behavior and start a new run: for factory "
+                            "runs, change the issue snapshot and use enginery factory run "
+                            "ISSUE --project PROJECT --supersede; for Stage 1 runs, rebuild "
+                            "with enginery stage1 build-request --run-id NEW_RUN_ID "
+                            "then enginery stage1 start --request REQUEST.",
+                        },
+                    ) from error
+                raise
         verification_request = Stage1VerificationRequest(
             run_id=request.run.id,
             lifecycle_operation_id=OperationId.derive(
@@ -1773,6 +1857,7 @@ class Stage1RunService:
             implementation_artifacts=_digest_tuple(implementation, "artifact_references"),
             verification_artifacts=(
                 _digest_from_string(_string(validation, "validation_artifact_digest")),
+                *behavioral_receipts,
             ),
             execution_selection_digest=_selection_digest(request),
         )
@@ -2131,6 +2216,11 @@ def _failed_checks(
 
 
 def _repair_context(wait_state: Mapping[str, object]) -> str:
+    findings = wait_state.get("behavioral_findings")
+    if isinstance(findings, list) and findings:
+        return "Repair the previous candidate's failing behavioral assertions: " + "; ".join(
+            str(finding) for finding in findings
+        )
     failed_checks = wait_state.get("failed_checks")
     if isinstance(failed_checks, list) and failed_checks:
         details = "; ".join(
