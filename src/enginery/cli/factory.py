@@ -60,16 +60,38 @@ HOLD_EXIT = exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
 CONFLICT_EXIT = exit_code_for(FailureClass.EXTERNAL_CONFLICT)
 
 
-def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``factory``'s subcommands on the root subparsers."""
-    parser = subparsers.add_parser(
-        "factory", help="Guided project setup and prerequisite diagnostics."
-    )
-    commands = parser.add_subparsers(dest="factory_command")
+def add_factory_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser], *, legacy: bool = False
+) -> None:
+    """Register project verbs at the root, or the legacy ``factory`` group."""
+    commands = subparsers
+    if legacy:
+        synopsis = "Project: Guided project setup and prerequisite diagnostics."
+        parser = subparsers.add_parser("factory", help=synopsis, description=synopsis)
+        commands = parser.add_subparsers(dest="factory_command")
 
-    init = commands.add_parser(
+    def add_project_command(
+        name: str,
+        *,
+        help_text: str,
+        description: str | None = None,
+        public_name: str | None = None,
+    ) -> argparse.ArgumentParser:
+        if public_name is None:
+            public_name = name
+            if not legacy:
+                public_name = {"doctor": "preflight", "resume": "continue"}.get(name, name)
+        command = commands.add_parser(
+            public_name,
+            help=f"Project: {help_text}",
+            description=f"Project: {description if description is not None else help_text}",
+        )
+        command.set_defaults(factory_command=name)
+        return command
+
+    init = add_project_command(
         "init",
-        help="Preview (default) or apply guided setup: a project policy file and a private "
+        help_text="Preview (default) or apply guided setup: a project policy file and a private "
         "ownership record.",
     )
     _add_project(init)
@@ -106,18 +128,20 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     )
     init.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
-    doctor = commands.add_parser(
-        "doctor", help="Report the prerequisites the project's selection needs; read-only."
+    doctor = add_project_command(
+        "doctor", help_text="Report the prerequisites the project's selection needs; read-only."
     )
     _add_project(doctor)
     doctor.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
-    collect_parser = commands.add_parser("collect", help="Preview or record GitHub issue intake.")
+    collect_parser = add_project_command(
+        "collect", help_text="Preview or record GitHub issue intake."
+    )
     _add_project(collect_parser)
     collect_parser.add_argument("--dry-run", action="store_true")
     collect_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
-    run = commands.add_parser("run", help="Bind an issue and advance its durable Stage 1 run.")
+    run = add_project_command("run", help_text="Bind an issue and advance its durable run.")
     _add_project(run)
     run.add_argument("issue", metavar="OWNER/REPO#N")
     run.add_argument("--once", action="store_true")
@@ -134,7 +158,9 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     run.add_argument("--time-budget-seconds", type=int, default=None)
     run.add_argument("--json", action="store_true")
 
-    status_parser = commands.add_parser("status", help="Inspect durable runs without advancing.")
+    status_parser = add_project_command(
+        "status", help_text="Inspect durable runs without advancing."
+    )
     _add_project(status_parser)
     status_parser.add_argument("run_id", nargs="?")
     status_parser.add_argument("--json", action="store_true")
@@ -148,7 +174,7 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
         ("calibrate", "Measure behavioral evaluator fault sensitivity with deliberate faults."),
         ("check", "Capture current behavior and record its evaluated acceptance verdict."),
     ):
-        behavioral = commands.add_parser(name, help=synopsis, description=synopsis)
+        behavioral = add_project_command(name, help_text=synopsis, description=synopsis)
         _add_project(behavioral)
         behavioral.add_argument("run_id")
         behavioral.add_argument("--database", type=Path, default=None)
@@ -163,8 +189,8 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
                 help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
             )
 
-    packet = commands.add_parser(
-        "review", help="Render a safe packet and issue a terminal challenge."
+    packet = add_project_command(
+        "review", help_text="Render a safe packet and issue a terminal challenge."
     )
     _add_project(packet)
     packet.add_argument("run_id")
@@ -175,8 +201,8 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     packet.add_argument("--principal-id", default=None)
     packet.add_argument("--database", type=Path, default=None)
     packet.add_argument("--owner", default="factory")
-    decision = commands.add_parser(
-        "decide", help="Authenticate an exact action in the review terminal."
+    decision = add_project_command(
+        "decide", help_text="Authenticate an exact action in the review terminal."
     )
     _add_project(decision)
     decision.add_argument("run_id")
@@ -188,7 +214,7 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     decision.add_argument("--json", action="store_true")
     decision.add_argument("--database", type=Path, default=None)
     decision.add_argument("--owner", default="factory")
-    findings = commands.add_parser("feedback", help="Queue repair findings, never approvals.")
+    findings = add_project_command("feedback", help_text="Queue repair findings, never approvals.")
     _add_project(findings)
     findings.add_argument("run_id")
     findings.add_argument("--subject-digest", required=True)
@@ -198,20 +224,33 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     findings.add_argument("--port", type=int, default=8799)
     findings.add_argument("--json", action="store_true")
 
-    resume = commands.add_parser("resume", help="Reconcile workers and continue a durable run.")
+    resume = add_project_command(
+        "resume", help_text="Reconcile workers and continue a durable run."
+    )
     _add_project(resume)
     resume.add_argument("run_id")
     resume.add_argument("--wait-seconds", type=nonnegative_seconds, default=0)
     resume.add_argument("--json", action="store_true")
 
-    pause_parser = commands.add_parser("pause", help="Pause project-ledger dispatch only.")
+    pause_parser = add_project_command("pause", help_text="Pause project-ledger dispatch only.")
     _add_project(pause_parser)
     pause_parser.add_argument("--reason", default=None)
-    pause_parser.add_argument("--lift", action="store_true")
+    if legacy:
+        pause_parser.add_argument("--lift", action="store_true")
+    else:
+        pause_parser.set_defaults(lift=False)
     pause_parser.add_argument("--json", action="store_true")
 
-    drain_parser = commands.add_parser(
-        "drain", help="Pause, then wait for or stop project workers."
+    if not legacy:
+        resume_dispatch = add_project_command(
+            "pause", public_name="resume", help_text="Resume project-ledger dispatch."
+        )
+        _add_project(resume_dispatch)
+        resume_dispatch.set_defaults(factory_command="pause", lift=True, reason=None)
+        resume_dispatch.add_argument("--json", action="store_true")
+
+    drain_parser = add_project_command(
+        "drain", help_text="Pause, then wait for or stop project workers."
     )
     _add_project(drain_parser)
     drain_mode = drain_parser.add_mutually_exclusive_group(required=True)
@@ -219,18 +258,22 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     drain_mode.add_argument("--stop", action="store_true")
     drain_parser.add_argument("--json", action="store_true")
 
-    explain_parser = commands.add_parser(
+    explain_parser = add_project_command(
         "explain",
-        help="Show where every compiled field comes from, which files setup owns and what "
+        help_text="Show where every compiled field comes from, which files setup owns and what "
         "is held; read-only.",
     )
     _add_project(explain_parser)
-    explain_parser.add_argument("run_id", nargs="?")
+    if legacy:
+        explain_parser.add_argument("run_id", nargs="?")
+    else:
+        explain_parser.set_defaults(run_id=None)
     explain_parser.add_argument("--json", action="store_true", help="Emit canonical JSON.")
 
-    uninstall = commands.add_parser(
+    uninstall = add_project_command(
         "uninstall",
-        help="Preview (default) or apply removal of exactly the unmodified files setup created.",
+        help_text="Preview (default) or apply removal of exactly the unmodified files "
+        "setup created.",
     )
     _add_project(uninstall)
     uninstall.add_argument(

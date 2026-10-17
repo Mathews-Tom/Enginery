@@ -125,7 +125,8 @@ def add_build_request_parser(
     """Register ``stage1 build-request``'s flags on the shared ``stage1`` subparsers."""
     parser = stage1_subparsers.add_parser(
         "build-request",
-        help="Write a Stage 1 --request document for one GitHub issue.",
+        help="Engine ledger: Write a bound request document for one GitHub issue.",
+        description="Engine ledger: Compile a request for one GitHub issue.",
     )
     parser.add_argument(
         "--output", required=True, type=Path, help="Path to write the request JSON."

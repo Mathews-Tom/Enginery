@@ -43,7 +43,7 @@ from enginery.domain.runner import RunnerProfile, RunnerSelection
 def add_runner_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``runner``'s subcommands on the root subparsers."""
     parser = subparsers.add_parser(
-        "runner", help="Build and qualify the isolated worker image and engine."
+        "runner", help="Host: Build and qualify the isolated worker image and engine."
     )
     runner_subparsers = parser.add_subparsers(dest="runner_command")
     build = runner_subparsers.add_parser(

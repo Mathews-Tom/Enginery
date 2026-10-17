@@ -228,7 +228,7 @@ def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_capability_parser(subparsers: Any) -> None:
     capability_parser = subparsers.add_parser(
-        "capability", help="Capability lock and scoped install commands."
+        "capability", help="Project: Manage capability locks and scoped installs."
     )
     commands = capability_parser.add_subparsers(dest="capability_command")
 
