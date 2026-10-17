@@ -123,20 +123,23 @@ def test_exhausted_review_cli_has_no_actions_or_challenge(
     assert "Decision actions:" not in output.out
     assert "Decision challenge:" not in output.out
     assert not list_decisions(ingress.ledger.connection, RUN)
-    assert main(
-        [
-            "factory",
-            "decide",
-            RUN,
-            *scope(ingress),
-            "--action",
-            "pull_request.open",
-            "--subject-digest",
-            ingress.packet.subject_digest,
-            "--challenge",
-            "0" * 64,
-        ]
-    ) == 2
+    assert (
+        main(
+            [
+                "factory",
+                "decide",
+                RUN,
+                *scope(ingress),
+                "--action",
+                "pull_request.open",
+                "--subject-digest",
+                ingress.packet.subject_digest,
+                "--challenge",
+                "0" * 64,
+            ]
+        )
+        == 2
+    )
     refusal = capsys.readouterr().err
     assert "decision_challenge_unknown" in refusal
     repair = refusal.split("repair:", 1)[1]
