@@ -333,6 +333,14 @@ def test_a_pinned_run_binds_its_selection_digest_into_the_verify_node_and_eviden
             assert decisions[0].action == "pull_request.open"
             assert publication is not None
             assert publication.state["decision_id"] == decisions[0].id
+            protected = publication.state["protected_publication"]
+            assert isinstance(protected, dict)
+            assert (
+                decisions[0].subject_fields["protected_publication_digest"] == (protected["digest"])
+            )
+            assert protected["base_revision"] == (
+                verified_service.read(RunId("run-check")).request.run.base_revision
+            )
     finally:
         other.close()
 

@@ -100,6 +100,12 @@ def _publication_workspace(request: Stage1RunRequest) -> str:
     return _git("rev-parse", "HEAD", cwd=workspace)
 
 
+def _bind_publication_base(request: Stage1RunRequest) -> Stage1RunRequest:
+    """Bind manual runtime nodes to the same committed base the review packet resolves."""
+    base_revision = _git("rev-parse", request.run.base_revision, cwd=request.workspace_path)
+    return replace(request, run=replace(request.run, base_revision=base_revision))
+
+
 def _request(tmp_path: Path) -> FixtureDispatch:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -960,8 +966,9 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
         ),
     )
     verified_head = _publication_workspace(request)
+    request = _bind_publication_base(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    pull_requests = RecordingPullRequests()
+    pull_requests = RecordingPullRequests(base_revision=request.run.base_revision)
     terminal_snapshot = (
         replace(snapshot, source_revision="superseding-issue") if source_drift else None
     )
@@ -986,7 +993,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
                 repository_id=request.repository_id,
                 repository_path=request.repository_path,
                 workspace_path=request.workspace_path,
-                base_revision="base-revision",
+                base_revision=request.run.base_revision,
                 command=(node_id,),
                 expected_attempt_version=0,
                 operation_id=f"{node_id}:run-pr",
@@ -1060,7 +1067,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     pull_requests.check_status = final_check_status
     pull_requests.check_conclusion = final_check_conclusion
     pull_requests.head_revision = head_revision
-    pull_requests.base_revision = "advanced-base" if base_drift else "base-revision"
+    pull_requests.base_revision = "advanced-base" if base_drift else request.run.base_revision
     assert (
         service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60)).value
         == ci_outcome
@@ -1172,8 +1179,9 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
         ),
     )
     verified_head = _publication_workspace(request)
+    request = _bind_publication_base(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    pull_requests = RecordingPullRequests()
+    pull_requests = RecordingPullRequests(base_revision=request.run.base_revision)
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
         behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
@@ -1195,7 +1203,7 @@ def test_stage1_routes_a_blocked_ci_observation_to_bounded_repair_or_escalation(
                 repository_id=request.repository_id,
                 repository_path=request.repository_path,
                 workspace_path=request.workspace_path,
-                base_revision="base-revision",
+                base_revision=request.run.base_revision,
                 command=(node_id,),
                 expected_attempt_version=0,
                 operation_id=f"{node_id}:run-repair-gate",
@@ -1336,8 +1344,9 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
         ),
     )
     _publication_workspace(request)
+    request = _bind_publication_base(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    pull_requests = RecordingPullRequests()
+    pull_requests = RecordingPullRequests(base_revision=request.run.base_revision)
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
         behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
@@ -1374,7 +1383,7 @@ def test_stage1_repair_reconciles_the_same_pull_request_and_reaches_merge_ready(
                     repository_id=request.repository_id,
                     repository_path=request.repository_path,
                     workspace_path=request.workspace_path,
-                    base_revision="base-revision",
+                    base_revision=request.run.base_revision,
                     command=(node_id,),
                     expected_attempt_version=0,
                     operation_id=f"{node_id}:run-repair:{generation}",
@@ -1550,8 +1559,9 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
         ),
     )
     verified_head = _publication_workspace(request)
+    request = _bind_publication_base(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    pull_requests = RecordingPullRequests()
+    pull_requests = RecordingPullRequests(base_revision=request.run.base_revision)
     work_ledger = TerminalWorkLedger(snapshot)
     outcomes = OutcomeCaptureService(
         ledger=ledger_service, pull_requests=cast(PullRequestPort, pull_requests)
@@ -1577,7 +1587,7 @@ def test_stage1_registers_outcome_observations_after_reaching_merge_ready(
                 repository_id=request.repository_id,
                 repository_path=request.repository_path,
                 workspace_path=request.workspace_path,
-                base_revision="base-revision",
+                base_revision=request.run.base_revision,
                 command=(node_id,),
                 expected_attempt_version=0,
                 operation_id=f"{node_id}:run-outcomes",
@@ -1744,8 +1754,9 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
         ),
     )
     verified_head = _publication_workspace(request)
+    request = _bind_publication_base(request)
     runtime = CoordinatorRuntime(ledger_service, owner="coordinator")
-    pull_requests = RecordingPullRequests()
+    pull_requests = RecordingPullRequests(base_revision=request.run.base_revision)
     work_ledger = TerminalWorkLedger(snapshot)
     service = Stage1RunService(
         behavioral_verifier=lambda request, head: Digest.of_bytes(b"fixture behavioral verdict"),
@@ -1767,7 +1778,7 @@ def test_stage1_never_registers_outcome_observations_without_a_configured_servic
                 repository_id=request.repository_id,
                 repository_path=request.repository_path,
                 workspace_path=request.workspace_path,
-                base_revision="base-revision",
+                base_revision=request.run.base_revision,
                 command=(node_id,),
                 expected_attempt_version=0,
                 operation_id=f"{node_id}:run-no-outcomes",
@@ -2042,13 +2053,13 @@ def test_stage1_dispatch_implementation_self_determines_repair_or_rejects_exhaus
 class RecordingPullRequests:
     """Capture the idempotent Stage 1 pull-request request."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, base_revision: str = "base-revision") -> None:
         self.requests: list[PullRequestRequest] = []
         self.failures_remaining = 0
         self.check_status = "completed"
         self.check_conclusion: str | None = "success"
         self.head_revision = "head-revision"
-        self.base_revision = "base-revision"
+        self.base_revision = base_revision
 
     def probe(self) -> object:
         raise AssertionError("not used by this test")
@@ -2065,7 +2076,7 @@ class RecordingPullRequests:
             head_branch=request.head_branch,
             head_revision="head-revision",
             base_branch=request.base_branch,
-            base_revision="base-revision",
+            base_revision=self.base_revision,
         )
 
     def get(self, number: int) -> PullRequestSnapshot:
@@ -2211,7 +2222,7 @@ def _check_node_dispatch(request: Stage1RunRequest, node_id: str) -> WorkflowNod
             repository_id=request.repository_id,
             repository_path=request.repository_path,
             workspace_path=request.workspace_path,
-            base_revision="base-revision",
+            base_revision=request.run.base_revision,
             command=(node_id,),
             expected_attempt_version=0,
             operation_id=f"{node_id}:run-check",
@@ -2261,10 +2272,14 @@ def _drive_check_to_non_pass(
         tmp_path,
         source_drift=check_id == STAGE1_VERIFY_CHECK_ID and result == "fail",
         execution_selection=execution_selection,
+        start=False,
     )
     if check_id == STAGE1_VERIFY_CHECK_ID:
         _publication_workspace(request)
+        request = _bind_publication_base(request)
+        pull_requests.base_revision = request.run.base_revision
     heartbeat = timedelta(seconds=60)
+    service.start(request, now=now, heartbeat_window=heartbeat)
     _complete_check_node(runtime, request, "qualify", now)
     _complete_check_node(runtime, request, "implement", now)
     if check_id == STAGE1_VALIDATE_CHECK_ID:

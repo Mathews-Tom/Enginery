@@ -252,7 +252,7 @@ def test_review_writes_a_private_digest_specific_inert_packet(
     packet = _packet("<script>hostile</script>")
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.setattr(factory_review, "read_packet", lambda *args: packet)
+    monkeypatch.setattr(factory_review, "read_packet", lambda *args, **kwargs: packet)
     first = factory_review.review(project, packet.run_id)
     path = Path(str(first["packet_path"]))
     assert path.name == "packet.html"
@@ -467,7 +467,9 @@ def test_presenter_failure_preserves_terminal_packet(
     from enginery.cli import factory
 
     monkeypatch.setattr(factory, "resolve_project", lambda value: tmp_path)
-    monkeypatch.setattr(factory, "review", lambda *args: {"lines": ["terminal packet survives"]})
+    monkeypatch.setattr(
+        factory, "review", lambda *args, **kwargs: {"lines": ["terminal packet survives"]}
+    )
     monkeypatch.setattr(
         factory, "issue_for_review", lambda project, run_id, packet, **kwargs: packet
     )
@@ -485,6 +487,8 @@ def test_presenter_failure_preserves_terminal_packet(
         port=3210,
         no_open=True,
         principal_id=None,
+        database=None,
+        owner="factory",
     )
     with pytest.raises(PresenterError, match="unavailable"):
         factory.run_factory(args)

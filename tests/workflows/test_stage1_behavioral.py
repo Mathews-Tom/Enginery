@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from tests.support.branch_publication import HEAD_REVISION
+from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.workflows.test_stage1_runtime import (
     TerminalWorkLedger,
+    _bind_publication_base,
     _check_disposition_fixture,
     _complete_check_node,
+    _publication_workspace,
 )
 
 from enginery.domain.digests import Digest
@@ -30,10 +32,12 @@ from enginery.workflows.stage1 import (
 def _ready_to_verify(
     ledger_service: LedgerService, tmp_path: Path, *, repair_limit: int = 1
 ) -> tuple[Stage1RunRequest, Stage1RunService, datetime]:
-    request, service, runtime, _, now = _check_disposition_fixture(
+    request, service, runtime, pull_requests, now = _check_disposition_fixture(
         ledger_service, tmp_path, start=False
     )
-    request = replace(request, repair_limit=repair_limit)
+    head_revision = _publication_workspace(request)
+    request = replace(_bind_publication_base(request), repair_limit=repair_limit)
+    pull_requests.base_revision = request.run.base_revision
     service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert request.behavioral_checks
     assert all(check.assertions for check in request.behavioral_checks)
@@ -51,7 +55,7 @@ def _ready_to_verify(
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": HEAD_REVISION},
+                        "result": {"head_revision": head_revision},
                     },
                 ),
             ),
@@ -65,6 +69,7 @@ def _ready_to_verify(
         now=now,
         heartbeat_window=heartbeat,
     )
+    AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=heartbeat)
     service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
     assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
