@@ -133,14 +133,18 @@ def test_captured_real_lavish_poll_metadata_is_not_a_finding(status: str) -> Non
         ("annotation_tabular", ("Rename the flag before merge",)),
         ("two_prompts", ("Rename the flag before merge", "Add a regression test")),
         ("with_target_expanded", ("Rename the flag before merge",)),
+        ("nel_text_two_prompts", ("First comment", "Second comment")),
+        ("nel_text_quoted", ("Only comment",)),
+        ("nel_snapshot", ("Rename the flag",)),
+        ("ls_prompt", ("line one\u2028line two", "next comment")),
     ],
 )
 def test_encoder_produced_poll_prompts(name: str, expected: tuple[str, ...]) -> None:
     fixtures = Path(__file__).parents[1] / "fixtures" / "lavish"
     cases = {
         name: body
-        for filename in ("encode_poll.out", "encode_poll2.out")
-        for section in (fixtures / filename).read_text().split("=====")[1:]
+        for filename in ("encode_poll.out", "encode_poll2.out", "encode_nel.out")
+        for section in (fixtures / filename).read_text(encoding="utf-8").split("=====")[1:]
         for name, body in [section.split("\n", 1)]
     }
     assert presenters._findings(cases[name]) == tuple(map(presenters.escape_terminal, expected))
@@ -155,7 +159,9 @@ def test_packet_text_is_never_feedback() -> None:
 
 def test_encoder_artifact_failure_is_refused() -> None:
     fixture = Path(__file__).parents[1] / "fixtures" / "lavish" / "encode_poll2.out"
-    cases = dict(section.split("\n", 1) for section in fixture.read_text().split("=====")[1:])
+    cases = dict(
+        section.split("\n", 1) for section in fixture.read_text(encoding="utf-8").split("=====")[1:]
+    )
     with pytest.raises(PresenterError, match="artifact failures"):
         presenters._findings(cases["artifact_failure"])
 

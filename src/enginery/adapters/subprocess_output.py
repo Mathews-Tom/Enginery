@@ -6,6 +6,7 @@ import os
 import selectors
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 MAX_BYTES = 1024 * 1024
@@ -13,6 +14,15 @@ MAX_BYTES = 1024 * 1024
 
 class SubprocessOutputError(ValueError):
     """A subprocess could not safely produce bounded UTF-8 output."""
+
+
+@dataclass(frozen=True, slots=True)
+class SubprocessResult:
+    """Bounded UTF-8 streams and exit status, including unsuccessful exits."""
+
+    returncode: int
+    stdout: str
+    stderr: str
 
 
 def execute_output(
@@ -23,6 +33,21 @@ def execute_output(
     cwd: Path | None = None,
 ) -> str:
     """Return stdout; cap combined stdout/stderr at 1 MiB and redact diagnostics."""
+    result = execute_result(argv, environment, timeout=timeout, cwd=cwd)
+    if result.returncode:
+        # Tool diagnostics may contain credentials; never echo them.
+        raise SubprocessOutputError(f"subprocess exited with status {result.returncode}")
+    return result.stdout
+
+
+def execute_result(
+    argv: tuple[str, ...],
+    environment: dict[str, str],
+    *,
+    timeout: float = 30.0,
+    cwd: Path | None = None,
+) -> SubprocessResult:
+    """Return status and both streams; enforce the same combined bounds on all exits."""
     if any(not item or "\0" in item for item in argv):
         raise SubprocessOutputError("subprocess argv contains an empty or invalid argument")
     if sum(len(item.encode()) + 1 for item in argv) > MAX_BYTES:
@@ -40,6 +65,7 @@ def execute_output(
     except OSError as exc:
         raise SubprocessOutputError("subprocess executable could not be started") from exc
     output = bytearray()
+    diagnostics = bytearray()
     total = 0
     deadline = time.monotonic() + timeout
     try:
@@ -61,13 +87,12 @@ def execute_output(
                         raise SubprocessOutputError("subprocess output exceeds 1 MiB")
                     if key.data:
                         output.extend(chunk)
+                    else:
+                        diagnostics.extend(chunk)
             try:
                 code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired as exc:
                 raise SubprocessOutputError("subprocess timed out") from exc
-            if code:
-                # Tool diagnostics may contain credentials; never echo them.
-                raise SubprocessOutputError(f"subprocess exited with status {code}")
     finally:
         if process.poll() is None:
             process.kill()
@@ -76,6 +101,6 @@ def execute_output(
             if stream is not None:
                 stream.close()
     try:
-        return output.decode("utf-8")
+        return SubprocessResult(code, output.decode("utf-8"), diagnostics.decode("utf-8"))
     except UnicodeDecodeError as exc:
         raise SubprocessOutputError("subprocess output is not UTF-8") from exc

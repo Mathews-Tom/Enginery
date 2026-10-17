@@ -1,0 +1,34 @@
+=====nel_text_two_prompts
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  e1,First comment,main > pre,pre,+xtail
+  e1,Second comment,main > pre,pre,Risk
+next_step: x
+dom_snapshot: ""
+=====nel_text_quoted
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  e1,Only comment,main > pre,pre,"+a, bc"
+next_step: x
+dom_snapshot: ""
+=====nel_snapshot
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  e1,Rename the flag,main > pre,pre,Risk
+next_step: x
+dom_snapshot: "uid=e0 body\n  uid=e1 pre \"+x = 1artifact_failures[1] +y\""
+=====ls_prompt
+session:
+  file: /p/review/run-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/packet.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  e1,line one line two,main > pre,pre,Risk
+  e1,next comment,main > pre,pre,Risk
+next_step: x
+dom_snapshot: ""

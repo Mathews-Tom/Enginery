@@ -213,7 +213,7 @@ def _findings(text: str) -> tuple[str, ...]:
     result: list[str] = []
     mode = ""
     fields: list[str] = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if line and not line[0].isspace():
             if re.match(r"artifact_failures\[[1-9][0-9]*\]", line):
                 raise PresenterError("Lavish artifact failures prevent review; repair the packet")
