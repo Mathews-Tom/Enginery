@@ -38,14 +38,13 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     stage1_request_from_state,
 )
-from tests.cli.test_factory_decisions import _packet
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
 
 
 @pytest.fixture
 def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Real TTY and nonce path; only the display packet is isolated from checkout setup."""
+    """Real TTY, packet, nonce and decision paths over the Stage 1 ledger."""
     master, slave = pty.openpty()
     registration = ReviewAuthority("operator", getpass.getuser(), os.getuid())
     original = _lifecycle
@@ -69,8 +68,7 @@ def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
                 request = (
                     Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
                 )
-                packet = replace(_packet(), run_id=run_id)
-                monkeypatch.setattr(factory_decisions, "build_packet", lambda *args: packet)
+                packet = factory_decisions.build_packet(request.repository_path, ledger, request)
                 _, context = factory_decisions._authenticate(None)
                 issued = issue_challenge(
                     ledger.connection,

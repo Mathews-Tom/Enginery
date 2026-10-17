@@ -23,7 +23,7 @@ from enginery.cli.setup_files import read_regular, refuse_links, write_private_a
 from enginery.cli.stage1_composition import HEARTBEAT_WINDOW, read_only_service, runtime_for_run
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
-from enginery.domain.ids import RunId
+from enginery.domain.ids import NodeId, RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.task_repository import intake_path_for
 from enginery.evidence.review_rendering import render_html, render_terminal
@@ -81,6 +81,31 @@ def _receipt_document(root: Path, digest_text: str) -> dict[str, object]:
     return {"digest": digest_text, "availability": "digest_verified", "document": document}
 
 
+def preimplementation_waits(
+    ledger: LedgerService, request: Stage1RunRequest
+) -> tuple[str, ...]:
+    """Find waits whose dependency closure does not include implementation."""
+    def requires_implementation(node_id: str, visited: frozenset[str]) -> bool:
+        if node_id == "implement":
+            return True
+        if node_id in visited:
+            return False
+        node = request.manifest.nodes[NodeId(node_id)]
+        return any(
+            requires_implementation(str(dependency), visited | {node_id})
+            for dependency in node.dependencies
+        )
+
+    return tuple(
+        str(node_id)
+        for node_id in request.manifest.nodes
+        if _projection(
+            ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{request.run.id}:{node_id}"
+        ).get("status") == "awaiting_human"
+        and not requires_implementation(str(node_id), frozenset())
+    )
+
+
 def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest) -> ReviewPacket:
     """Assemble one immutable subject from the run, not worker presentation documents."""
     run_id = str(request.run.id)
@@ -95,28 +120,35 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     result = attempt.get("result")
     result = dict(result) if isinstance(result, Mapping) else {}
     head = result.get("head_revision")
-    if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
-        raise MissingPrerequisiteError("review requires the host-verified implementation head")
-    # Inspect committed objects only: no external diff/textconv and no untracked worker content.
-    repository = (
-        intake_path_for(request.workspace_path)
-        if request.runner.isolated_mode
-        else request.workspace_path
-    )
-    if not request.runner.isolated_mode and _revision(repository, "HEAD") != head:
-        raise InvalidInputError(
-            "review head changed; collect and validate the current implementation"
+    preimplementation = not isinstance(head, str) and bool(preimplementation_waits(ledger, request))
+    if preimplementation:
+        repository = request.repository_path
+        base = head = _revision(repository, request.run.base_revision)
+        diff = ""
+        changed_paths: tuple[str, ...] = ()
+    else:
+        if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
+            raise MissingPrerequisiteError("review requires the host-verified implementation head")
+        # Only host-owned committed objects, never the isolated worker clone.
+        repository = (
+            intake_path_for(request.workspace_path)
+            if request.runner.isolated_mode
+            else request.workspace_path
         )
-    bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
-    base = _revision(repository, bound_base)
-    diff = _git(repository, "diff", *DIFF_FLAGS, base, head, "--")
-    changed_paths = tuple(
-        value
-        for value in _git(
-            repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--"
-        ).split("\0")
-        if value
-    )
+        if not request.runner.isolated_mode and _revision(repository, "HEAD") != head:
+            raise InvalidInputError(
+                "review head changed; collect and validate the current implementation"
+            )
+        bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
+        base = _revision(repository, bound_base)
+        diff = _git(repository, "diff", *DIFF_FLAGS, base, head, "--")
+        changed_paths = tuple(
+            value
+            for value in _git(
+                repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--"
+            ).split("\0")
+            if value
+        )
     policy = ProtectedPathPolicy(request.protected_paths)
     protected_digest = str(
         Digest.of_json(
