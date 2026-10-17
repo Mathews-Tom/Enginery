@@ -41,6 +41,11 @@ attempt and return `wait`, never launch a second worker.
   stores, or requests a literal secret value; every credential field in a
   request is an opaque reference the GitHub/harness CLI resolves itself
   (see [`docs/operations.md`](operations.md#configuration)).
+- Commit project policy with non-empty `[acceptance]` checks at the selected
+  base revision before `stage1 build-request`. Include assertions and declared
+  fault classes for the changed behavior, as described in
+  [behavioral acceptance](operations.md#behavioral-check-custody-and-receipts);
+  without base-bound checks a new run holds with `no_behavioral_checks`.
 
 ## Procedure
 
@@ -55,7 +60,8 @@ attempt and return `wait`, never launch a second worker.
    (not a full issue URL — that is a request-composition detail this
    demonstration's own worked example got wrong on a first attempt; see the
    published write-up), a `--repository-path` pointing at a local clone,
-   fresh `--workspace-path`/`--artifact-root` directories, and
+   a fresh `--workspace-path`, and an `--artifact-root` beneath the private Enginery
+   state home (`${XDG_STATE_HOME:-$HOME/.local/state}/enginery/`). Select
    `--harness-provider omp` or `claude-code`. The title, the body, the
    source revision, and the declared classification are read from the issue
    through `gh` and bound exactly as returned: a live GitHub-sourced work
@@ -114,16 +120,25 @@ attempt and return `wait`, never launch a second worker.
 
 8. **Continue advancing** until the worker's result file appears and the
    run collects it (`"action_taken": "collect_implementation"`), then
-   continues through `validate`, a real human `stage1 review`, `open_pr`,
-   `wait_for_ci`, and `verify`:
+   continues through `validate`, a real independent `stage1 review` report,
+   `factory review` and authenticated `factory decide` against the same
+   `ledger.db` and `operator` owner, then `open_pr`, `wait_for_ci`, and `verify`.
+   The example assumes successful validation, no actionable review findings,
+   and passing current-head CI. Resolve any reported hold instead of treating it
+   as completion. Review and decide must use the same genuine local terminal;
+   register the operator's `[review_authority]` in user preferences first:
 
    ```bash
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
    # repeat until next_action is await_human_review
    uv run enginery stage1 review --database ledger.db --owner operator --run-id <run-id> \
      --report review.json --repair-attempt 0
+   uv run enginery factory review <run-id> --project <repository> --database ledger.db --owner operator
+   # copy DIGEST and SECRET from the terminal review above
+   uv run enginery factory decide <run-id> --project <repository> --database ledger.db --owner operator \
+     --action pull_request.open --subject-digest DIGEST --challenge SECRET
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
-   # repeat until next_action is wait
+   # repeat until next_action is wait and the verify node's status is passed
    uv run enginery stage1 evidence --database ledger.db --owner operator --run-id <run-id>
    ```
 

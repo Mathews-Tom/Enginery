@@ -110,7 +110,7 @@ def test_every_terminal_control_is_visible_instead_of_executable() -> None:
         {"evidence_receipt_digests": (str(Digest.of_bytes(b"different observation")),)},
         {"ci_evidence_json": '{"status":"failed"}'},
         {"findings_json": '["repair the result"]'},
-        {"sections": (("Intent", '{"text":"different intent"}'),)},
+        {"protected_publication_digest": str(Digest.of_bytes(b"new matched protected paths"))},
     ],
 )
 def test_subject_digest_binds_every_review_input(changes: dict[str, Any]) -> None:
@@ -120,6 +120,15 @@ def test_subject_digest_binds_every_review_input(changes: dict[str, Any]) -> Non
     fields["run_id"] = "mutated copy"
     assert packet.run_id == "run-review"
     assert packet.subject_fields()["run_id"] == "run-review"
+
+
+def test_presentation_lifecycle_changes_get_distinct_files_not_distinct_authority() -> None:
+    packet = _packet()
+    registered = replace(packet, sections=(("Risk", '{"publication":{"status":"queued"}}'),))
+    resolved = replace(packet, sections=(("Risk", '{"publication":{"status":"passed"}}'),))
+    assert registered.subject_digest == resolved.subject_digest == packet.subject_digest
+    assert registered.digest != resolved.digest
+    assert render_html(registered) != render_html(resolved)
 
 
 def test_packet_and_expanded_rendering_are_bounded() -> None:
@@ -243,7 +252,7 @@ def test_review_writes_a_private_digest_specific_inert_packet(
     packet = _packet("<script>hostile</script>")
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.setattr(factory_review, "read_packet", lambda *args: packet)
+    monkeypatch.setattr(factory_review, "read_packet", lambda *args, **kwargs: packet)
     first = factory_review.review(project, packet.run_id)
     path = Path(str(first["packet_path"]))
     assert path.name == "packet.html"
@@ -333,7 +342,17 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     assert packet.evidence_receipt_digests == (str(digest), str(digest))
     assert packet.head_revision == head
     assert json.loads(packet.ci_evidence_json)["availability"] == "not_persisted_for_current_head"
-    observed["result"] = "failed"
+    # Lifecycle registration and resolution must not alter their own authorization.
+    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:open_pr")] = {
+        "status": "awaiting_human",
+        "epoch": 3,
+        "attempt_id": "open-pr-9",
+        "operator_decision": "approved",
+        "transitioned_at": "later",
+    }
+    stable = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+    assert stable.subject_digest == packet.subject_digest
+    observed["receipt_digest"] = str(Digest.of_bytes(b"changed evaluated verdict"))
     newer = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
     assert newer.subject_digest != packet.subject_digest
     ci_state: dict[str, object] = {
@@ -448,7 +467,12 @@ def test_presenter_failure_preserves_terminal_packet(
     from enginery.cli import factory
 
     monkeypatch.setattr(factory, "resolve_project", lambda value: tmp_path)
-    monkeypatch.setattr(factory, "review", lambda *args: {"lines": ["terminal packet survives"]})
+    monkeypatch.setattr(
+        factory, "review", lambda *args, **kwargs: {"lines": ["terminal packet survives"]}
+    )
+    monkeypatch.setattr(
+        factory, "issue_for_review", lambda project, run_id, packet, **kwargs: packet
+    )
 
     def fail(*args: object, **kwargs: object) -> None:
         raise PresenterError("presenter unavailable")
@@ -462,6 +486,9 @@ def test_presenter_failure_preserves_terminal_packet(
         lavish=True,
         port=3210,
         no_open=True,
+        principal_id=None,
+        database=None,
+        owner="factory",
     )
     with pytest.raises(PresenterError, match="unavailable"):
         factory.run_factory(args)

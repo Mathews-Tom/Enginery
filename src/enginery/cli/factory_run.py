@@ -14,6 +14,7 @@ from typing import cast
 
 from enginery.application.effective_config import EffectiveConfig
 from enginery.application.factory_intake import IntakeEntry, RepositoryIntake, derive_run_id
+from enginery.application.human_decisions import decision_commands
 from enginery.cli.config_locations import private_state_directory, project_identity
 from enginery.cli.factory_collect import (
     database_path,
@@ -61,6 +62,7 @@ from enginery.workflows.stage1 import (
     Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,
+    behavioral_repair_exhausted,
     first_attempt_generation,
     stage1_request_from_state,
 )
@@ -591,14 +593,56 @@ def _enrich(
         f"--database {shlex.quote(str(database_path(project)))} "
         f"--owner factory --run-id {shlex.quote(run_id)}"
     )
-    if awaiting is not None and awaiting["node_id"] != "review":
-        node_id = shlex.quote(str(awaiting["node_id"]))
-        report["next_decision"] = {
-            "action": "stage1 approve|reject",
-            "command": f"enginery stage1 approve {prefix} --node-id {node_id} --reason REASON",
-            "reject_command": (
-                f"enginery stage1 reject {prefix} --node-id {node_id} --reason REASON"
+    verification = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:verify"
+    )
+    exhausted_behavior = (
+        report["next_action"] == "await_human_review"
+        and verification is not None
+        and behavioral_repair_exhausted(
+            request,
+            next((node for node in node_states if node["node_id"] == "implement"), {}),
+            verification.state,
+        )
+    )
+    if exhausted_behavior:
+        assert verification is not None
+        review_command, _ = decision_commands(run_id, str(project), "pull_request.open")
+        new_run_command = shlex.join(
+            [
+                "enginery",
+                "factory",
+                "run",
+                request.work_snapshot.work_item.external_reference,
+                "--supersede",
+                "--project",
+                str(project),
+            ]
+        )
+        report.update(
+            status="failed",
+            reason="behavioral_acceptance_failed",
+            behavioral_findings=verification.state["behavioral_findings"],
+            next_decision=None,
+        )
+        hold = {
+            "reason": "behavioral_acceptance_failed",
+            "message": "The behavioral repair budget is exhausted; this run is terminal.",
+            "repair": (
+                f"Inspect the evidence with {review_command}. A new attempt requires a new run: "
+                f"{new_run_command}. Supersede is accepted only after the issue snapshot changes."
             ),
+        }
+    elif awaiting is not None and awaiting["node_id"] != "review":
+        node_id = str(awaiting["node_id"])
+        action = "pull_request.open" if node_id == "open_pr" else f"human_wait.{node_id}.approve"
+        review_command, decide_command = decision_commands(run_id, str(project), action)
+        _, reject_command = decision_commands(run_id, str(project), f"human_wait.{node_id}.reject")
+        report["next_decision"] = {
+            "action": "factory review|decide",
+            "review_command": review_command,
+            "command": decide_command,
+            "reject_command": reject_command,
         }
     elif report["next_action"] == "await_human_review":
         implementation = next(

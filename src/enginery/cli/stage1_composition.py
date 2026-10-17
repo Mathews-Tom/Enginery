@@ -171,6 +171,8 @@ def advancing_service(
         None if isinstance(wiring, DriftedRunnerWiring) else harness_for(configuration, wiring)
     )
     isolated_validation = wiring.validation if isinstance(wiring, IsolatedWiring) else None
+    from enginery.cli.factory_decisions import require_for_effect
+
     return Stage1RunService(
         runtime=runtime,
         ledger=ledger,
@@ -183,6 +185,14 @@ def advancing_service(
         branch_publisher=branch_publisher(request),
         behavioral_verifier=lambda bound, head: verify_for_stage1(
             ledger, bound, head, owner=runtime.coordinator.owner
+        ),
+        publication_authorizer=lambda bound: (
+            require_for_effect(
+                ledger,
+                bound,
+                "pull_request.open",
+                "open_pr",
+            ).id
         ),
     )
 

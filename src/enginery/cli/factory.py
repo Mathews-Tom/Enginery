@@ -28,6 +28,7 @@ from enginery.cli._exit_codes import SUCCESS, exit_code_for
 from enginery.cli.factory_behavioral import run_command as run_behavioral_command
 from enginery.cli.factory_collect import collect, document_lines
 from enginery.cli.factory_control import drain, pause
+from enginery.cli.factory_decisions import decide, issue_for_review
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
 from enginery.cli.factory_review import feedback, lavish_feedback, present_review, review
@@ -151,13 +152,31 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
                 help="Record a deliberately uninjected fault; this cannot qualify acceptance.",
             )
 
-    packet = commands.add_parser("review", help="Render a safe private packet; no approval.")
+    packet = commands.add_parser(
+        "review", help="Render a safe packet and issue a terminal challenge."
+    )
     _add_project(packet)
     packet.add_argument("run_id")
     packet.add_argument("--lavish", action="store_true")
     packet.add_argument("--port", type=int, default=8799)
     packet.add_argument("--no-open", action="store_true")
     packet.add_argument("--json", action="store_true")
+    packet.add_argument("--principal-id", default=None)
+    packet.add_argument("--database", type=Path, default=None)
+    packet.add_argument("--owner", default="factory")
+    decision = commands.add_parser(
+        "decide", help="Authenticate an exact action in the review terminal."
+    )
+    _add_project(decision)
+    decision.add_argument("run_id")
+    decision.add_argument("--action", required=True)
+    decision.add_argument("--subject-digest", required=True)
+    decision.add_argument("--challenge", required=True)
+    decision.add_argument("--principal-id", default=None)
+    decision.add_argument("--reason", default="")
+    decision.add_argument("--json", action="store_true")
+    decision.add_argument("--database", type=Path, default=None)
+    decision.add_argument("--owner", default="factory")
     findings = commands.add_parser("feedback", help="Queue repair findings, never approvals.")
     _add_project(findings)
     findings.add_argument("run_id")
@@ -368,10 +387,36 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_doctor(args)
     if command == "review":
         project = resolve_project(args.project)
-        document = review(project, args.run_id)
+        packet_report = review(project, args.run_id, database=args.database, owner=args.owner)
+        issued_report = issue_for_review(
+            project,
+            args.run_id,
+            packet_report,
+            principal_id=args.principal_id,
+            database=args.database,
+            owner=args.owner,
+        )
+        secret = issued_report.pop("challenge", None)
+        document = issued_report
         _emit(args, document, cast(list[str], document["lines"]))
+        if isinstance(secret, str):
+            print(f"Decision challenge: {secret}")
         if args.lavish:
             present_review(project, document, port=args.port, no_open=args.no_open)
+        return SUCCESS
+    if command == "decide":
+        document = decide(
+            resolve_project(args.project),
+            args.run_id,
+            action=args.action,
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
+            database=args.database,
+            owner=args.owner,
+        )
+        _emit(args, document, [json.dumps(document, sort_keys=True)])
         return SUCCESS
     if command == "feedback":
         project = resolve_project(args.project)

@@ -384,14 +384,22 @@ without GitHub mutations or writes except disclosed SQLite sidecars. `collect`
 records private intake; `run`, `status`, `explain RUN` and `resume` share the
 existing coordinator and immutable binding. `explain` without RUN still explains
 current configuration. `pause` and `drain` control project dispatch; lift the pause
-with `factory pause --lift`. Unlike factory recovery, `stage1 resume` requeues a
-human-wait node.
+with `factory pause --lift`. Unlike factory recovery, `stage1 resume` refuses
+with `human_wait_requeue_unsupported`: no human-wait node supports end-to-end
+requeue. Use review to inspect the available approve/reject actions.
 
 `factory calibrate RUN` qualifies deliberate-fault sensitivity; `factory check RUN`
 observes the verified candidate and requires semantic assertions. `factory review
-RUN` renders a safe local packet, and `factory feedback RUN --subject-digest DIGEST
---text TEXT` queues repairs, never approval. See the [operator guide](operations.md#manual-factory-path)
-for the journey and holds. Only factory `watch` and `evidence` remain proposed.
+RUN` renders a safe local packet and issues a terminal-only challenge.
+Feedback and Stage 1 review reports supply findings, never approval.
+`factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+authenticates the registered operator; publication uses `pull_request.open`, and
+human waits use the exact node-scoped actions reported by review. Stage 1
+approve/reject/resume require the same authentication. Decisions expire and changed
+bound inputs supersede them; challenges are consumed once. See the
+[operator guide](operations.md#authenticated-terminal-decisions) for registration,
+repair commands and trusted-local limitations. Only factory `watch` and
+`evidence` remain proposed.
 The manual path ends at a verified open PR and outcome observation, never automatic
 merge, release or deployment. Control is deterministic and local; models never
 schedule or decide completion. Trusted-local operation is not containment.

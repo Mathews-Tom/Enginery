@@ -96,6 +96,33 @@ Per the system design's general adapter requirements:
 Do not add a general plugin/discovery framework before two real
 implementations require the same extension point.
 
+## Behavioral observers and local review presentation
+
+Command observers execute trusted argv against the verified candidate; service
+observers probe loopback HTTP. The qualified headless-shell observer uses CDP
+pipes, a fresh profile and loopback-only requests. Operator-owned
+`[executables].browser` and `browser_digest` select and qualify it; project policy
+cannot select host programs. Missing/mismatched qualification holds rather than
+substituting a browser. Receipts bind candidate/configuration/evaluator/environment
+identity and raw capture digests; decodable PNG media is not semantic success.
+Protected deliberate-fault calibration must be current and classify each outcome
+as `caught`, `escaped`, `not_injected`, or `inconclusive`; missing tools/timeouts
+are inconclusive, never catches. See [configuration and receipts](operations.md#behavioral-check-custody-and-receipts).
+
+Optional `[executables].lavish` is also user-preferences-only. The presenter uses
+only local open/poll/end operations on Enginery's escaped, CSP-restricted packet,
+with `LAVISH_AXI_TELEMETRY=0`, a private `LAVISH_AXI_STATE_DIR`, explicit
+`LAVISH_AXI_PORT`, and `LAVISH_AXI_NO_OPEN=1` when `--no-open` is requested.
+It never shares, exports or updates. Poll results become bounded repair findings,
+not decisions. Absence leaves the fully usable terminal review available.
+
+Decision ingress is the trusted CLI terminal, not a browser or presenter API.
+The secret challenge never enters HTML, JSON or presenter artifacts. A registered
+operator's `factory decide` uses the same ledger authority as Stage 1 human waits;
+adapters must not treat annotations, reports, queued prompts or scores as approval.
+This is trusted-local authority, not isolation from another same-user process.
+
+
 ## Two independent harness adapters, side by side
 
 `OmpHarness` and `ClaudeCodeHarness` (`src/enginery/adapters/omp.py`,

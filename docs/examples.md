@@ -37,13 +37,19 @@ to end. Label the issue with exactly one `enginery/work-kind/issue` (or
 `plan`) label and one `enginery/risk/low` (or `medium`) label, then build the
 request from it:
 
+Before building the request, commit project policy containing non-empty
+`[acceptance]` checks at the selected base revision. Checks and their declared
+fault classes must describe the changed behavior; see
+[behavioral acceptance](operations.md#behavioral-check-custody-and-receipts).
+Without these base-bound checks a new run holds with `no_behavioral_checks`.
+
 ```bash
 uv run enginery stage1 build-request --runner trusted-local \
   --output request.json --run-id issue-142 \
   --repository <owner>/<repo> --external-reference "<owner>/<repo>#142" \
   --base-revision <real base revision> --repository-path <absolute path to the local checkout> \
   --workspace-path <absolute path to a fresh workspace directory> \
-  --artifact-root <absolute path to an artifact directory>
+  --artifact-root <absolute path to a private artifact directory under the Enginery state home>
 ```
 
 A trusted-local run validates with `uv run pytest -q` unless you pass
@@ -53,7 +59,9 @@ image (`python3`, `node`, `git`, `uv`, `sh`), so a tool the image lacks, such as
 `pytest`, holds the run with a reason naming it. An explicit
 `--implementation-attempt-id` must end in `-<number>` (that number is the run's
 first generation), and `--protected-path GLOB` (repeatable) adds paths whose change
-holds the branch for `stage1 approve` / `stage1 reject` before it is published.
+holds the branch for `factory review RUN --project PROJECT` followed by an
+authenticated `factory decide` with action `pull_request.open` (or
+`human_wait.open_pr.reject` with a reason) before publication.
 
 `build-request` reads the issue through the GitHub adapter (the work item,
 source revision, and declared `enginery/work-kind/*` and `enginery/risk/*`
@@ -165,7 +173,7 @@ request = Stage1RunRequest(
         harness_provider="omp",  # or "claude-code"
         harness_credential_reference="operator-harness-session",
         harness_executable="omp",
-        artifact_root=Path("<absolute path to an artifact directory>"),
+        artifact_root=Path("<absolute private artifact directory beneath the Enginery state home>"),
     ),
 )
 
@@ -174,14 +182,23 @@ Path("request.json").write_text(json.dumps(request.initial_state(), indent=2), e
 
 The commands below start from the `request.json` that `build-request` wrote:
 
+Run review/decide on the same genuine local terminal after registering the
+operator's `[review_authority]` in user preferences. This successful path assumes
+passing validation/current-head CI and no actionable review findings; repair any
+reported hold rather than treating a transient `wait` as completion.
+
 ```bash
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
 # repeat watch --advance until next_action is `await_human_review`
 uv run enginery stage1 review --database ledger.db --owner operator --run-id issue-142 \
   --report review.json --repair-attempt 0
+uv run enginery factory review issue-142 --project <repository> --database ledger.db --owner operator
+# copy DIGEST and SECRET from that terminal review
+uv run enginery factory decide issue-142 --project <repository> --database ledger.db --owner operator \
+  --action pull_request.open --subject-digest DIGEST --challenge SECRET
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
-# repeat until next_action is `wait` -- the run is merge_ready
+# repeat until next_action is wait and the verify node's status is passed
 uv run enginery stage1 evidence --database ledger.db --owner operator --run-id issue-142
 ```
 

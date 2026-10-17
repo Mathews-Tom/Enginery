@@ -18,6 +18,8 @@ from full_system_gate import run_gate
 def test_stage1_only_gate_passes() -> None:
     report = run_gate(stages="1", restart_between_stages=True)
     assert len(report.run_evidence) == 2
+    assert all(run["publication_decision_count"] == 1 for run in report.run_evidence)
+    assert len({run["publication_decision_id"] for run in report.run_evidence}) == 2
     assert report.stage2_evidence is None
     assert report.evidence_digest.startswith("sha256:")
 

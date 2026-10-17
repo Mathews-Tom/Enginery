@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import getpass
 import json
+import os
+import pty
 import subprocess
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from enginery.application.human_decisions import ReviewAuthority
 from enginery.application.work_ports import WorkLedgerSnapshot
+from enginery.cli import factory_decisions
 from enginery.cli.main import main
 from enginery.cli.stage1_composition import lease_window
 from enginery.domain.digests import Digest
@@ -21,16 +28,76 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
+from enginery.ledger.human_decisions import issue_challenge
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.stage1 import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
+    Stage1RunService,
     stage1_request_from_state,
 )
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
+
+
+@pytest.fixture
+def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Real TTY, packet, nonce and decision paths over the Stage 1 ledger."""
+    master, slave = pty.openpty()
+    registration = ReviewAuthority("operator", getpass.getuser(), os.getuid())
+    original = _lifecycle
+    with (
+        os.fdopen(os.dup(slave), "r") as input_stream,
+        os.fdopen(os.dup(slave), "w") as output_stream,
+    ):
+        monkeypatch.setattr(
+            factory_decisions,
+            "sys",
+            SimpleNamespace(stdin=input_stream, stdout=output_stream),
+        )
+        monkeypatch.setattr(factory_decisions, "operator_registration", lambda: registration)
+
+        def authenticated(database: Path, command: str, *arguments: str) -> int:
+            if command not in {"approve", "reject", "resume"}:
+                return original(database, command, *arguments)
+            run_id = arguments[arguments.index("--run-id") + 1]
+            with LedgerService.open(database) as ledger:
+                runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
+                request = (
+                    Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+                )
+                packet = factory_decisions.build_packet(request.repository_path, ledger, request)
+                _, context = factory_decisions._authenticate(None)
+                issued = issue_challenge(
+                    ledger.connection,
+                    run_id=run_id,
+                    subject_fields=packet.subject_fields(),
+                    actions=factory_decisions._actions(ledger, request),
+                    context=context,
+                    registered_humans=registration.registered_humans,
+                )
+            reason = () if "--reason" in arguments else ("--reason", "operator investigated wait")
+            return original(
+                database,
+                command,
+                *arguments,
+                *reason,
+                "--subject-digest",
+                issued.subject_digest,
+                "--challenge",
+                issued.challenge,
+            )
+
+        monkeypatch.setattr(
+            __import__(__name__, fromlist=["_lifecycle"]), "_lifecycle", authenticated
+        )
+        try:
+            yield
+        finally:
+            os.close(master)
+            os.close(slave)
 
 
 def test_stage1_start_watch_and_evidence_are_ledger_backed(
@@ -99,7 +166,8 @@ def test_stage1_rejects_invalid_persisted_implementation_budget(
         stage1_request_from_state(state)
 
 
-def test_stage1_approve_resume_and_cancel_route_through_runtime(
+@pytest.mark.usefixtures("authenticated_decisions")
+def test_stage1_refuses_requeue_without_changing_wait_or_consuming_challenge(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "ledger.db"
@@ -120,14 +188,15 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
             "--operation-id",
             "plan-approval:run-stage1:1",
         )
-        == 0
+        == 2
     )
-    assert json.loads(capsys.readouterr().out)["status"] == "queued"
+    assert "human_wait_requeue_unsupported" in capsys.readouterr().err
+    assert _node_state(database, "plan_approval")["status"] == "awaiting_human"
 
     assert (
         _lifecycle(
             database,
-            "cancel",
+            "reject",
             "--run-id",
             "run-stage1",
             "--node-id",
@@ -135,7 +204,7 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["status"] == "cancelled"
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
     _register_human_node(database, request, node_id="no_change_confirmation")
     assert (
@@ -154,6 +223,7 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
     assert json.loads(capsys.readouterr().out)["status"] == "passed"
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 @pytest.mark.parametrize("command", ["approve", "reject"])
 def test_stage1_human_decisions_on_a_pinned_run_record_its_selection_digest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
@@ -183,6 +253,7 @@ def test_stage1_human_decisions_on_a_pinned_run_record_its_selection_digest(
     assert state["status"] == ("passed" if command == "approve" else "failed")
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 def test_stage1_human_decisions_on_a_pre_selection_run_record_no_selection_digest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -242,6 +313,7 @@ def test_stage1_cancel_rejects_human_wait_without_worker_lease(
     assert "cannot cancel a human-waiting non-agent node" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("authenticated_decisions")
 def test_stage1_rejects_human_wait_and_invalid_request(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -653,3 +725,54 @@ def test_watch_never_presents_a_legacy_carried_dollar_number_as_enforcement(
 
     assert watched["cost_budget"] == {"value": "5.0", "enforced": False}
     assert evidence["request_digest"] == str(legacy.digest)
+
+
+@pytest.mark.usefixtures("authenticated_decisions")
+def test_factory_explicit_stage1_ledger_refuses_unsupported_requeue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "operator's ledger.db"
+    request = _start_request(database, tmp_path)
+    capsys.readouterr()
+    _register_qualify_and_human_node(database, request, node_id="no_change_confirmation")
+    scope = [
+        "--project",
+        str(request.repository_path),
+        "--database",
+        str(database),
+        "--owner",
+        "stage1-cli",
+    ]
+    assert main(["factory", "review", "run-stage1", *scope, "--json"]) == 0
+    report_text, challenge_line = capsys.readouterr().out.strip().rsplit("\n", 1)
+    report = json.loads(report_text)
+    assert report["challenge_issued"] is True
+    challenge = challenge_line.removeprefix("Decision challenge: ")
+    assert challenge_line != challenge
+    assert (
+        main(
+            [
+                "factory",
+                "decide",
+                "run-stage1",
+                *scope,
+                "--action",
+                "human_wait.no_change_confirmation.requeue",
+                "--subject-digest",
+                report["subject_digest"],
+                "--challenge",
+                challenge,
+                "--reason",
+                "reconsider the implementation",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    assert "human_wait_requeue_unsupported" in capsys.readouterr().err
+    assert _node_state(database, "no_change_confirmation")["status"] == "awaiting_human"
+    with LedgerService.open(database) as ledger:
+        row = ledger.connection.execute(
+            "SELECT consumed_at FROM human_decision_challenges"
+        ).fetchone()
+        assert row["consumed_at"] is None

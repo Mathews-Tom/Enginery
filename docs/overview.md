@@ -207,9 +207,18 @@ Stage 1 coordinator and immutable request binding. `pause` and `drain` control
 project-ledger dispatch; `factory pause --lift` lifts the pause.
 
 `factory calibrate` and `check` bind independent observations and semantic verdicts
-to the current build. `factory review RUN` renders safe local terminal/HTML packets;
-`factory feedback RUN` queues repairs and grants no approval. Only factory `watch`
-and `evidence` remain proposed; scheduled collection/watch is not shipped.
+to the current build. `factory review RUN` renders safe local terminal/HTML packets
+and issues a one-time challenge only on a genuine same stdin/stdout TTY.
+`factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+authenticates the registered local operator; publication uses `pull_request.open`.
+Decisions expire and changed bound inputs supersede them. Feedback and Stage 1
+review reports supply findings, never authority. Human-wait approve/reject
+commands require the same node-scoped authenticated protocol; `stage1 resume`
+refuses with `human_wait_requeue_unsupported` (no supported requeue nodes). See
+[operator registration and decisions](operations.md#authenticated-terminal-decisions).
+This trusted-local protocol does not contain another process running as the same
+OS user. Only factory `watch` and `evidence` remain proposed; scheduled
+collection/watch is not shipped.
 The manual path ends at a verified open PR and outcome observation, never merge,
 release or deployment. Those actions retain their separate workflow policy gates.
 Shipped control is deterministic and local; models do not poll, schedule or decide

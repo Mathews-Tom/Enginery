@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from enginery.cli.setup_files import read_regular, refuse_links, write_private_a
 from enginery.cli.stage1_composition import HEARTBEAT_WINDOW, read_only_service, runtime_for_run
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
-from enginery.domain.ids import RunId
+from enginery.domain.ids import NodeId, RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.task_repository import intake_path_for
 from enginery.evidence.review_rendering import render_html, render_terminal
@@ -81,6 +82,31 @@ def _receipt_document(root: Path, digest_text: str) -> dict[str, object]:
     return {"digest": digest_text, "availability": "digest_verified", "document": document}
 
 
+def preimplementation_waits(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
+    """Find waits whose dependency closure does not include implementation."""
+
+    def requires_implementation(node_id: str, visited: frozenset[str]) -> bool:
+        if node_id == "implement":
+            return True
+        if node_id in visited:
+            return False
+        node = request.manifest.nodes[NodeId(node_id)]
+        return any(
+            requires_implementation(str(dependency), visited | {node_id})
+            for dependency in node.dependencies
+        )
+
+    return tuple(
+        str(node_id)
+        for node_id in request.manifest.nodes
+        if _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{request.run.id}:{node_id}").get(
+            "status"
+        )
+        == "awaiting_human"
+        and not requires_implementation(str(node_id), frozenset())
+    )
+
+
 def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest) -> ReviewPacket:
     """Assemble one immutable subject from the run, not worker presentation documents."""
     run_id = str(request.run.id)
@@ -91,35 +117,51 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     }
     implementation = states["implement"]
     attempt_id = implementation.get("attempt_id")
-    if not isinstance(attempt_id, str):
-        raise MissingPrerequisiteError(
-            "review requires a collected implementation with a verified head"
-        )
-    attempt = _projection(ledger, "node_attempt", attempt_id)
+    attempt = _projection(ledger, "node_attempt", attempt_id) if isinstance(attempt_id, str) else {}
     result = attempt.get("result")
     result = dict(result) if isinstance(result, Mapping) else {}
     head = result.get("head_revision")
-    if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
-        raise MissingPrerequisiteError("review requires the host-verified implementation head")
-    # Inspect committed objects only: no external diff/textconv and no untracked worker content.
-    repository = (
-        intake_path_for(request.workspace_path)
-        if request.runner.isolated_mode
-        else request.workspace_path
-    )
-    if not request.runner.isolated_mode and _revision(repository, "HEAD") != head:
-        raise InvalidInputError(
-            "review head changed; collect and validate the current implementation"
+    early_waits = preimplementation_waits(ledger, request)
+    preimplementation = not isinstance(head, str) and bool(early_waits)
+    if preimplementation:
+        repository = request.repository_path
+        base = _revision(repository, request.run.base_revision)
+        head = ""
+        diff = ""
+        changed_paths: tuple[str, ...] = ()
+    else:
+        if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
+            raise MissingPrerequisiteError("review requires the host-verified implementation head")
+        # Only host-owned committed objects, never the isolated worker clone.
+        repository = (
+            intake_path_for(request.workspace_path)
+            if request.runner.isolated_mode
+            else request.workspace_path
         )
-    bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
-    base = _revision(repository, bound_base)
-    diff = _git(repository, "diff", *DIFF_FLAGS, base, head, "--")
-    changed_paths = tuple(
-        value
-        for value in _git(
-            repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--"
-        ).split("\0")
-        if value
+        if not request.runner.isolated_mode and _revision(repository, "HEAD") != head:
+            raise InvalidInputError(
+                "review head changed; collect and validate the current implementation"
+            )
+        bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
+        base = _revision(repository, bound_base)
+        diff = _git(repository, "diff", *DIFF_FLAGS, base, head, "--")
+        changed_paths = tuple(
+            value
+            for value in _git(
+                repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--"
+            ).split("\0")
+            if value
+        )
+    policy = ProtectedPathPolicy(request.protected_paths)
+    protected_digest = str(
+        Digest.of_json(
+            {
+                "patterns": list(policy.patterns),
+                "base_revision": base,
+                "head_revision": head,
+                "matched_paths": list(policy.matched(changed_paths)),
+            }
+        )
     )
     observed = _projection(ledger, "behavioral_acceptance", run_id)
     configuration_digest = str(request.run.configuration_snapshot_digest)
@@ -140,7 +182,21 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         receipts.append(calibration)
     raw = request.initial_state()
     findings = states["review"].get("finding_ids", [])
-    ci = states["verify"]
+    ci = {
+        key: value
+        for key, value in states["verify"].items()
+        if key
+        in {
+            "head_revision",
+            "configuration_snapshot_digest",
+            "base_revision",
+            "evidence_bundle_digest",
+            "evidence_digest",
+            "behavioral_receipt_digests",
+            "github_evidence",
+            "github_evidence_digest",
+        }
+    }
     ci_head = ci.get("head_revision")
     ci_view: dict[str, object] = {
         "availability": "current_head"
@@ -171,6 +227,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
                 {
                     "artifact_root": str(request.execution_configuration.artifact_root),
                     "implementation_result": result,
+                    "preimplementation_waits": list(early_waits) if preimplementation else [],
                     "validation": states["validate"],
                 }
             ),
@@ -227,6 +284,8 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         ci_evidence_json=_json(ci_view),
         findings_json=_json(findings),
         sections=sections,
+        protected_publication_digest=protected_digest,
+        preimplementation_waits=early_waits if preimplementation else (),
     )
     # No packet, even a display-only one, may leak credential-shaped worker text.
     assert_no_raw_credentials(_json(packet.to_state()))
@@ -234,23 +293,41 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
 
 
 def _open(
-    project: Path, run_id: str, *, writable: bool = False
+    project: Path,
+    run_id: str,
+    *,
+    writable: bool = False,
+    database: Path | None = None,
+    owner: str = "factory",
 ) -> tuple[LedgerService, Stage1RunRequest]:
     RunId(run_id)
     if re.fullmatch(r"[A-Za-z0-9_.-]+", run_id) is None or run_id in {".", ".."}:
         raise InvalidInputError("review run id must be a plain identifier")
-    connection = read_ledger(project)
-    if connection is None:
-        raise MissingPrerequisiteError("factory review requires an existing project run")
-    if writable:
-        connection.close()
-        path = database_path(project)
-        require_state_path(path, what="project ledger")
-        ledger = LedgerService.open(path)
+    if database is None:
+        connection = read_ledger(project)
+        if connection is None:
+            raise MissingPrerequisiteError("factory review requires an existing project run")
+        if writable:
+            connection.close()
+            path = database_path(project)
+            require_state_path(path, what="project ledger")
+            ledger = LedgerService.open(path)
+        else:
+            ledger = LedgerService(connection)
     else:
-        ledger = LedgerService(connection)
+        path = database.expanduser().absolute()
+        refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
+        if not path.is_file():
+            raise MissingPrerequisiteError("factory review requires an existing Stage 1 ledger")
+        if writable:
+            ledger = LedgerService.open(path)
+        else:
+            connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=1")
+            ledger = LedgerService(connection)
     try:
-        runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
+        runtime = runtime_for_run(ledger, owner=owner, run_id=run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
         return ledger, request
     except BaseException:
@@ -258,9 +335,11 @@ def _open(
         raise
 
 
-def read_packet(project: Path, run_id: str) -> ReviewPacket:
+def read_packet(
+    project: Path, run_id: str, *, database: Path | None = None, owner: str = "factory"
+) -> ReviewPacket:
     """Rebuild the CURRENT subject; never trust a previously rendered packet."""
-    ledger, request = _open(project, run_id)
+    ledger, request = _open(project, run_id, database=database, owner=owner)
     try:
         return build_packet(project, ledger, request)
     finally:
@@ -277,8 +356,10 @@ def _packet_path(project: Path, packet: ReviewPacket) -> Path:
     )
 
 
-def review(project: Path, run_id: str) -> dict[str, object]:
-    packet = read_packet(project, run_id)
+def review(
+    project: Path, run_id: str, *, database: Path | None = None, owner: str = "factory"
+) -> dict[str, object]:
+    packet = read_packet(project, run_id, database=database, owner=owner)
     lines = render_terminal(packet)
     document = render_html(packet).encode()
     path = _packet_path(project, packet)

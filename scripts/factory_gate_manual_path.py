@@ -9,9 +9,14 @@ unexercised dependants. No engine, credentials or hosted inference is used.
 from __future__ import annotations
 
 import contextlib
+import errno
+import getpass
 import hashlib
 import json
 import os
+import pty
+import re
+import select
 import shlex
 import shutil
 import signal
@@ -19,7 +24,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -70,7 +75,10 @@ REQUIRED: dict[str, str] = {
     "repeat-run-same-identity": (
         "factory run of the same snapshot resumes the existing request and run"
     ),
-    "terminal-review-approved": "stage1 review accepts a terminal independent approving report",
+    "terminal-review-findings-only": "stage1 review records findings without publication authority",
+    "terminal-publication-decision": (
+        "a registered operator reviews and authorizes the current subject on one real terminal"
+    ),
     "coordinator-kill-after-pr": (
         "SIGKILL occurs after PR creation before its response is delivered"
     ),
@@ -242,6 +250,89 @@ raise SystemExit(1)
 """
 
 
+MAX_TERMINAL_BYTES = 1024 * 1024
+OPERATOR_PRINCIPAL = "gate-human"
+PUBLICATION_ACTION = "pull_request.open"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalResult:
+    code: int
+    text: str
+    challenge: str | None = field(default=None, repr=False)
+    subject: str | None = None
+
+
+class TerminalSession:
+    """Keep one real OS terminal for issuance and consumption; retain only scrubbed output."""
+
+    def __init__(self) -> None:
+        self.master, self.slave = pty.openpty()
+        self.secrets: set[str] = set()
+        self.closed = False
+
+    def scrub(self, text: str) -> str:
+        for secret in self.secrets:
+            marker = "<challenge-sha256:" + hashlib.sha256(secret.encode()).hexdigest() + ">"
+            text = text.replace(secret, marker)
+        return text
+
+    def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> TerminalResult:
+        process = subprocess.Popen(
+            argv,
+            stdin=self.slave,
+            stdout=self.slave,
+            stderr=self.slave,
+            cwd=cwd,
+            env=env,
+            shell=False,
+        )
+        output = bytearray()
+        deadline = time.monotonic() + 180
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("interactive CLI exceeded its deadline")
+                ready, _, _ = select.select([self.master], [], [], 0.05)
+                if ready:
+                    try:
+                        chunk = os.read(self.master, 65536)
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+                        chunk = b""
+                    output.extend(chunk)
+                    if len(output) > MAX_TERMINAL_BYTES:
+                        raise RuntimeError("interactive CLI output exceeded 1 MiB")
+                if process.poll() is not None and not ready:
+                    break
+            text = output.decode("utf-8").replace("\r\n", "\n")
+            challenges = re.findall(
+                r"(?im)^Decision challenge:\s*([0-9a-f]{64})\s*$",
+                text,
+            )
+            self.secrets.update(challenges)
+            if len(challenges) > 1:
+                raise RuntimeError("review printed its plaintext challenge more than once")
+            subjects = re.findall(r"(?im)^Subject digest:\s*(sha256:[0-9a-f]{64})\s*$", text)
+            return TerminalResult(
+                process.returncode or 0,
+                self.scrub(text),
+                challenges[0] if challenges else None,
+                subjects[0] if subjects else None,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            os.close(self.master)
+            os.close(self.slave)
+
+
 def required_assertions(options: GateOptions) -> dict[str, str]:
     return dict(REQUIRED)
 
@@ -274,6 +365,7 @@ class ManualPathGate(SetupGate):
         self.clients: list[subprocess.Popen[str]] = []
         self.completed: list[dict[str, Any]] = []
         self.recorded: set[str] = set()
+        self.terminal: TerminalSession | None = None
         self.worker_groups: set[int] = set()
         self.project = self.projects / "manual-path"
         self.state = private_state_directory(self.project, self.environment())
@@ -339,6 +431,121 @@ class ManualPathGate(SetupGate):
                 "fault_classes": ["constant_result", "wrong_build"],
             }
         ]
+
+    def publication_hold(self, reason: str = "decision_required") -> tuple[int, dict[str, Any]]:
+        """Observe an intentional authority refusal without treating other CLI errors as holds."""
+        result = self.cli(
+            "factory",
+            "resume",
+            self.run_id,
+            "--wait-seconds",
+            "1",
+            "--project",
+            str(self.project),
+            "--json",
+        )
+        if result.returncode not in {0, 5} or (
+            result.returncode == 5 and not result.stderr.startswith(reason + ":")
+        ):
+            raise RuntimeError(
+                f"expected publication hold {reason}, got exit {result.returncode}: {result.stderr}"
+            )
+        if result.returncode == 0:
+            json.loads(result.stdout)  # A normal response must still be genuine CLI JSON.
+        status_code, status = self.factory("status", self.run_id)
+        ledger = LedgerService.open(self.database)
+        try:
+            projection = ledger.read_projection(
+                aggregate_type="runtime_node",
+                aggregate_id=f"{self.run_id}:open_pr",
+            )
+            state = {} if projection is None else dict(projection.state)
+        finally:
+            ledger.close()
+        waiting = any(
+            node.get("node_id") == "open_pr" and node.get("status") == "awaiting_human"
+            for node in status.get("nodes", [])
+        )
+        if (
+            status_code not in {0, 5}
+            or not waiting
+            or state.get("status") != "awaiting_human"
+            or state.get("reason") != reason
+            or "--action pull_request.open" not in str(status.get("next_decision"))
+            or (self.bin / "gh-pr.json").exists()
+        ):
+            raise RuntimeError("publication refusal did not persist the expected decision wait")
+        return result.returncode, {
+            **status,
+            "publication_refusal": {"reason": reason, "stderr": result.stderr},
+            "publication_node": state,
+        }
+
+    def preferences(self, *, ttl: int = 1800, lavish: str | None = None) -> None:
+        text = (
+            "schema_version = 1\n[executables]\n"
+            f"github = {json.dumps(str(self.bin / 'gh'))}\n"
+            f"harness = {json.dumps(str(self.bin / 'omp'))}\n"
+        )
+        if lavish is not None:
+            text += f"lavish = {json.dumps(lavish)}\n"
+        self.write_user(
+            text + "[review_authority]\n"
+            f"principal_id = {json.dumps(OPERATOR_PRINCIPAL)}\n"
+            f"os_user = {json.dumps(getpass.getuser())}\nos_uid = {os.getuid()}\n"
+            f"ttl_seconds = {ttl}\n"
+        )
+
+    def interactive(self, command: str, *arguments: str) -> TerminalResult:
+        if self.terminal is None:
+            self.terminal = TerminalSession()
+        args = ["factory", command, self.run_id, "--project", str(self.project), *arguments]
+        result = self.terminal.run(
+            [sys.executable, "-m", "enginery.cli.main", *args],
+            cwd=self.root,
+            env=self.environment(),
+        )
+        safe_args = [self.terminal.scrub(arg) for arg in args]
+        self.commands.append("enginery " + shlex.join(safe_args))
+        self.completed.append(
+            {
+                "argv": safe_args,
+                "exit_code": result.code,
+                "stdout": result.text,
+                "stderr": "",
+                "real_pty": True,
+            }
+        )
+        return result
+
+    def challenge(self) -> TerminalResult:
+        result = self.interactive("review")
+        if result.code or result.challenge is None or result.subject is None:
+            raise RuntimeError("trusted review did not issue a terminal challenge: " + result.text)
+        return result
+
+    def decide(
+        self,
+        issued: TerminalResult,
+        *,
+        principal: str = OPERATOR_PRINCIPAL,
+        action: str = PUBLICATION_ACTION,
+        subject: str | None = None,
+        challenge: str | None = None,
+    ) -> TerminalResult:
+        if issued.challenge is None or issued.subject is None:
+            raise RuntimeError("a decision requires a real issued challenge")
+        return self.interactive(
+            "decide",
+            "--action",
+            action,
+            "--subject-digest",
+            subject or issued.subject,
+            "--challenge",
+            challenge or issued.challenge,
+            "--principal-id",
+            principal,
+        )
 
     def launch(self, command: str, *arguments: str) -> subprocess.Popen[str]:
         args = ("factory", command, *arguments, "--project", str(self.project), "--json")
@@ -431,6 +638,8 @@ class ManualPathGate(SetupGate):
                             os.killpg(identity.process_group_id, signal.SIGKILL)
             finally:
                 ledger.close()
+        if self.terminal is not None:
+            self.terminal.close()
         super().cleanup()
 
 
@@ -464,11 +673,7 @@ def step_prepare(gate: ManualPathGate) -> None:
     branch = gate.git(project, "symbolic-ref", "--short", "HEAD")
     gate.git(project, "push", "-q", "origin", branch)
     (gate.bin / "gh-state.json").write_text(json.dumps({"origin": str(origin)}), encoding="utf-8")
-    gate.write_user(
-        "schema_version = 1\n[executables]\n"
-        f"github = {json.dumps(str(gate.bin / 'gh'))}\n"
-        f"harness = {json.dumps(str(gate.bin / 'omp'))}\n"
-    )
+    gate.preferences()
     code, report = gate.factory(
         "init",
         "--apply",
@@ -508,6 +713,7 @@ def step_prepare(gate: ManualPathGate) -> None:
             "initial_commits": 2,
         },
     )
+    gate.git(project, "push", "-q", "origin", branch)
 
 
 def step_collect(gate: ManualPathGate) -> None:
@@ -743,7 +949,7 @@ def step_inspection_review(gate: ManualPathGate) -> None:
     check_code, checked = gate.factory("check", gate.run_id)
     if calibration_code != 0 or check_code != 0 or checked.get("result") != "pass":
         raise RuntimeError("current behavioral evidence did not pass: " + json.dumps(checked))
-    report_path = gate.root / "approving-review.json"
+    report_path = gate.root / "review-findings.json"
     report_path.write_text(
         json.dumps(
             {"producer": "local-implementation", "reviewer": "human-terminal", "findings": []}
@@ -768,11 +974,27 @@ def step_inspection_review(gate: ManualPathGate) -> None:
         raise RuntimeError(f"stage1 review exited {result.returncode}: {result.stderr}")
     report = dict(json.loads(result.stdout))
     gate.record(
-        "terminal-review-approved",
-        result.returncode == 0 and report.get("review_outcome") == "approved",
+        "terminal-review-findings-only",
+        result.returncode == 0
+        and report.get("findings_recorded") is True
+        and not (gate.bin / "gh-pr.json").exists(),
         {"exit": result.returncode, "json": report},
         {"report": _read(report_path)},
     )
+    _, held = gate.publication_hold()
+    issued = gate.challenge()
+    decided = gate.decide(issued)
+    gate.record(
+        "terminal-publication-decision",
+        issued.code == decided.code == 0
+        and "pull_request.open" in issued.text
+        and "decision" in json.dumps(held).lower()
+        and not (gate.bin / "gh-pr.json").exists(),
+        {"review": issued.text, "decision": decided.text, "before_decision": held},
+        {"kind": "real same-PTY CLI", "principal_id": OPERATOR_PRINCIPAL},
+    )
+    if decided.code != 0:
+        raise RuntimeError("authenticated publication decision refused: " + decided.text)
 
 
 def step_pr_recovery(gate: ManualPathGate) -> None:

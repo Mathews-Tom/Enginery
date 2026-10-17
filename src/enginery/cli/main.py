@@ -122,7 +122,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "resume",
         "evidence",
     ):
-        lifecycle_parser = stage1_subparsers.add_parser(command)
+        lifecycle_parser = stage1_subparsers.add_parser(
+            command,
+            help=(
+                "Unsupported human-wait requeue; refuses with human_wait_requeue_unsupported."
+                if command == "resume"
+                else "Authenticated human-wait decision; requires a factory review challenge."
+                if command in {"approve", "reject"}
+                else None
+            ),
+        )
         lifecycle_parser.add_argument("--database", required=True, type=Path)
         lifecycle_parser.add_argument("--owner", required=True)
         if command == "start":
@@ -136,7 +145,10 @@ def _build_parser() -> argparse.ArgumentParser:
             lifecycle_parser.add_argument("--repair-attempt", required=True, type=int)
         if command in {"approve", "reject", "cancel", "resume"}:
             lifecycle_parser.add_argument("--node-id", required=True)
-        if command in {"approve", "reject"}:
+        if command in {"approve", "reject", "resume"}:
+            lifecycle_parser.add_argument("--subject-digest", required=True)
+            lifecycle_parser.add_argument("--challenge", required=True)
+            lifecycle_parser.add_argument("--principal-id", default=None)
             lifecycle_parser.add_argument("--reason", required=True)
         if command == "resume":
             lifecycle_parser.add_argument("--attempt-id", required=True)

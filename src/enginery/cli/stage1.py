@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enginery.cli.factory_decisions import decide_in_ledger
 from enginery.cli.stage1_composition import (
     HEARTBEAT_WINDOW,
     advancing_service,
@@ -103,33 +103,23 @@ def _resolve_human_wait(args: argparse.Namespace, *, approved: bool) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
-        selection = (
-            Stage1RunService(runtime=runtime, ledger=ledger)
-            .read(RunId(args.run_id))
-            .request.execution_selection
+        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
+        action = (
+            "pull_request.open"
+            if approved and args.node_id == "open_pr"
+            else f"human_wait.{args.node_id}.{'approve' if approved else 'reject'}"
         )
-        epoch = runtime.claim_epoch(now=_now(), heartbeat_window=HEARTBEAT_WINDOW)
-        extra: dict[str, object] = {
-            "operator_decision": "approved" if approved else "rejected",
-            "reason": args.reason,
-        }
-        if not selection.legacy:
-            extra["execution_selection_digest"] = str(selection.digest)
-        runtime.resolve_human_wait(
-            run_id=args.run_id,
-            node_id=args.node_id,
-            epoch=epoch.epoch,
-            now=_now(),
-            outcome="passed" if approved else "failed",
-            extra=extra,
+        result = decide_in_ledger(
+            ledger,
+            request,
+            action=action,
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
+            owner=args.owner,
         )
-        _print(
-            {
-                "run_id": args.run_id,
-                "node_id": args.node_id,
-                "status": "passed" if approved else "failed",
-            }
-        )
+        _print({**result, "status": "passed" if approved else "failed"})
     finally:
         ledger.close()
 
@@ -158,6 +148,8 @@ def _review(args: argparse.Namespace) -> None:
             {
                 "run_id": str(run.request.run.id),
                 "review_outcome": result.outcome.value,
+                "findings_recorded": True,
+                "authority_granted": False,
             }
         )
     finally:
@@ -212,19 +204,17 @@ def _resume(args: argparse.Namespace) -> None:
     ledger = LedgerService.open(args.database)
     try:
         runtime = runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
-        epoch = runtime.claim_epoch(now=_now(), heartbeat_window=HEARTBEAT_WINDOW)
-        request = runtime.read_node_request(run_id=args.run_id, node_id=args.node_id)
-        runtime.resume_human_wait(
-            request=replace(
-                request,
-                attempt_id=args.attempt_id,
-                operation_id=args.operation_id,
-                expected_attempt_version=0,
-            ),
-            epoch=epoch.epoch,
-            now=_now(),
+        request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
+        decide_in_ledger(
+            ledger,
+            request,
+            action=f"human_wait.{args.node_id}.requeue",
+            subject_digest=args.subject_digest,
+            challenge=args.challenge,
+            principal_id=args.principal_id,
+            reason=args.reason,
+            owner=args.owner,
         )
-        _print({"run_id": args.run_id, "node_id": args.node_id, "status": "queued"})
     finally:
         ledger.close()
 

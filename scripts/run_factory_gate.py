@@ -35,6 +35,14 @@ Scenarios:
     durable recovery after client/coordinator interruption, and pause/drain. Like setup,
     it rejects hosted-session, harness-selection, engine, image and custody flags.
 
+``behavioral-acceptance``
+    Local changed-candidate CLI/service/browser observation and deliberate-fault calibration.
+
+``review-authority``
+    Local real CLI/PTY review, feedback, one-time authenticated decisions, refusal cases,
+    evidence supersession and publication. No GitHub pagination assertions are implied.
+    Like behavioral-acceptance, it rejects hosted, engine, image and custody flags.
+
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;
 raw artifacts go to ``<evidence stem>.raw/`` beside it. Exit status: 0 only if every required
 assertion ran and passed; 1 if any assertion failed or did not run; 2 for a usage error; 3 when the
@@ -95,12 +103,14 @@ SCENARIO_AUTH = "runner-auth"
 SCENARIO_SETUP = "setup"
 SCENARIO_MANUAL_PATH = "manual-path"
 SCENARIO_BEHAVIORAL = "behavioral-acceptance"
+SCENARIO_REVIEW_AUTHORITY = "review-authority"
 SCENARIO_NAMES = (
     SCENARIO_BOUNDARY,
     SCENARIO_AUTH,
     SCENARIO_SETUP,
     SCENARIO_MANUAL_PATH,
     SCENARIO_BEHAVIORAL,
+    SCENARIO_REVIEW_AUTHORITY,
 )
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
@@ -127,6 +137,7 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_behavioral as behavioral
     import factory_gate_boundary as boundary
     import factory_gate_manual_path as manual_path
+    import factory_gate_review_authority as review_authority
     import factory_gate_setup as setup
 
     return {
@@ -154,6 +165,13 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             behavioral.run,
             behavioral.finalize,
             prepare=behavioral.prepare,
+        ),
+        SCENARIO_REVIEW_AUTHORITY: ScenarioSpec(
+            review_authority.required_assertions,
+            False,
+            review_authority.run,
+            review_authority.finalize,
+            prepare=review_authority.prepare,
         ),
     }
 
@@ -217,7 +235,12 @@ def parse_options(
     scenario: str = args.scenario
     if scenario == SCENARIO_AUTH and args.harness is None:
         parser.error("--harness {omp,claude} is required for --scenario runner-auth")
-    if scenario in {SCENARIO_SETUP, SCENARIO_MANUAL_PATH, SCENARIO_BEHAVIORAL}:
+    if scenario in {
+        SCENARIO_SETUP,
+        SCENARIO_MANUAL_PATH,
+        SCENARIO_BEHAVIORAL,
+        SCENARIO_REVIEW_AUTHORITY,
+    }:
         local_only = {
             "--harness": args.harness,
             "--model": args.model,
