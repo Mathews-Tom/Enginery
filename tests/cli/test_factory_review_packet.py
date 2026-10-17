@@ -372,12 +372,14 @@ def test_isolated_packet_reads_bare_intake_not_worker_replace_refs(
 
     subprocess.run(
         ("git", "clone", str(request.repository_path), str(workspace)),
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(("git", "config", "user.name", "Test"), cwd=workspace, check=True)
     subprocess.run(
         ("git", "config", "user.email", "test@example.invalid"), cwd=workspace, check=True
     )
+
     def git(*arguments: str) -> str:
         return subprocess.check_output(("git", *arguments), cwd=workspace, text=True).strip()
 
@@ -390,7 +392,13 @@ def test_isolated_packet_reads_bare_intake_not_worker_replace_refs(
     git("clone", "--bare", str(workspace), str(intake))
     git("replace", head, base)
     request = replace(
-        request, runner=replace(request.runner, trust_mode=TrustMode.ISOLATED_OCI)
+        request,
+        runner=replace(
+            request.runner,
+            trust_mode=TrustMode.ISOLATED_OCI,
+            profile_digest=Digest.of_bytes(b"isolated profile"),
+            image="sha256:" + "a" * 64,
+        ),
     )
     run_id = str(request.run.id)
     states = {
@@ -400,11 +408,13 @@ def test_isolated_packet_reads_bare_intake_not_worker_replace_refs(
         ("node_attempt", request.implementation.attempt_id): {"result": {"head_revision": head}},
     }
     monkeypatch.setattr(
-        factory_review, "_projection",
+        factory_review,
+        "_projection",
         lambda ledger, kind, identity: states.get((kind, identity), {}),
     )
     monkeypatch.setattr(
-        factory_review, "CoordinatorRuntime",
+        factory_review,
+        "CoordinatorRuntime",
         lambda *args, **kwargs: SimpleNamespace(
             read_node_request=lambda **kwargs: SimpleNamespace(base_revision=base)
         ),

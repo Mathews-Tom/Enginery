@@ -1037,6 +1037,9 @@ waiting/ended metadata are not feedback, and artifact failures are
 refused. Only Enginery-rendered safe packets are passed to the presenter. Every
 invocation sets telemetry off, host `127.0.0.1`, an explicit port, and the private
 state directory `review/<run>/lavish`; no share, export or update command is invoked.
+The shared subprocess reader caps combined stdout/stderr at 1 MiB, enforces a
+deadline, requires UTF-8 stdout, and never echoes potentially sensitive tool
+diagnostics on failure.
 The fully usable terminal packet is emitted before presentation, so presenter
 failure never suppresses it. Review diffs use host-owned committed objects with
 replacement refs, external diff and textconv disabled; binary attributes, renames,

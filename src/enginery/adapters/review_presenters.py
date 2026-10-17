@@ -5,18 +5,18 @@ from __future__ import annotations
 import json
 import os
 import re
-import selectors
 import stat
-import subprocess
-import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 
+from enginery.adapters.subprocess_output import (
+    SubprocessOutputError,
+    execute_output,
+)
 from enginery.evidence.review_rendering import PACKET_MARKER, REVIEW_CSP, escape_terminal
 
 MAX_BYTES = 1024 * 1024
-_TIMEOUT = 30.0
 
 
 class PresenterError(ValueError):
@@ -47,61 +47,10 @@ def _private_directory(path: Path) -> Path:
 
 
 def _execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
-    if any(not item or "\0" in item for item in argv):
-        raise PresenterError("presenter argv contains an empty or invalid argument")
-    if sum(len(item.encode()) + 1 for item in argv) > MAX_BYTES:
-        raise PresenterError("presenter argv exceeds 1 MiB")
     try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=environment,
-            shell=False,
-        )
-    except OSError as exc:
-        raise PresenterError("presenter executable could not be started") from exc
-    output = bytearray()
-    total = 0
-    deadline = time.monotonic() + _TIMEOUT
-    try:
-        with selectors.DefaultSelector() as selector:
-            for stream in (process.stdout, process.stderr):
-                assert stream is not None
-                selector.register(stream, selectors.EVENT_READ, stream is process.stdout)
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise PresenterError("presenter timed out")
-                for key, _ in selector.select(min(remaining, 0.1)):
-                    chunk = os.read(key.fd, min(65536, MAX_BYTES + 1 - total))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    total += len(chunk)
-                    if total > MAX_BYTES:
-                        raise PresenterError("presenter output exceeds 1 MiB")
-                    if key.data:
-                        output.extend(chunk)
-            try:
-                code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired as exc:
-                raise PresenterError("presenter timed out") from exc
-            if code:
-                # Tool diagnostics may contain credentials; never echo them.
-                raise PresenterError(f"presenter exited with status {code}")
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
-    try:
-        return output.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PresenterError("presenter output is not UTF-8") from exc
+        return execute_output(argv, environment)
+    except SubprocessOutputError as error:
+        raise PresenterError(str(error)) from error
 
 
 class _PacketMarkup(HTMLParser):
@@ -256,7 +205,9 @@ def _findings(text: str) -> tuple[str, ...]:
         return tuple(
             escape_terminal(item["prompt"])
             for item in prompts
-            if isinstance(item, dict) and isinstance(item.get("prompt"), str) and item["prompt"].strip()
+            if isinstance(item, dict)
+            and isinstance(item.get("prompt"), str)
+            and item["prompt"].strip()
         )
     # TOON uses tables for primitive objects and lists for nested targets/attachments.
     result: list[str] = []

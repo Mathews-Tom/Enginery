@@ -693,9 +693,7 @@ def test_changed_paths_resolves_a_branch_name_base_and_refuses_a_missing_one(rig
         rig.publisher().changed_paths(base_revision="main", head_revision="main")
 
 
-def test_changed_paths_maps_diff_read_failure(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_changed_paths_maps_diff_read_failure(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
     head = _implement(rig)
     original = git_publication.git_bytes
 

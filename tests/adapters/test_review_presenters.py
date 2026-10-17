@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters import review_presenters as presenters
+from enginery.adapters import subprocess_output
 from enginery.adapters.review_presenters import LavishPresenter, PresenterError
 from enginery.evidence.review_rendering import PACKET_MARKER, REVIEW_CSP
 
@@ -129,11 +130,19 @@ def test_captured_real_lavish_poll_metadata_is_not_a_finding(status: str) -> Non
         ("attachments", ("see image",)),
         ("waiting", ()),
         ("ended", ()),
+        ("annotation_tabular", ("Rename the flag before merge",)),
+        ("two_prompts", ("Rename the flag before merge", "Add a regression test")),
+        ("with_target_expanded", ("Rename the flag before merge",)),
     ],
 )
 def test_encoder_produced_poll_prompts(name: str, expected: tuple[str, ...]) -> None:
-    fixture = Path(__file__).parents[1] / "fixtures" / "lavish" / "encode_poll2.out"
-    cases = dict(section.split("\n", 1) for section in fixture.read_text().split("=====")[1:])
+    fixtures = Path(__file__).parents[1] / "fixtures" / "lavish"
+    cases = {
+        name: body
+        for filename in ("encode_poll.out", "encode_poll2.out")
+        for section in (fixtures / filename).read_text().split("=====")[1:]
+        for name, body in [section.split("\n", 1)]
+    }
     assert presenters._findings(cases[name]) == tuple(map(presenters.escape_terminal, expected))
 
 
@@ -197,7 +206,7 @@ def test_argv_bound_refuses_before_start(monkeypatch: pytest.MonkeyPatch) -> Non
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("oversized argv must not start a process")
 
-    monkeypatch.setattr(presenters.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess_output.subprocess, "Popen", forbidden)
     with pytest.raises(PresenterError, match="argv exceeds"):
         presenters._execute(("x" * presenters.MAX_BYTES,), {})
 
@@ -213,7 +222,7 @@ def test_missing_executable_has_explicit_redacted_error(
     def missing(*args: object, **kwargs: object) -> None:
         raise FileNotFoundError("sensitive diagnostic")
 
-    monkeypatch.setattr(presenters.subprocess, "Popen", missing)
+    monkeypatch.setattr(subprocess_output.subprocess, "Popen", missing)
     with pytest.raises(PresenterError, match="could not be started") as failure:
         presenters._execute(("missing", "poll"), {})
     assert "sensitive" not in str(failure.value)
