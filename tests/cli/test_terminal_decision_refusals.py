@@ -29,7 +29,10 @@ def scope(value: Ingress) -> list[str]:
 @pytest.mark.parametrize("command", ["factory", "stage1"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_requeue_cli_refuses_before_authentication(
-    ingress: Ingress, capsys: pytest.CaptureFixture[str], command: str, registered: bool  # noqa: F811
+    ingress: Ingress,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    registered: bool,
 ) -> None:
     ingress.register("validate", outcome="awaiting_human")
     if not registered:

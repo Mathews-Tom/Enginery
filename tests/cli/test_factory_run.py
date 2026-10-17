@@ -1247,9 +1247,17 @@ def test_exhausted_behavioral_failure_is_terminal_and_reviewable(
                         schema_version=1,
                         payload={
                             "status": "failed",
-                            "attempt_id": "verify-0",
+                            "attempt_id": "verify-1",
                             "behavioral_findings": ["behavioral_assertion_failed:fixture:0"],
                         },
+                    ),
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{run_id}:implement",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_passed",
+                        schema_version=1,
+                        payload={"status": "passed", "attempt_id": "implement-1"},
                     ),
                     EventWrite(
                         aggregate_type="runtime_node",

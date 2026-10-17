@@ -40,7 +40,7 @@ request from it:
 Before building the request, commit project policy containing non-empty
 `[acceptance]` checks at the selected base revision. Checks and their declared
 fault classes must describe the changed behavior; see
-[behavioral acceptance](operations.md#behavioral-acceptance-and-calibration).
+[behavioral acceptance](operations.md#behavioral-check-custody-and-receipts).
 Without these base-bound checks a new run holds with `no_behavioral_checks`.
 
 ```bash

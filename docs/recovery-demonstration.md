@@ -44,7 +44,7 @@ attempt and return `wait`, never launch a second worker.
 - Commit project policy with non-empty `[acceptance]` checks at the selected
   base revision before `stage1 build-request`. Include assertions and declared
   fault classes for the changed behavior, as described in
-  [behavioral acceptance](operations.md#behavioral-acceptance-and-calibration);
+  [behavioral acceptance](operations.md#behavioral-check-custody-and-receipts);
   without base-bound checks a new run holds with `no_behavioral_checks`.
 
 ## Procedure
