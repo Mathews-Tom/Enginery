@@ -1,11 +1,11 @@
-"""``enginery-operator``: the fixed operator recovery entry point.
+"""``enginery operator``: the fixed operator recovery entry point.
 
-A separate console script, run by the operator outside any coding-agent session, that can pause
-dispatch, drain or stop running workers, select the pinned runner image, and back up or restore
-the ledger. It imports only the domain, the ledger, the engine control modules and the OCI
-adapter used to qualify an image -- never the workflows -- so it keeps working when a workflow
-is broken or a run is wedged. Every subcommand takes ``--database`` and prints JSON; failures
-print a JSON error on stderr and use the exit codes of :mod:`enginery.cli._exit_codes`.
+Run by the operator outside any coding-agent session, this can pause dispatch, drain or stop
+running workers, select the pinned runner image, and back up or restore the ledger. It imports
+only the domain, the ledger, the engine control modules and the OCI adapter used to qualify an
+image -- never the workflows -- so it keeps working when a workflow is broken or a run is
+wedged. Recovery commands print JSON; verify and rebuild-projections preserve the ledger
+consistency commands' text/JSON output. The legacy console script remains supported.
 """
 
 from __future__ import annotations
@@ -22,7 +22,13 @@ from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import container_name_for, worker_container_gone
 from enginery.cli._exit_codes import SUCCESS, exit_code_for
-from enginery.cli.ledger import run_backup, run_restore, run_verify
+from enginery.cli.ledger import (
+    run_backup,
+    run_rebuild_projections_command,
+    run_restore,
+    run_verify,
+    run_verify_command,
+)
 from enginery.domain.errors import (
     EngineryError,
     FailureClass,
@@ -63,13 +69,32 @@ def _utc_now() -> datetime:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="enginery-operator",
-        description="Operator recovery: pause, drain, select a runner, back up, restore.",
+        prog="enginery operator",
+        description="Operator ledger: Pause, drain, select a runner, back up, restore and verify.",
     )
-    subparsers = parser.add_subparsers(dest="command")
+    _add_operator_commands(parser)
+    return parser
+
+
+def add_operator_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register the workflow-free operator group on the root parser."""
+    parser = subparsers.add_parser(
+        "operator",
+        help="Operator ledger: Run recovery, consistency and storage commands.",
+        description="Operator ledger: Pause, drain, select a runner, back up, restore and verify.",
+    )
+    _add_operator_commands(parser)
+
+
+def _add_operator_commands(parser: argparse.ArgumentParser) -> None:
+    subparsers = parser.add_subparsers(dest="operator_command")
 
     def command(name: str, help_text: str) -> argparse.ArgumentParser:
-        sub = subparsers.add_parser(name, help=help_text)
+        sub = subparsers.add_parser(
+            name,
+            help=f"Operator ledger: {help_text}",
+            description=f"Operator ledger: {help_text}",
+        )
         sub.add_argument("--database", required=True, type=Path, help="Ledger database path.")
         return sub
 
@@ -111,7 +136,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Restore although the ledger is not paused, has live workers, or cannot be read.",
     )
-    return parser
+    verify = command("verify", "Check ledger and artifact-store consistency.")
+    verify.add_argument("--artifacts", type=Path, default=None, help="Artifact store to verify.")
+    verify.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    command("rebuild-projections", "Rebuild ledger projections from stored events.")
 
 
 def main(
@@ -124,25 +152,34 @@ def main(
     """Run one operator command; the keyword arguments are test seams, unused by the script."""
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command is None:
+    if args.operator_command is None:
         parser.print_help(sys.stderr)
         return exit_code_for(FailureClass.INVALID_INPUT)
     try:
-        if args.command == "status":
+        if args.operator_command == "status":
             return _status(args)
-        if args.command == "pause":
+        if args.operator_command == "pause":
             return _pause(args, clock)
-        if args.command == "resume":
+        if args.operator_command == "resume":
             return _resume(args, clock)
-        if args.command == "drain":
+        if args.operator_command == "drain":
             return _drain(args, clock, engine_factory)
-        if args.command == "select-runner":
+        if args.operator_command == "select-runner":
             return _select_runner(args, clock, admission or OciRunnerAdmission())
-        if args.command == "backup":
+        if args.operator_command == "backup":
             return _backup(args)
-        if args.command == "restore":
+        if args.operator_command == "restore":
             return _restore(args, clock)
+        if args.operator_command == "verify":
+            return run_verify_command(
+                database=args.database, artifacts=args.artifacts, as_json=args.json
+            )
+        if args.operator_command == "rebuild-projections":
+            return run_rebuild_projections_command(database=args.database)
     except EngineryError as error:
+        if args.operator_command in {"verify", "rebuild-projections"}:
+            print(str(error), file=sys.stderr)
+            return exit_code_for(error.failure_class)
         print(
             json.dumps(
                 {
@@ -159,7 +196,7 @@ def main(
             file=sys.stderr,
         )
         return exit_code_for(error.failure_class)
-    raise AssertionError(f"unhandled command: {args.command}")  # pragma: no cover
+    raise AssertionError(f"unhandled command: {args.operator_command}")  # pragma: no cover
 
 
 def _emit(report: Mapping[str, object]) -> None:
