@@ -64,3 +64,37 @@ def test_reader_refuses_oversized_output(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("PATH", str(tmp_path))
     with pytest.raises(InvalidInputError, match="1 MiB"):
         git_bytes(tmp_path, "status")
+
+
+def test_review_diff_keeps_text_renames_gitlinks_and_real_objects(tmp_path: Path) -> None:
+    from enginery.adapters.git_reader import DIFF_FLAGS
+    from enginery.cli.factory_review import _git as review_git
+
+    repository, _ = _repository(tmp_path)
+    protected = repository / ".github"
+    protected.mkdir()
+    (protected / "workflow.yml").write_text("sensitive\n")
+    (repository / ".gitattributes").write_text("README -diff\n")
+    _git("add", ".", cwd=repository)
+    _git("commit", "-m", "protected fixture", cwd=repository)
+    first = _git("rev-parse", "HEAD", cwd=repository)
+    _git("update-index", "--add", "--cacheinfo", f"160000,{first},module", cwd=repository)
+    _git("commit", "-m", "gitlink fixture", cwd=repository)
+    base = _git("rev-parse", "HEAD", cwd=repository)
+    (repository / "README").write_text("visible despite binary attribute\n")
+    _git("mv", ".github/workflow.yml", "ordinary.yml", cwd=repository)
+    _git("update-index", "--cacheinfo", f"160000,{base},module", cwd=repository)
+    _git("add", "README", cwd=repository)
+    _git("commit", "-m", "candidate", cwd=repository)
+    head = _git("rev-parse", "HEAD", cwd=repository)
+    _git("replace", head, base, cwd=repository)
+    _git("config", "diff.ignoreSubmodules", "all", cwd=repository)
+    _git("config", "submodule.module.ignore", "all", cwd=repository)
+    diff = review_git(repository, "diff", *DIFF_FLAGS, base, head, "--")
+    assert "+visible despite binary attribute" in diff
+    assert "Subproject commit" in diff
+    assert "deleted file mode" in diff
+    paths = review_git(repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--")
+    assert ".github/workflow.yml" in paths.split("\0")
+    assert "ordinary.yml" in paths.split("\0")
+    assert "module" in paths.split("\0")

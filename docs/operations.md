@@ -1031,10 +1031,18 @@ user preferences (project policy cannot choose it), then run
 `enginery factory review RUN --project PROJECT --lavish --port PORT --no-open`.
 `--no-open` suppresses browser launch. Collect annotations with
 `enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --lavish-poll --port PORT`;
-Enginery polls and ends that session. Only Enginery-rendered safe packets are
-passed to the presenter. Every invocation sets telemetry off, a private state
-directory and an explicit port; no share, export or update command is invoked.
-The fully usable terminal packet requires no presenter.
+Enginery polls without ending the reviewer's session on timeout. Only prompt text
+is actionable; waiting/ended metadata is not feedback, and artifact failures are
+refused. Only Enginery-rendered safe packets are passed to the presenter. Every
+invocation sets telemetry off, host `127.0.0.1`, an explicit port, and the private
+state directory `review/<run>/lavish`; no share, export or update command is invoked.
+The fully usable terminal packet is emitted before presentation, so presenter
+failure never suppresses it. Review diffs use host-owned committed objects with
+replacement refs, external diff and textconv disabled; binary attributes, renames,
+and submodule ignore settings cannot conceal changed protected paths. Risk lists
+the matched paths. CI and behavioral receipts are current only when both their
+stored head and configuration digest match the packet; otherwise they are labeled
+`not_persisted_for_current_head` and excluded from the subject.
 
 Terminal review remains `enginery stage1 review` against the returned database and
 run ID. The independent review gate reports `next_decision` with

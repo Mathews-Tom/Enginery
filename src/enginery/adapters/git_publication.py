@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from enginery.adapters.git_reader import DIFF_FLAGS, git_bytes
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -212,39 +213,38 @@ class GitBranchPublisher:
             raise InvalidInputError(
                 "base_revision must be a revision", details={"base_revision": base_revision}
             )
-        self._require_commit(head_revision)
-        resolved = self._run(
-            ["rev-parse", "--verify", "--end-of-options", f"{base_revision}^{{commit}}"],
-            cwd=self.source_path,
-        )
-        base = resolved.stdout.strip()
-        if resolved.returncode != 0 or _OBJECT_ID.fullmatch(base) is None:
-            raise ExternalConflictError(
-                "the verified repository does not contain the base revision",
-                details={"base_revision": base_revision},
+        base = (
+            git_bytes(
+                self.source_path,
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{base_revision}^{{commit}}",
             )
-        completed = self._invoke_hardened(
-            [
-                "diff",
-                "--name-only",
-                "-z",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--ignore-submodules=none",
-                f"{base}..{head_revision}",
-                "--",
-            ],
-            cwd=self.source_path,
+            .decode("ascii")
+            .strip()
         )
-        if completed.returncode != 0:
+        if _OBJECT_ID.fullmatch(base) is None:
             raise ExternalConflictError(
-                "the changed paths of the verified branch could not be read",
-                details={"stderr": completed.stderr.decode("utf-8", "replace").strip()[-2000:]},
+                "the verified repository does not contain the base revision"
             )
-        return tuple(
-            entry.decode("utf-8", "replace") for entry in completed.stdout.split(b"\x00") if entry
+        git_bytes(
+            self.source_path,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{head_revision}^{{commit}}",
         )
+        changed = git_bytes(
+            self.source_path,
+            "diff",
+            "--name-only",
+            "-z",
+            *DIFF_FLAGS,
+            f"{base}..{head_revision}",
+            "--",
+        )
+        return tuple(entry.decode("utf-8", "replace") for entry in changed.split(b"\x00") if entry)
 
     def reconcile(self, request: BranchPublicationRequest) -> ReconciliationResult:
         """Compare the remote with what ``request`` would have left, from the request alone.

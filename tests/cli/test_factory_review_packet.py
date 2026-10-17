@@ -328,6 +328,47 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     observed["result"] = "failed"
     newer = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
     assert newer.subject_digest != packet.subject_digest
+    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:verify_merge_ready")] = {
+        "head_revision": "c" * 40,
+        "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+        "status": "passed",
+    }
+    observed["head_revision"] = "c" * 40
+    stale = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+    assert stale.evidence_receipt_digests == ()
+    stale_result = json.loads(dict(stale.sections)["Observed result"])
+    assert stale_result["availability"] == "not_persisted_for_current_head"
+    assert stale_result["receipts"] == []
+    assert json.loads(stale.ci_evidence_json)["availability"] == "not_persisted_for_current_head"
     monkeypatch.setattr(factory_review, "_revision", lambda *args: "c" * 40)
     with pytest.raises(InvalidInputError, match="head changed"):
         factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+
+
+def test_presenter_failure_preserves_terminal_packet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    from enginery.adapters.review_presenters import PresenterError
+    from enginery.cli import factory
+
+    monkeypatch.setattr(factory, "resolve_project", lambda value: tmp_path)
+    monkeypatch.setattr(factory, "review", lambda *args: {"lines": ["terminal packet survives"]})
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise PresenterError("presenter unavailable")
+
+    monkeypatch.setattr(factory, "present_review", fail)
+    args = argparse.Namespace(
+        factory_command="review",
+        project=tmp_path,
+        run_id="run",
+        json=False,
+        lavish=True,
+        port=3210,
+        no_open=True,
+    )
+    with pytest.raises(PresenterError, match="unavailable"):
+        factory.run_factory(args)
+    assert capsys.readouterr().out == "terminal packet survives\n"

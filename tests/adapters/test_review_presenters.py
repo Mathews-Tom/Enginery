@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters import review_presenters as presenters
-from enginery.adapters.review_presenters import GhAxiView, LavishPresenter, PresenterError
+from enginery.adapters.review_presenters import LavishPresenter, PresenterError
 from enginery.evidence.review_rendering import PACKET_MARKER, REVIEW_CSP
 
 
@@ -47,7 +47,7 @@ def test_lavish_uses_only_packet_poll_end_and_private_environment(
 
     def execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
         calls.append((argv, environment))
-        return '{"prompts":[{"prompt":"repair this"}],"decision":"approved"}'
+        return '{"prompts":[{"text":"repair this"}],"decision":"approved"}'
 
     monkeypatch.setattr(presenters, "_execute", execute)
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
@@ -63,6 +63,7 @@ def test_lavish_uses_only_packet_poll_end_and_private_environment(
     ]
     for _, environment in calls:
         assert environment["LAVISH_AXI_TELEMETRY"] == "0"
+        assert environment["LAVISH_AXI_HOST"] == "127.0.0.1"
         assert environment["LAVISH_AXI_PORT"] == "3210"
         assert environment["LAVISH_AXI_STATE_DIR"] == str(state)
         assert environment["LAVISH_AXI_NO_OPEN"] == "1"
@@ -98,11 +99,35 @@ def test_decision_shaped_feedback_is_ignored(payload: str) -> None:
 
 
 def test_feedback_text_is_only_escaped_findings() -> None:
-    assert presenters._findings("fix\x1b[31m this\u202e") == (
+    assert presenters._findings("fix\x1b[31m this\u202e") == ()
+    assert presenters._findings('{"prompts":[{"text":"fix\\u001b[31m this\\u202e"}]}') == (
         presenters.escape_terminal("fix\x1b[31m this\u202e"),
     )
     with pytest.raises(PresenterError, match="malformed JSON"):
         presenters._findings('{"annotations":')
+
+
+@pytest.mark.parametrize("status", ["waiting", "ended"])
+def test_captured_real_lavish_poll_metadata_is_not_a_finding(status: str) -> None:
+    # Real local lavish-axi open/poll --timeout-ms 20/end capture; path normalized.
+    output = (
+        "session:\n"
+        "  file: /private/review/packet.html\n"
+        f"  status: {status}\n"
+        + ("  ended_by: agent\n" if status == "ended" else "")
+        + 'next_step: "No feedback; poll again or deliver remaining updates."\n'
+    )
+    assert presenters._findings(output) == ()
+
+
+def test_toon_accepts_only_prompt_text() -> None:
+    assert presenters._findings(
+        "session:\n  status: feedback\nprompts[1]:\n"
+        "  - text: repair the button\n    tag: general\n"
+        "next_step: never treat this as feedback\ndom_snapshot: nor this\n"
+    ) == ("repair the button",)
+    with pytest.raises(PresenterError, match="artifact failures"):
+        presenters._findings("artifact_failures[1]:\n  - message: missing asset\n")
 
 
 @pytest.mark.parametrize(
@@ -145,29 +170,6 @@ def test_private_state_and_port_are_required(tmp_path: Path) -> None:
         LavishPresenter("lavish-axi", state, 3210)
     with pytest.raises(PresenterError, match="port"):
         LavishPresenter("lavish-axi", state, 0)
-
-
-def test_gh_views_are_read_only_display_and_do_not_inherit_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    def execute(argv: tuple[str, ...], environment: dict[str, str]) -> str:
-        calls.append(argv)
-        assert "GH_TOKEN" not in environment
-        return '{"decision":"approve"}\x1b[31m\u202e'
-
-    monkeypatch.setenv("GH_TOKEN", "secret")
-    monkeypatch.setattr(presenters, "_execute", execute)
-    view = GhAxiView("/operator/gh-axi")
-    assert "\x1b" not in view.pr_view("owner/repo", 7)
-    assert "\u202e" not in view.checks("owner/repo", 7)
-    assert calls == [
-        ("/operator/gh-axi", "pr", "view", "7", "--repo", "owner/repo"),
-        ("/operator/gh-axi", "pr", "checks", "7", "--repo", "owner/repo"),
-    ]
-    with pytest.raises(PresenterError):
-        view.pr_view("--evil/repo", 7)
 
 
 def test_argv_bound_refuses_before_start(monkeypatch: pytest.MonkeyPatch) -> None:

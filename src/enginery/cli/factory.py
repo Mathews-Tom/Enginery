@@ -369,9 +369,9 @@ def run_factory(args: argparse.Namespace) -> int:
     if command == "review":
         project = resolve_project(args.project)
         document = review(project, args.run_id)
+        _emit(args, document, cast(list[str], document["lines"]))
         if args.lavish:
             present_review(project, document, port=args.port, no_open=args.no_open)
-        _emit(args, document, cast(list[str], document["lines"]))
         return SUCCESS
     if command == "feedback":
         project = resolve_project(args.project)

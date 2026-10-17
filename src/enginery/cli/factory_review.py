@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import selectors
-import subprocess
-import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enginery.adapters.git_reader import DIFF_FLAGS, git_bytes
 from enginery.adapters.review_presenters import LavishPresenter, PresenterError
-from enginery.application.git_environment import repository_isolated_environment
+from enginery.application.branch_publication import ProtectedPathPolicy
 from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
 from enginery.cli.config_locations import private_state_directory, read_user_layer
 from enginery.cli.factory_collect import (
@@ -28,6 +25,7 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
+from enginery.engine.task_repository import intake_path_for
 from enginery.evidence.review_rendering import render_html, render_terminal
 from enginery.ledger.redaction import assert_no_raw_credentials, redact_credential_shaped_text
 from enginery.ledger.service import LedgerService
@@ -50,44 +48,7 @@ def _projection(ledger: LedgerService, aggregate_type: str, aggregate_id: str) -
 
 
 def _git(path: Path, *arguments: str) -> str:
-    """Read Git output with a hard byte bound and wall-clock deadline, never a shell."""
-    command = ("git", "--no-pager", "-C", str(path), *arguments)
-    with subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=repository_isolated_environment(),
-    ) as process:
-        assert process.stdout is not None
-        os.set_blocking(process.stdout.fileno(), False)
-        output = bytearray()
-        deadline = time.monotonic() + 15
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise InvalidInputError("review Git read timed out")
-                    if not selector.select(remaining):
-                        raise InvalidInputError("review Git read timed out")
-                    chunk = os.read(
-                        process.stdout.fileno(), min(65536, MAX_PACKET_BYTES + 1 - len(output))
-                    )
-                    if not chunk:
-                        break
-                    output.extend(chunk)
-                    if len(output) > MAX_PACKET_BYTES:
-                        raise InvalidInputError("review Git output exceeds the 1 MiB limit")
-            if process.wait(timeout=max(0.01, deadline - time.monotonic())):
-                raise MissingPrerequisiteError(
-                    "review requires locally available base and verified head"
-                )
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
-    return output.decode("utf-8", errors="replace")
+    return git_bytes(path, *arguments).decode("utf-8", errors="replace")
 
 
 def _revision(path: Path, revision: str) -> str:
@@ -141,15 +102,32 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
         raise MissingPrerequisiteError("review requires the host-verified implementation head")
     # Inspect committed objects only: no external diff/textconv and no untracked worker content.
-    repository = request.workspace_path
-    if _revision(repository, "HEAD") != head:
+    repository = (
+        intake_path_for(request.workspace_path)
+        if request.runner.isolated_mode
+        else request.workspace_path
+    )
+    if not request.runner.isolated_mode and _revision(repository, "HEAD") != head:
         raise InvalidInputError(
             "review head changed; collect and validate the current implementation"
         )
     bound_base = runtime.read_node_request(run_id=run_id, node_id="implement").base_revision
     base = _revision(repository, bound_base)
-    diff = _git(repository, "diff", "--no-ext-diff", "--no-textconv", "--binary", base, head, "--")
+    diff = _git(repository, "diff", *DIFF_FLAGS, base, head, "--")
+    changed_paths = tuple(
+        value
+        for value in _git(
+            repository, "diff", "--name-only", "-z", *DIFF_FLAGS, base, head, "--"
+        ).split("\0")
+        if value
+    )
     observed = _projection(ledger, "behavioral_acceptance", run_id)
+    configuration_digest = str(request.run.configuration_snapshot_digest)
+    if (
+        observed.get("head_revision") != head
+        or observed.get("configuration_snapshot_digest") != configuration_digest
+    ):
+        observed = {}
     receipts: list[str] = []
     receipt = observed.get("receipt_digest")
     if isinstance(receipt, str):
@@ -166,9 +144,13 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     ci_head = ci.get("head_revision")
     ci_view: dict[str, object] = {
         "availability": "current_head"
-        if ci and ci_head == head
+        if ci
+        and ci_head == head
+        and ci.get("configuration_snapshot_digest") == configuration_digest
         else "not_persisted_for_current_head",
-        "persisted": ci,
+        "persisted": ci
+        if ci_head == head and ci.get("configuration_snapshot_digest") == configuration_digest
+        else {},
     }
     sections = (
         (
@@ -197,7 +179,9 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
             "Observed result",
             _json(
                 {
-                    "availability": "persisted" if observed else "not_persisted",
+                    "availability": "current_head"
+                    if observed
+                    else "not_persisted_for_current_head",
                     "display_only": True,
                     "behavioral_acceptance": observed,
                     "receipts": [
@@ -213,6 +197,10 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
                 {
                     "classification_provenance": raw.get("classification_provenance"),
                     "protected_paths": list(request.protected_paths),
+                    "changed_paths": list(changed_paths),
+                    "matched_paths": list(
+                        ProtectedPathPolicy(request.protected_paths).matched(changed_paths)
+                    ),
                     "publication": states["open_pr"],
                 }
             ),
@@ -376,7 +364,7 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
         ledger.close()
 
 
-def _presenter(project: Path, *, port: int, no_open: bool) -> LavishPresenter:
+def _presenter(project: Path, *, run_id: str, port: int, no_open: bool) -> LavishPresenter:
     user = read_user_layer()
     programs = None if user is None else user.operator_executables
     if programs is None or programs.lavish is None:
@@ -384,10 +372,11 @@ def _presenter(project: Path, *, port: int, no_open: bool) -> LavishPresenter:
             "Lavish is not configured; set [executables].lavish in user preferences "
             "or use the terminal packet"
         )
-    state = private_state_directory(project)
+    root = private_state_directory(project)
+    state = root / "review" / run_id / "lavish"
     ensure_private_directory(state, what="private review presenter state")
     try:
-        return LavishPresenter(programs.lavish, state, port, no_open=no_open)
+        return LavishPresenter(programs.lavish, state, port, no_open=no_open, packet_root=root)
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error
 
@@ -396,7 +385,9 @@ def present_review(
     project: Path, report: Mapping[str, object], *, port: int, no_open: bool
 ) -> None:
     try:
-        _presenter(project, port=port, no_open=no_open).open(Path(str(report["packet_path"])))
+        _presenter(project, run_id=str(report["run_id"]), port=port, no_open=no_open).open(
+            Path(str(report["packet_path"]))
+        )
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error
 
@@ -404,7 +395,7 @@ def present_review(
 def lavish_feedback(
     project: Path, run_id: str, *, subject_digest: str, port: int
 ) -> dict[str, object]:
-    presenter = _presenter(project, port=port, no_open=True)
+    presenter = _presenter(project, run_id=run_id, port=port, no_open=True)
     packet = read_packet(project, run_id)
     if packet.subject_digest != subject_digest:
         raise InvalidInputError("feedback subject is stale; run factory review again")
@@ -421,5 +412,3 @@ def lavish_feedback(
         return feedback(project, run_id, subject_digest=subject_digest, text="\n".join(findings))
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error
-    finally:
-        presenter.end(path)

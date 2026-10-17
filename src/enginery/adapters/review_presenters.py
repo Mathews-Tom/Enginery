@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import stat
 import subprocess
@@ -195,44 +196,50 @@ def _packet(path: Path, private_state: Path) -> Path:
 
 
 def _findings(text: str) -> tuple[str, ...]:
+    """Accept prompt text only, never session instructions or DOM snapshots."""
     if len(text.encode("utf-8")) > MAX_BYTES:
         raise PresenterError("presenter feedback exceeds 1 MiB")
     if not text.strip():
         return ()
-    try:
-        value = json.loads(text)
-    except RecursionError as exc:
-        raise PresenterError("presenter feedback nesting is excessive") from exc
-    except json.JSONDecodeError:
-        if text.lstrip().startswith(("{", "[")):
-            raise PresenterError("presenter feedback contains malformed JSON") from None
-        return tuple(escape_terminal(line) for line in text.splitlines() if line.strip())
+    if text.lstrip().startswith("{"):
+        try:
+            document = json.loads(text)
+        except (ValueError, RecursionError) as error:
+            raise PresenterError("presenter feedback contains malformed JSON") from error
+        if not isinstance(document, dict):
+            raise PresenterError("presenter feedback must be an object")
+        if document.get("artifact_failures"):
+            raise PresenterError("Lavish artifact failures prevent review; repair the packet")
+        prompts = document.get("prompts", [])
+        if not isinstance(prompts, list):
+            raise PresenterError("Lavish prompts must be a list")
+        return tuple(
+            escape_terminal(item["text"])
+            for item in prompts
+            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip()
+        )
+    # TOON's expanded object-array form. Top-level metadata is never feedback.
     result: list[str] = []
-
-    def collect(item: object) -> None:
-        if isinstance(item, str) and item.strip():
-            result.append(escape_terminal(item))
-        elif isinstance(item, list):
-            for entry in item:
-                collect(entry)
-        elif isinstance(item, dict):
-            # Allowlisted feedback fields only: approval/action/principal fields are ignored.
-            for field in (
-                "findings",
-                "annotations",
-                "prompts",
-                "feedback",
-                "prompt",
-                "text",
-                "message",
-            ):
-                if field in item:
-                    collect(item[field])
-
-    try:
-        collect(value)
-    except RecursionError as exc:
-        raise PresenterError("presenter feedback nesting is excessive") from exc
+    in_prompts = False
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            if re.match(r"artifact_failures\[[1-9][0-9]*\]", line):
+                raise PresenterError("Lavish artifact failures prevent review; repair the packet")
+            in_prompts = re.fullmatch(r"prompts\[[0-9]+\]:", line) is not None
+            continue
+        if in_prompts:
+            match = re.fullmatch(r"  (?:- )?text: (.*)", line)
+            if match is None:
+                match = re.fullmatch(r"    text: (.*)", line)
+            if match:
+                value = match.group(1)
+                if value.startswith('"'):
+                    try:
+                        value = json.loads(value)
+                    except ValueError as error:
+                        raise PresenterError("Lavish prompt text is malformed") from error
+                if isinstance(value, str) and value.strip():
+                    result.append(escape_terminal(value))
     return tuple(result)
 
 
@@ -242,6 +249,7 @@ class LavishPresenter:
     private_state_dir: Path
     port: int
     no_open: bool = True
+    packet_root: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.executable or self.executable.startswith("-"):
@@ -255,6 +263,7 @@ class LavishPresenter:
         environment = _environment()
         environment.update(
             LAVISH_AXI_TELEMETRY="0",
+            LAVISH_AXI_HOST="127.0.0.1",
             LAVISH_AXI_STATE_DIR=str(self.private_state_dir),
             LAVISH_AXI_PORT=str(self.port),
         )
@@ -263,40 +272,12 @@ class LavishPresenter:
         return _execute((self.executable, *arguments), environment)
 
     def open(self, packet_path: Path) -> None:
-        self._run(str(_packet(packet_path, self.private_state_dir)))
+        self._run(str(_packet(packet_path, self.packet_root or self.private_state_dir)))
 
     def poll(self, packet_path: Path) -> tuple[str, ...]:
-        return _findings(self._run("poll", str(_packet(packet_path, self.private_state_dir))))
-
-    def end(self, packet_path: Path) -> None:
-        self._run("end", str(_packet(packet_path, self.private_state_dir)))
-
-
-@dataclass(frozen=True, slots=True)
-class GhAxiView:
-    executable: str
-
-    def _view(self, command: str, repository: str, number: int) -> str:
-        if not self.executable or self.executable.startswith("-"):
-            raise PresenterError("gh-axi executable must be explicitly configured")
-        parts = repository.split("/")
-        if len(parts) != 2 or any(
-            not part
-            or not part[0].isalnum()
-            or any(not (char.isascii() and (char.isalnum() or char in "-_.")) for char in part)
-            for part in parts
-        ):
-            raise PresenterError("repository must be an owner/name pair")
-        if isinstance(number, bool) or number < 1:
-            raise PresenterError("pull request number must be positive")
-        return escape_terminal(
-            _execute(
-                (self.executable, "pr", command, str(number), "--repo", repository), _environment()
-            )
+        return _findings(
+            self._run("poll", str(_packet(packet_path, self.packet_root or self.private_state_dir)))
         )
 
-    def pr_view(self, repository: str, number: int) -> str:
-        return self._view("view", repository, number)
-
-    def checks(self, repository: str, number: int) -> str:
-        return self._view("checks", repository, number)
+    def end(self, packet_path: Path) -> None:
+        self._run("end", str(_packet(packet_path, self.packet_root or self.private_state_dir)))

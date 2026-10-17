@@ -1891,7 +1891,11 @@ class Stage1RunService:
         ).verify(request=verification_request, observed_at=now)
         if result.outcome is PullRequestOutcome.WAITING:
             return result
-        extra: dict[str, object] = {"pull_request_outcome": result.outcome.value}
+        extra: dict[str, object] = {
+            "pull_request_outcome": result.outcome.value,
+            "head_revision": verification_request.requirements.expected_head_revision,
+            "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+        }
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
         if not request.execution_selection.legacy:
