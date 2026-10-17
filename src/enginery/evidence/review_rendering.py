@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import unicodedata
 
 from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
 from enginery.domain.errors import InvalidInputError
@@ -23,6 +24,8 @@ def escape_terminal(text: str) -> str:
         if ord(character) < 0x20
         or 0x7F <= ord(character) <= 0x9F
         or ord(character) in _BIDI_CONTROLS
+        or ord(character) in {0x2028, 0x2029}
+        or unicodedata.category(character) == "Cf"
         else character
         for character in text
     )

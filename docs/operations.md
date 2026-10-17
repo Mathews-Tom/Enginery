@@ -1031,8 +1031,9 @@ user preferences (project policy cannot choose it), then run
 `enginery factory review RUN --project PROJECT --lavish --port PORT --no-open`.
 `--no-open` suppresses browser launch. Collect annotations with
 `enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --lavish-poll --port PORT`;
-Enginery polls without ending the reviewer's session on timeout. Only prompt text
-is actionable; waiting/ended metadata is not feedback, and artifact failures are
+Enginery leaves the session open, including after feedback or timeout; the reviewer
+ends it from Lavish. Only the reviewer's `prompt` is actionable; packet `text` and
+waiting/ended metadata are not feedback, and artifact failures are
 refused. Only Enginery-rendered safe packets are passed to the presenter. Every
 invocation sets telemetry off, host `127.0.0.1`, an explicit port, and the private
 state directory `review/<run>/lavish`; no share, export or update command is invoked.

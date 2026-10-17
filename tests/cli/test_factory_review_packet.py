@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import subprocess
 from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
@@ -76,6 +77,13 @@ def test_every_terminal_control_is_visible_instead_of_executable() -> None:
             *range(0x20),
             *range(0x7F, 0xA0),
             0x61C,
+            0x200B,
+            0x200C,
+            0x200D,
+            0x2028,
+            0x2029,
+            0x2060,
+            0xFEFF,
             0x200E,
             0x200F,
             *range(0x202A, 0x202F),
@@ -351,6 +359,74 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     monkeypatch.setattr(factory_review, "_revision", lambda *args: "c" * 40)
     with pytest.raises(InvalidInputError, match="head changed"):
         factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+
+
+def test_isolated_packet_reads_bare_intake_not_worker_replace_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from enginery.domain.runner import TrustMode
+    from tests.cli.test_stage1 import _request
+
+    request = _request(tmp_path)
+    workspace = request.workspace_path
+
+    subprocess.run(
+        ("git", "clone", str(request.repository_path), str(workspace)),
+        check=True, capture_output=True,
+    )
+    subprocess.run(("git", "config", "user.name", "Test"), cwd=workspace, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.invalid"), cwd=workspace, check=True
+    )
+    def git(*arguments: str) -> str:
+        return subprocess.check_output(("git", *arguments), cwd=workspace, text=True).strip()
+
+    base = git("rev-parse", "HEAD")
+    (workspace / "README").write_text("real changed behavior\n")
+    git("add", "README")
+    git("commit", "-m", "candidate")
+    head = git("rev-parse", "HEAD")
+    intake = factory_review.intake_path_for(workspace)
+    git("clone", "--bare", str(workspace), str(intake))
+    git("replace", head, base)
+    request = replace(
+        request, runner=replace(request.runner, trust_mode=TrustMode.ISOLATED_OCI)
+    )
+    run_id = str(request.run.id)
+    states = {
+        (factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:implement"): {
+            "attempt_id": request.implementation.attempt_id
+        },
+        ("node_attempt", request.implementation.attempt_id): {"result": {"head_revision": head}},
+    }
+    monkeypatch.setattr(
+        factory_review, "_projection",
+        lambda ledger, kind, identity: states.get((kind, identity), {}),
+    )
+    monkeypatch.setattr(
+        factory_review, "CoordinatorRuntime",
+        lambda *args, **kwargs: SimpleNamespace(
+            read_node_request=lambda **kwargs: SimpleNamespace(base_revision=base)
+        ),
+    )
+    packet = factory_review.build_packet(tmp_path, SimpleNamespace(), request)
+    expected = factory_review._git(intake, "diff", *factory_review.DIFF_FLAGS, base, head, "--")
+    assert packet.diff == expected
+    assert "+real changed behavior" in packet.diff
+    assert git("diff", base, head, "--") == ""
+
+
+def test_invalid_lavish_run_creates_no_presenter_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("invalid run id must be refused before presenter creation")
+
+    monkeypatch.setattr(factory_review, "_presenter", forbidden)
+    with pytest.raises(InvalidInputError):
+        factory_review.lavish_feedback(
+            tmp_path, "../../outside", subject_digest="a" * 64, port=3210
+        )
 
 
 def test_presenter_failure_preserves_terminal_packet(

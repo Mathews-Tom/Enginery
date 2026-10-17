@@ -395,8 +395,8 @@ def present_review(
 def lavish_feedback(
     project: Path, run_id: str, *, subject_digest: str, port: int
 ) -> dict[str, object]:
-    presenter = _presenter(project, run_id=run_id, port=port, no_open=True)
     packet = read_packet(project, run_id)
+    presenter = _presenter(project, run_id=run_id, port=port, no_open=True)
     if packet.subject_digest != subject_digest:
         raise InvalidInputError("feedback subject is stale; run factory review again")
     path = _packet_path(project, packet)
