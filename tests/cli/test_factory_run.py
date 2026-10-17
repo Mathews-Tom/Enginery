@@ -1606,3 +1606,86 @@ def test_status_github_view_is_optional_display_only(
     plain.pop("local_writes")
     viewed.pop("local_writes")
     assert viewed == plain
+
+
+@pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
+@pytest.mark.parametrize("reason", ["github_pull_request_merged", "github_evidence_blocked"])
+def test_terminal_github_outcome_reports_failed_without_decision(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    reason: str,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+        request = run.request
+        generation = factory_run.first_attempt_generation(request.implementation.attempt_id)
+
+        def version(name: str) -> int:
+            projection = ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id=f"{run_id}:{name}"
+            )
+            return 0 if projection is None else projection.aggregate_version
+
+        ledger.append(
+            AppendCommand(
+                correlation_id="terminal-github-outcome",
+                events=tuple(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{run_id}:{name}",
+                        expected_version=version(name),
+                        event_type="runtime_node.fixture_updated",
+                        schema_version=1,
+                        payload=payload,
+                    )
+                    for name, payload in (
+                        (
+                            "implement",
+                            {
+                                "status": "passed",
+                                "attempt_id": f"implement-{generation + request.repair_limit}",
+                            },
+                        ),
+                        (
+                            "validate",
+                            {
+                                "status": "passed",
+                                "attempt_id": f"validate-{generation + request.repair_limit}",
+                                "validation_artifact_digest": "sha256:" + "a" * 64,
+                            },
+                        ),
+                        (
+                            node,
+                            {
+                                "status": "failed",
+                                "attempt_id": f"{node}-{generation + request.repair_limit}",
+                                "pull_request_outcome": "blocked",
+                                "reason": reason,
+                                "message": "The GitHub outcome is terminal.",
+                                "repair": "Inspect the evidence and start a new run.",
+                            },
+                        ),
+                    )
+                ),
+            )
+        )
+        progression = Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        monkeypatch.setattr(
+            factory_run,
+            "read_only_service",
+            lambda **_: SimpleNamespace(next_action=lambda _: progression),
+        )
+    finally:
+        ledger.close()
+    code, report = invoke(capsys, project, "status", run_id)
+    assert code == 5
+    assert report["status"] == "failed"
+    assert report["holds"][0]["reason"] == reason
+    assert report["next_decision"] is None

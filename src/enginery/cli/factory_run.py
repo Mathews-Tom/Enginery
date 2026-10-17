@@ -64,6 +64,7 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     behavioral_repair_exhausted,
     first_attempt_generation,
+    github_outcome_terminal,
     stage1_request_from_state,
 )
 
@@ -603,6 +604,26 @@ def _enrich(
             ),
             **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
         }
+    implementation_state = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:implement"
+    )
+    terminal_github = None
+    for name in ("verify", "wait_for_ci"):
+        github_node = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{name}"
+        )
+        if github_node is not None and github_outcome_terminal(
+            request,
+            {} if implementation_state is None else implementation_state.state,
+            github_node.state,
+        ):
+            terminal_github = github_node.state
+            hold = {
+                key: terminal_github[key]
+                for key in ("reason", "message", "repair")
+                if key in terminal_github
+            }
+            break
     if hold is None and report["next_action"] in {
         "wait_for_ci",
         "verify",
@@ -652,7 +673,9 @@ def _enrich(
             verification.state,
         )
     )
-    if exhausted_behavior:
+    if terminal_github is not None:
+        report.update(status="failed", reason=terminal_github["reason"], next_decision=None)
+    elif exhausted_behavior:
         assert verification is not None
         review_command, _ = decision_commands(run_id, str(project), "pull_request.open")
         new_run_command = shlex.join(

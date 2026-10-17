@@ -2296,6 +2296,31 @@ def behavioral_repair_exhausted(
     )
 
 
+def github_outcome_terminal(
+    request: Stage1RunRequest,
+    implementation: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> bool:
+    """Recognize terminal GitHub outcomes only for the current implementation."""
+    if observation.get("status") != "failed":
+        return False
+    current = implementation.get("attempt_id", request.implementation.attempt_id)
+    observed = observation.get("attempt_id")
+    if not isinstance(current, str) or not isinstance(observed, str):
+        return False
+    generation = first_attempt_generation(current)
+    if first_attempt_generation(observed) != generation:
+        return False
+    return observation.get("reason") == "github_pull_request_merged" or (
+        observation.get("reason") == "github_evidence_blocked"
+        and (
+            observation.get("node_id") == "verify"
+            or generation - first_attempt_generation(request.implementation.attempt_id)
+            >= request.repair_limit
+        )
+    )
+
+
 def first_attempt_generation(attempt_id: str) -> int:
     """Return the generation a run's first implementation attempt id carries, or refuse the id.
 
