@@ -1702,11 +1702,7 @@ class Stage1RunService:
         failed_checks = _failed_checks(evidence, request.required_checks)
         if outcome is PullRequestOutcome.BLOCKED:
             extra.update(self._github_blocked_repair(request))
-            if (
-                not failed_checks
-                and evidence.pull_request.state.lower() == "open"
-                and evidence.mergeable is not False
-            ):
+            if not failed_checks:
                 self._github_blocked(request, "wait_for_ci", epoch.epoch, now, extra)
                 return outcome
         if failed_checks:
@@ -1721,14 +1717,38 @@ class Stage1RunService:
         )
         return outcome
 
-    @staticmethod
-    def _github_blocked_repair(request: Stage1RunRequest) -> dict[str, object]:
+    def _github_commands(self, request: Stage1RunRequest) -> tuple[str, str]:
+        database = self.ledger.connection.execute("PRAGMA database_list").fetchone()[2]
+        owner = self.runtime.coordinator.owner
+        review, _ = decision_commands(
+            str(request.run.id),
+            str(request.repository_path),
+            "pull_request.open",
+            database=database or None,
+            owner=owner,
+        )
+        advance = shlex.join(
+            (
+                "enginery",
+                "stage1",
+                "watch",
+                "--database",
+                database,
+                "--owner",
+                owner,
+                "--run-id",
+                str(request.run.id),
+                "--advance",
+            )
+        )
+        return review, advance
+
+    def _github_blocked_repair(self, request: Stage1RunRequest) -> dict[str, object]:
+        review, advance = self._github_commands(request)
         repair = (
-            f"enginery factory review {request.run.id} --project "
-            f"{shlex.quote(str(request.repository_path))}; repair the failing current-head "
-            "checks/statuses or current requested review changes, then run "
-            f"enginery factory resume {request.run.id} --project "
-            f"{shlex.quote(str(request.repository_path))}"
+            f"{review}; repair failing required current-head checks, statuses or requested "
+            "review changes; reopen a closed PR or resolve its merge conflicts as applicable; "
+            f"then run {advance}"
         )
         return {
             "reason": "github_evidence_blocked",
@@ -1763,10 +1783,10 @@ class Stage1RunService:
         now: datetime,
         evidence: Mapping[str, object],
     ) -> None:
+        _, advance = self._github_commands(request)
         repair = (
             "wait for all required current-head checks/statuses and configured reviews, then "
-            f"run enginery factory resume {request.run.id} --project "
-            f"{shlex.quote(str(request.repository_path))}"
+            f"run {advance}"
         )
         self.runtime.record_evidence_hold(
             run_id=str(request.run.id),
@@ -1787,12 +1807,12 @@ class Stage1RunService:
         now: datetime,
         error: Exception,
     ) -> None:
+        _, advance = self._github_commands(request)
         repair = (
             "retry transient GitHub API changes or repair malformed records; never accept a "
-            "prefix. The fixed limit is 100 pages (at most 9,900 records per collection); "
-            "collections reaching that limit cannot be accepted. Retry "
-            f"enginery factory resume {request.run.id} --project "
-            f"{shlex.quote(str(request.repository_path))}"
+            "prefix. The fixed limit is 100 pages; completion must be proven before page 100. "
+            "Collections reaching that page cannot be accepted. Retry "
+            f"{advance}"
         )
         message = f"github_evidence_incomplete: {error}; repair: {repair}"
         self.runtime.record_evidence_hold(
@@ -1976,12 +1996,7 @@ class Stage1RunService:
         if result.outcome is PullRequestOutcome.BLOCKED:
             extra.update(self._github_blocked_repair(request))
             observation = result.github_evidence[-1] if result.github_evidence else None
-            if (
-                observation is not None
-                and not _failed_checks(observation, request.required_checks)
-                and observation.pull_request.state.lower() == "open"
-                and observation.mergeable is not False
-            ):
+            if observation is not None and not _failed_checks(observation, request.required_checks):
                 self._github_blocked(request, "verify", epoch.epoch, now, extra)
                 return result
         if result.evidence is not None:
@@ -2322,7 +2337,7 @@ def _failed_checks(
     for check in evidence.checks:
         if check.name not in required_checks:
             continue
-        if check.status.lower() != "completed" or (
+        if check.status.lower() == "completed" and (
             check.conclusion is None or check.conclusion.lower() != "success"
         ):
             entries.append(

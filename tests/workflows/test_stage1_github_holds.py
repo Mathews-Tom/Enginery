@@ -15,6 +15,7 @@ from enginery.workflows.pull_request import PullRequestOutcome
 from enginery.workflows.stage1 import Stage1ProgressionAction
 
 
+@pytest.mark.parametrize("running", [False, True])
 @pytest.mark.parametrize("kind", ["review", "status", "check"])
 @pytest.mark.parametrize("node_id", ["wait_for_ci", "verify"])
 def test_external_veto_is_queued_and_resume_rereads_without_implementation(
@@ -23,6 +24,7 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
     node_id: str,
+    running: bool,
 ) -> None:
     request, service, now = _ready_to_verify(
         ledger_service, tmp_path, observe_ci=node_id == "verify"
@@ -36,6 +38,14 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
         nonlocal calls
         calls += 1
         evidence = original(provider, number)
+        if running and not resolved:
+            evidence = replace(
+                evidence,
+                checks=tuple(
+                    replace(check, status="in_progress", conclusion=None)
+                    for check in evidence.checks
+                ),
+            )
         if resolved:
             return evidence
         if kind == "review":
@@ -65,6 +75,12 @@ def test_external_veto_is_queued_and_resume_rereads_without_implementation(
     assert projection.state["status"] == "queued"
     assert projection.state["reason"] == "github_evidence_blocked"
     assert projection.state["repair"]
+    repair = str(projection.state["repair"])
+    assert "--database" in repair
+    assert "--owner" in repair
+    assert "stage1 watch" in repair
+    assert "factory resume" not in repair
+    assert "factory review" in repair
     assert projection.state["head_revision"] == "head-revision"
     assert projection.state["configuration_snapshot_digest"] == str(
         request.run.configuration_snapshot_digest
@@ -139,3 +155,42 @@ def test_incomplete_observation_clears_previous_current_head_evidence(
         "configuration_snapshot_digest",
     ):
         assert state[key] is None
+
+
+@pytest.mark.parametrize("kind", ["required", "closed", "conflicts"])
+def test_verify_block_repairs_describe_the_actual_cause(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    request, service, now = _ready_to_verify(ledger_service, tmp_path)
+    original = RecordingPullRequests.evidence
+
+    def observe(provider: RecordingPullRequests, number: int) -> PullRequestEvidence:
+        evidence = original(provider, number)
+        if kind == "required":
+            return replace(
+                evidence,
+                checks=tuple(
+                    replace(check, status="completed", conclusion="failure")
+                    for check in evidence.checks
+                ),
+            )
+        if kind == "closed":
+            return replace(evidence, pull_request=replace(evidence.pull_request, state="closed"))
+        return replace(evidence, mergeable=False)
+
+    monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
+    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert result.outcome is PullRequestOutcome.BLOCKED
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:verify"
+    )
+    assert projection is not None
+    assert projection.state["status"] == ("failed" if kind == "required" else "queued")
+    assert {
+        "required": "repair failing required current-head checks",
+        "closed": "reopen a closed PR",
+        "conflicts": "resolve its merge conflicts",
+    }[kind] in str(projection.state["repair"])

@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import selectors
 import subprocess
-import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TypeGuard, cast
 from urllib.parse import quote
 
+from enginery.adapters.subprocess_output import SubprocessOutputError, execute_output
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -392,44 +391,14 @@ class GitHubWorkLedger:
 
 
 def _bounded_github_command(arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
-    """Capture original UTF-8 bytes without newline translation or an unbounded pipe."""
-    process = subprocess.Popen(
-        arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    buffers = (bytearray(), bytearray())
-    total = 0
-    deadline = time.monotonic() + 60
+    """Use the shared bounded reader without exposing tool diagnostics."""
     try:
-        with selectors.DefaultSelector() as selector:
-            for index, stream in enumerate((process.stdout, process.stderr)):
-                assert stream is not None
-                selector.register(stream, selectors.EVENT_READ, index)
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TransientProviderFailureError("GitHub evidence command timed out")
-                for key, _ in selector.select(min(remaining, 0.1)):
-                    chunk = os.read(key.fd, min(65536, _MAX_EVIDENCE_BYTES + 1 - total))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    total += len(chunk)
-                    if total > _MAX_EVIDENCE_BYTES:
-                        raise TransientProviderFailureError("GitHub output exceeds 1 MiB")
-                    buffers[key.data].extend(chunk)
-            code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
-        return subprocess.CompletedProcess(
-            arguments, code, buffers[0].decode("utf-8"), buffers[1].decode("utf-8")
-        )
-    except (UnicodeDecodeError, subprocess.TimeoutExpired) as error:
-        raise TransientProviderFailureError("GitHub output is invalid or timed out") from error
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
+        output = execute_output(arguments, dict(os.environ), timeout=60)
+    except SubprocessOutputError as error:
+        if isinstance(error.__cause__, OSError):
+            raise error.__cause__ from error
+        raise TransientProviderFailureError(f"GitHub evidence command failed: {error}") from error
+    return subprocess.CompletedProcess(arguments, 0, output, "")
 
 
 @dataclass(slots=True)

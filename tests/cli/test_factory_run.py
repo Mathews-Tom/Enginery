@@ -1472,3 +1472,84 @@ def test_intake_failure_repair_uses_configured_github(
         "--project",
         str(project),
     ]
+
+
+@pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "github_evidence_incomplete",
+        "github_evidence_waiting",
+        "github_evidence_blocked",
+    ],
+)
+@pytest.mark.parametrize("wait_seconds", [0, 60])
+def test_wait_seconds_retries_only_retryable_github_holds(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    reason: str,
+    wait_seconds: int,
+) -> None:
+    project, _ = bound_project
+    _, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(report["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=report["run_id"])
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(
+            factory_run.RunId(report["run_id"])
+        )
+    finally:
+        ledger.close()
+    progression = Stage1Progression(Stage1ProgressionAction(node), run)
+    calls = 0
+    clock = 0.0
+
+    def advance(*_: object, **__: object) -> Stage1Progression:
+        nonlocal calls
+        calls += 1
+        return progression
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    enrich = factory_run._enrich
+
+    def held(*args: object, **kwargs: object) -> dict[str, object]:
+        result = enrich(*args, **kwargs)
+        result["next_action"] = node
+        result["nodes"] = [{"node_id": node, "status": "queued", "attempt_id": "attempt"}]
+        result["holds"] = [{"reason": reason}] if calls < 2 else [{"reason": "finished"}]
+        return result
+
+    monkeypatch.setattr(factory_run, "_enrich", held)
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **_: SimpleNamespace(
+            next_action=lambda _: progression,
+            advance=advance,
+        ),
+    )
+    monkeypatch.setattr(factory_run.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(factory_run.time, "sleep", sleep)
+    result = factory_run.advance_run(project, report["run_id"], wait_seconds=wait_seconds)
+    assert calls == (2 if wait_seconds else 1)
+    assert result["holds"] == [{"reason": "finished" if wait_seconds else reason}]
+
+
+def test_status_github_view_is_optional_display_only(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    _, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    _, plain = invoke(capsys, project, "status", run["run_id"])
+    _, viewed = invoke(capsys, project, "status", run["run_id"], "--github-view")
+    assert viewed.pop("github_view") == {
+        "display_only": True,
+        "note": "gh-axi is not configured in user preferences [executables].gh_axi",
+    }
+    assert viewed == plain

@@ -421,7 +421,7 @@ def advance_run(
                 watch_document(ledger, runtime, progression, action_taken=previous.action.value),
                 run_id,
             )
-            if once or _finished(report):
+            if once or (_finished(report) and not _retryable_github_hold(report)):
                 return report
             digest = _node_digest(cast(list[dict[str, object]], report["nodes"]))
             if progression.action in _EXECUTES_NOW and (
@@ -443,7 +443,9 @@ def advance_run(
                 current_nodes = nodes(ledger, runtime, run_id=run_id)
                 current_digest = _node_digest(current_nodes)
                 report = _enrich(project, ledger, watch_document(ledger, runtime, observed), run_id)
-                if _finished(report) or time.monotonic() >= deadline:
+                if (
+                    _finished(report) and not _retryable_github_hold(report)
+                ) or time.monotonic() >= deadline:
                     return report
                 backoff = min(backoff + 1, len(_BACKOFF_SECONDS) - 1)
                 if (
