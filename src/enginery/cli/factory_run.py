@@ -592,7 +592,44 @@ def _enrich(
         f"--database {shlex.quote(str(database_path(project)))} "
         f"--owner factory --run-id {shlex.quote(run_id)}"
     )
-    if awaiting is not None and awaiting["node_id"] != "review":
+    verification = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:verify"
+    )
+    exhausted_behavior = (
+        report["next_action"] == "await_human_review"
+        and verification is not None
+        and verification.state.get("status") == "failed"
+        and bool(verification.state.get("behavioral_findings"))
+    )
+    if exhausted_behavior:
+        assert verification is not None
+        review_command, _ = decision_commands(run_id, str(project), "pull_request.open")
+        new_run_command = shlex.join(
+            [
+                "enginery",
+                "factory",
+                "run",
+                request.work_snapshot.work_item.external_reference,
+                "--supersede",
+                "--project",
+                str(project),
+            ]
+        )
+        report.update(
+            status="failed",
+            reason="behavioral_acceptance_failed",
+            behavioral_findings=verification.state["behavioral_findings"],
+            next_decision=None,
+        )
+        hold = {
+            "reason": "behavioral_acceptance_failed",
+            "message": "The behavioral repair budget is exhausted; this run is terminal.",
+            "repair": (
+                f"Inspect the evidence with {review_command}. A new attempt requires a new run: "
+                f"{new_run_command}. Supersede is accepted only after the issue snapshot changes."
+            ),
+        }
+    elif awaiting is not None and awaiting["node_id"] != "review":
         node_id = str(awaiting["node_id"])
         action = "pull_request.open" if node_id == "open_pr" else f"human_wait.{node_id}.approve"
         review_command, decide_command = decision_commands(run_id, str(project), action)

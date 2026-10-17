@@ -1225,6 +1225,71 @@ def test_completed_run_returns_without_advancing_or_sleeping(
     assert report["next_action"] == "wait"
 
 
+def test_exhausted_behavioral_failure_is_terminal_and_reviewable(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        ledger.append(
+            AppendCommand(
+                correlation_id="exhausted-behavior",
+                events=(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{run_id}:verify",
+                        expected_version=0,
+                        event_type="runtime_node.fixture_failed",
+                        schema_version=1,
+                        payload={
+                            "status": "failed",
+                            "attempt_id": "verify-0",
+                            "behavioral_findings": ["behavioral_assertion_failed:fixture:0"],
+                        },
+                    ),
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{run_id}:qualify",
+                        expected_version=ledger.read_projection(
+                            aggregate_type="runtime_node", aggregate_id=f"{run_id}:qualify"
+                        ).aggregate_version,
+                        event_type="runtime_node.fixture_wait",
+                        schema_version=1,
+                        payload={"status": "awaiting_human", "attempt_id": "qualify-0"},
+                    ),
+                ),
+            )
+        )
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+        progression = Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        monkeypatch.setattr(
+            factory_run,
+            "read_only_service",
+            lambda **_: SimpleNamespace(next_action=lambda _: progression),
+        )
+    finally:
+        ledger.close()
+    code, report = invoke(capsys, project, "status", run_id)
+    assert code == 5
+    assert report["status"] == "failed"
+    assert report["reason"] == "behavioral_acceptance_failed"
+    assert report["behavioral_findings"] == ["behavioral_assertion_failed:fixture:0"]
+    assert report["next_decision"] is None
+    repair = report["holds"][0]["resolve"]
+    assert "--supersede" in repair
+    assert "only after the issue snapshot changes" in repair
+    assert "factory decide" not in repair
+    assert "requeue" not in repair
+    review_command = repair.split("Inspect the evidence with ", 1)[1].split(". A new attempt", 1)[0]
+    assert main(shlex.split(review_command)[1:]) == 0
+    assert "Subject digest:" in capsys.readouterr().out
+
+
 def test_failed_implementation_human_wait_names_its_decision(
     bound_project: tuple[Path, StandInGitHub],
     capsys: pytest.CaptureFixture[str],
