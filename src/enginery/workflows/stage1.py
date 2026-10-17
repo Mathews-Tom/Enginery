@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import NoReturn
 
 from enginery.application.behavioral_checks import BehavioralCheck, checks_from_state
 from enginery.application.branch_publication import (
@@ -1685,6 +1684,7 @@ class Stage1RunService:
             evidence = self._require_pull_requests().evidence(pull_request_number)
         except (TransientProviderFailureError, StaleEvidenceError) as error:
             self._github_evidence_hold(request, "wait_for_ci", epoch.epoch, now, error)
+            return PullRequestOutcome.WAITING
         outcome = evaluate_pull_request(evidence, requirements)
         extra: dict[str, object] = {
             "pull_request_outcome": outcome.value,
@@ -1698,9 +1698,16 @@ class Stage1RunService:
         if outcome is PullRequestOutcome.WAITING:
             self._github_pending(request, "wait_for_ci", epoch.epoch, now, extra)
             return outcome
+        failed_checks = _failed_checks(evidence, request.required_checks)
         if outcome is PullRequestOutcome.BLOCKED:
             extra.update(self._github_blocked_repair(request))
-        failed_checks = _failed_checks(evidence, request.required_checks)
+            if (
+                not failed_checks
+                and evidence.pull_request.state.lower() == "open"
+                and evidence.mergeable is not False
+            ):
+                self._github_blocked(request, "wait_for_ci", epoch.epoch, now, extra)
+                return outcome
         if failed_checks:
             extra["failed_checks"] = list(failed_checks)
         self.runtime.complete_node(
@@ -1727,6 +1734,25 @@ class Stage1RunService:
             "repair": repair,
             "message": "complete current-head GitHub evidence blocks readiness",
         }
+
+    def _github_blocked(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        evidence: Mapping[str, object],
+    ) -> None:
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_blocked",
+            repair=str(evidence["repair"]),
+            message=str(evidence["message"]),
+            extra=evidence,
+        )
 
     def _github_pending(
         self,
@@ -1759,10 +1785,11 @@ class Stage1RunService:
         epoch: int,
         now: datetime,
         error: Exception,
-    ) -> NoReturn:
+    ) -> None:
         repair = (
-            "repair the incomplete GitHub API collection (page cap, changing total_count, "
-            "or malformed records); never accept a prefix. Retry "
+            "retry transient GitHub API changes or repair malformed records; never accept a "
+            "prefix. The fixed limit is 100 pages (at most 9,900 records per collection); "
+            "collections reaching that limit cannot be accepted. Retry "
             f"enginery factory resume {request.run.id} --project "
             f"{shlex.quote(str(request.repository_path))}"
         )
@@ -1775,11 +1802,14 @@ class Stage1RunService:
             reason="github_evidence_incomplete",
             repair=repair,
             message=message,
+            extra={
+                "github_evidence": None,
+                "github_evidence_digest": None,
+                "github_evidence_observations": None,
+                "pull_request_outcome": None,
+                "head_revision": None,
+            },
         )
-        raise HumanActionRequiredError(
-            message,
-            details={"reason": "github_evidence_incomplete", "repair": repair},
-        ) from error
 
     def verify_merge_ready(
         self,
@@ -1919,6 +1949,7 @@ class Stage1RunService:
             ).verify(request=verification_request, observed_at=now)
         except (TransientProviderFailureError, StaleEvidenceError) as error:
             self._github_evidence_hold(request, "verify", epoch.epoch, now, error)
+            return Stage1VerificationResult(PullRequestOutcome.WAITING, None)
         extra: dict[str, object] = {
             "pull_request_outcome": result.outcome.value,
             "head_revision": verification_request.requirements.expected_head_revision,
@@ -1942,6 +1973,15 @@ class Stage1RunService:
             return result
         if result.outcome is PullRequestOutcome.BLOCKED:
             extra.update(self._github_blocked_repair(request))
+            observation = result.github_evidence[-1] if result.github_evidence else None
+            if (
+                observation is not None
+                and not _failed_checks(observation, request.required_checks)
+                and observation.pull_request.state.lower() == "open"
+                and observation.mergeable is not False
+            ):
+                self._github_blocked(request, "verify", epoch.epoch, now, extra)
+                return result
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
             store = self.ledger.artifact_store or ArtifactStore(

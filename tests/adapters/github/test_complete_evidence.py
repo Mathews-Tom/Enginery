@@ -11,7 +11,6 @@ from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests
 from enginery.application.work_ports import PullRequestEvidence
 from enginery.domain.digests import Digest
 from enginery.domain.errors import (
-    InvalidInputError,
     MissingPrerequisiteError,
     StaleEvidenceError,
     TransientProviderFailureError,
@@ -234,6 +233,37 @@ def test_later_approval_replaces_old_changes_request(tmp_path: Path) -> None:
     assert _outcome(adapter.evidence(11)) is PullRequestOutcome.MERGE_READY
 
 
+@pytest.mark.parametrize("state", ["COMMENTED", "PENDING"])
+@pytest.mark.parametrize(
+    "opinion,outcome",
+    [
+        ("CHANGES_REQUESTED", PullRequestOutcome.BLOCKED),
+        ("APPROVED", PullRequestOutcome.MERGE_READY),
+    ],
+)
+def test_non_opinion_review_preserves_latest_opinion(
+    tmp_path: Path, state: str, opinion: str, outcome: PullRequestOutcome
+) -> None:
+    later = _review(2, state=state, submitted_at="2026-10-17T10:01:00Z")
+    if state == "PENDING":
+        later["submitted_at"] = None
+    adapter, _, _, _ = _adapter(tmp_path, _responses(reviews=[_review(state=opinion), later]))
+    assert _outcome(adapter.evidence(11)) is outcome
+
+
+@pytest.mark.parametrize("computed", [True, False])
+def test_mergeability_computed_during_collection_is_used(tmp_path: Path, computed: bool) -> None:
+    responses = _responses()
+    initial = _pull()
+    initial["mergeable"] = None
+    terminal = _pull()
+    terminal["mergeable"] = computed
+    responses[0] = initial
+    responses[-1] = terminal
+    adapter, _, _, _ = _adapter(tmp_path, responses)
+    assert adapter.evidence(11).mergeable is computed
+
+
 def test_new_head_does_not_reuse_old_approval(tmp_path: Path) -> None:
     adapter, _, _, _ = _adapter(tmp_path, _responses(reviews=[_review(head="c" * 40)]))
     assert _outcome(adapter.evidence(11)) is PullRequestOutcome.WAITING
@@ -309,7 +339,7 @@ def test_malformed_element_anywhere_fails_closed(
 )
 def test_malformed_review_fields_hold(tmp_path: Path, review: dict[str, object]) -> None:
     adapter, _, _, _ = _adapter(tmp_path, _responses(reviews=[review]))
-    with pytest.raises((TransientProviderFailureError, InvalidInputError)):
+    with pytest.raises(TransientProviderFailureError):
         adapter.evidence(11)
 
 

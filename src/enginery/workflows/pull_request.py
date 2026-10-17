@@ -53,7 +53,7 @@ def evaluate_pull_request(
         return PullRequestOutcome.BLOCKED
     latest_reviews: dict[str, tuple[tuple[datetime, int], PullRequestReview]] = {}
     for index, review in enumerate(evidence.reviews):
-        if review.state.upper() == "PENDING":
+        if review.state.upper() not in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
             continue
         # Live evidence carries timezone-aware submission times and IDs. Historical
         # normalized fixtures retain their input ordering when those fields are absent.

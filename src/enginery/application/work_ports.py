@@ -384,6 +384,7 @@ class PullRequestCheck:
     status: str
     conclusion: str | None
     head_revision: str
+    app_id: int | None = None
 
     def __post_init__(self) -> None:
         if any(not value.strip() for value in (self.name, self.status, self.head_revision)):
@@ -401,6 +402,7 @@ class PullRequestStatus:
     head_revision: str
     status_id: int
     created_at: str
+    creator_id: int | None = None
 
     def __post_init__(self) -> None:
         if (

@@ -532,6 +532,12 @@ class GitHubPullRequests:
             raise MissingPrerequisiteError("GitHub evidence requires the project artifact store")
         if type(self.evidence_page_cap) is not int or not 2 <= self.evidence_page_cap <= _MAX_PAGES:
             raise InvalidInputError("GitHub evidence page cap must be between 2 and 100")
+        try:
+            return self._collect_evidence(number)
+        except InvalidInputError as error:
+            raise TransientProviderFailureError(f"GitHub evidence is malformed: {error}") from error
+
+    def _collect_evidence(self, number: int) -> PullRequestEvidence:
         raw: list[Digest] = []
         proofs: list[EvidenceCompleteness] = []
         endpoint = f"repos/{self.config.repository}/pulls/{number}"
@@ -573,8 +579,13 @@ class GitHubPullRequests:
             raise StaleEvidenceError("GitHub combined and per-context statuses disagree")
         latest_payload = self._evidence_object(endpoint, raw)
         latest = _pull_request_snapshot(latest_payload)
-        if latest != snapshot or latest_payload.get("mergeable") != mergeable:
+        latest_mergeable = latest_payload.get("mergeable")
+        if latest_mergeable is not None and not isinstance(latest_mergeable, bool):
+            raise TransientProviderFailureError("GitHub mergeability must be boolean or null")
+        if latest != snapshot or (mergeable is not None and latest_mergeable != mergeable):
             raise StaleEvidenceError("GitHub pull request changed while evidence was collected")
+        if mergeable is None:
+            mergeable = latest_mergeable
         return PullRequestEvidence(
             snapshot,
             reviews,
@@ -1169,7 +1180,13 @@ def _evidence_check(payload: Mapping[str, object], head: str) -> PullRequestChec
         "startup_failure",
     }:
         raise TransientProviderFailureError("GitHub check-run conclusion is malformed")
-    return PullRequestCheck(_required_string(payload, "name"), status, conclusion, head)
+    return PullRequestCheck(
+        _required_string(payload, "name"),
+        status,
+        conclusion,
+        head,
+        _evidence_actor_id(payload, "app"),
+    )
 
 
 def _latest_statuses(
@@ -1191,11 +1208,21 @@ def _latest_statuses(
             head,
             _required_positive_int(payload, "id"),
             _evidence_timestamp(payload, "created_at"),
+            _evidence_actor_id(payload, "creator"),
         )
         previous = latest.get(status.context)
         if previous is None or status.status_id > previous.status_id:
             latest[status.context] = status
     return tuple(latest[context] for context in sorted(latest))
+
+
+def _evidence_actor_id(payload: Mapping[str, object], field: str) -> int | None:
+    actor = payload.get(field)
+    if actor is None:
+        return None
+    if not isinstance(actor, Mapping):
+        raise TransientProviderFailureError(f"GitHub {field} must be an object")
+    return _required_positive_int(actor, "id")
 
 
 def _pull_request_marker(operation_id: OperationId) -> str:

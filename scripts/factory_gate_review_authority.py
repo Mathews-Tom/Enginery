@@ -779,7 +779,14 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
                 and no_second_collection
                 and reason in packet
                 and (mode != "late-check" or late_page)
-                and (mode != "cap" or "cap" in text.lower())
+                and (
+                    mode != "cap"
+                    or (
+                        isinstance(status.get("hold"), dict)
+                        and status["hold"].get("reason") == "github_evidence_incomplete"
+                        and "pagination cap reached" in text
+                    )
+                )
             )
             observed = {
                 "mode": mode,

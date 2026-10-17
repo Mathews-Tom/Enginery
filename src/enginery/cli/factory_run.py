@@ -604,12 +604,26 @@ def _enrich(
         "await_human_review",
         "blocked",
     }:
+        implementation_projection = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:implement",
+        )
+        current_attempt = (
+            request.implementation.attempt_id
+            if implementation_projection is None
+            else str(implementation_projection.state.get("attempt_id", ""))
+        )
         for name in ("verify", "wait_for_ci"):
             ci_observation = ledger.read_projection(
                 aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
                 aggregate_id=f"{run_id}:{name}",
             )
             state = {} if ci_observation is None else ci_observation.state
+            attempt = state.get("attempt_id")
+            if not isinstance(attempt, str) or first_attempt_generation(
+                attempt
+            ) != first_attempt_generation(current_attempt):
+                continue
             if isinstance(state.get("reason"), str) and str(state["reason"]).startswith(
                 "github_evidence_",
             ):

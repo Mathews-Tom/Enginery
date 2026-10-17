@@ -1191,6 +1191,15 @@ The existing Stage 1 outcome projection also writes one visible, operation-marke
 comment to the issue and reconciles it before retrying. This is disclosed in gate effect
 counts; it is not a hidden issue reply. Collection itself still performs zero GitHub mutations.
 
+Required checks and commit statuses are matched by check name/status context,
+not by creator app or user identity. Raw API evidence retains check-run app IDs
+and status creator IDs when GitHub supplies them, but they are not authorization
+constraints: a principal with `statuses:write` can mask an earlier failing context.
+This limitation affects readiness only; merge remains outside the factory.
+Review/status vetoes and non-required failing checks stay queued for a fresh
+observation on resume, without dispatching a new implementation. Required-check
+failures retain the existing bounded implementation-repair path.
+
 ### Manual-path holds
 
 Holds report repairs; replace placeholders with the values reported for the run:
@@ -1210,7 +1219,7 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
 | `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
 | `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
-| `github_evidence_incomplete` | Read the exact collection failure detail. Fix incomplete/malformed API collection or inconsistent totals; if the configured page cap is below 100, increase it to a valid cap, or reduce the excess collection when already at the maximum. Then retry the same run with `enginery factory resume RUN --project PROJECT`. Never accept a collected prefix or start a replacement run to bypass completeness. |
+| `github_evidence_incomplete` | Read the exact collection failure detail. Retry transient API changes or repair malformed records/inconsistent totals, then run `enginery factory resume RUN --project PROJECT`. The fixed limit is 100 pages (at most 9,900 records per collection); a collection reaching that limit cannot be accepted, and no configuration setting raises it. Never accept a prefix or start a replacement run to bypass completeness. |
 | `github_evidence_blocked` | Inspect the recorded CI/status/review detail in `enginery factory review RUN --project PROJECT`. Repair the failing check or current commit status, or resolve the current `CHANGES_REQUESTED` review with the reviewer, then run `enginery factory resume RUN --project PROJECT`. A display command, earlier approval or successful prefix cannot clear the block. |
 | `github_evidence_waiting` | Wait for the required current-head checks/statuses and configured reviews, then run `enginery factory resume RUN --project PROJECT` to recollect complete evidence; pending or skipped checks do not count as success. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
