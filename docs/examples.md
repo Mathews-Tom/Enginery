@@ -167,7 +167,7 @@ request = Stage1RunRequest(
         harness_provider="omp",  # or "claude-code"
         harness_credential_reference="operator-harness-session",
         harness_executable="omp",
-        artifact_root=Path("<absolute path to an artifact directory>"),
+        artifact_root=Path("<absolute private artifact directory beneath the Enginery state home>"),
     ),
 )
 

@@ -55,7 +55,8 @@ attempt and return `wait`, never launch a second worker.
    (not a full issue URL — that is a request-composition detail this
    demonstration's own worked example got wrong on a first attempt; see the
    published write-up), a `--repository-path` pointing at a local clone,
-   fresh `--workspace-path`/`--artifact-root` directories, and
+   a fresh `--workspace-path`, and an `--artifact-root` beneath the private Enginery
+   state home (`${XDG_STATE_HOME:-$HOME/.local/state}/enginery/`). Select
    `--harness-provider omp` or `claude-code`. The title, the body, the
    source revision, and the declared classification are read from the issue
    through `gh` and bound exactly as returned: a live GitHub-sourced work
