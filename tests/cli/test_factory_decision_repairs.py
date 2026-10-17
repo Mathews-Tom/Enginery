@@ -107,7 +107,7 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
             ledger=ledger,
             publication_authorizer=refuse,
         )
-        with pytest.raises(stage1.HumanActionRequiredError):
+        with pytest.raises(stage1.HumanActionRequiredError) as refused:
             service.open_pull_request(
                 request, now=datetime.now(tz=UTC), heartbeat_window=timedelta(seconds=60)
             )
@@ -122,6 +122,7 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
         "reason": "decision_required",
         "repair": f"{review}; {decide}",
     }
+    assert str(refused.value) == f"decision_required: review required; repair: {review}; {decide}"
     for command, verb in ((review, "review"), (decide, "decide")):
         argv = shlex.split(command)
         assert argv[:4] == ["enginery", "factory", verb, str(request.run.id)]

@@ -15,12 +15,14 @@ from enginery.application.human_decisions import (
     AuthenticatedDecisionContext,
     AuthenticationError,
     HumanDecision,
+    HumanDecisionError,
     PrincipalMismatchError,
     ReviewAuthority,
     StaleSubjectError,
     SubjectMismatchError,
     authenticate_context,
     bounded_json,
+    decision_commands,
     policy_action,
     wait_scope,
 )
@@ -260,6 +262,45 @@ def decide_in_ledger(
     reason: str = "",
     resumed_request: FixtureDispatch | None = None,
     owner: str = "factory",
+) -> dict[str, object]:
+    """Attach one repair using the actual ledger, owner and requested action."""
+    try:
+        return _decide_in_ledger(
+            ledger,
+            request,
+            action=action,
+            subject_digest=subject_digest,
+            challenge=challenge,
+            principal_id=principal_id,
+            reason=reason,
+            resumed_request=resumed_request,
+            owner=owner,
+        )
+    except HumanDecisionError as error:
+        database = ledger.connection.execute("PRAGMA database_list").fetchone()[2]
+        review, decide = decision_commands(
+            str(request.run.id),
+            str(request.repository_path),
+            action,
+            database=database or None,
+            owner=owner,
+        )
+        raise type(error)(
+            error.args[0], details={**error.details, "repair": f"{review}; {decide}"}
+        ) from error
+
+
+def _decide_in_ledger(
+    ledger: LedgerService,
+    request: Stage1RunRequest,
+    *,
+    action: str,
+    subject_digest: str,
+    challenge: str,
+    principal_id: str | None,
+    reason: str,
+    resumed_request: FixtureDispatch | None,
+    owner: str,
 ) -> dict[str, object]:
     """Consume and release an exact wait under ONE write transaction, including its event."""
     registration, context = _authenticate(principal_id)

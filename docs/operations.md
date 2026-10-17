@@ -1084,6 +1084,8 @@ receives the packet and subject digest with a notice to correct `[review_authori
 in user preferences; no challenge is issued.
 For a run started with `stage1 --database DB --owner OWNER`, pass those same
 `--database DB --owner OWNER` flags to both `factory review` and `factory decide`.
+Decision refusals name one quoted review/decide repair for that run, ledger and
+owner; human-wait repairs include the required `--reason`.
 Pre-implementation waits bind the verified base, request, issue snapshot,
 configuration, waiting node IDs and findings with an empty head and diff; they
 offer only their wait actions. No implementation commit is invented for review.

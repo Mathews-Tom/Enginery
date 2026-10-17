@@ -1403,11 +1403,11 @@ class Stage1RunService:
                     node_id="open_pr",
                     epoch=epoch.epoch,
                     now=now,
-                    reason=f"{error.code}: {error}; repair: {repair}",
+                    reason=f"{error}; repair: {repair}",
                     extra={"reason": error.code, "repair": repair},
                 )
             raise HumanActionRequiredError(
-                f"{error.code}: {error}; repair: {repair}",
+                f"{error}; repair: {repair}",
                 details={"reason": error.code, "repair": repair},
             ) from error
         if publisher is not None:

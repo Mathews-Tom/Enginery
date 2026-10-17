@@ -9,6 +9,7 @@ import json
 import os
 import pty
 import subprocess
+import shlex
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -351,6 +352,32 @@ def test_real_terminal_issues_hash_only_and_consumes_once(
     with LedgerService.open(ingress.database) as reopened:
         assert list_decisions(reopened.connection, RUN)[0] == decisions[0]
 
+
+
+@pytest.mark.parametrize("action", [ACTION, "human_wait.validate.reject"])
+def test_decision_refusal_has_one_context_correct_quoted_repair(
+    ingress: Ingress,
+    terminal: None,
+    action: str,
+) -> None:
+    if action != ACTION:
+        ingress.register("validate", outcome="awaiting_human")
+    issued = ingress.issue()
+    with pytest.raises(SubjectMismatchError) as refused:
+        ingress.decide(issued, action=action, subject_digest="sha256:" + "0" * 64)
+    message = str(refused.value)
+    assert message.count("repair:") == 1
+    review, decide = message.split("; repair: ", 1)[1].split("; ", 1)
+    for command, verb in ((review, "review"), (decide, "decide")):
+        argv = shlex.split(command)
+        assert argv[:4] == ["enginery", "factory", verb, RUN]
+        assert argv[argv.index("--project") + 1] == str(ingress.project)
+        assert argv[argv.index("--database") + 1] == str(ingress.database)
+        assert argv[argv.index("--owner") + 1] == "stage1-cli"
+    argv = shlex.split(decide)
+    assert argv[argv.index("--action") + 1] == action
+    assert ("--reason" in argv) == action.startswith("human_wait.")
+    assert not list_decisions(ingress.ledger.connection, RUN)
 
 def test_a_durable_publication_decision_cannot_release_another_action(
     ingress: Ingress,

@@ -57,11 +57,9 @@ class HumanDecisionError(InvalidInputError):
     code: ClassVar[str] = "human_decision_refused"
 
     def __str__(self) -> str:
-        review, decide = decision_commands("RUN", "PROJECT", "ACTION")
-        return (
-            f"{self.code}: {super().__str__()}; repair: in the registered operator's terminal, "
-            f"run {review}, then {decide}"
-        )
+        message = f"{self.code}: {super().__str__()}"
+        repair = self.details.get("repair")
+        return f"{message}; repair: {repair}" if isinstance(repair, str) else message
 
 
 class AuthenticationError(HumanDecisionError):
