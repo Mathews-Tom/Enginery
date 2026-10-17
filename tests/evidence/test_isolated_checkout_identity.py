@@ -9,7 +9,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.evidence.test_behavioral_acceptance import _current, _repository
 
 from enginery.adapters.checkout_identity import verified_returned_build
 from enginery.adapters.oci.store import replace_tree, write_tree_archive
@@ -20,6 +19,7 @@ from enginery.domain.errors import StaleEvidenceError
 from enginery.domain.execution_receipt import RunnerReceiptRef
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.workflows.behavioral_acceptance import BehavioralAcceptanceService
+from tests.evidence.test_behavioral_acceptance import _current, _repository
 
 
 def _plant(workspace: Path, marker: Path) -> None:
@@ -34,7 +34,8 @@ def test_plain_git_status_executes_planted_filter_control(tmp_path: Path) -> Non
     checkout, _ = _repository(tmp_path, "print('changed', end='')\n")
     marker = tmp_path / "HOST-EXECUTED"
     _plant(checkout, marker)
-    (checkout / "behavior.py").write_text("print('dirty')\n")
+    # Same-size dirty bytes force Git to consult the clean filter, not its size shortcut.
+    (checkout / "behavior.py").write_text("print('altered', end='')\n")
     subprocess.run(["git", "status", "--porcelain"], cwd=checkout, check=True, capture_output=True)
     assert marker.exists(), "control must prove the filter executes under plain host git"
 
@@ -71,16 +72,23 @@ def test_isolated_returned_git_config_never_executes_on_host(tmp_path: Path) -> 
         artifacts, custody, isolated=True, command_runner=container, calibration_python="python3"
     )
     check = BehavioralCheck(
-        "behavior", "command", (BehavioralAssertion("stdout", "equals", "changed"),),
-        ("constant_result", "wrong_build"), argv=("python3", "-I", "behavior.py"),
+        "behavior",
+        "command",
+        (BehavioralAssertion("stdout", "equals", "changed"),),
+        ("constant_result", "wrong_build"),
+        argv=("python3", "-I", "behavior.py"),
     )
     inputs = _current((check,), checkout, head)
     with pytest.raises(StaleEvidenceError, match="returned Git metadata"):
         service.run(
-            checks=(check,), cwd=checkout, source_revision=inputs.source_revision,
-            base_revision=inputs.base_revision, head_revision=head,
+            checks=(check,),
+            cwd=checkout,
+            source_revision=inputs.source_revision,
+            base_revision=inputs.base_revision,
+            head_revision=head,
             configuration_snapshot_digest=inputs.configuration_snapshot_digest,
-            evaluator=inputs.evaluator, environment=inputs.environment,
+            evaluator=inputs.evaluator,
+            environment=inputs.environment,
         )
     assert calls == 1
     assert not marker.exists()

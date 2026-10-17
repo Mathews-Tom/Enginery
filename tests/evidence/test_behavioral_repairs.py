@@ -120,3 +120,25 @@ def test_checkout_mutation_during_observation_refuses_receipt(tmp_path: Path) ->
     service = _service(tmp_path)
     with pytest.raises(StaleEvidenceError, match="behavioral_build_mismatch"):
         _run(service, (check,), _current((check,), checkout, head), checkout)
+
+
+@pytest.mark.parametrize("calibrate_first", [False, True])
+def test_first_regressed_candidate_fails_even_without_qualified_calibration(
+    tmp_path: Path, calibrate_first: bool
+) -> None:
+    checkout, head = _repository(tmp_path, "print('regressed', end='')\n")
+    check = BehavioralCheck(
+        "behavior",
+        "command",
+        (BehavioralAssertion("stdout", "equals", "changed"),),
+        ("constant_result", "wrong_build"),
+        argv=(sys.executable, "-I", "behavior.py"),
+    )
+    inputs = _current((check,), checkout, head)
+    service = _service(tmp_path)
+    if calibrate_first:
+        calibration = _calibrate(service, (check,), inputs, checkout)
+        assert any(item.classification == "inconclusive" for item in calibration.results)
+    result = _run(service, (check,), inputs, checkout)
+    assert result.result is EvidenceResult.FAIL
+    assert result.holds == ("behavioral_assertion_failed:behavior:0",)

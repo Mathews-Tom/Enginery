@@ -213,13 +213,21 @@ def verify_for_stage1(
             details={
                 "reason": reason,
                 "findings": tuple(cast(list[str], state["holds"])) if failed else (),
-                "repair": "Repair the named observer infrastructure, then " + retry
+                "repair": "Repair the named observer infrastructure, then "
+                + retry
                 + "; to explicitly refresh calibration, run "
                 + shlex.join(
                     (
-                        "enginery", "factory", "calibrate", str(request.run.id),
-                        "--project", str(request.repository_path), "--database", database,
-                        "--owner", owner,
+                        "enginery",
+                        "factory",
+                        "calibrate",
+                        str(request.run.id),
+                        "--project",
+                        str(request.repository_path),
+                        "--database",
+                        database,
+                        "--owner",
+                        owner,
                     )
                 )
                 if not failed
@@ -231,8 +239,13 @@ def verify_for_stage1(
 
 
 def run_command(
-    project: Path, run_id: str, *, calibrate: bool, without_faults: tuple[str, ...] = (),
-    database: Path | None = None, owner: str = "factory",
+    project: Path,
+    run_id: str,
+    *,
+    calibrate: bool,
+    without_faults: tuple[str, ...] = (),
+    database: Path | None = None,
+    owner: str = "factory",
 ) -> dict[str, object]:
     with LedgerService.open(database if database is not None else database_path(project)) as ledger:
         request = (
@@ -246,15 +259,22 @@ def run_command(
         attempt_id = None if implementation is None else implementation.state.get("attempt_id")
         attempt = (
             ledger.read_projection(aggregate_type="node_attempt", aggregate_id=attempt_id)
-            if isinstance(attempt_id, str) else None
+            if isinstance(attempt_id, str)
+            else None
         )
         result = None if attempt is None else attempt.state.get("result")
         head = None if not isinstance(result, Mapping) else result.get("head_revision")
-        if not isinstance(head, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
+        if (
+            not isinstance(head, str)
+            or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None
+        ):
             raise HumanActionRequiredError(
                 "behavioral check requires a verified implementation attempt head"
             )
-        if not request.runner.isolated_mode and resolve_commit(request.workspace_path, "HEAD") != head:
+        if (
+            not request.runner.isolated_mode
+            and resolve_commit(request.workspace_path, "HEAD") != head
+        ):
             raise HumanActionRequiredError("behavioral_build_mismatch: workspace HEAD changed")
         return execute_behavioral(
             ledger, request, head_revision=head, calibrate=calibrate, without_faults=without_faults

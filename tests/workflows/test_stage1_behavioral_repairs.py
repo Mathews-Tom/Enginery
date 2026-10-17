@@ -7,6 +7,7 @@ import sys
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.evidence.test_behavioral_acceptance import _repository
@@ -17,9 +18,9 @@ from enginery.application.behavioral_checks import (
     BehavioralCheck,
     BehavioralChecksBinding,
 )
-from enginery.cli import factory_behavioral
-from enginery.domain.digests import Digest
+from enginery.cli import factory_behavioral, factory_collect
 from enginery.domain.errors import HumanActionRequiredError
+from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.behavioral_acceptance import BehavioralAcceptanceService
@@ -27,8 +28,11 @@ from enginery.workflows.stage1 import Stage1ProgressionAction, Stage1RunRequest
 
 
 def _wire(
-    monkeypatch: pytest.MonkeyPatch, request: Stage1RunRequest, checkout: Path,
-    check: BehavioralCheck, custody: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: Stage1RunRequest,
+    checkout: Path,
+    check: BehavioralCheck,
+    custody: Path,
 ) -> BehavioralAcceptanceService:
     custody.mkdir(mode=0o700)
     observer = BehavioralAcceptanceService(ArtifactStore(custody / "artifacts"), custody)
@@ -38,20 +42,27 @@ def _wire(
     monkeypatch.setattr(factory_behavioral, "read_behavioral_checks", lambda request: binding)
     monkeypatch.setattr(factory_behavioral, "_service", lambda request: observer)
     monkeypatch.setattr(factory_behavioral, "private_state_directory", lambda repository: custody)
+    monkeypatch.setattr(factory_collect, "state_home", lambda: custody)
     return observer
 
 
 @pytest.mark.parametrize("repair_limit", [0, 1])
 def test_first_candidate_failure_is_named_and_takes_bounded_repair(
-    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repair_limit: int
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repair_limit: int,
 ) -> None:
     request, service, now = _ready_to_verify(ledger_service, tmp_path, repair_limit=repair_limit)
     source = tmp_path / "source"
     source.mkdir()
     checkout, head = _repository(source, "print('regressed', end='')\n")
     check = BehavioralCheck(
-        "changed-cli", "command", (BehavioralAssertion("stdout", "equals", "changed"),),
-        ("constant_result", "wrong_build"), argv=(sys.executable, "behavior.py"),
+        "changed-cli",
+        "command",
+        (BehavioralAssertion("stdout", "equals", "changed"),),
+        ("constant_result", "wrong_build"),
+        argv=(sys.executable, "behavior.py"),
     )
     observer = _wire(monkeypatch, request, checkout, check, tmp_path / "evaluator")
     calibrations: list[str] = []
@@ -64,24 +75,47 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
     monkeypatch.setattr(observer, "calibrate", calibrate)
     bound = replace(request, workspace_path=checkout, repair_limit=repair_limit)
     # Publication fixture uses a symbolic head; observation uses its real committed candidate.
-    service = replace(service, behavioral_verifier=lambda req, revision: factory_behavioral.verify_for_stage1(
-        ledger_service, bound, head, owner="operator"
-    ))
-    with pytest.raises(HumanActionRequiredError, match="behavioral_assertion_failed:changed-cli:0") as caught:
-        service.verify_merge_ready(bound, now=now, heartbeat_window=timedelta(seconds=60))
+    service = replace(
+        service,
+        behavioral_verifier=lambda req, revision: factory_behavioral.verify_for_stage1(
+            ledger_service, bound, head, owner="operator"
+        ),
+    )
+    with pytest.raises(
+        HumanActionRequiredError, match="behavioral_assertion_failed:changed-cli:0"
+    ) as caught:
+        service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert "calibration" not in str(caught.value)
     assert calibrations == [], "a candidate failure must be observed before calibration"
     state = service._node_state(bound.run.id, "verify")
     assert state["status"] == "failed"
     assert state["behavioral_findings"] == ["behavioral_assertion_failed:changed-cli:0"]
     expected = (
-        Stage1ProgressionAction.IMPLEMENT if repair_limit
+        Stage1ProgressionAction.IMPLEMENT
+        if repair_limit
         else Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
     )
     assert service.next_action(bound.run.id).action is expected
     if repair_limit:
         assert "stage1 watch" in str(caught.value.details["repair"])
         assert "commit the corrected head" not in str(caught.value.details["repair"])
+        # Exercise Stage 1's real dispatch/repair-context construction, without
+        # launching an unrelated harness process from this semantic-verifier test.
+        monkeypatch.setattr(
+            service.runtime, "tick", lambda **kwargs: SimpleNamespace(dispatched=())
+        )
+        repairing = replace(
+            service, harness=SimpleNamespace(supervised_command=lambda *args, **kwargs: ("true",))
+        )
+        dispatch = repairing.dispatch_implementation(
+            request,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=60),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+        assert "behavioral_assertion_failed:changed-cli:0" in " ".join(dispatch.task.constraints)
+        assert str(dispatch.task.attempt_id) != request.implementation.attempt_id
     else:
         assert "budget is exhausted" in str(caught.value.details["repair"])
 
@@ -105,26 +139,32 @@ def test_inconclusive_calibration_retries_after_observer_recovers(
     )
     checkout, head = _repository(source, script)
     check = BehavioralCheck(
-        "changed-service", "service", (BehavioralAssertion("body", "equals", "changed"),),
-        ("constant_result", "wrong_build"), argv=(sys.executable, "behavior.py"),
+        "changed-service",
+        "service",
+        (BehavioralAssertion("body", "equals", "changed"),),
+        ("constant_result", "wrong_build"),
+        argv=(sys.executable, "behavior.py"),
         url=f"http://127.0.0.1:{port}/",
     )
     observer = _wire(monkeypatch, request, checkout, check, tmp_path / "evaluator")
     bound = replace(request, workspace_path=checkout)
-    service = replace(service, behavioral_verifier=lambda req, revision: factory_behavioral.verify_for_stage1(
-        ledger_service, bound, head, owner="operator"
-    ))
+    service = replace(
+        service,
+        behavioral_verifier=lambda req, revision: factory_behavioral.verify_for_stage1(
+            ledger_service, bound, head, owner="operator"
+        ),
+    )
     with socket.socket() as squatter:
         squatter.bind(("127.0.0.1", port))
         squatter.listen()
         with pytest.raises(HumanActionRequiredError, match="observer_service_conflict") as caught:
-            service.verify_merge_ready(bound, now=now, heartbeat_window=timedelta(seconds=60))
+            service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
         repair = str(caught.value.details["repair"])
         assert "factory calibrate run-check" in repair
         assert "--database" in repair and "--owner operator" in repair
         assert list(observer.evaluator_directory.glob("calibration-*.json"))
     assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
-    result = service.verify_merge_ready(bound, now=now, heartbeat_window=timedelta(seconds=60))
+    result = service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert result.outcome.value == "merge_ready"
     projection = ledger_service.read_projection(
         aggregate_type="behavioral_acceptance", aggregate_id=str(request.run.id)

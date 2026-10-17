@@ -1790,13 +1790,18 @@ class Stage1RunService:
                     raise
                 dispatch = WorkflowNodeDispatch(
                     _fixture_dispatch(
-                        request, node_id="verify", attempt_id=f"verify-{generation}",
-                        operation_id=str(OperationId.derive(
-                            run_id=request.run.id, node_id=NodeId("verify"),
-                            side_effect_kind="publish_merge_ready",
-                            target_scope=request.work_snapshot.work_item.external_reference,
-                            ordinal=generation,
-                        )),
+                        request,
+                        node_id="verify",
+                        attempt_id=f"verify-{generation}",
+                        operation_id=str(
+                            OperationId.derive(
+                                run_id=request.run.id,
+                                node_id=NodeId("verify"),
+                                side_effect_kind="publish_merge_ready",
+                                target_scope=request.work_snapshot.work_item.external_reference,
+                                ordinal=generation,
+                            )
+                        ),
                         command=("verify_merge_ready",),
                         dependencies=((str(request.run.id), "wait_for_ci"),),
                     ),
@@ -1806,11 +1811,17 @@ class Stage1RunService:
                     dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
                 )
                 self.runtime.complete_node(
-                    run_id=str(request.run.id), node_id="verify", epoch=epoch.epoch, now=now,
+                    run_id=str(request.run.id),
+                    node_id="verify",
+                    epoch=epoch.epoch,
+                    now=now,
                     outcome="failed",
                     extra={"behavioral_findings": [str(finding) for finding in findings]},
                 )
-                if generation - _generation(request.implementation.attempt_id) >= request.repair_limit:
+                if (
+                    generation - _generation(request.implementation.attempt_id)
+                    >= request.repair_limit
+                ):
                     raise HumanActionRequiredError(
                         str(error),
                         details={

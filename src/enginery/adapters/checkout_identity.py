@@ -49,9 +49,7 @@ def _tracked_bytes(root: int, relative: str) -> tuple[bytes, int]:
         os.close(directory)
 
 
-def verified_returned_build(
-    checkout: Path, repository: Path, expected_head: str
-) -> BuildIdentity:
+def verified_returned_build(checkout: Path, repository: Path, expected_head: str) -> BuildIdentity:
     """Verify returned bytes without executing any process in the returned tree.
 
     ``repository`` is host-owned and never mounted into the isolated runner. Only
@@ -86,7 +84,9 @@ def _verified_tree(
             algorithm = "sha1" if len(object_id) == 40 else "sha256"
             header = f"blob {len(data)}\0".encode()
             if hashlib.new(algorithm, header + data).hexdigest() != object_id:
-                raise StaleEvidenceError("behavioral_build_mismatch: checkout differs from bound tree")
+                raise StaleEvidenceError(
+                    "behavioral_build_mismatch: checkout differs from bound tree"
+                )
             if bool(actual_mode & 0o111) != (mode == "100755"):
                 raise StaleEvidenceError("behavioral_build_mismatch: executable mode differs")
             records.append({"path": relative, "mode": mode, "digest": str(Digest.of_bytes(data))})
