@@ -33,6 +33,7 @@ from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
+from enginery.domain.ids import RunId
 from enginery.workflows.stage1 import Stage1RunRequest, stage1_request_from_state
 from tests.cli.test_stage1_request_builder import _git, _minimal_argv, _repository
 
@@ -96,6 +97,61 @@ def test_doctor_uses_committed_checks_not_working_tree(tmp_path: Path) -> None:
     )
 
 
+def test_refused_stage1_start_leaves_no_custody(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository, base = _repository(tmp_path)
+    request, _ = _build(tmp_path, repository, base)
+    assert request.behavioral_checks == ()
+    path = behavioral_checks_path(request)
+    assert path is not None and not path.parent.exists()
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "stage1",
+                "start",
+                "--database",
+                str(tmp_path / "ledger.db"),
+                "--owner",
+                "operator",
+                "--request",
+                str(tmp_path / "request.json"),
+            ]
+        )
+        == 5
+    )
+    output = capsys.readouterr()
+    message = output.out + output.err
+    assert str(repository / ".enginery/project.toml") in message
+    assert request.base_branch in message
+    assert "enginery stage1 build-request" in message
+    assert not path.parent.exists()
+
+
+def test_factory_corrupt_custody_repair_names_factory_command(tmp_path: Path) -> None:
+    repository, _ = _repository(tmp_path)
+    _policy(repository)
+    _git("add", ".enginery/project.toml", cwd=repository)
+    _git("commit", "-m", "base checks", cwd=repository)
+    request, _ = _build(tmp_path, repository, _git("rev-parse", "HEAD", cwd=repository))
+    request = replace(request, run=replace(request.run, id=RunId("fr-custody")))
+    bind_behavioral_checks(request)
+    path = behavioral_checks_path(request)
+    assert path is not None
+    path.write_text("{")
+    with pytest.raises(InvalidInputError, match="not valid JSON") as caught:
+        bind_behavioral_checks(request)
+    assert f"rm -- {shlex.quote(str(path))}" in str(caught.value)
+    assert (
+        f"enginery factory run {shlex.quote(request.work_snapshot.work_item.external_reference)} "
+        f"--project {shlex.quote(str(repository))}"
+    ) in str(caught.value)
+    assert "stage1 build-request" not in str(caught.value)
+    path.unlink()
+    assert bind_behavioral_checks(request) == read_behavioral_checks(request)
+
+
 def test_corrupt_custody_names_file_and_repair(tmp_path: Path) -> None:
     repository, _ = _repository(tmp_path)
     _policy(repository)
@@ -150,6 +206,7 @@ def test_killed_custody_publisher_names_repair_and_can_rebind(
     original = config_binding.os.link
     pid = os.fork()
     if pid == 0:
+
         def link_then_die(source: Path, destination: Path) -> None:
             original(source, destination)
             os.kill(os.getpid(), signal.SIGKILL)

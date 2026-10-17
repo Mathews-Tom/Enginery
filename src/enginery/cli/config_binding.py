@@ -135,17 +135,13 @@ def _custody_lock(path: Path) -> Iterator[None]:
     """Serialize publication and reads, including the temporary hard-link window."""
     lock_path = path.parent / ".lock"
     require_private_path(lock_path, what=_CUSTODY_WHAT)
-    descriptor = os.open(
-        lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
-    )
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or metadata.st_mode & 0o077
-        ):
-            raise InvalidInputError(f"behavioral evaluator custody lock is not private: {lock_path}")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_mode & 0o077:
+            raise InvalidInputError(
+                f"behavioral evaluator custody lock is not private: {lock_path}"
+            )
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -233,7 +229,7 @@ def bind_behavioral_checks(request: Stage1RunRequest) -> BehavioralChecksBinding
                 if actual != expected:
                     raise InvalidInputError(
                         "behavioral evaluator custody does not match the bound request"
-                    )
+                    ) from None
                 return actual
             temporary.unlink()
             fsync_directory(path.parent)

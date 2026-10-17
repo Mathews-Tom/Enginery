@@ -42,6 +42,30 @@ def test_new_empty_check_request_holds_without_rebinding(
     )
 
 
+def test_bound_empty_check_run_names_replacement_not_same_factory_run(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False
+    )
+    request = replace(request, behavioral_checks=())
+    runtime.register_run(
+        run_id=str(request.run.id),
+        initial_state=request.initial_state(),
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    progression = service.next_action(request.run.id)
+    assert progression.hold is not None
+    message = progression.hold.message
+    assert str(request.run.id) in message
+    assert "cannot be rebound" in message
+    assert str(request.repository_path / ".enginery/project.toml") in message
+    assert request.base_branch in message
+    assert "new --run-id" in message
+    assert "factory run ISSUE" not in message
+
+
 def test_absent_checks_refused_for_new_run_but_history_restarts(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:

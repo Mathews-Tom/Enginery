@@ -103,6 +103,15 @@ evaluator custody outside the worker workspace; the request, configuration snaps
 and assertion-set digest must agree. Historical requests without this field keep
 their original serialization and resume binding.
 
+An empty-check `stage1 start` is refused before any evaluator custody file is
+written. Custody readers and publishers share a private-directory lock. If a
+publisher is killed after linking its complete document but before removing the
+temporary link, the next start refuses the multi-link file and names its exact
+`rm -- PATH` repair. Remove only that named custody file, then repeat the start
+or factory run command; factory repair messages name `enginery factory run`,
+not the Stage 1 request-builder flow. An already-bound empty-check run cannot
+be rebound: commit the checks and build a replacement request with a new run id.
+
 ```toml
 [acceptance]
 checks = [

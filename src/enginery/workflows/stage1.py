@@ -429,7 +429,8 @@ class Stage1RunService:
             if not request.behavioral_checks:
                 raise HumanActionRequiredError(
                     "no behavioral checks were bound; add [acceptance] checks to "
-                    ".enginery/project.toml, commit on the base branch, then rebuild "
+                    f"{shlex.quote(str(request.repository_path / '.enginery/project.toml'))}, "
+                    f"commit on {shlex.quote(request.base_branch)}, then rebuild "
                     "with enginery stage1 build-request and start the unbound run again",
                     details={"reason": "no_behavioral_checks"},
                 )
@@ -528,10 +529,12 @@ class Stage1RunService:
                 ExecutionHold(
                     reason=HoldReason.NO_BEHAVIORAL_CHECKS,
                     message=(
-                        "no behavioral checks were bound; add [acceptance] checks to "
-                        ".enginery/project.toml, commit the project policy on the base branch, "
-                        "then rebuild with enginery stage1 build-request and start a new run "
-                        "with enginery factory run ISSUE --project PROJECT"
+                        f"run {request.run.id} has no behavioral checks and cannot be rebound; "
+                        "add [acceptance] checks to "
+                        f"{shlex.quote(str(request.repository_path / '.enginery/project.toml'))}, "
+                        f"commit on {shlex.quote(request.base_branch)}, then supersede this run "
+                        "with enginery stage1 build-request using a new --run-id and start "
+                        "the resulting request"
                     ),
                 )
             )

@@ -297,7 +297,8 @@ def start_bound_run(
         is None
     ):
         require_bound_configuration(raw_request, request)
-        bind_behavioral_checks(request)
+        if request.behavioral_checks:
+            bind_behavioral_checks(request)
     runtime = CoordinatorRuntime(ledger, owner=owner)
     return read_only_service(runtime=runtime, ledger=ledger, request=request).start(
         request, now=_now(), heartbeat_window=HEARTBEAT_WINDOW
