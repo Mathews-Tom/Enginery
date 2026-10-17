@@ -1776,9 +1776,13 @@ class Stage1RunService:
                         str(error),
                         details={
                             **error.details,
-                            "repair": "The behavioral repair budget is exhausted; this run is "
-                            f"terminal. Inspect its evidence with {review_command}. A new attempt "
-                            "requires stage1 build-request and stage1 start with a new run id.",
+                            "repair": "The behavioral repair budget is exhausted; this run "
+                            "cannot pass and is terminal. Inspect its evidence with "
+                            f"{review_command}. Fix the behavior and start a new run: for "
+                            "factory runs, change the issue snapshot and use enginery factory "
+                            "run ISSUE --project PROJECT --supersede; for Stage 1 runs, "
+                            "rebuild with enginery stage1 build-request and start with "
+                            "enginery stage1 start using a new run id.",
                         },
                     ) from error
                 raise
