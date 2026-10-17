@@ -162,6 +162,8 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     packet.add_argument("--no-open", action="store_true")
     packet.add_argument("--json", action="store_true")
     packet.add_argument("--principal-id", default=None)
+    packet.add_argument("--database", type=Path, default=None)
+    packet.add_argument("--owner", default="factory")
     decision = commands.add_parser(
         "decide", help="Authenticate an exact action in the review terminal."
     )
@@ -173,6 +175,8 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     decision.add_argument("--principal-id", default=None)
     decision.add_argument("--reason", default="")
     decision.add_argument("--json", action="store_true")
+    decision.add_argument("--database", type=Path, default=None)
+    decision.add_argument("--owner", default="factory")
     findings = commands.add_parser("feedback", help="Queue repair findings, never approvals.")
     _add_project(findings)
     findings.add_argument("run_id")
@@ -383,12 +387,14 @@ def run_factory(args: argparse.Namespace) -> int:
         return _run_doctor(args)
     if command == "review":
         project = resolve_project(args.project)
-        packet_report = review(project, args.run_id)
+        packet_report = review(project, args.run_id, database=args.database, owner=args.owner)
         issued_report = issue_for_review(
             project,
             args.run_id,
             packet_report,
             principal_id=args.principal_id,
+            database=args.database,
+            owner=args.owner,
         )
         secret = issued_report.pop("challenge", None)
         document = issued_report
@@ -407,6 +413,8 @@ def run_factory(args: argparse.Namespace) -> int:
             challenge=args.challenge,
             principal_id=args.principal_id,
             reason=args.reason,
+            database=args.database,
+            owner=args.owner,
         )
         _emit(args, document, [json.dumps(document, sort_keys=True)])
         return SUCCESS

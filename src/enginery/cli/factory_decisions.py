@@ -26,7 +26,7 @@ from enginery.application.human_decisions import (
 )
 from enginery.application.review_packet import ReviewPacket
 from enginery.cli.config_locations import read_user_layer
-from enginery.cli.factory_review import _open, build_packet
+from enginery.cli.factory_review import _open, build_packet, preimplementation_waits
 from enginery.domain.digests import Digest
 from enginery.domain.policy_decision import PolicyAction
 from enginery.domain.principal import AuthorityPrincipal
@@ -114,7 +114,7 @@ def _waits(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
 
 
 def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
-    waiting = _waits(ledger, request)
+    waiting = preimplementation_waits(ledger, request) or _waits(ledger, request)
     actions: list[str] = []
     publication = _state(ledger, str(request.run.id), "open_pr")
     if "open_pr" in waiting or (
@@ -185,6 +185,8 @@ def issue_for_review(
     report: dict[str, object],
     *,
     principal_id: str | None = None,
+    database: Path | None = None,
+    owner: str = "factory",
 ) -> dict[str, object]:
     """Return a terminal-only secret separately from serializable report lines."""
     result = dict(report)
@@ -192,8 +194,22 @@ def issue_for_review(
         result["challenge_issued"] = False
         result["challenge_reason"] = "decision_authentication_required"
         return result
+    try:
+        operator_registration()
+    except PrincipalMismatchError as error:
+        result["challenge_issued"] = False
+        result["challenge_reason"] = error.code
+        notice = (
+            f"No decision challenge: {error}. Register principal_id, os_user and os_uid "
+            "in operator user preferences [review_authority], then run factory review "
+            "again in a real local terminal."
+        )
+        result["notice"] = notice
+        lines = report.get("lines")
+        result["lines"] = [*(lines if isinstance(lines, list) else []), notice]
+        return result
     registration, context = _authenticate(principal_id)
-    ledger, request = _open(project, run_id, writable=True)
+    ledger, request = _open(project, run_id, writable=True, database=database, owner=owner)
     try:
         packet = build_packet(project, ledger, request)
         if report.get("subject_digest") != packet.subject_digest:
@@ -299,9 +315,10 @@ def decide_in_ledger(
             extra["execution_selection_digest"] = str(request.execution_selection.digest)
         if scope is not None and scope[1] == "requeue":
             prior = runtime.read_node_request(run_id=run_id, node_id=node_id)
+            stem, generation = prior.attempt_id.rsplit("-", 1)
             resumed = resumed_request or replace(
                 prior,
-                attempt_id=f"{prior.attempt_id}-requeue-{decision.id[:8]}",
+                attempt_id=f"{stem}-requeue-{decision.id[:8]}-{generation}",
                 operation_id=str(
                     Digest.of_json({"prior": prior.operation_id, "decision": decision.id})
                 ),
@@ -357,8 +374,10 @@ def decide(
     challenge: str,
     principal_id: str | None = None,
     reason: str = "",
+    database: Path | None = None,
+    owner: str = "factory",
 ) -> dict[str, object]:
-    ledger, request = _open(project, run_id, writable=True)
+    ledger, request = _open(project, run_id, writable=True, database=database, owner=owner)
     try:
         return decide_in_ledger(
             ledger,
@@ -368,6 +387,7 @@ def decide(
             challenge=challenge,
             principal_id=principal_id,
             reason=reason,
+            owner=owner,
         )
     finally:
         ledger.close()

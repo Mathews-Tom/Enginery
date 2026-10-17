@@ -14,6 +14,7 @@ from typing import cast
 
 from enginery.application.effective_config import EffectiveConfig
 from enginery.application.factory_intake import IntakeEntry, RepositoryIntake, derive_run_id
+from enginery.application.human_decisions import decision_commands
 from enginery.cli.config_locations import private_state_directory, project_identity
 from enginery.cli.factory_collect import (
     database_path,
@@ -594,20 +595,13 @@ def _enrich(
     if awaiting is not None and awaiting["node_id"] != "review":
         node_id = str(awaiting["node_id"])
         action = "pull_request.open" if node_id == "open_pr" else f"human_wait.{node_id}.approve"
-        project_flag = f"--project {shlex.quote(str(project))}"
+        review_command, decide_command = decision_commands(run_id, str(project), action)
+        _, reject_command = decision_commands(run_id, str(project), f"human_wait.{node_id}.reject")
         report["next_decision"] = {
             "action": "factory review|decide",
-            "review_command": f"enginery factory review {shlex.quote(run_id)} {project_flag}",
-            "command": (
-                f"enginery factory decide {shlex.quote(run_id)} {project_flag} "
-                f"--action {shlex.quote(action)} --subject-digest DIGEST --challenge CHALLENGE"
-                + (" --reason REASON" if node_id != "open_pr" else "")
-            ),
-            "reject_command": (
-                f"enginery factory decide {shlex.quote(run_id)} {project_flag} "
-                f"--action human_wait.{shlex.quote(node_id)}.reject "
-                "--subject-digest DIGEST --challenge CHALLENGE --reason REASON"
-            ),
+            "review_command": review_command,
+            "command": decide_command,
+            "reject_command": reject_command,
         }
     elif report["next_action"] == "await_human_review":
         implementation = next(

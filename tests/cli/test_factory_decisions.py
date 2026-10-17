@@ -281,6 +281,28 @@ def test_a_durable_publication_decision_cannot_release_another_action(
     )
 
 
+def test_unregistered_operator_still_receives_packet_without_challenge(
+    ingress: Ingress,
+    terminal: None,
+) -> None:
+    ingress.preferences.write_text("schema_version = 1\n")
+    report = ingress.issue()
+    assert report["subject_digest"] == ingress.packet.subject_digest
+    assert report["challenge_issued"] is False
+    assert "challenge" not in report
+    assert "[review_authority]" in report["notice"]
+    assert "user preferences" in report["notice"]
+    with pytest.raises(PrincipalMismatchError):
+        factory_decisions.decide(
+            ingress.project,
+            RUN,
+            action=ACTION,
+            subject_digest=ingress.packet.subject_digest,
+            challenge="unissued",
+        )
+    assert not list_decisions(ingress.ledger.connection, RUN)
+
+
 def test_forged_principal_and_wrong_registered_os_identity_are_refused(
     ingress: Ingress,
     terminal: None,

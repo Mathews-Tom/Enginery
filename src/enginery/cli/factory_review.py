@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,10 +82,9 @@ def _receipt_document(root: Path, digest_text: str) -> dict[str, object]:
     return {"digest": digest_text, "availability": "digest_verified", "document": document}
 
 
-def preimplementation_waits(
-    ledger: LedgerService, request: Stage1RunRequest
-) -> tuple[str, ...]:
+def preimplementation_waits(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...]:
     """Find waits whose dependency closure does not include implementation."""
+
     def requires_implementation(node_id: str, visited: frozenset[str]) -> bool:
         if node_id == "implement":
             return True
@@ -99,9 +99,10 @@ def preimplementation_waits(
     return tuple(
         str(node_id)
         for node_id in request.manifest.nodes
-        if _projection(
-            ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{request.run.id}:{node_id}"
-        ).get("status") == "awaiting_human"
+        if _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{request.run.id}:{node_id}").get(
+            "status"
+        )
+        == "awaiting_human"
         and not requires_implementation(str(node_id), frozenset())
     )
 
@@ -288,23 +289,41 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
 
 
 def _open(
-    project: Path, run_id: str, *, writable: bool = False
+    project: Path,
+    run_id: str,
+    *,
+    writable: bool = False,
+    database: Path | None = None,
+    owner: str = "factory",
 ) -> tuple[LedgerService, Stage1RunRequest]:
     RunId(run_id)
     if re.fullmatch(r"[A-Za-z0-9_.-]+", run_id) is None or run_id in {".", ".."}:
         raise InvalidInputError("review run id must be a plain identifier")
-    connection = read_ledger(project)
-    if connection is None:
-        raise MissingPrerequisiteError("factory review requires an existing project run")
-    if writable:
-        connection.close()
-        path = database_path(project)
-        require_state_path(path, what="project ledger")
-        ledger = LedgerService.open(path)
+    if database is None:
+        connection = read_ledger(project)
+        if connection is None:
+            raise MissingPrerequisiteError("factory review requires an existing project run")
+        if writable:
+            connection.close()
+            path = database_path(project)
+            require_state_path(path, what="project ledger")
+            ledger = LedgerService.open(path)
+        else:
+            ledger = LedgerService(connection)
     else:
-        ledger = LedgerService(connection)
+        path = database.expanduser().absolute()
+        refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
+        if not path.is_file():
+            raise MissingPrerequisiteError("factory review requires an existing Stage 1 ledger")
+        if writable:
+            ledger = LedgerService.open(path)
+        else:
+            connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only=1")
+            ledger = LedgerService(connection)
     try:
-        runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
+        runtime = runtime_for_run(ledger, owner=owner, run_id=run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
         return ledger, request
     except BaseException:
@@ -312,9 +331,11 @@ def _open(
         raise
 
 
-def read_packet(project: Path, run_id: str) -> ReviewPacket:
+def read_packet(
+    project: Path, run_id: str, *, database: Path | None = None, owner: str = "factory"
+) -> ReviewPacket:
     """Rebuild the CURRENT subject; never trust a previously rendered packet."""
-    ledger, request = _open(project, run_id)
+    ledger, request = _open(project, run_id, database=database, owner=owner)
     try:
         return build_packet(project, ledger, request)
     finally:
@@ -331,8 +352,10 @@ def _packet_path(project: Path, packet: ReviewPacket) -> Path:
     )
 
 
-def review(project: Path, run_id: str) -> dict[str, object]:
-    packet = read_packet(project, run_id)
+def review(
+    project: Path, run_id: str, *, database: Path | None = None, owner: str = "factory"
+) -> dict[str, object]:
+    packet = read_packet(project, run_id, database=database, owner=owner)
     lines = render_terminal(packet)
     document = render_html(packet).encode()
     path = _packet_path(project, packet)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +18,37 @@ from enginery.domain.policy_decision import ApprovalAttestation, PolicyAction
 from enginery.domain.principal import AuthorityPrincipal, PrincipalType
 
 MAX_DECISION_BYTES = 1024 * 1024
+
+
+def decision_commands(
+    run_id: str,
+    project: str,
+    action: str,
+    *,
+    database: str | None = None,
+    owner: str = "factory",
+) -> tuple[str, str]:
+    """Render copyable terminal ingress commands from argv, quoting every value."""
+    scope = ["--project", project]
+    if database is not None:
+        scope.extend(("--database", database, "--owner", owner))
+    review = shlex.join(["enginery", "factory", "review", run_id, *scope])
+    decide = [
+        "enginery",
+        "factory",
+        "decide",
+        run_id,
+        *scope,
+        "--action",
+        action,
+        "--subject-digest",
+        "DIGEST",
+        "--challenge",
+        "CHALLENGE",
+    ]
+    if action.startswith("human_wait."):
+        decide.extend(("--reason", "REASON"))
+    return review, shlex.join(decide)
 
 
 class HumanDecisionError(InvalidInputError):

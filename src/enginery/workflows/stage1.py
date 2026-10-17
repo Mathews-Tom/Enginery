@@ -18,7 +18,12 @@ from enginery.application.branch_publication import (
     PublishedBranch,
 )
 from enginery.application.execution_catalog import load_execution_catalog
-from enginery.application.human_decisions import HumanDecisionError, MissingDecisionError
+from enginery.application.human_decisions import (
+    HumanDecisionError,
+    MissingDecisionError,
+    SubjectMismatchError,
+    decision_commands,
+)
 from enginery.application.runner_ports import (
     IsolatedCommandRunner,
     RunnerAdmissionPort,
@@ -84,6 +89,7 @@ from enginery.engine.task_repository import out_path_for, resolve_commit, verifi
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
+from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
 from enginery.workflows.issue_to_pr import WorkQualification
@@ -1381,11 +1387,15 @@ class Stage1RunService:
                 )
             publication["decision_id"] = self.publication_authorizer(request)
         except HumanDecisionError as error:
-            repair = (
-                f"enginery factory review {request.run.id} --project {request.repository_path}; "
-                f"enginery factory decide {request.run.id} --project {request.repository_path} "
-                "--action pull_request.open --subject-digest DIGEST --challenge CHALLENGE"
+            database = self.ledger.connection.execute("PRAGMA database_list").fetchone()[2]
+            review_command, decide_command = decision_commands(
+                str(request.run.id),
+                str(request.repository_path),
+                "pull_request.open",
+                database=database or None,
+                owner=self.runtime.coordinator.owner,
             )
+            repair = f"{review_command}; {decide_command}"
             if self._node_status(request.run.id, "open_pr") == "queued":
                 self.runtime.await_human_node(
                     run_id=str(request.run.id),
@@ -1400,13 +1410,31 @@ class Stage1RunService:
                 details={"reason": error.code, "repair": repair},
             ) from error
         if publisher is not None:
-            publication["protected_publication"] = self._require_protected_publication_decision(
+            protected_publication = self._require_protected_publication_decision(
                 request,
                 publisher,
                 generation=generation,
                 epoch=epoch.epoch,
                 now=now,
             )
+            publication["protected_publication"] = protected_publication
+            decided = next(
+                (
+                    decision
+                    for decision in list_decisions(self.ledger.connection, str(request.run.id))
+                    if decision.id == publication["decision_id"]
+                ),
+                None,
+            )
+            if (
+                decided is None
+                or decided.subject_fields.get("protected_publication_digest")
+                != protected_publication["digest"]
+            ):
+                raise SubjectMismatchError(
+                    "publication protected paths differ from the authenticated decision; "
+                    "run factory review and decide again"
+                )
             published = self._publish_verified_branch(request, publisher, generation=generation)
             publication["published_revision"] = published.revision
         pull_request = self._require_pull_requests().create_or_update(
