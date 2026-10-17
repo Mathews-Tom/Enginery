@@ -8,9 +8,13 @@ from pathlib import Path
 import pytest
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests
+from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.work_ports import PullRequestRequest
 from enginery.domain.errors import (
     AmbiguousExternalSideEffectError,
+    AuthenticationFailureError,
+    ExternalConflictError,
+    RateLimitError,
     StaleEvidenceError,
     TransientProviderFailureError,
 )
@@ -24,6 +28,40 @@ def _config() -> GitHubAdapterConfig:
         repository="Mathews-Tom/enginery-provider-smoke",
         credential_reference="github-keyring:default",
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (401, AuthenticationFailureError),
+        (429, RateLimitError),
+        (405, ExternalConflictError),
+        (409, ExternalConflictError),
+        (422, ExternalConflictError),
+    ],
+)
+def test_default_runner_classifies_bounded_stderr(
+    tmp_path: Path, status: int, error_type: type[Exception]
+) -> None:
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!/bin/sh\nprintf 'HTTP {status}: private-diagnostic\\n' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    adapter = GitHubPullRequests(
+        GitHubAdapterConfig(
+            repository="owner/repository",
+            credential_reference="github-keyring:default",
+            executable=str(executable),
+        ),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+    )
+    with pytest.raises(error_type) as caught:
+        adapter.evidence(1)
+    assert "private-diagnostic" not in str(caught.value)
+    if status == 401:
+        assert adapter.probe().availability is AdapterAvailability.MISCONFIGURED
 
 
 def _completed(

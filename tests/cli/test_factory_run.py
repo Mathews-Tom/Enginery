@@ -12,12 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests, GitHubWorkLedger
 from enginery.application.factory_intake import derive_run_id
 from enginery.cli import factory_run
 from enginery.cli.config_locations import private_state_directory, project_identity
 from enginery.cli.main import _build_parser, main
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import AuthenticationFailureError, InvalidInputError
 from enginery.engine.operator_control import OperatorControl
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.events import AppendCommand, EventWrite
@@ -1538,6 +1538,56 @@ def test_wait_seconds_retries_only_retryable_github_holds(
     result = factory_run.advance_run(project, report["run_id"], wait_seconds=wait_seconds)
     assert calls == (2 if wait_seconds else 1)
     assert result["holds"] == [{"reason": "finished" if wait_seconds else reason}]
+
+
+def test_wait_seconds_stops_on_default_github_runner_authentication_failure(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project, _ = bound_project
+    _, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    executable = tmp_path / "expired-gh"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'HTTP 401: Bad credentials\\n' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    from enginery.ledger.artifact_store import ArtifactStore
+
+    adapter = GitHubPullRequests(
+        GitHubAdapterConfig(
+            repository="owner/repo",
+            credential_reference="github-keyring:default",
+            executable=str(executable),
+        ),
+        artifact_store=ArtifactStore(tmp_path / "auth-artifacts"),
+    )
+    calls = 0
+
+    def advance(*_: object, **__: object) -> None:
+        nonlocal calls
+        calls += 1
+        adapter.evidence(1)
+
+    def unexpected_sleep(_: float) -> None:
+        pytest.fail("authentication failure must not be polled")
+
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **kwargs: SimpleNamespace(
+            advance=advance,
+            next_action=lambda _: Stage1RunService(
+                runtime=kwargs["runtime"], ledger=kwargs["ledger"]
+            ).next_action(factory_run.RunId(report["run_id"])),
+        ),
+    )
+    monkeypatch.setattr(factory_run.time, "sleep", unexpected_sleep)
+    with pytest.raises(AuthenticationFailureError):
+        factory_run.advance_run(project, report["run_id"], wait_seconds=60)
+    assert calls == 1
 
 
 def test_status_github_view_is_optional_display_only(

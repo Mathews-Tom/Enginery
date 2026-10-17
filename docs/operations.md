@@ -1034,10 +1034,10 @@ cannot be accepted as one consistent observation.
 Reviews, check runs, combined commit status and per-context status history are
 fully paginated, not truncated to the first page. Each collection records its
 page count, explicit page cap, record count, available API total and raw-response
-digests. The adapter accepts a page cap from 2 through 100 (default 100), and
-must establish completion before reaching it. Reaching the cap, inconsistent
-totals, malformed responses or conflicting status observations holds the run;
-even an apparently terminal page at the cap is not accepted as complete.
+digests. The operator page cap is fixed at 100 (an internal test seam may lower
+it); completion must be proven before page 100, so at most 9,900 records per
+collection. Reaching the cap, inconsistent totals, malformed responses or
+conflicting status observations holds the run, even at a terminal short page.
 Failures on later pages count: a failed check or current failed/error commit
 status blocks readiness, and a current `CHANGES_REQUESTED` review blocks it.
 Earlier approvals or a successful prefix cannot override those observations.
@@ -1219,9 +1219,10 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
 | `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
 | `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
-| `github_evidence_incomplete` | Read the exact collection failure detail. Retry transient API changes or repair malformed records/inconsistent totals, then run the ledger-scoped advance command printed by the hold. The default cap is 100 pages; completion must be proven before the cap, even for a terminal short page. The adapter's bounded page-cap parameter may lower the cap to 2–100, never raise it. Never accept a prefix or start a replacement run to bypass completeness. |
-| `github_evidence_blocked` | Inspect the recorded CI/status/review detail in `enginery factory review RUN --project PROJECT`. Repair the failing check or current commit status, or resolve the current `CHANGES_REQUESTED` review with the reviewer, then run `enginery factory resume RUN --project PROJECT`. A display command, earlier approval or successful prefix cannot clear the block. |
-| `github_evidence_waiting` | Wait for the required current-head checks/statuses and configured reviews, then run `enginery factory resume RUN --project PROJECT` to recollect complete evidence; pending or skipped checks do not count as success. |
+| `github_evidence_incomplete` | Read the exact collection failure detail. Retry transient API changes or repair malformed records/inconsistent totals, then run the ledger-scoped advance command printed by the hold. The operator cap is fixed at 100 pages (an internal test seam may lower it); completion must be proven before page 100, even for a terminal short page, so at most 9,900 records per collection. Never accept a prefix or start a replacement run to bypass completeness. |
+| `github_evidence_blocked` | Inspect the recorded CI/status/review detail with the printed review command (factory runs: `enginery factory review RUN --project PROJECT`; Stage 1 ledgers: the printed command includes `--database` and `--owner`). For a retryable hold, repair the failing check/status, requested changes, closed-unmerged PR or merge conflicts, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance`. A failed verification or exhausted repair budget is terminal: inspect its evidence and follow the printed new-run instructions, not an advance command. |
+| `github_evidence_waiting` | Wait for required current-head checks/statuses and configured reviews, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance` to recollect complete evidence. This is the printed command for both factory and explicit Stage 1 ledgers; preserve its database and owner. Pending or skipped checks do not count as success. |
+| `github_pull_request_merged` | The PR was merged outside Enginery before verification. This run is terminal, not a retryable GitHub hold; inspect its recorded evidence with the printed review command and start a new run only if needed. A merged PR cannot be reopened. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
 | Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
 | `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |

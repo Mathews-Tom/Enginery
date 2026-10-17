@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import TypeGuard, cast
 from urllib.parse import quote
 
-from enginery.adapters.subprocess_output import SubprocessOutputError, execute_output
+from enginery.adapters.subprocess_output import SubprocessOutputError, execute_result
 from enginery.application.adapter_types import (
     ADAPTER_API_VERSION,
     AdapterAvailability,
@@ -393,12 +393,12 @@ class GitHubWorkLedger:
 def _bounded_github_command(arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     """Use the shared bounded reader without exposing tool diagnostics."""
     try:
-        output = execute_output(arguments, dict(os.environ), timeout=60)
+        result = execute_result(arguments, dict(os.environ), timeout=60)
     except SubprocessOutputError as error:
         if isinstance(error.__cause__, OSError):
             raise error.__cause__ from error
         raise TransientProviderFailureError(f"GitHub evidence command failed: {error}") from error
-    return subprocess.CompletedProcess(arguments, 0, output, "")
+    return subprocess.CompletedProcess(arguments, result.returncode, result.stdout, result.stderr)
 
 
 @dataclass(slots=True)

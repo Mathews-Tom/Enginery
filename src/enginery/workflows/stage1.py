@@ -771,6 +771,7 @@ class Stage1RunService:
         if (
             wait_for_ci_state.get("status") == "failed"
             and wait_for_ci_state.get("pull_request_outcome") == PullRequestOutcome.BLOCKED.value
+            and wait_for_ci_state.get("reason") != "github_pull_request_merged"
         ):
             # A genuine required-check failure on our own pushed head takes the same
             # bounded repair edge as an actionable review finding: a fresh implementation
@@ -1701,8 +1702,21 @@ class Stage1RunService:
             return outcome
         failed_checks = _failed_checks(evidence, request.required_checks)
         if outcome is PullRequestOutcome.BLOCKED:
-            extra.update(self._github_blocked_repair(request))
-            if not failed_checks:
+            extra.update(
+                self._github_blocked_repair(
+                    request,
+                    terminal=(
+                        evidence.pull_request.merged
+                        or (
+                            bool(failed_checks)
+                            and generation - _generation(request.implementation.attempt_id)
+                            >= request.repair_limit
+                        )
+                    ),
+                    merged=evidence.pull_request.merged,
+                )
+            )
+            if not failed_checks and not evidence.pull_request.merged:
                 self._github_blocked(request, "wait_for_ci", epoch.epoch, now, extra)
                 return outcome
         if failed_checks:
@@ -1743,8 +1757,28 @@ class Stage1RunService:
         )
         return review, advance
 
-    def _github_blocked_repair(self, request: Stage1RunRequest) -> dict[str, object]:
+    def _github_blocked_repair(
+        self, request: Stage1RunRequest, *, terminal: bool = False, merged: bool = False
+    ) -> dict[str, object]:
         review, advance = self._github_commands(request)
+        if terminal:
+            explanation = (
+                "The PR was merged outside Enginery before verification."
+                if merged
+                else "Required current-head checks failed; this run cannot advance."
+            )
+            return {
+                "reason": "github_pull_request_merged" if merged else "github_evidence_blocked",
+                "repair": (
+                    f"{explanation} Inspect its evidence with {review}. "
+                    "For factory runs, a new attempt requires enginery factory run "
+                    f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
+                    f"--supersede --project {shlex.quote(str(request.repository_path))} "
+                    "after the issue snapshot changes. For stage1 --database/--owner runs, "
+                    "use stage1 build-request and stage1 start with a new run id."
+                ),
+                "message": explanation,
+            }
         repair = (
             f"{review}; repair failing required current-head checks, statuses or requested "
             "review changes; reopen a closed PR or resolve its merge conflicts as applicable; "
@@ -1994,9 +2028,21 @@ class Stage1RunService:
             self._github_pending(request, "verify", epoch.epoch, now, extra)
             return result
         if result.outcome is PullRequestOutcome.BLOCKED:
-            extra.update(self._github_blocked_repair(request))
             observation = result.github_evidence[-1] if result.github_evidence else None
-            if observation is not None and not _failed_checks(observation, request.required_checks):
+            merged = observation is not None and observation.pull_request.merged
+            extra.update(
+                self._github_blocked_repair(
+                    request,
+                    terminal=merged
+                    or bool(observation and _failed_checks(observation, request.required_checks)),
+                    merged=merged,
+                )
+            )
+            if (
+                observation is not None
+                and not merged
+                and not _failed_checks(observation, request.required_checks)
+            ):
                 self._github_blocked(request, "verify", epoch.epoch, now, extra)
                 return result
         if result.evidence is not None:

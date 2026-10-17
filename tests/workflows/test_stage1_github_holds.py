@@ -190,7 +190,76 @@ def test_verify_block_repairs_describe_the_actual_cause(
     assert projection is not None
     assert projection.state["status"] == ("failed" if kind == "required" else "queued")
     assert {
-        "required": "repair failing required current-head checks",
+        "required": "this run cannot advance",
         "closed": "reopen a closed PR",
         "conflicts": "resolve its merge conflicts",
     }[kind] in str(projection.state["repair"])
+    if kind == "required":
+        assert "stage1 watch" not in str(projection.state["repair"])
+
+
+@pytest.mark.parametrize("node_id", ["wait_for_ci", "verify"])
+def test_externally_merged_pr_is_terminal(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    node_id: str,
+) -> None:
+    request, service, now = _ready_to_verify(
+        ledger_service, tmp_path, observe_ci=node_id == "verify"
+    )
+    original = RecordingPullRequests.evidence
+
+    def observe(provider: RecordingPullRequests, number: int) -> PullRequestEvidence:
+        evidence = original(provider, number)
+        return replace(
+            evidence,
+            pull_request=replace(evidence.pull_request, state="closed", merged=True),
+        )
+
+    monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
+    advance = service.wait_for_ci if node_id == "wait_for_ci" else service.verify_merge_ready
+    advance(request, now=now, heartbeat_window=timedelta(seconds=60))
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:{node_id}"
+    )
+    assert projection is not None
+    assert projection.state["status"] == "failed"
+    assert projection.state["reason"] == "github_pull_request_merged"
+    assert "merged outside Enginery before verification" in str(projection.state["repair"])
+    assert "reopen" not in str(projection.state["repair"])
+    assert "stage1 watch" not in str(projection.state["repair"])
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+
+
+def test_required_check_failure_without_repair_budget_has_no_advance_command(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, service, now = _ready_to_verify(
+        ledger_service, tmp_path, observe_ci=False, repair_limit=0
+    )
+    original = RecordingPullRequests.evidence
+
+    def observe(provider: RecordingPullRequests, number: int) -> PullRequestEvidence:
+        evidence = original(provider, number)
+        return replace(
+            evidence,
+            checks=tuple(
+                replace(check, status="completed", conclusion="failure")
+                for check in evidence.checks
+            ),
+        )
+
+    monkeypatch.setattr(RecordingPullRequests, "evidence", observe)
+    service.wait_for_ci(request, now=now, heartbeat_window=timedelta(seconds=60))
+    projection = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:wait_for_ci"
+    )
+    assert projection is not None
+    assert projection.state["status"] == "failed"
+    assert "this run cannot advance" in str(projection.state["repair"])
+    assert "--supersede" in str(projection.state["repair"])
+    assert "new run id" in str(projection.state["repair"])
+    assert "stage1 watch" not in str(projection.state["repair"])
