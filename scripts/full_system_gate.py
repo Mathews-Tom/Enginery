@@ -141,10 +141,10 @@ from enginery.application.work_ports import (
     WorkLedgerPort,
     WorkLedgerSnapshot,
 )
+from enginery.cli import factory_decisions
 from enginery.cli.config_binding import bind_behavioral_checks
 from enginery.cli.config_locations import private_state_directory
 from enginery.cli.factory_behavioral import verify_for_stage1
-from enginery.cli import factory_decisions
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
