@@ -137,11 +137,18 @@ stream; successful decoding alone says nothing about semantic behavior.
 Run `enginery factory calibrate RUN --project PROJECT` to execute the protected
 deliberate-fault fixtures and `enginery factory check RUN --project PROJECT` to
 observe the candidate. Stage 1's terminal verify node uses the same observer and
-evaluator service automatically for requests declaring checks. Observers inspect
-a clean, independently verified checkout of the current head, not uncommitted
-worker files. Command subprocesses receive argv and a fresh minimal environment;
-optional service argv starts and tears down a loopback service. HTTP redirects,
-non-loopback targets and a preexisting listener are refused.
+evaluator service and creates missing current-build calibration automatically;
+operators do not need a sidecar check to authorize verification. Observers inspect
+a fresh, independently verified checkout for each baseline, fault and real check.
+Declared output paths must be absent before execution: committed or stale output
+cannot stand in for newly persisted behavior. Trusted-local observers execute
+candidate code as the operator, with argv and a minimal environment but no OS
+containment. Isolated runs use the existing pinned validation runner with network
+none and retain its verified runner receipt; they never fall back to host execution.
+Service/browser observations are not supported in isolated runs and hold until
+the operator binds command checks in a new request or deliberately starts a new
+trusted-local run. HTTP redirects, non-loopback targets and a preexisting listener
+are refused.
 
 The evaluator requires actual, unskipped semantic comparisons and current
 calibration; an empty assertion set, exit-zero skipped output, mock-marked observer,
@@ -151,6 +158,10 @@ for every assertion/fault pair, with `binding_identity`, `observer` or `evaluato
 attribution only for demonstrated catches. Constant results and skipped persistence
 are exercised in protected fixture processes; wrong heads are rejected at the
 identity gate. Missing programs and timeouts are inconclusive, never catches.
+Every acceptance assertion must also catch a semantic fault (`constant_result`
+or `skipped_persistence`) at the evaluator rung. A wrong-build identity catch alone
+does not demonstrate assertion sensitivity. With current qualified calibration,
+a regressed assertion produces FAIL with its assertion id, not a calibration hold.
 `calibrate --without-fault FAULT` deliberately records missing injection and cannot
 qualify acceptance.
 
@@ -163,25 +174,36 @@ browser_digest = "sha256:EXACT_DISTRIBUTION_TREE_DIGEST"
 ```
 
 Only the qualified headless shell runs, over anonymous CDP pipes with a fresh
-profile and loopback-only requests. Its distribution digest is verified before
-every launch. The canonical tree digest is SHA-256 over path-byte-sorted lines
+profile. Fetch requests are restricted to the declared scheme, host and port, and
+DOM assertions run in an isolated execution world. Its distribution digest is
+verified before every launch. The canonical tree digest is SHA-256 over
+path-byte-sorted lines
 `<file-sha256>  <path-relative-to-the-distribution-parent>\n`, equivalent to
 `find DIR -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256`
 when invoked from that parent. This is content identity, not publisher trust or
 OS containment. Browser DOM assertions and decodable screenshots are separate
 evidence; no public upload occurs.
+Digest verification followed by execution has a same-user race: another process
+with the operator's write access can replace a qualified executable between those
+steps. This is not same-user adversary containment; protect the installation and
+run trusted-local observers only under an appropriately trusted operator account.
 
 The local-only `behavioral-acceptance` factory-gate scenario exercises installed
 fixture CLI/service behavior and the qualified browser. A missing browser records
 unrun browser evidence and does not produce a passing scenario. `--live`, harness,
 engine/image and custody options are refused for this scenario.
+Set `ENGINERY_BROWSER_EXECUTABLE` and `ENGINERY_BROWSER_DIGEST` explicitly when
+running that scenario; no machine-specific browser location is compiled into it.
 
 | Hold | Repair |
 |---|---|
 | `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery factory run ISSUE --project PROJECT`. For `stage1 start`, rebuild with `enginery stage1 build-request` first. Existing immutable runs are never rebound. |
 | `browser_observer_unqualified` | Install the approved headless-shell distribution and set its exact absolute executable and canonical distribution digest in user preferences; rerun `enginery factory check RUN --project PROJECT`. |
-| `behavioral_calibration_required`, stale, incomplete, escaped, not-injected or inconclusive calibration | Repair the named observer/assertion or missing fault injection, run `enginery factory calibrate RUN --project PROJECT`, then `enginery factory check RUN --project PROJECT`. A changed head/config/evaluator requires current calibration. |
-| `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. Recalibrate and rerun the check. |
+| `behavioral_calibration_required`, stale, incomplete, escaped, not-injected, inconclusive, or `behavioral_calibration_semantic_catch_required` | Repair the named observer/assertion or semantic fault declaration. For standalone checks, run `enginery factory calibrate RUN --project PROJECT` then `enginery factory check RUN --project PROJECT`. Stage 1 automatically calibrates its current build; retry its emitted `stage1 watch --advance` command after repairing the cause. |
+| `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. Retry verification against the corrected head. |
+| `behavioral_output_preexists` | Remove the declared output from the committed candidate and commit the corrected head, so every observer starts with that output absent. |
+| `behavioral_observer_requires_isolation` | Isolated service/browser checks cannot run on the host. Bind command checks for the pinned network-none runner in a new request, or deliberately start a new trusted-local run; restore a drifted pinned runner rather than falling back. |
+| `behavioral_acceptance_failed` / `behavioral_assertion_failed:CHECK:INDEX` | Repair the named candidate behavior, commit the corrected head, and retry the emitted Stage 1 advancement command. Recalibrating unchanged failing behavior cannot repair it. |
 
 Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
 commands use the project's private `ledger.sqlite` and report its path; pass that

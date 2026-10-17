@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import sys
@@ -15,12 +16,6 @@ from factory_gate_evidence import EvidenceBuilder
 from factory_gate_setup import SetupGate
 
 SCENARIO = "behavioral-acceptance"
-BROWSER = (
-    Path.home()
-    / "Library/Caches/ms-playwright/chromium_headless_shell-1234"
-    / "chrome-headless-shell-mac-arm64/chrome-headless-shell"
-)
-BROWSER_DIGEST = "sha256:29db62dcc2f157f06f871ca3ef573cbe62b9e14a6370556245e007b36a54bf09"
 REQUIRED = {
     "changed-command": (
         "installed changed CLI produces current bound observations and a passing verdict"
@@ -93,6 +88,8 @@ class BehavioralGate(SetupGate):
         self.project = self.new_project("behavioral")
         self.state = private_state_directory(self.project, self.environment())
         self.database = self.state / "ledger.sqlite"
+        self.browser = os.environ.get("ENGINERY_BROWSER_EXECUTABLE")
+        self.browser_digest = os.environ.get("ENGINERY_BROWSER_DIGEST")
         self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         origin = self.root / "owner" / "repo.git"
         origin.parent.mkdir()
@@ -102,10 +99,16 @@ class BehavioralGate(SetupGate):
             "schema_version = 1\n[executables]\n"
             f"github = {json.dumps(str(self.bin / 'gh'))}\n"
             f"harness = {json.dumps(str(self.bin / 'omp'))}\n"
-            f'browser = {json.dumps(str(BROWSER))}\nbrowser_digest = "{BROWSER_DIGEST}"\n'
+            + (
+                f"browser = {json.dumps(self.browser)}\n"
+                f"browser_digest = {json.dumps(self.browser_digest)}\n"
+                if self.browser and self.browser_digest
+                else ""
+            )
         )
         self.checks: list[dict[str, Any]] = []
         self.run_counter = 0
+        self.empty_start: dict[str, Any] = {}
 
     def record(self, key: str, passed: bool, observed: Any) -> None:
         self.evidence.assertion(
@@ -166,7 +169,7 @@ class BehavioralGate(SetupGate):
         )
         if code:
             raise RuntimeError(f"request refused: {built}")
-        code, started = self.cli_json(
+        started = self.cli(
             "stage1",
             "start",
             "--database",
@@ -176,8 +179,11 @@ class BehavioralGate(SetupGate):
             "--request",
             str(request),
         )
-        if code:
-            raise RuntimeError(f"bound start refused: {started}")
+        if not checks:
+            self.empty_start = {"code": started.returncode, "error": started.stderr}
+            return run_id
+        if started.returncode:
+            raise RuntimeError(f"bound start refused: {started.stderr}")
         self.git(self.project, "clone", "--quiet", "--no-local", str(self.project), str(workspace))
         self.git(workspace, "config", "user.name", "local candidate fixture")
         self.git(workspace, "config", "user.email", "fixture@example.invalid")
@@ -296,12 +302,12 @@ def run(gate: BehavioralGate) -> None:
         any(item.get("classification") == "inconclusive" for item in _rows(unavailable)),
         unavailable,
     )
-    empty_run = gate.bind([])
-    code, empty = gate.factory("status", empty_run)
+    gate.bind([])
     gate.record(
         "zero-checks",
-        code != 0 and empty.get("hold", {}).get("reason") == "no_behavioral_checks",
-        empty,
+        gate.empty_start.get("code") != 0
+        and "no behavioral checks were bound" in gate.empty_start.get("error", ""),
+        gate.empty_start,
     )
     skipped = dict(command, name="skipped", argv=[sys.executable, "-c", "print('1 skipped')"])
     skipped_run = gate.bind([skipped])
@@ -310,15 +316,24 @@ def run(gate: BehavioralGate) -> None:
     gate.record(
         "skipped-check", code != 0 and skipped_result.get("result") != "pass", skipped_result
     )
+    gate.effects.update({"hosted_inference_calls": 0, "github_mutations": 0})
+    if not gate.browser or not gate.browser_digest or not Path(gate.browser).is_file():
+        reason = (
+            "not_run: configure ENGINERY_BROWSER_EXECUTABLE and ENGINERY_BROWSER_DIGEST "
+            "with an available approved browser distribution"
+        )
+        gate.evidence.details["browser"] = {"status": "not_run", "reason": reason}
+        gate.evidence.hold(reason)
+        return
     browser = dict(
         service,
         name="browser",
         observer="browser",
         assertions=[{"kind": "dom", "selector": "#result", "equals": "5"}],
-        fault_classes=["wrong_build"],
+        fault_classes=["constant_result", "wrong_build"],
     )
     browser_run = gate.bind([browser])
-    gate.factory("calibrate", browser_run)
+    _, browser_calibration = gate.factory("calibrate", browser_run)
     code, browser_result = gate.factory("check", browser_run)
     browser_observations = [
         gate.artifact(item) for item in browser_result.get("observation_receipt_digests", [])
@@ -330,18 +345,27 @@ def run(gate: BehavioralGate) -> None:
     ]
     gate.record(
         "qualified-browser",
-        BROWSER.is_file()
-        and code == 0
+        code == 0
         and browser_result.get("result") == "pass"
+        and any(
+            item.get("fault_class") == "constant_result"
+            and item.get("classification") == "caught"
+            and item.get("rung") == "evaluator"
+            for item in _rows(browser_calibration)
+        )
         and any(
             item.get("media_type") == "image/png"
             and item.get("decode", {}).get("status") == "decodable"
             for item in captures
         ),
-        {"result": browser_result, "observations": browser_observations},
+        {
+            "result": browser_result,
+            "observations": browser_observations,
+            "calibration": browser_calibration,
+        },
     )
     user = gate.user_file()
-    user.write_text(user.read_text().replace(BROWSER_DIGEST, "sha256:" + "0" * 64))
+    user.write_text(user.read_text().replace(gate.browser_digest, "sha256:" + "0" * 64))
     code, mismatch = gate.factory("check", browser_run)
     gate.record(
         "unqualified-browser",

@@ -131,8 +131,11 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     status_parser.add_argument("run_id", nargs="?")
     status_parser.add_argument("--json", action="store_true")
 
-    for name in ("calibrate", "check"):
-        behavioral = commands.add_parser(name, help="Run independently bound behavioral checks.")
+    for name, synopsis in (
+        ("calibrate", "Measure behavioral evaluator fault sensitivity with deliberate faults."),
+        ("check", "Capture current behavior and record its evaluated acceptance verdict."),
+    ):
+        behavioral = commands.add_parser(name, help=synopsis, description=synopsis)
         _add_project(behavioral)
         behavioral.add_argument("run_id")
         behavioral.add_argument("--json", action="store_true")

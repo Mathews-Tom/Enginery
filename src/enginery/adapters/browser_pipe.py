@@ -63,6 +63,11 @@ def loopback_url(url: str) -> str:
         ) from error
 
 
+def _origin(url: str) -> tuple[str, str | None, int]:
+    parsed = urlsplit(url)
+    return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
 def browser_tree_digest(executable: Path) -> str:
     """Hash the distribution using the approved C-locale shasum-list definition.
 
@@ -139,9 +144,15 @@ class _Pipe:
     """Small synchronous CDP client; events are serviced while awaiting replies."""
 
     def __init__(
-        self, executable: Path, profile: Path, environment: dict[str, str], deadline: float
+        self,
+        executable: Path,
+        profile: Path,
+        environment: dict[str, str],
+        deadline: float,
+        origin_url: str,
     ) -> None:
         self.deadline = deadline
+        self.origin = _origin(origin_url)
         self.buffer = bytearray()
         self.sequence = 0
         self.loaded: set[str] = set()
@@ -285,7 +296,12 @@ class _Pipe:
             request_id = params.get("requestId")
             if not isinstance(target, str) or not isinstance(request_id, str):
                 raise BrowserObserverError("browser_transport_failed: malformed Fetch identity")
-            allowed = normalized is not None
+            allowed = (
+                normalized is not None
+                and isinstance(url, str)
+                and _origin(url) == self.origin
+                and target == self.session
+            )
             parameters: dict[str, object] = {"requestId": request_id}
             if allowed:
                 parameters["url"] = normalized
@@ -329,7 +345,7 @@ def observe_browser(
     with tempfile.TemporaryDirectory(prefix="enginery-browser-") as temporary:
         profile = Path(temporary)
         profile.chmod(0o700)
-        pipe = _Pipe(executable, profile, environment, deadline)
+        pipe = _Pipe(executable, profile, environment, deadline, url)
         try:
             target = pipe.call("Target.createTarget", {"url": "about:blank"}, root=True)
             attached = pipe.call(
@@ -358,6 +374,16 @@ def observe_browser(
             if not isinstance(loader, str):
                 raise BrowserObserverError("browser_navigation_failed: missing navigation identity")
             pipe.wait_loaded(loader)
+            frame = navigation.get("frameId")
+            if not isinstance(frame, str):
+                raise BrowserObserverError("browser_dom_unobserved: missing main frame identity")
+            world = pipe.call(
+                "Page.createIsolatedWorld",
+                {"frameId": frame, "worldName": "enginery-observer"},
+            )
+            context = world.get("executionContextId")
+            if not isinstance(context, int) or isinstance(context, bool):
+                raise BrowserObserverError("browser_dom_unobserved: missing isolated context")
             results: list[tuple[int, bool]] = []
             for index, assertion in enumerate(check.assertions):
                 if assertion.kind != "dom":
@@ -375,7 +401,8 @@ def observe_browser(
                     f"return {comparison}; }})()"
                 )
                 observed = pipe.call(
-                    "Runtime.evaluate", {"expression": expression, "returnByValue": True}
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True, "contextId": context},
                 )
                 result = observed.get("result")
                 if (
