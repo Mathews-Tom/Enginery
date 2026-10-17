@@ -195,7 +195,7 @@ def issue_for_review(
         result["challenge_reason"] = "decision_authentication_required"
         return result
     try:
-        operator_registration()
+        registration, context = _authenticate(principal_id)
     except PrincipalMismatchError as error:
         result["challenge_issued"] = False
         result["challenge_reason"] = error.code
@@ -208,7 +208,6 @@ def issue_for_review(
         lines = report.get("lines")
         result["lines"] = [*(lines if isinstance(lines, list) else []), notice]
         return result
-    registration, context = _authenticate(principal_id)
     ledger, request = _open(project, run_id, writable=True, database=database, owner=owner)
     try:
         packet = build_packet(project, ledger, request)

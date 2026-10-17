@@ -1079,8 +1079,9 @@ serialized lines), HTML, feedback, or persisted packet artifacts; only its hash
 is stored. Redirected, piped, HTTP, or fabricated terminal contexts cannot issue
 or submit authenticated decisions. A noninteractive review can still display a
 packet but grants no authority.
-An unregistered operator also receives the packet and subject digest, with a
-notice to register `[review_authority]` in user preferences; no challenge is issued.
+An unregistered operator, or a registration naming another OS user or uid, also
+receives the packet and subject digest with a notice to correct `[review_authority]`
+in user preferences; no challenge is issued.
 For a run started with `stage1 --database DB --owner OWNER`, pass those same
 `--database DB --owner OWNER` flags to both `factory review` and `factory decide`.
 Pre-implementation waits bind the verified base, request, issue snapshot,

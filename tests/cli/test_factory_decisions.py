@@ -369,11 +369,15 @@ def test_a_durable_publication_decision_cannot_release_another_action(
     )
 
 
+@pytest.mark.parametrize("registration", [{}, {"os_uid": os.getuid() + 1}, {"os_user": "other-user"}])
 def test_unregistered_operator_still_receives_packet_without_challenge(
     ingress: Ingress,
     terminal: None,
+    registration: dict[str, object],
 ) -> None:
-    ingress.preferences.write_text("schema_version = 1\n")
+    ingress.preferences.write_bytes(
+        _preferences(**registration) if registration else b"schema_version = 1\n"
+    )
     report = ingress.issue()
     assert report["subject_digest"] == ingress.packet.subject_digest
     assert report["challenge_issued"] is False
