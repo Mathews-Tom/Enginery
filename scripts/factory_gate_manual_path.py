@@ -31,6 +31,7 @@ from enginery.engine.operator_control import live_workers
 from enginery.engine.recovery import assess_worker
 from enginery.ledger.service import LedgerService
 from enginery.workflows.stage1 import stage1_request_from_state
+from factory_gate_behavioral import _toml
 from factory_gate_context import GateHoldError, GateOptions
 from factory_gate_evidence import EvidenceBuilder
 from factory_gate_setup import SetupGate, _changed, snapshot
@@ -323,6 +324,22 @@ class ManualPathGate(SetupGate):
             raise RuntimeError(f"factory {command} exited {result.returncode}: {result.stderr}")
         return result.returncode, dict(json.loads(result.stdout))
 
+    def acceptance_checks(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "changed-result",
+                "observer": "command",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "print(Path('manual-path-result.txt').read_text(), end='')",
+                ],
+                "assertions": [{"kind": "stdout", "equals": "one bounded local change\n"}],
+                "fault_classes": ["constant_result", "wrong_build"],
+            }
+        ]
+
     def launch(self, command: str, *arguments: str) -> subprocess.Popen[str]:
         args = ("factory", command, *arguments, "--project", str(self.project), "--json")
         self.commands.append("enginery " + shlex.join(args))
@@ -467,20 +484,11 @@ def step_prepare(gate: ManualPathGate) -> None:
     policy = project / ".enginery" / "project.toml"
     policy_text = policy.read_text(encoding="utf-8") if policy.exists() else ""
     policy.write_text(
-        policy_text
-        + "\n[acceptance]\n"
-        + 'checks = [{name = "changed-result", observer = "command", '
-        + "argv = ["
-        + json.dumps(sys.executable)
-        + ', "-c", "from pathlib import Path; '
-        + "print(Path('manual-path-result.txt').read_text(), end='')\"], "
-        + 'assertions = [{kind = "stdout", equals = "one bounded local change\\n"}], '
-        + 'fault_classes = ["constant_result", "wrong_build"]}]\n',
+        policy_text + "\n[acceptance]\nchecks = " + _toml(gate.acceptance_checks()) + "\n",
         encoding="utf-8",
     )
     gate.git(project, "add", ".enginery/project.toml")
     gate.git(project, "commit", "-q", "-m", "chore: bind operator behavioral checks")
-    gate.git(project, "push", "-q", "origin", branch)
     policy_text = policy.read_text(encoding="utf-8")
     gate.state = private_state_directory(project, gate.environment())
     with patch.dict(os.environ, gate.environment(), clear=True):
