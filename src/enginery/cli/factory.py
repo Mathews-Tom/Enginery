@@ -138,6 +138,8 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
         behavioral = commands.add_parser(name, help=synopsis, description=synopsis)
         _add_project(behavioral)
         behavioral.add_argument("run_id")
+        behavioral.add_argument("--database", type=Path, default=None)
+        behavioral.add_argument("--owner", default="factory")
         behavioral.add_argument("--json", action="store_true")
         if name == "calibrate":
             behavioral.add_argument(
@@ -352,6 +354,8 @@ def run_factory(args: argparse.Namespace) -> int:
             args.run_id,
             calibrate=command == "calibrate",
             without_faults=tuple(getattr(args, "without_fault", ())),
+            database=args.database,
+            owner=args.owner,
         )
         _emit(args, document, [json.dumps(document, sort_keys=True)])
         return (

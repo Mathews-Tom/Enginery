@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict, cast
@@ -21,7 +23,7 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.domain.node_attempt import EvidenceResult
-from enginery.engine.runtime import CoordinatorRuntime
+from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.task_repository import (
     intake_path_for,
     materialize_task_local_repository,
@@ -146,7 +148,11 @@ def execute_behavioral(
             }
         else:
             result = service.run(**arguments)
-            if calibrate_when_required and "behavioral_calibration_required" in result.holds:
+            if (
+                calibrate_when_required
+                and result.result is not EvidenceResult.FAIL
+                and any(hold.startswith("behavioral_calibration_") for hold in result.holds)
+            ):
                 service.calibrate(**arguments)
                 result = service.run(**arguments)
             state = {
@@ -206,12 +212,18 @@ def verify_for_stage1(
             reason + ": " + "; ".join(cast(list[str], state["holds"])),
             details={
                 "reason": reason,
-                "repair": (
-                    "Repair the named candidate behavior and commit the corrected head, then "
-                    if failed
-                    else "Repair the named observer/assertion or its declared semantic fault, then "
+                "findings": tuple(cast(list[str], state["holds"])) if failed else (),
+                "repair": "Repair the named observer infrastructure, then " + retry
+                + "; to explicitly refresh calibration, run "
+                + shlex.join(
+                    (
+                        "enginery", "factory", "calibrate", str(request.run.id),
+                        "--project", str(request.repository_path), "--database", database,
+                        "--owner", owner,
+                    )
                 )
-                + retry,
+                if not failed
+                else "Start the bounded repair attempt with " + retry,
             },
         )
     algorithm, value = str(state["receipt_digest"]).split(":", 1)
@@ -219,20 +231,31 @@ def verify_for_stage1(
 
 
 def run_command(
-    project: Path, run_id: str, *, calibrate: bool, without_faults: tuple[str, ...] = ()
+    project: Path, run_id: str, *, calibrate: bool, without_faults: tuple[str, ...] = (),
+    database: Path | None = None, owner: str = "factory",
 ) -> dict[str, object]:
-    with LedgerService.open(database_path(project)) as ledger:
+    with LedgerService.open(database if database is not None else database_path(project)) as ledger:
         request = (
-            Stage1RunService(runtime=CoordinatorRuntime(ledger, owner="factory"), ledger=ledger)
+            Stage1RunService(runtime=CoordinatorRuntime(ledger, owner=owner), ledger=ledger)
             .read(RunId(run_id))
             .request
         )
-        source = (
-            intake_path_for(request.workspace_path)
-            if request.runner.isolated_mode
-            else request.workspace_path
+        implementation = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:implement"
         )
-        head = resolve_commit(source, "HEAD")
+        attempt_id = None if implementation is None else implementation.state.get("attempt_id")
+        attempt = (
+            ledger.read_projection(aggregate_type="node_attempt", aggregate_id=attempt_id)
+            if isinstance(attempt_id, str) else None
+        )
+        result = None if attempt is None else attempt.state.get("result")
+        head = None if not isinstance(result, Mapping) else result.get("head_revision")
+        if not isinstance(head, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
+            raise HumanActionRequiredError(
+                "behavioral check requires a verified implementation attempt head"
+            )
+        if not request.runner.isolated_mode and resolve_commit(request.workspace_path, "HEAD") != head:
+            raise HumanActionRequiredError("behavioral_build_mismatch: workspace HEAD changed")
         return execute_behavioral(
             ledger, request, head_revision=head, calibrate=calibrate, without_faults=without_faults
         )

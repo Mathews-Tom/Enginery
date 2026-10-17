@@ -28,9 +28,13 @@ from enginery.workflows.stage1 import (
 
 
 def _ready_to_verify(
-    ledger_service: LedgerService, tmp_path: Path
+    ledger_service: LedgerService, tmp_path: Path, *, repair_limit: int = 1
 ) -> tuple[Stage1RunRequest, Stage1RunService, datetime]:
-    request, service, runtime, _, now = _check_disposition_fixture(ledger_service, tmp_path)
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False
+    )
+    request = replace(request, repair_limit=repair_limit)
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
     assert request.behavioral_checks
     assert all(check.assertions for check in request.behavioral_checks)
     for node_id in ("qualify", "implement", "validate"):

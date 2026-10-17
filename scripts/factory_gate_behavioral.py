@@ -7,10 +7,16 @@ import os
 import shutil
 import socket
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from enginery.cli.config_locations import private_state_directory
+from enginery.domain.ids import RunId
+from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
+from enginery.ledger.events import AppendCommand, EventWrite
+from enginery.ledger.service import LedgerService
+from enginery.workflows.stage1 import Stage1RunService, _fixture_dispatch
 from factory_gate_context import GateOptions
 from factory_gate_evidence import EvidenceBuilder
 from factory_gate_setup import SetupGate
@@ -190,6 +196,36 @@ class BehavioralGate(SetupGate):
         (workspace / "sample_app.py").write_text(_APP)
         self.git(workspace, "add", "sample_app.py")
         self.git(workspace, "commit", "-qm", "implement actual addition")
+        # This scenario's candidate is a real committed fixture, not a hosted worker.
+        # Record its verified attempt just as a collected worker result is recorded.
+        with LedgerService.open(self.database) as ledger:
+            runtime = CoordinatorRuntime(ledger, owner="factory")
+            bound = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(run_id)).request
+            now = datetime.now(UTC)
+            for node in ("qualify", "implement"):
+                epoch = runtime.register_node(
+                    dispatch=WorkflowNodeDispatch(
+                        _fixture_dispatch(
+                            bound, node_id=node,
+                            attempt_id=bound.implementation.attempt_id if node == "implement"
+                            else f"qualify-{run_id}",
+                            operation_id=f"fixture:{run_id}:{node}", command=("true",),
+                        ),
+                        bound.manifest,
+                    ),
+                    now=now, heartbeat_window=timedelta(seconds=60),
+                )
+                runtime.complete_node(
+                    run_id=run_id, node_id=node, epoch=epoch.epoch, now=now
+                )
+            ledger.append(AppendCommand(
+                correlation_id=f"fixture-result:{run_id}",
+                events=(EventWrite(
+                    aggregate_type="node_attempt", aggregate_id=bound.implementation.attempt_id,
+                    expected_version=0, event_type="node_attempt.result_ingested", schema_version=1,
+                    payload={"result": {"head_revision": self.git(workspace, "rev-parse", "HEAD")}},
+                ),),
+            ))
         return run_id
 
     def factory(self, command: str, run_id: str, *args: str) -> tuple[int, dict[str, Any]]:

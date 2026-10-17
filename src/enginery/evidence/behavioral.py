@@ -414,7 +414,6 @@ def evaluate_behavioral(
             observed_result = evaluate_observation(check=check, observation=item, inputs=inputs)
             holds.extend(observed_result.holds)
             outcomes.extend(observed_result.assertion_outcomes)
-    holds.extend(calibration_holds(checks, inputs, calibration))
     if any(not item.ran or item.skipped for item in outcomes):
         holds.append("behavioral_assertion_not_run")
     result = (
@@ -426,6 +425,11 @@ def evaluate_behavioral(
         if any(item.result is EvidenceResult.FAIL for item in outcomes)
         else EvidenceResult.PASS
     )
+    # Calibration can authorize a pass, but must never hide a real candidate failure.
+    if result is not EvidenceResult.FAIL:
+        holds.extend(calibration_holds(checks, inputs, calibration))
+        if holds:
+            result = EvidenceResult.INDETERMINATE
     reasons = tuple(dict.fromkeys(holds))
     if result is EvidenceResult.FAIL:
         reasons = tuple(

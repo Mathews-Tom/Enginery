@@ -136,8 +136,10 @@ stream; successful decoding alone says nothing about semantic behavior.
 
 Run `enginery factory calibrate RUN --project PROJECT` to execute the protected
 deliberate-fault fixtures and `enginery factory check RUN --project PROJECT` to
-observe the candidate. Stage 1's terminal verify node uses the same observer and
-evaluator service and creates missing current-build calibration automatically;
+observe the verified implementation attempt's committed head, not an intake's
+unborn `HEAD`. Both commands accept `--database LEDGER --owner OWNER` for an explicit
+Stage 1 ledger. Stage 1's terminal verify node uses the same observer and evaluator
+service and retries missing or inconclusive current-build calibration automatically;
 operators do not need a sidecar check to authorize verification. Observers inspect
 a fresh, independently verified checkout for each baseline, fault and real check.
 Declared output paths must be absent before execution: committed or stale output
@@ -164,8 +166,8 @@ are exercised in protected fixture processes; wrong heads are rejected at the
 identity gate. Missing programs and timeouts are inconclusive, never catches.
 Every acceptance assertion must also catch a semantic fault (`constant_result`
 or `skipped_persistence`) at the evaluator rung. A wrong-build identity catch alone
-does not demonstrate assertion sensitivity. With current qualified calibration,
-a regressed assertion produces FAIL with its assertion id, not a calibration hold.
+does not demonstrate assertion sensitivity. A regressed assertion produces FAIL
+with its assertion id even before calibration: calibration gates PASS, not FAIL.
 `calibrate --without-fault FAULT` deliberately records missing injection and cannot
 qualify acceptance.
 
@@ -203,11 +205,18 @@ running that scenario; no machine-specific browser location is compiled into it.
 |---|---|
 | `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery factory run ISSUE --project PROJECT`. For `stage1 start`, rebuild with `enginery stage1 build-request` first. Existing immutable runs are never rebound. |
 | `browser_observer_unqualified` | Install the approved headless-shell distribution and set its exact absolute executable and canonical distribution digest in user preferences; rerun `enginery factory check RUN --project PROJECT`. |
-| `behavioral_calibration_required`, stale, incomplete, escaped, not-injected, inconclusive, or `behavioral_calibration_semantic_catch_required` | Repair the named observer/assertion or semantic fault declaration. For standalone checks, run `enginery factory calibrate RUN --project PROJECT` then `enginery factory check RUN --project PROJECT`. Stage 1 automatically calibrates its current build; retry its emitted `stage1 watch --advance` command after repairing the cause. |
+| `behavioral_calibration_required`, `behavioral_calibration_stale`, `behavioral_calibration_incomplete`, `behavioral_calibration_escaped`, `behavioral_calibration_not_injected`, `behavioral_calibration_inconclusive`, `behavioral_calibration_invalid_injection`, `behavioral_calibration_no_relevant_catch`, `behavioral_calibration_semantic_catch_required` | Clear the named infrastructure cause and retry the emitted Stage 1 advancement command; inconclusive calibration is retried, not treated as final. Explicit refresh: `enginery factory calibrate RUN --project PROJECT --database LEDGER --owner OWNER`. An insensitive or invalid assertion/fault declaration needs a corrected base policy and a new bound run. |
 | `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. Retry verification against the corrected head. |
 | `behavioral_output_preexists` | Remove the declared output from the committed candidate and commit the corrected head, so every observer starts with that output absent. |
 | `behavioral_observer_requires_isolation` | Isolated service/browser checks cannot run on the host. Bind command checks for the pinned network-none runner in a new request, or deliberately start a new trusted-local run; restore a drifted pinned runner rather than falling back. |
-| `behavioral_acceptance_failed` / `behavioral_assertion_failed:CHECK:INDEX` | Repair the named candidate behavior, commit the corrected head, and retry the emitted Stage 1 advancement command. Recalibrating unchanged failing behavior cannot repair it. |
+| `behavioral_acceptance_failed` / `behavioral_assertion_failed:CHECK:INDEX` | Retry the emitted `stage1 watch --advance` command to dispatch a bounded implementation repair carrying the failing assertion ids. When its repair budget is exhausted, use the existing failed-implementation human decision; committing a different workspace head or recalibrating cannot change this published attempt. |
+| `behavioral_acceptance_indeterminate` | Clear the accompanying observer/infrastructure hold, then retry the emitted `stage1 watch --advance` command. To explicitly refresh calibration use `enginery factory calibrate RUN --project PROJECT --database LEDGER --owner OWNER`; immutable assertions are not edited in place. |
+| `behavioral_verifier_unconfigured` | Advance with the normal `enginery stage1 watch --database LEDGER --owner OWNER --run-id RUN --advance` composition; a standalone check does not configure Stage 1's observer. |
+| `behavioral_zero_assertions`, `behavioral_calibration_faults_missing`, `behavioral_check_identity_ambiguous`, `behavioral_evaluator_identity_mismatch` | Correct the base policy's nonempty uniquely named checks and semantic faults, then build and bind a new request. Do not alter custody for an existing run. |
+| `behavioral_assertion_not_run`, `behavioral_observer_untrusted`, `behavioral_worker_claim_not_evidence`, `behavioral_observation_missing`, `behavioral_observations_incomplete`, `behavioral_observation_ambiguous` | Restore the real trusted observer and run every declared assertion without skips or mocks, then retry verification; worker claims cannot substitute. |
+| `behavioral_observation_stale`, `behavioral_observation_time_mismatch`, `behavioral_observation_capture_mismatch`, `behavioral_capture_missing`, `behavioral_capture_not_decodable`, `behavioral_browser_capture_missing`, `behavioral_observer_capture_invalid`, `behavioral_calibration_capture_mismatch`, `behavioral_calibration_fixture_changed`, `behavioral_binding_unavailable` | Restore intact evaluator custody/artifacts and trusted observer tooling; rerun calibration and verification for the same verified head. Never accept or patch a corrupted receipt. |
+| `behavioral_capture_exceeds_bound`, `observer_output_limit`, `observer_output_undecodable` | Reduce output/captures to the 1 MiB bound and emit valid UTF-8 text, then retry with a corrected implementation attempt if candidate behavior changed. |
+| `observer_service_conflict`, `observer_service_unavailable`, `observer_timeout`, `observer_command_invalid`, `observer_redirect_refused`, `observer_produced_file_unsafe` | Stop conflicting listeners; restore the configured executable and loopback service; avoid redirects and linked/nonregular output paths. Retry the emitted advancement command after infrastructure repair; configuration changes require a new request. |
 
 Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
 commands use the project's private `ledger.sqlite` and report its path; pass that
