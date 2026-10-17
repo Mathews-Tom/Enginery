@@ -782,8 +782,11 @@ def _github_holds(gate: ReviewAuthorityGate) -> None:
                 and (
                     mode != "cap"
                     or (
-                        isinstance(status.get("hold"), dict)
-                        and status["hold"].get("reason") == "github_evidence_incomplete"
+                        any(
+                            hold.get("reason") == "github_evidence_incomplete"
+                            for hold in status.get("holds", [])
+                            if isinstance(hold, dict)
+                        )
                         and "pagination cap reached" in text
                     )
                 )
