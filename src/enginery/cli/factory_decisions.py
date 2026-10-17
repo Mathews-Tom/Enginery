@@ -6,7 +6,6 @@ import getpass
 import os
 import sys
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from enginery.cli.factory_review import _open, build_packet, preimplementation_w
 from enginery.domain.digests import Digest
 from enginery.domain.policy_decision import PolicyAction
 from enginery.domain.principal import AuthorityPrincipal
-from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, FixtureDispatch
+from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE
 from enginery.ledger.human_decisions import (
     consume_decision,
     issue_challenge,
@@ -126,7 +125,7 @@ def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...
     ):
         actions.append(_PUBLICATION)
     for node_id in waiting:
-        for outcome in ("approve", "reject", "requeue"):
+        for outcome in ("approve", "reject"):
             if node_id == "open_pr" and outcome == "approve":
                 continue
             actions.append(f"human_wait.{node_id}.{outcome}")
@@ -260,7 +259,6 @@ def decide_in_ledger(
     challenge: str,
     principal_id: str | None = None,
     reason: str = "",
-    resumed_request: FixtureDispatch | None = None,
     owner: str = "factory",
 ) -> dict[str, object]:
     """Attach one repair using the actual ledger, owner and requested action."""
@@ -273,7 +271,6 @@ def decide_in_ledger(
             challenge=challenge,
             principal_id=principal_id,
             reason=reason,
-            resumed_request=resumed_request,
             owner=owner,
         )
     except HumanDecisionError as error:
@@ -285,9 +282,10 @@ def decide_in_ledger(
             database=database or None,
             owner=owner,
         )
-        raise type(error)(
-            error.args[0], details={**error.details, "repair": f"{review}; {decide}"}
-        ) from error
+        repair = review if error.details.get("reason") == "human_wait_requeue_unsupported" else (
+            f"{review}; {decide}"
+        )
+        raise type(error)(error.args[0], details={**error.details, "repair": repair}) from error
 
 
 def _decide_in_ledger(
@@ -299,16 +297,21 @@ def _decide_in_ledger(
     challenge: str,
     principal_id: str | None,
     reason: str,
-    resumed_request: FixtureDispatch | None,
     owner: str,
 ) -> dict[str, object]:
     """Consume and release an exact wait under ONE write transaction, including its event."""
     registration, context = _authenticate(principal_id)
+    scope = wait_scope(action)
+    if scope is not None and scope[1] == "requeue":
+        raise ActionMismatchError(
+            "human_wait_requeue_unsupported: Stage 1 cannot complete a requeued human wait; "
+            "the wait is unchanged",
+            details={"reason": "human_wait_requeue_unsupported", "node_id": scope[0]},
+        )
     bounded_json(reason)
     assert_no_raw_credentials(reason)
     run_id = str(request.run.id)
     packet = build_packet(request.repository_path, ledger, request)
-    scope = wait_scope(action)
     node_id = "open_pr" if action == _PUBLICATION else None if scope is None else scope[0]
     schema_expiry = timedelta(seconds=registration.ttl_seconds)
 
@@ -353,34 +356,14 @@ def _decide_in_ledger(
         }
         if not request.execution_selection.legacy:
             extra["execution_selection_digest"] = str(request.execution_selection.digest)
-        if scope is not None and scope[1] == "requeue":
-            prior = runtime.read_node_request(run_id=run_id, node_id=node_id)
-            stem, generation = prior.attempt_id.rsplit("-", 1)
-            resumed = resumed_request or replace(
-                prior,
-                attempt_id=f"{stem}-requeue-{decision.id[:8]}-{generation}",
-                operation_id=str(
-                    Digest.of_json({"prior": prior.operation_id, "decision": decision.id})
-                ),
-                expected_attempt_version=0,
-            )
-            if resumed.run_id != run_id or resumed.node_id != node_id:
-                raise ActionMismatchError("a requeue decision cannot release another node")
-            runtime.resume_human_wait(
-                request=resumed,
-                epoch=epoch.epoch,
-                now=decision.decided_at,
-                extra=extra,
-            )
-        else:
-            runtime.resolve_human_wait(
-                run_id=run_id,
-                node_id=node_id,
-                epoch=epoch.epoch,
-                now=decision.decided_at,
-                outcome="failed" if scope and scope[1] == "reject" else "passed",
-                extra=extra,
-            )
+        runtime.resolve_human_wait(
+            run_id=run_id,
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=decision.decided_at,
+            outcome="failed" if scope and scope[1] == "reject" else "passed",
+            extra=extra,
+        )
 
     decision = consume_decision(
         ledger.connection,

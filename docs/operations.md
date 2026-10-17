@@ -1107,18 +1107,26 @@ inputs supersede the decision; expiry or supersession requires a fresh review
 and decision before an effect can proceed. A review report, even one marked
 approved, never substitutes for `pull_request.open`.
 
-Human waits use `human_wait.NODE.approve`, `human_wait.NODE.reject`, or
-`human_wait.NODE.requeue`, with the actual node ID in place of `NODE`.
-Approving `open_pr` uses `pull_request.open`; rejecting it uses
-`human_wait.open_pr.reject`. Follow the exact actions and commands reported by
-review/status. `factory decide` resolves the selected wait atomically.
+Human waits use `human_wait.NODE.approve` or `human_wait.NODE.reject`, with the
+actual node ID in place of `NODE`. Approving `open_pr` uses `pull_request.open`;
+rejecting it uses `human_wait.open_pr.reject`. Follow the exact actions and
+commands reported by review/status. `factory decide` resolves the selected wait
+atomically.
 
-**Breaking change:** `stage1 approve`, `stage1 reject`, and human-wait
-`stage1 resume` also require `--subject-digest DIGEST --challenge SECRET`
-and optionally `--principal-id ID`, using the same authentication and node-scoped
-actions. Retain their database/owner/run/node flags. All three commands now require
-`--reason REASON`, including `stage1 resume`, which previously did not; resume
-retains its attempt/operation flags.
+**Supported human-wait requeue nodes: none.** Stage 1 cannot complete a requeue
+end to end: deterministic/human nodes do not redispatch the persisted request,
+and implementation requeues retain an obsolete embedded worker task/result path.
+No `human_wait.NODE.requeue` action is offered. Both `factory decide` requeue
+requests and `stage1 resume` refuse with `decision_action_mismatch` and reason
+`human_wait_requeue_unsupported`, leaving the wait and challenge unchanged.
+This does not affect `factory resume`, which advances the existing request
+without replacing its attempt/operation identity.
+
+**Breaking change:** `stage1 approve` and `stage1 reject` require
+`--subject-digest DIGEST --challenge SECRET` and optionally `--principal-id ID`,
+using the same authentication and node-scoped actions. Retain their
+database/owner/run/node flags and supply `--reason REASON`. Human-wait
+`stage1 resume` no longer requeues unsupported work.
 A legacy report or reason-only command no longer authorizes publication or releases work.
 
 This is a **trusted-local** protocol, not same-user process containment: another
@@ -1156,6 +1164,7 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | `decision_authentication_required` | Run review and decide directly on the same genuine stdin/stdout TTY as the registered OS user; remove pipes/redirection and do not submit through HTTP. |
 | `decision_principal_mismatch` | Set `[review_authority]` to the actual `id -un`/`id -u` identity in user preferences; omit `--principal-id` or use that registered ID, then obtain a fresh terminal review challenge. |
 | `decision_action_mismatch` | Run `enginery factory review RUN --project PROJECT`; use the exact available action for the intended effect and obtain a fresh challenge rather than reusing another action's authorization. |
+| `human_wait_requeue_unsupported` (`decision_action_mismatch`) | No Stage 1 human-wait node supports end-to-end requeue. The wait and challenge are unchanged; run the reported ledger-scoped `factory review` command and choose an available action. Do not retry `stage1 resume` or invent a requeue action. |
 | `decision_subject_mismatch` | Run `enginery factory review RUN --project PROJECT` and copy its current subject digest into `factory decide`; never combine a digest and challenge from different reviews. |
 | `decision_subject_stale` | Review the changed head/diff/config/evidence/findings with `enginery factory review RUN --project PROJECT`, then decide against that new subject and challenge. |
 | `decision_challenge_unknown` | Discard the unrecognized secret; run `enginery factory review RUN --project PROJECT` on the terminal and use the newly issued challenge. |

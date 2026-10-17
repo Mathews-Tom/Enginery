@@ -727,7 +727,7 @@ def test_subject_is_checked_again_under_the_nonce_consumption_lock(
 
 
 @pytest.mark.parametrize("node_id", ["qualify", "no_change_confirmation"])
-@pytest.mark.parametrize("outcome", ["approve", "reject", "requeue"])
+@pytest.mark.parametrize("outcome", ["approve", "reject"])
 def test_preimplementation_wait_has_real_packet_and_authenticated_node_decision(
     unimplemented_ingress: Ingress,
     terminal: None,
@@ -755,7 +755,7 @@ def test_preimplementation_wait_has_real_packet_and_authenticated_node_decision(
     issued = ingress.issue()
     action = f"human_wait.{node_id}.{outcome}"
     assert set(issued["actions"]) == {
-        f"human_wait.{node_id}.{choice}" for choice in ("approve", "reject", "requeue")
+        f"human_wait.{node_id}.{choice}" for choice in ("approve", "reject")
     }
     assert ACTION not in issued["actions"]
     result = ingress.decide(issued, action=action, reason="operator reviewed the source intent")
@@ -769,7 +769,6 @@ def test_preimplementation_wait_has_real_packet_and_authenticated_node_decision(
         == {
             "approve": "passed",
             "reject": "failed",
-            "requeue": "queued",
         }[outcome]
     )
     assert state["decision_id"] == decision.id
@@ -831,3 +830,34 @@ def test_missing_implementation_head_without_an_early_wait_is_not_a_review_packe
     with pytest.raises(MissingPrerequisiteError, match="host-verified implementation head"):
         unimplemented_ingress.issue()
     assert not list_decisions(unimplemented_ingress.ledger.connection, RUN)
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    [
+        "qualify", "plan_approval", "no_change_confirmation", "implement", "validate",
+        "review", "repair", "open_pr", "wait_for_ci", "verify",
+    ],
+)
+def test_every_stage1_requeue_is_refused_without_changing_the_wait(
+    ingress: Ingress,
+    terminal: None,
+    node_id: str,
+) -> None:
+    if node_id == "implement":
+        ingress.update_node(node_id, status="awaiting_human")
+    else:
+        ingress.register(node_id, outcome="awaiting_human")
+    before = ingress.state(node_id)
+    issued = ingress.issue()
+    assert not any(action.endswith(".requeue") for action in issued["actions"])
+    with pytest.raises(ActionMismatchError) as refused:
+        ingress.decide(issued, action=f"human_wait.{node_id}.requeue", reason="retry")
+    assert refused.value.code == "decision_action_mismatch"
+    assert refused.value.details["reason"] == "human_wait_requeue_unsupported"
+    assert ingress.state(node_id) == before
+    assert not list_decisions(ingress.ledger.connection, RUN)
+    row = ingress.ledger.connection.execute(
+        "SELECT consumed_at FROM human_decision_challenges"
+    ).fetchone()
+    assert row["consumed_at"] is None

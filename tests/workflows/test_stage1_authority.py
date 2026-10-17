@@ -1853,3 +1853,25 @@ def test_a_trusted_local_run_keeps_the_host_default_validation_command(
     built.service.start(built.request, now=NOW, heartbeat_window=HEARTBEAT)
 
     assert ledger_service.read_projection(aggregate_type="run", aggregate_id=RUN_ID) is not None
+
+
+def test_refused_publication_requeue_preserves_wait_and_can_still_publish(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    from enginery.application.human_decisions import ActionMismatchError
+
+    ready = _isolated_ready_to_open(ledger_service, tmp_path, committed=_WORKFLOW)
+    with pytest.raises(HumanActionRequiredError):
+        ready.open()
+    before = dict(_node(ledger_service, "open_pr"))
+    with pytest.raises(ActionMismatchError, match="human_wait_requeue_unsupported"):
+        ready.decisions.decide(
+            ready.built.request, action="human_wait.open_pr.requeue", reason="retry"
+        )
+    assert _node(ledger_service, "open_pr") == before
+    assert before["status"] == "awaiting_human"
+    assert ready.events == []
+    ready.decisions.decide(ready.built.request, action="pull_request.open", reason="publish")
+    ready.open()
+    assert _node(ledger_service, "open_pr")["status"] == "passed"
+    assert ready.events == ["publish", "pull_request"]

@@ -167,7 +167,7 @@ def test_stage1_rejects_invalid_persisted_implementation_budget(
 
 
 @pytest.mark.usefixtures("authenticated_decisions")
-def test_stage1_approve_resume_and_cancel_route_through_runtime(
+def test_stage1_refuses_requeue_without_changing_wait_or_consuming_challenge(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "ledger.db"
@@ -188,14 +188,15 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
             "--operation-id",
             "plan-approval:run-stage1:1",
         )
-        == 0
+        == 2
     )
-    assert json.loads(capsys.readouterr().out)["status"] == "queued"
+    assert "human_wait_requeue_unsupported" in capsys.readouterr().err
+    assert _node_state(database, "plan_approval")["status"] == "awaiting_human"
 
     assert (
         _lifecycle(
             database,
-            "cancel",
+            "reject",
             "--run-id",
             "run-stage1",
             "--node-id",
@@ -203,7 +204,7 @@ def test_stage1_approve_resume_and_cancel_route_through_runtime(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["status"] == "cancelled"
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
     _register_human_node(database, request, node_id="no_change_confirmation")
     assert (
@@ -727,7 +728,7 @@ def test_watch_never_presents_a_legacy_carried_dollar_number_as_enforcement(
 
 
 @pytest.mark.usefixtures("authenticated_decisions")
-def test_factory_explicit_stage1_ledger_requeues_real_decision_with_numeric_generation(
+def test_factory_explicit_stage1_ledger_refuses_unsupported_requeue(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "operator's ledger.db"
@@ -766,13 +767,12 @@ def test_factory_explicit_stage1_ledger_requeues_real_decision_with_numeric_gene
                 "--json",
             ]
         )
-        == 0
+        == 2
     )
-    decision = json.loads(capsys.readouterr().out)
+    assert "human_wait_requeue_unsupported" in capsys.readouterr().err
+    assert _node_state(database, "no_change_confirmation")["status"] == "awaiting_human"
     with LedgerService.open(database) as ledger:
-        runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
-        resumed = runtime.read_node_request(run_id="run-stage1", node_id="no_change_confirmation")
-    assert resumed.attempt_id == (f"no_change_confirmation-requeue-{decision['decision_id'][:8]}-0")
-    assert int(resumed.attempt_id.rsplit("-", 1)[1]) == 0
-    assert resumed.operation_id != "no_change_confirmation:run-stage1:0"
-    assert _node_state(database, "no_change_confirmation")["status"] == "queued"
+        row = ledger.connection.execute(
+            "SELECT consumed_at FROM human_decision_challenges"
+        ).fetchone()
+        assert row["consumed_at"] is None

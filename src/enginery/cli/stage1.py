@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -206,8 +205,7 @@ def _resume(args: argparse.Namespace) -> None:
     try:
         runtime = runtime_for_run(ledger, owner=args.owner, run_id=args.run_id)
         request = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id)).request
-        prior = runtime.read_node_request(run_id=args.run_id, node_id=args.node_id)
-        result = decide_in_ledger(
+        decide_in_ledger(
             ledger,
             request,
             action=f"human_wait.{args.node_id}.requeue",
@@ -216,14 +214,7 @@ def _resume(args: argparse.Namespace) -> None:
             principal_id=args.principal_id,
             reason=args.reason,
             owner=args.owner,
-            resumed_request=replace(
-                prior,
-                attempt_id=args.attempt_id,
-                operation_id=args.operation_id,
-                expected_attempt_version=0,
-            ),
         )
-        _print({**result, "status": "queued"})
     finally:
         ledger.close()
 
