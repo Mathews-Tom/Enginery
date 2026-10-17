@@ -23,20 +23,20 @@ production-incident-to-hotfix-and-rollback workflow (Stage 3, proven
 against a real but controlled local HTTP service — never a real
 production, container, or cloud destination). Stage 4 (governed
 factory self-improvement) is gate-deferred with no committed date; run
-`enginery gate status --gate G4` to see exactly which entry conditions
+`enginery gate status --gate G4 --database ledger.db` to see exactly which entry conditions
 are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
 
 ### Guided setup and manual factory execution
 
-`enginery factory init`, `doctor`, `explain`, `uninstall`, and `collect` are shipped: guided,
+`enginery init`, `preflight`, `explain`, `uninstall`, and `collect` are shipped: guided,
 preview-first project setup, read-only prerequisite diagnostics, an explanation of where
 every configured value comes from, and reversible removal of exactly what setup created,
 described in [Guided project setup](docs/operations.md#guided-project-setup). They write
 only a project policy file and a private ownership record, and never install
 capabilities, sign in, or touch services, MCP servers or global configuration.
 
-`enginery factory collect --dry-run` previews canonical issue classification, deduplication,
+`enginery collect --dry-run` previews canonical issue classification, deduplication,
 workflow selection and budgets without GitHub mutations. Read-only inspection of a WAL
 ledger may create SQLite sidecars, disclosed in `local_writes`, without changing the
 ledger's content. `collect` updates only the private
@@ -44,14 +44,14 @@ repository cursor, never issue-to-run bindings, and never skips held issues. JSO
 reports GitHub authentication probes separately from issue reads; neither form calls
 a model or changes GitHub.
 
-`enginery factory run OWNER/REPO#N` compiles a bound request and advances the
-existing Stage 1 coordinator, not a second scheduler. `factory status [RUN]`
-reports durable progress; `factory explain RUN` explains the run's immutable
-binding, while `factory explain` without RUN still explains current configuration.
-See the [Manual factory path](docs/operations.md#manual-factory-path) for private
-state, run identity, overrides and holds. `factory review RUN` renders a safe local
+`enginery run OWNER/REPO#N` compiles a bound request and advances the
+existing Stage 1 coordinator, not a second scheduler. `status [RUN]`
+reports durable progress and the run's immutable binding. `enginery explain`
+explains current configuration and takes no run ID.
+See the [Manual project path](docs/operations.md#manual-project-path) for private
+state, run identity, overrides and holds. `review RUN` renders a safe local
 terminal/HTML packet and issues a terminal-only one-time challenge to a registered
-operator. `factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+operator. `decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
 records authenticated, expiring action-specific authority; publication uses
 `pull_request.open`. Feedback and Stage 1 review reports record findings only.
 See [terminal decisions](docs/operations.md#authenticated-terminal-decisions)
@@ -59,15 +59,17 @@ for registration, node-scoped waits, supersession and trusted-local limitations.
 GitHub readiness uses fully paginated, exact-head API evidence retained in the
 private artifact store and bound into the terminal evidence bundle; incomplete
 collections hold rather than accepting a prefix. Review/status reuse that evidence.
-Optional `factory status RUN --github-view` uses user-configured `gh-axi` only
+Optional `status RUN --github-view` uses user-configured `gh-axi` only
 for escaped, read-only display, never evidence or approval. See
 [GitHub evidence and display](docs/operations.md#authoritative-github-evidence-and-optional-display).
 
-Factory `resume`, `pause`, and `drain` are shipped: reconcile and continue the
-same durable run, pause project-ledger dispatch, or drain supervised workers.
-Lift a pause with `factory pause --lift`. Factory `calibrate` and `check` run
-independent behavioral acceptance. Only factory `watch` and `evidence` remain
-**proposed and not shipped**; scheduled collection/watch is not shipped.
+`enginery continue RUN` reconciles and continues the same durable run.
+`enginery pause` pauses project-ledger dispatch; `enginery resume` lifts that
+pause without continuing a run. `enginery drain` drains supervised workers.
+`enginery calibrate` and `enginery check` run independent behavioral acceptance.
+Inspect project progress with `enginery status RUN`; use `enginery engine evidence`
+with an explicit database, owner and run ID for retained run evidence.
+Scheduled collection is not shipped.
 The shipped boundary is manual-first, local-first, and deterministic: models never
 poll, schedule, keep books, or decide whether a check is complete; routine control
 uses no model. Harness, model, session, and worker machine are separate axes.
@@ -128,24 +130,42 @@ uv sync --all-extras --dev
 
 ## CLI
 
+Project commands use the current directory by default (`--project` selects another
+project). Host diagnostics do not replace project prerequisite checks.
+
 ```bash
 uv run enginery --version
-uv run enginery doctor
-uv run enginery factory init --runner trusted-local          # preview; add --apply to write
-uv run enginery factory doctor
-uv run enginery factory explain
-uv run enginery factory uninstall                            # preview; add --apply to remove
+uv run enginery doctor                                     # host diagnostics
+uv run enginery init --runner trusted-local                # preview; add --apply to write
+uv run enginery init --runner trusted-local --apply        # after reviewing preview
+uv run enginery preflight                                  # project prerequisites
+uv run enginery explain
+uv run enginery collect --dry-run
+uv run enginery run OWNER/REPO#N --once
+uv run enginery status RUN
+uv run enginery continue RUN                               # reconcile/advance same run
+uv run enginery pause --reason "operator maintenance"
+uv run enginery resume                                     # lift project dispatch pause
+uv run enginery uninstall                                  # preview; add --apply after review
+```
+
+Lower-level host, engine, operator, policy and capability commands are shown
+below. Ledger-scoped commands select a database explicitly; engine run and stack
+commands also select their coordinator owner. `engine build-request` writes a
+request document without selecting a ledger or owner:
+
+```bash
 uv run enginery adapter doctor --json
-uv run enginery ledger verify --database ledger.db
+uv run enginery operator verify --database ledger.db
 uv run enginery policy explain request.json
-uv run enginery stage1 build-request --runner trusted-local \
+uv run enginery engine build-request --runner trusted-local \
   --output request.json --run-id issue-1 \
   --repository owner/repo --external-reference "owner/repo#1" \
   --base-revision "..." --repository-path /path/to/repo \
   --workspace-path /path/to/workspace \
   --artifact-root "${XDG_STATE_HOME:-$HOME/.local/state}/enginery/artifacts/issue-1"
-uv run enginery stage1 start --database ledger.db --owner operator --request request.json
-uv run enginery stage2 status --database ledger.db --owner operator --stack-id ID
+uv run enginery engine start --database ledger.db --owner operator --request request.json
+uv run enginery engine status --database ledger.db --owner operator --stack-id ID
 uv run enginery workspace inspect --database ledger.db --owner operator --json
 uv run enginery outcome completeness --database ledger.db
 uv run enginery workspace release --database ledger.db --owner operator \

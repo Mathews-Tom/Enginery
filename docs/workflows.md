@@ -3,9 +3,9 @@
 - **Status:** Operating examples. Stages 1–3 are shipped; Stage 4 remains
   gate-deferred. Worked output illustrates intended usage rather than a literal
   transcript. Guided setup, manual execution/recovery, behavioral `calibrate`/
-  `check`, safe `review` packets and repair-only `feedback` are shipped factory
-  commands. Only factory `watch` and `evidence` remain proposed; scheduled
-  collection/watch is not shipped.
+  `check`, safe `review` packets and repair-only `feedback` are shipped project
+  commands. Scheduled collection is not shipped; retained evidence is available
+  through `enginery engine evidence` with explicit ledger selection.
 - **Audience:** Engineers choosing how existing coding agents and models participate in an Enginery workflow.
 
 > **Core rule:** Users choose their preferred coding agents and models. Enginery coordinates the workflow around them; it does not replace their reasoning loop or silently select a different worker.
@@ -302,10 +302,10 @@ The preferred agent did not need to solve the provider failure. Enginery owns th
 
 ### Required operator recovery experience
 
-The recovery path is a product interaction, not a ledger-debugging exercise. The default CLI must render a concise recovery packet; JSON Lines remains an opt-in machine interface, and no resolution may require direct SQLite access. The following illustrates the required behavior, not implemented command output:
+The recovery path is a product interaction, not a ledger-debugging exercise. The default CLI must render a concise recovery packet; JSON Lines remains an opt-in machine interface, and no resolution may require direct SQLite access. The following is an application/API recovery-packet design, not executable CLI syntax or implemented command output:
 
 ```text
-$ enginery run inspect run_01
+Recovery packet for run_01 (API design)
 Run: run_01
 Status: blocked — external operation requires reconciliation
 Operation: pull_request.open / op_7f2a
@@ -313,10 +313,10 @@ Expected: repository=acme/api, branch=enginery/work-42, head=8de2c1a
 Observed: PR #405, branch=enginery/work-42, head=91a6f77
 Reason: provider result conflicts with the bound head revision
 Evidence: reconciliation bundle for run_01
-Next permitted action: enginery work reconcile WORK-42
+Next permitted API operation: reconcile the bound work item WORK-42
 ```
 
-The reconciliation command must show the immutable operation ID, target, expected and observed bindings, provider facts, available evidence, policy requirement, and the consequences of every permitted decision. `found_matching` is adopted automatically only when the provider-visible correlation and every required binding match. `not_found` permits the scheduler to retry under the same operation ID. `found_conflicting` and `indeterminate` remain blocked until a human records a typed resolution bound to the same reconciliation packet; a generic “yes, adopt” confirmation is not sufficient.
+The proposed reconciliation API must show the immutable operation ID, target, expected and observed bindings, provider facts, available evidence, policy requirement, and the consequences of every permitted decision. `found_matching` is adopted automatically only when the provider-visible correlation and every required binding match. `not_found` permits the scheduler to retry under the same operation ID. `found_conflicting` and `indeterminate` remain blocked until a human records a typed resolution bound to the same reconciliation packet; a generic “yes, adopt” confirmation is not sufficient.
 
 The typed human resolution must choose one declared outcome: supersede the run and create a new run from a newly bound source snapshot; cancel the run while preserving the conflict and evidence record; or request a separately policy-gated remedial action against the external object. Resolution never mutates the original bindings, converts an indeterminate result into success, or authorizes another create operation. The recorded intervention includes the selected outcome, rationale, principal, time, and the exact reconciliation-packet digest.
 
@@ -377,29 +377,32 @@ Stage 1 binds two checks. `stage1.validate` runs the validation commands supplie
 
 Current supported behavior is frozen in a versioned, digest-verified acceptance baseline (`acceptance-baseline-v1.toml`, package data). It lists the Stage 1 to 3 local gates, the doctor command, and fail-closed G4 status, with each assertion mapped to a typed check and to the script or test that exercises it. Acceptance for a new feature is defined separately by that feature's task and is never added to the baseline. Calibration outcomes are `caught`, `escaped`, `not_injected`, or `inconclusive`; private calibration scenarios are held by the operator or evaluator outside worker-readable mounts.
 
-### Manual factory path and proposed controls
+### Manual project path
 
-The shipped `enginery factory collect --dry-run` previews issue eligibility
+The shipped `enginery collect --dry-run` previews issue eligibility
 without GitHub mutations or writes except disclosed SQLite sidecars. `collect`
-records private intake; `run`, `status`, `explain RUN` and `resume` share the
-existing coordinator and immutable binding. `explain` without RUN still explains
+records private intake; `run`, `status RUN` and `continue RUN` share the
+existing coordinator and immutable binding. `enginery explain` takes no run ID and explains
 current configuration. `pause` and `drain` control project dispatch; lift the pause
-with `factory pause --lift`. Unlike factory recovery, `stage1 resume` refuses
-with `human_wait_requeue_unsupported`: no human-wait node supports end-to-end
-requeue. Use review to inspect the available approve/reject actions.
+with `enginery resume` (dispatch only); `enginery continue RUN` then reconciles
+and advances the selected run. Human-wait requeue via
+`decide RUN --action human_wait.NODE.requeue` refuses with
+`human_wait_requeue_unsupported`: no human-wait node supports end-to-end requeue.
+Use review to inspect the available approve/reject actions.
 
-`factory calibrate RUN` qualifies deliberate-fault sensitivity; `factory check RUN`
-observes the verified candidate and requires semantic assertions. `factory review
+`calibrate RUN` qualifies deliberate-fault sensitivity; `check RUN`
+observes the verified candidate and requires semantic assertions. `review
 RUN` renders a safe local packet and issues a terminal-only challenge.
 Feedback and Stage 1 review reports supply findings, never approval.
-`factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+`decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
 authenticates the registered operator; publication uses `pull_request.open`, and
-human waits use the exact node-scoped actions reported by review. Stage 1
-approve/reject/resume require the same authentication. Decisions expire and changed
+human waits use the exact node-scoped actions reported by review. Engine-ledger
+approve/reject commands require the same authentication. Decisions expire and changed
 bound inputs supersede them; challenges are consumed once. See the
 [operator guide](operations.md#authenticated-terminal-decisions) for registration,
-repair commands and trusted-local limitations. Only factory `watch` and
-`evidence` remain proposed.
+repair commands and trusted-local limitations. Use `enginery status RUN` for
+project inspection or `enginery engine evidence` with explicit database, owner
+and run ID for retained evidence.
 The manual path ends at a verified open PR and outcome observation, never automatic
 merge, release or deployment. Control is deterministic and local; models never
 schedule or decide completion. Trusted-local operation is not containment.

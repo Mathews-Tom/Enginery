@@ -1,7 +1,7 @@
 # Operator Guide
 
 This is the operator-facing reference for running Enginery locally: install,
-configuration, health checks, the Stage 1 command surface, recovery,
+configuration, health checks, project and engine-ledger commands, recovery,
 backup/restore, and the security limits an operator must understand before
 running real workflows.
 
@@ -10,7 +10,7 @@ where operator-specific values are required. The published release documented in
 [`README.md`](../README.md#status) is `v0.6.0`. The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
-release; `stage2 status` remains the only Stage 2 CLI command (a
+release; `engine status` remains the only Stage 2 CLI command (a
 read-only stack inspection — Stage 2's own merge/build/publish
 orchestration runs through the release-preparation workflow, not a
 shipped `enginery` verb). Stage 3 (incident to hotfix and rollback) is
@@ -58,16 +58,17 @@ uv run enginery doctor
 [ok] package_metadata: enginery 0.6.0 installed
 ```
 
-`enginery doctor --json` emits the same report as a machine-readable
-document; every CLI command that reports structured state accepts `--json`
-for scripting.
+`enginery doctor --json` emits the same host report as a machine-readable
+document. Project reports accept `--json`. Operator `status`, `pause`, `resume`,
+`drain`, `select-runner`, `backup` and `restore` emit JSON by default. Operator
+`verify` prints text unless `--json` is given; `rebuild-projections` prints a count.
 
 ## Configuration
 
 Enginery reads layered configuration (below) when it builds a Stage 1 request and when
-`factory init`, `doctor` and `explain` compile it for a project. Every
+`enginery init`, `enginery preflight` and `enginery explain` compile it for a project. Every
 run's provider configuration is an explicit, versioned `--request` document passed to
-`enginery stage1 start` (see
+`enginery engine start` (see
 [Running a Stage 1 workflow](#running-a-stage-1-workflow) below): work-item
 identity, acceptance criteria, validation commands, and an
 `execution_configuration` block naming the GitHub repository, an opaque
@@ -91,7 +92,7 @@ before this block existed keeps its original request digest, decodes
 unchanged, and runs as a host default with unknown effective controls;
 Enginery never invents a selection for it. If the packaged catalog differs
 from the one a run was bound to (for example after upgrading Enginery),
-`enginery stage1 watch` reports the diagnostic as `hold` and refuses to
+`enginery engine next` reports the diagnostic as `hold` and refuses to
 advance the run; the run's original binding is retained, never rebound.
 
 ### Behavioral check custody and receipts
@@ -103,12 +104,12 @@ evaluator custody outside the worker workspace; the request, configuration snaps
 and assertion-set digest must agree. Historical requests without this field keep
 their original serialization and resume binding.
 
-An empty-check `stage1 start` is refused before any evaluator custody file is
+An empty-check `engine start` is refused before any evaluator custody file is
 written. Custody readers and publishers share a private-directory lock. If a
 publisher is killed after linking its complete document but before removing the
 temporary link, the next start refuses the multi-link file and names its exact
 `rm -- PATH` repair. Remove only that named custody file, then repeat the start
-or factory run command; factory repair messages name `enginery factory run`,
+or run command; project repair messages name `enginery run`,
 not the Stage 1 request-builder flow. An already-bound empty-check run cannot
 be rebound: commit the checks and build a replacement request with a new run id.
 
@@ -134,11 +135,11 @@ are distinct categories: a claim or a decodable screenshot is never acceptance.
 PNG validation checks signatures, chunk CRCs, dimensions and the decoded zlib
 stream; successful decoding alone says nothing about semantic behavior.
 
-Run `enginery factory calibrate RUN --project PROJECT` to execute the protected
-deliberate-fault fixtures and `enginery factory check RUN --project PROJECT` to
+Run `enginery calibrate RUN --project PROJECT` to execute the protected
+deliberate-fault fixtures and `enginery check RUN --project PROJECT` to
 observe the verified implementation attempt's committed head, not an intake's
 unborn `HEAD`. Both commands accept `--database LEDGER --owner OWNER` for an explicit
-Stage 1 ledger. Stage 1's terminal verify node uses the same observer and evaluator
+engine ledger. Stage 1's terminal verify node uses the same observer and evaluator
 service and retries missing or inconclusive current-build calibration automatically;
 operators do not need a sidecar check to authorize verification. Observers inspect
 a fresh, independently verified checkout for each baseline, fault and real check.
@@ -203,15 +204,15 @@ running that scenario; no machine-specific browser location is compiled into it.
 
 | Hold | Repair |
 |---|---|
-| `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery factory run ISSUE --project PROJECT`. For `stage1 start`, rebuild with `enginery stage1 build-request` first. Existing immutable runs are never rebound. |
-| `browser_observer_unqualified` | Install the approved headless-shell distribution and set its exact absolute executable and canonical distribution digest in user preferences; retry the emitted `enginery stage1 watch --database LEDGER --owner OWNER --run-id RUN --advance` command so Stage 1 consumes the new observation. |
-| `behavioral_calibration_required`, `behavioral_calibration_stale`, `behavioral_calibration_incomplete`, `behavioral_calibration_escaped`, `behavioral_calibration_not_injected`, `behavioral_calibration_inconclusive`, `behavioral_calibration_invalid_injection`, `behavioral_calibration_no_relevant_catch`, `behavioral_calibration_semantic_catch_required` | Clear the named infrastructure cause and retry the emitted Stage 1 advancement command; inconclusive calibration is retried, not treated as final. Explicit refresh: `enginery factory calibrate RUN --project PROJECT --database LEDGER --owner OWNER`. An insensitive or invalid assertion/fault declaration needs a corrected base policy and a new bound run. |
-| `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. In isolated runs, the candidate check command must not modify tracked files or create `.git` in its returned workspace; retrying the unchanged command cannot converge. No failed verify node is recorded, so start a new run after correcting the candidate behavior or the base policy's `[acceptance]` command if that command writes tracked files or creates `.git`. For factory runs, change the issue snapshot and use `enginery factory run ISSUE --project PROJECT --supersede`; for Stage 1 runs, use `enginery stage1 build-request … --run-id NEW_RUN_ID` then `enginery stage1 start --request REQUEST`. |
+| `no_behavioral_checks` | Nothing is bound for a new run. Add nonempty `[acceptance]` checks to `.enginery/project.toml`, commit on the base branch, then repeat `enginery run ISSUE --project PROJECT`. For `engine start`, rebuild with `enginery engine build-request` first. Existing immutable runs are never rebound. |
+| `browser_observer_unqualified` | Install the approved headless-shell distribution and set its exact absolute executable and canonical distribution digest in user preferences; retry the emitted `enginery engine next --database LEDGER --owner OWNER --run-id RUN --advance` command so Stage 1 consumes the new observation. |
+| `behavioral_calibration_required`, `behavioral_calibration_stale`, `behavioral_calibration_incomplete`, `behavioral_calibration_escaped`, `behavioral_calibration_not_injected`, `behavioral_calibration_inconclusive`, `behavioral_calibration_invalid_injection`, `behavioral_calibration_no_relevant_catch`, `behavioral_calibration_semantic_catch_required` | Clear the named infrastructure cause and retry the emitted `engine next --advance` command; inconclusive calibration is retried, not treated as final. Explicit refresh: `enginery calibrate RUN --project PROJECT --database LEDGER --owner OWNER`. An insensitive or invalid assertion/fault declaration needs a corrected base policy and a new bound run. |
+| `behavioral_build_mismatch` | Restore the exact committed candidate head in the run workspace; never reuse receipts from another build. In isolated runs, the candidate check command must not modify tracked files or create `.git` in its returned workspace; retrying the unchanged command cannot converge. No failed verify node is recorded, so start a new run after correcting the candidate behavior or the base policy's `[acceptance]` command if that command writes tracked files or creates `.git`. For project runs, change the issue snapshot and use `enginery run ISSUE --project PROJECT --supersede`; for engine-ledger runs, use `enginery engine build-request … --run-id NEW_RUN_ID` then `enginery engine start --request REQUEST`. |
 | `behavioral_output_preexists` | Remove the declared output from the committed candidate and commit the corrected head, so every observer starts with that output absent. |
 | `behavioral_observer_requires_isolation` | Isolated service/browser checks cannot run on the host. Bind command checks for the pinned network-none runner in a new request, or deliberately start a new trusted-local run; restore a drifted pinned runner rather than falling back. |
-| `behavioral_acceptance_failed` / `behavioral_assertion_failed:CHECK:INDEX` | Retry the emitted `stage1 watch --advance` command to dispatch a bounded implementation repair carrying the failing assertion ids. Once the repair budget is exhausted, this run cannot pass: factory status reports a terminal failure and no decision command, and no human decision can change that outcome. Inspect it with the emitted `factory review` command. Fix the behavior and start a new run: for factory runs, change the issue snapshot and use `enginery factory run OWNER/REPO#N --supersede --project PROJECT`; for Stage 1 runs, rebuild with `enginery stage1 build-request … --run-id NEW_RUN_ID` then `enginery stage1 start --request REQUEST`. Committing a different workspace head, approving verify, or recalibrating cannot change this published attempt. |
-| `behavioral_acceptance_indeterminate` | Clear the accompanying observer/infrastructure hold, then retry the emitted `stage1 watch --advance` command. To explicitly refresh calibration use `enginery factory calibrate RUN --project PROJECT --database LEDGER --owner OWNER`; immutable assertions are not edited in place. |
-| `behavioral_verifier_unconfigured` | Advance with the normal `enginery stage1 watch --database LEDGER --owner OWNER --run-id RUN --advance` composition; a standalone check does not configure Stage 1's observer. |
+| `behavioral_acceptance_failed` / `behavioral_assertion_failed:CHECK:INDEX` | Retry the emitted `engine next --advance` command to dispatch a bounded implementation repair carrying the failing assertion ids. Once the repair budget is exhausted, this run cannot pass: status reports a terminal failure and no decision command, and no human decision can change that outcome. Inspect it with the emitted `review` command. Fix the behavior and start a new run: for project runs, change the issue snapshot and use `enginery run OWNER/REPO#N --supersede --project PROJECT`; for engine-ledger runs, rebuild with `enginery engine build-request … --run-id NEW_RUN_ID` then `enginery engine start --request REQUEST`. Committing a different workspace head, approving verify, or recalibrating cannot change this published attempt. |
+| `behavioral_acceptance_indeterminate` | Clear the accompanying observer/infrastructure hold, then retry the emitted `engine next --advance` command. To explicitly refresh calibration use `enginery calibrate RUN --project PROJECT --database LEDGER --owner OWNER`; immutable assertions are not edited in place. |
+| `behavioral_verifier_unconfigured` | Advance with the normal `enginery engine next --database LEDGER --owner OWNER --run-id RUN --advance` composition; a standalone check does not configure Stage 1's observer. |
 | `behavioral_zero_assertions`, `behavioral_calibration_faults_missing`, `behavioral_check_identity_ambiguous`, `behavioral_evaluator_identity_mismatch` | Correct the base policy's nonempty uniquely named checks and semantic faults, then build and bind a new request. Do not alter custody for an existing run. |
 | `behavioral_assertion_not_run`, `behavioral_observer_untrusted`, `behavioral_worker_claim_not_evidence`, `behavioral_observation_missing`, `behavioral_observations_incomplete`, `behavioral_observation_ambiguous` | Restore the real trusted observer and run every declared assertion without skips or mocks, then retry verification; worker claims cannot substitute. |
 | `behavioral_observation_stale`, `behavioral_observation_time_mismatch`, `behavioral_observation_capture_mismatch`, `behavioral_capture_missing`, `behavioral_capture_not_decodable`, `behavioral_browser_capture_missing`, `behavioral_observer_capture_invalid`, `behavioral_calibration_capture_mismatch`, `behavioral_calibration_fixture_changed`, `behavioral_binding_unavailable` | Restore intact evaluator custody/artifacts and trusted observer tooling; rerun calibration and verification for the same verified head. Never accept or patch a corrupted receipt. |
@@ -219,20 +220,20 @@ running that scenario; no machine-specific browser location is compiled into it.
 | `observer_service_conflict`, `observer_service_unavailable`, `observer_timeout`, `observer_command_invalid`, `observer_redirect_refused`, `observer_produced_file_unsafe` | Stop conflicting listeners; restore the configured executable and loopback service; avoid redirects and linked/nonregular output paths. Retry the emitted advancement command after infrastructure repair; configuration changes require a new request. |
 | `behavioral_observer_receipt_missing`, `observer_isolated_capture_failed` | Restore the pinned isolated runner/image and its verified receipt, then retry verification. Never retry through a host fallback. |
 | `observer_cwd_invalid`, `observer_kind_invalid`, `observer_url_refused` | Use the verified absolute checkout and a supported observer kind with an HTTP(S) loopback URL without credentials. Correct immutable configuration through a new bound request. |
-| `observer_tool_missing`, `observer_tool_unavailable`, `observer_transport_failed` | Restore the operator-declared executable, permissions, candidate access and local transport, then retry the emitted Stage 1 advancement command. |
+| `observer_tool_missing`, `observer_tool_unavailable`, `observer_transport_failed` | Restore the operator-declared executable, permissions, candidate access and local transport, then retry the emitted `engine next --advance` command. |
 | `browser_transport_failed`, `browser_navigation_failed`, `browser_dom_unobserved`, `browser_capture_failed`, `browser_output_limit` | Restore the approved browser's CDP pipe and declared loopback page; correct selectors or excessive output in a new request when needed, then rerun verification with DOM assertions and a decodable PNG. |
 | `behavioral_calibration_fixture_baseline_failed` | Inspect the baseline's named assertions and observer cause. A failing current candidate takes bounded implementation repair; infrastructure must be restored before calibration can qualify a PASS. |
 
-Stage 1's `--database` flag names the SQLite ledger file explicitly. Factory
+Engine commands use `--database` to name the SQLite ledger file explicitly. Project
 commands use the project's private `ledger.sqlite` and report its path; pass that
-path to Stage 1 commands to act on the same runs. The ledger is the single source of
+path and its owner to engine commands to act on the same runs. The ledger is the single source of
 durable truth: deleting or corrupting it discards every run, node, policy
 decision, and evidence record it contains, so back it up (see
 [Backup and restore](#backup-and-restore)) before any risky operation.
 
 ### Layered configuration
 
-`stage1 build-request` compiles one effective configuration from five layers,
+`engine build-request` compiles one effective configuration from five layers,
 highest precedence first: **run** (the command-line flags), **project**
 (`<repository>/.enginery/project.toml`, tracked, and inside the protected
 `.enginery/**` set so a worker cannot change its own policy without an operator
@@ -245,7 +246,7 @@ field wins; protected paths are additive across layers and never remove a built-
 protected path. A file that is absent is simply not a layer. The request snapshot also
 records which layer files were absent and where the user preferences file is looked up,
 so creating either file, or starting under a different `XDG_CONFIG_HOME`/`HOME` than the
-build, makes `stage1 start` refuse the request until it is rebuilt. A file that is present
+build, makes `engine start` refuse the request until it is rebuilt. A file that is present
 is validated strictly: an unknown key or section, a wrong type, an unsupported
 `schema_version`, an unknown workflow profile, or, in project policy only, a
 credential-shaped key or value is refused with exit code 2 and a message that names
@@ -325,72 +326,74 @@ The compiled result records, for every field, the value, the winning layer and e
 shadowed lower-layer value with its source file and sha256. Its canonical JSON is the
 configuration snapshot; the snapshot's sha256 is the request's
 `configuration_snapshot_digest`, and `build-request` writes the snapshot into the request
-document next to the request. `stage1 start` verifies the digest, agreement with every
+document next to the request. `engine start` verifies the digest, agreement with every
 carried field, the snapshot's recorded hard constraints and all recorded source digests
 (including packaged defaults and workflow profiles). It refuses inconsistent,
 policy-violating or drifted requests, or documents without a snapshot; rebuild them with
-`enginery stage1 build-request`. Already-started runs are read from the ledger unchanged.
+`enginery engine build-request`. Already-started runs are read from the ledger unchanged.
 Building a `Stage1RunRequest` directly through the Python API stays supported; a document
-submitted to `stage1 start` must carry a consistent, current compiled snapshot.
+submitted to `engine start` must carry a consistent, current compiled snapshot.
 
 ## Command surface
 
-The full current CLI surface, generated from `enginery --help`:
+Use the `enginery` console script. Choose the scope before choosing an action:
 
-```text
-usage: enginery [-h] [--version]
-                {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,runner,capability,factory}
-                ...
+| Scope | Command family | State selected |
+|---|---|---|
+| Project | Root `init`, `preflight`, `collect`, `run`, `status`, `explain`, `check`, `calibrate`, `review`, `feedback`, `decide`, `continue`, `pause`, `resume`, `drain`, `uninstall` | `--project PATH`, defaulting to the current directory; the project ledger is implicit. |
+| Host | `doctor`, `adapter doctor`, `runner` | Local installation, configured adapters, container engine, images and relay; not a project preflight. |
+| Engine ledger | `engine`, `outcome`, `gate`, `workspace` | Run and stack commands take an explicit `--database PATH` and `--owner OWNER`; `engine build-request` writes a request document without either. Other ledger-scoped commands select an explicit database, and workspace commands also take an owner. |
+| Operator ledger | `operator` | An explicit `--database PATH`, independent of workflow imports; recovery and storage controls. |
+| Project capabilities | `capability` | Explicit or project-relative package, lockfile and install paths. |
+| Policy | `policy explain` | A request document, without authorizing it. |
 
-positional arguments:
-  {doctor,adapter,ledger,policy,stage1,stage2,outcome,gate,workspace,runner,capability,factory}
-    doctor              Report locally implemented prerequisites.
-    adapter             Inspect configured adapter providers.
-    ledger              Ledger consistency and storage commands.
-    policy              Explain policy decisions.
-    stage1              Run the Stage 1 issue-to-PR lifecycle.
-    stage2              Inspect Stage 2 plan-to-release stack state.
-    outcome             Inspect raw outcome observations and completeness.
-    gate                Report readiness against a decision gate.
-    workspace           Inspect and release run-scoped workspace reservations.
-    runner              Build and qualify the isolated worker image and engine.
-    capability          Capability lock and scoped install commands.
-    factory             Guided setup, manual issue intake, execution and inspection.
-```
+In particular, `enginery resume --project PATH` lifts that project's dispatch
+pause; it takes no run ID and does not reconcile a worker. Use
+`enginery continue RUN --project PATH` to reconcile and advance a durable run
+after dispatch is enabled. `enginery operator resume --database PATH` lifts the
+pause on the explicitly selected ledger, not on every ledger on the host.
+`enginery engine next` inspects one run, or advances at most one durable action
+when given `--advance`. It is not a background watcher.
 
-This is materially narrower than the full command-family list in the system
-design document, which also names `init`, `work`, `run`, `evidence`,
-`workflow`, `factory-change`, and `gc` families. Those are design targets
-for later milestones; they do not exist in this release. Do not document or
-script against a command that is not listed above.
+The tables below use synopsis notation: square brackets mark optional arguments,
+braces list alternatives, and uppercase names are values to replace. Those
+markers are not literal shell arguments. Use `enginery --help` and each
+subcommand's `--help` for the full argument lists.
 
 | Command | Purpose |
 |---|---|
-| `enginery doctor [--json]` | Report locally implemented prerequisites (Python version, installed package). |
+| `enginery doctor [--json]` | Host installation prerequisites (Python version, installed package); use project `preflight` for a compiled project's prerequisites. |
 | `enginery adapter doctor [--json] [--github-repository ...] [--deployment-app-script PATH] ...` | Report the deterministic local provider and Stage 2/3 broker configuration state Enginery ships (see [Local provider inventory and Stage 2/3 broker configuration](#local-provider-inventory-and-stage-23-broker-configuration)). |
-| `enginery ledger verify --database PATH [--artifacts PATH] [--json]` | Check ledger and artifact-store consistency. |
-| `enginery ledger backup --database PATH --output PATH [--artifacts PATH]` | Snapshot a ledger to a directory. |
-| `enginery ledger restore --backup PATH --database PATH [--artifacts PATH]` | Restore a ledger from a backup directory. |
-| `enginery ledger rebuild-projections --database PATH` | Rebuild ledger projections from stored events. |
+| `enginery operator verify --database PATH [--artifacts PATH] [--json]` | Check ledger and artifact-store consistency. |
+| `enginery operator backup --database PATH --output PATH [--artifacts PATH]` | Verify the source, snapshot it, and verify the backup; emit JSON. |
+| `enginery operator restore --backup PATH --database PATH [--artifacts PATH] [--force-unpaused]` | Verify and restore a backup, preserving the prior ledger and leaving dispatch paused; emit JSON. The current ledger must be paused with no running worker unless the explicit override is used. |
+| `enginery operator rebuild-projections --database PATH` | Rebuild ledger projections from stored events. |
 | `enginery policy explain REQUEST [--json]` | Explain a policy decision for a request document without authorizing it. |
-| `enginery stage1 {start,watch,review,approve,reject,cancel,resume,evidence,build-request}` | Run and inspect the Stage 1 lifecycle, plus build a `--request` document from a GitHub issue (below). |
-| `enginery stage2 status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
+| `enginery operator {status,pause,resume,drain,select-runner}` | Inspect and control an explicit ledger without workflow imports (see [Operator recovery entry point](#operator-recovery-entry-point)). |
+| `enginery engine {build-request,start,next,review,approve,reject,cancel,evidence}` | Build requests and run or inspect the Stage 1 lifecycle using explicit ledger/owner selection. Human-wait requeue is unsupported. |
+| `enginery engine status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
 | `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report fail-closed G4 readiness from classified completed runs and recorded authority evidence. |
 | `enginery gate record-g4-deficiency --database PATH --finding-id ID --deficiency TEXT --cited-run-id RUN_ID ... --evidence-pull-request-number N --producer-principal-id ID --evidence-pull-request-author-login LOGIN --correlation-id ID [--floor-config PATH] [--json]` | Record an immutable recurring-deficiency finding against a verified classified cohort and derive its evidence-PR document digest. |
 | `enginery gate record-g4-deficiency-evidence --database PATH --finding-id ID --correlation-id ID --github-repository OWNER/REPO --github-credential-reference REF [--github-executable PATH] [--floor-config PATH] [--json]` | Verify one merged GitHub evidence PR and record its immutable two-human authority evidence. |
 | `enginery workspace inspect --database PATH --owner OWNER [--json]` | List every repository's current workspace reservation. |
 | `enginery workspace release --database PATH --owner OWNER --repository-id ID --run-id ID [--dry-run] [--json]` | Release a retained workspace reservation with no live lease (below). |
-| `enginery factory init --runner MODE [--apply] [--project PATH] [choices...] [--json]` | Preview, or with `--apply` perform, guided project setup (below). |
-| `enginery factory doctor [--project PATH] [--json]` | Report the prerequisites the project's compiled selection needs, read-only (below). |
-| `enginery factory explain [RUN] [--project PATH] [--json]` | Without RUN, explain current compiled configuration and setup ownership; with RUN, explain its immutable binding. |
-| `enginery factory uninstall [--apply] [--project PATH] [--json]` | Preview, or with `--apply` perform, removal of exactly the unmodified files setup created (below). |
-| `enginery factory collect [--dry-run] [--project PATH] [--json]` | Preview eligible GitHub issues; without `--dry-run`, record only private intake state. |
-| `enginery factory run OWNER/REPO#N [--project PATH] [--once] [--wait-seconds N] [--json]` | Compile, bind and advance an issue through the existing Stage 1 coordinator. |
-| `enginery factory status [RUN] [--project PATH] [--json]` | List durable project runs or inspect one run without advancing it. |
-| `enginery factory resume RUN [--project PATH] [--wait-seconds N] [--json]` | Reconcile durable workers and pending external operations, then continue the same run. |
-| `enginery factory pause [--reason TEXT] [--lift] [--project PATH] [--json]` | Pause project-ledger dispatch, or lift that pause; running workers are untouched. |
-| `enginery factory drain (--wait-seconds N \| --stop) [--project PATH] [--json]` | Pause dispatch, then wait for or stop workers through the existing drain path. |
+| `enginery init --runner MODE [--apply] [--project PATH] [choices...] [--json]` | Preview, or with `--apply` perform, guided project setup (below). |
+| `enginery preflight [--project PATH] [--json]` | Report the prerequisites the project's compiled selection needs, read-only (below). |
+| `enginery explain [--project PATH] [--json]` | Explain current compiled configuration and setup ownership; takes no run ID. Use `status RUN` for an immutable run binding. |
+| `enginery uninstall [--apply] [--project PATH] [--json]` | Preview, or with `--apply` perform, removal of exactly the unmodified files setup created (below). |
+| `enginery collect [--dry-run] [--project PATH] [--json]` | Preview eligible GitHub issues; without `--dry-run`, record only private intake state. |
+| `enginery run OWNER/REPO#N [--project PATH] [--once] [--wait-seconds N] [--json]` | Compile, bind and advance an issue through the existing Stage 1 coordinator. |
+| `enginery status [RUN] [--project PATH] [--json]` | List durable project runs or inspect one run without advancing it. |
+| `enginery continue RUN [--project PATH] [--wait-seconds N] [--json]` | Reconcile durable workers and pending external operations, then continue the same run. |
+| `enginery pause [--reason TEXT] [--project PATH] [--json]` | Pause project-ledger dispatch; running workers are untouched. |
+| `enginery resume [--project PATH] [--json]` | Lift the project-ledger dispatch pause; does not reconcile or advance a run. |
+| `enginery drain (--wait-seconds N \| --stop) [--project PATH] [--json]` | Pause dispatch, then wait for or stop workers through the existing drain path. |
+| `enginery check RUN [--project PATH] [--database PATH] [--owner OWNER] [--json]` | Observe the run's verified committed implementation head with its bound acceptance checks. |
+| `enginery calibrate RUN [--project PATH] [--database PATH] [--owner OWNER] [--without-fault FAULT] [--json]` | Execute protected deliberate-fault calibration for the bound checks. |
+| `enginery review RUN [--project PATH] [--database PATH] [--owner OWNER] [--json]` | Render the safe review packet; on a genuine authenticated terminal, offer current action-specific challenges. |
+| `enginery feedback RUN --subject-digest DIGEST (--text TEXT \| --lavish-poll) [--port N] [--project PATH] [--json]` | Queue current-subject repair feedback, never approval. |
+| `enginery decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET [--reason TEXT] [--project PATH] [--database PATH] [--owner OWNER] [--json]` | Submit an authenticated, current-subject decision; follow the exact action reported by review. |
 | `enginery capability {lock,inspect,preview,install,uninstall}` | Verify the capability lock; inspect, preview, install, and uninstall scoped capability packages (below). |
 
 ### Capability packages
@@ -754,17 +757,17 @@ silently resume under a changed adapter (see
 
 ## Guided project setup
 
-`enginery factory init` resolves explicit choices into the project policy file the
-[layered configuration](#layered-configuration) reads, and `enginery factory doctor`
+`enginery init` resolves explicit choices into the project policy file the
+[layered configuration](#layered-configuration) reads, and `enginery preflight`
 reports what the project still needs. Setup is preview-first and its footprint is
 small enough to read in full.
 
 ```bash
-uv run enginery factory init --runner trusted-local --harness omp \
+uv run enginery init --runner trusted-local --harness omp \
   --validation-command "uv run pytest -q" --required-check CI          # preview, writes nothing
-uv run enginery factory init --runner trusted-local --harness omp \
+uv run enginery init --runner trusted-local --harness omp \
   --validation-command "uv run pytest -q" --required-check CI --apply  # performs that exact plan
-uv run enginery factory doctor
+uv run enginery preflight
 ```
 
 `--runner` is required: the trust mode is never defaulted. Other choices are
@@ -778,7 +781,7 @@ When a model or effort is configured under `trusted-local`, the preview runs onl
 selected harness's read-only version probe (the same probe `build-request` runs).
 An out-of-range or unsupported harness version is a hold (exit 5); applying that
 plan writes nothing until the harness is resolved. A missing or unidentifiable
-harness is not checked by init; `factory doctor` reports it.
+harness is not checked by init; `preflight` reports it.
 
 Without `--apply`, `init` previews and writes nothing. The preview lists every file it
 would create (path, `tracked` or `private`, and the action `create`, `update`,
@@ -809,7 +812,7 @@ Setup never writes credentials, never installs or changes launchd, systemd or cr
 units, MCP servers or global configuration, never edits `user.toml`, and never touches
 the ledger, evidence, the capability store or lockfile, or authentication state.
 
-`factory doctor` checks only what the compiled selection needs and never changes
+`preflight` checks only what the compiled selection needs and never changes
 anything: git; the GitHub CLI and its read-only `auth status`; the selected harness
 executable through the same host probe `build-request` uses, against the packaged
 catalog (skipped for an `isolated-oci` run, which executes the image's pinned harness);
@@ -819,7 +822,7 @@ item is a hold that names the exact prerequisite and the command that resolves i
 the exit code is 5 while any hold remains. A project that declares no trust mode is
 itself a hold: set `mode = "trusted-local"` or `mode = "isolated-oci"` in the
 existing policy's `[runner]` table (add the table if absent), or declare that choice
-in the user preferences. With no policy, the hold names `enginery factory init`.
+in the user preferences. With no policy, the hold names `enginery init`.
 A malformed policy or user file is invalid input (exit 2), not a hold. Engine holds
 name engine installation, startup, qualification or context selection; image holds
 name image rebuilding and status; relay holds name relay setup.
@@ -827,12 +830,13 @@ Container checks disclose the Docker context in use (or the docker CLI's current
 the container-engine contact in `network_access`. Repair commands carry `--docker-context`
 when a context is configured, so they target the same engine. Select a machine-local context
 with `docker_context` in `[runner]` in `$XDG_CONFIG_HOME/enginery/user.toml`, or with
-`enginery stage1 build-request --docker-context NAME` for a run, never in project policy.
+`enginery engine build-request --docker-context NAME` for a run, never in project policy.
 
 
-`factory explain` without RUN answers "why would a new run use that value, and what
-did setup leave behind?" from the same compiler output `doctor` and `build-request` use. For every
-compiled field it prints the value, the winning layer, each shadowed lower-layer value
+`enginery explain` answers "why would a new run use that value, and what
+did setup leave behind?" from the same compiler output `preflight` and
+`engine build-request` use. For every compiled field it prints the value,
+the winning layer, each shadowed lower-layer value
 with its source file and sha256, then the hard constraints that applied, every layer
 file with its digest, each file setup created with its status (`owned`,
 `user-modified`, `missing`, or `user-owned` for a policy setup did not create), and the
@@ -840,14 +844,15 @@ current holds (an undeclared trust mode, a permitted capability that is not inst
 or an incompatible selected harness). It changes nothing and reads local files; when
 a model or effort is configured under trusted-local, it also runs the selected harness's
 read-only version probe, as `build-request` does. It exits 5 while a hold remains and 2
-for malformed configuration. Other host prerequisites remain `doctor`'s job.
+for malformed configuration. Other host prerequisites remain `preflight`'s job;
+`enginery doctor` checks only the host's Python and installed package.
 Ownership entries are validated before any are reported as owned: the recorded role must
 match setup's project-relative path, with no traversal or symbolic links. A tampered
 ownership record is invalid input, not evidence of ownership.
 
 ### Issue intake
 
-`enginery factory collect --dry-run --project . --json` lists open issues from the
+`enginery collect --dry-run --project . --json` lists open issues from the
 repository's `origin`, excluding pull requests. Exactly one canonical
 `enginery/work-kind/issue|plan` and one `enginery/risk/low|medium` label are required.
 Missing, duplicated or unknown labels hold the issue with an explicit `gh issue edit N
@@ -874,7 +879,7 @@ The JSON `local_writes` list discloses these paths. Collection never comments, l
 opens a pull request, merges, deploys, installs a capability or starts a worker.
 
 
-`factory uninstall` previews by default and, with `--apply`, undoes exactly what
+`uninstall` previews by default and, with `--apply`, undoes exactly what
 `init` did, using only the private ownership record. It removes the policy file only
 while its sha256 still equals the one setup recorded; a file you edited is kept and
 reported as user-owned, and a file that is already gone is a no-op. The `.enginery`
@@ -885,29 +890,31 @@ the ledger, evidence and artifacts, the capability store or lockfile, or authent
 state; a record that names any path other than the two setup creates is refused rather
 than obeyed, and a symbolic link on the way to either path or the ownership record is refused.
 
-## Manual factory path
+## Manual project path
 
 After choosing a runner and completing guided setup, collect and run manually:
 
 ```sh
-enginery factory init --runner trusted-local --apply --project .
-enginery factory collect --dry-run --project . --json
-enginery factory collect --project . --json
-enginery factory run OWNER/REPO#N --project . --json
-enginery factory status --project . --json
-enginery factory status RUN --project . --json
-enginery factory explain RUN --project . --json
-enginery stage1 review --database DATABASE --owner factory --run-id RUN \
+enginery init --runner trusted-local --apply --project .
+enginery preflight --project .
+enginery explain --project . --json
+enginery collect --dry-run --project . --json
+enginery collect --project . --json
+enginery run OWNER/REPO#N --project . --json
+enginery status --project . --json
+enginery status RUN --project . --json
+enginery engine review --database DATABASE --owner factory --run-id RUN \
   --report review.json --repair-attempt 0
-enginery factory review RUN --project .
-enginery factory decide RUN --project . --action pull_request.open \
+enginery review RUN --project .
+enginery decide RUN --project . --action pull_request.open \
   --subject-digest DIGEST --challenge SECRET
-enginery factory resume RUN --project . --json
-enginery factory pause --reason "operator maintenance" --project . --json
-enginery factory drain --wait-seconds 30 --project . --json
+enginery continue RUN --project . --json
+enginery pause --reason "operator maintenance" --project . --json
+enginery drain --wait-seconds 30 --project . --json
 # Or stop remaining workers instead of waiting:
-enginery factory drain --stop --project . --json
-enginery factory pause --lift --project . --json
+enginery drain --stop --project . --json
+enginery resume --project . --json
+enginery continue RUN --project . --json
 ```
 
 Use the returned `run_id` in place of RUN and `database` in place of DATABASE.
@@ -917,18 +924,18 @@ Setup does not install capabilities or authenticate: resolve reported holds firs
 Factory control makes no model calls; an implementation worker dispatched by the
 coordinator can use the selected coding harness and model. Collection never dispatches a worker.
 
-`factory run` uses the same request compiler and bound-start path as `stage1 start`.
+`run` uses the same request compiler and bound-start path as `engine start`.
 The shared Stage 1 composition supplies runtime selection, inspection and advancing
 services; only `Stage1RunService.advance` progresses the run. There is one coordinator,
 not a second factory scheduler. The private project ledger uses owner `factory`;
-existing Stage 1 commands can open that same database with `--database`.
+engine commands can open that same database with `--database` and `--owner factory`.
 
 The command resolves the project repository from `origin`, uses the current branch
 and its current commit as the base, and uses the project capability lockfile when
 present. `--base-branch` selects a different base branch. Run-layer overrides are
 `--model`, `--effort`, `--runner`, `--profile`, `--validation-command`,
 `--required-check`, `--protected-path` and `--time-budget-seconds`, with the same
-meaning and defaults as `stage1 build-request`; all other settings come from the
+meaning and defaults as `engine build-request`; all other settings come from the
 compiled project/user/workflow/factory layers. A bound run is not recompiled by
 repeating `run` with different overrides. If a previous invocation wrote `request.json`
 but never started the run, repeating `run` recompiles it against the current configuration.
@@ -962,7 +969,7 @@ finite non-negative number. Idle or unchanged actions back off for 0.5, 1, 2, th
 CI is pending, advance the coordinator no more often than every 15 seconds.
 CI waits poll no more often than every 15 seconds. The command returns at the deadline
 rather than making another idle advance.
-Repeating `factory run` for the same bound issue continues that durable run.
+Repeating `run` for the same bound issue continues that durable run.
 An existing unstarted request is recompiled; if its digest differs, it is replaced
 before binding and the report discloses `request_rebuilt: true`. Bound requests are
 never replaced by that path.
@@ -971,28 +978,28 @@ current nodes, next action, worker PID or container identity, selection and winn
 layers, runner, budget basis, and holds with repairs. Time budgets are reported in
 seconds; cost remains unenforced.
 
-`factory explain RUN` reads the immutable binding: request and configuration digests,
+`enginery status RUN` reads the immutable binding: request and configuration digests,
 embedded field sources, harness/model/effort, runner, permitted capability subset,
 node states and current hold repairs. It does not recompile today's configuration.
-Without RUN, `factory explain` retains the current configuration and setup-ownership
-explanation described above.
+`enginery explain` instead describes current configuration and setup ownership;
+it never accepts a run ID.
 
-`factory resume RUN` first reconciles exited workers and pending external operations
+`continue RUN` first reconciles exited workers and pending external operations
 through the existing Stage 1 service and broker paths, then continues the durable
 run. A killed client or coordinator does not require a new request, workspace or run
 ID; retrying pending PR publication reconciles its operation identity rather than
-creating a second PR. Binding, catalog or runner drift still holds; resume does not
+creating a second PR. Binding, catalog or runner drift still holds; continuation does not
 rewrite the binding or bypass those checks. `--wait-seconds` has the same wait-boundary
-meaning as on `run`. This is distinct from `stage1 resume`, which refuses with
-`human_wait_requeue_unsupported`: no human-wait node supports end-to-end requeue.
+meaning as on `run`. No human-wait node supports end-to-end requeue; continuation
+does not replace an attempt or operation identity.
 
-`factory pause` reports its scope as the **project ledger**, not the whole host or
-another project's ledger. Running workers are untouched. Both `run` and `resume`
-hold while dispatch is paused; lift it with `factory pause --lift --project .`.
-`factory drain --wait-seconds N` pauses and waits for running workers, reporting
+`pause` reports its scope as the **project ledger**, not the whole host or
+another project's ledger. Running workers are untouched. Both `run` and `continue`
+hold while dispatch is paused; lift it with `enginery resume --project .`.
+`drain --wait-seconds N` pauses and waits for running workers, reporting
 `released: by resume/reconcile`: observing an exit does not collect its result or
-release its lease/workspace reservation. Lift the pause, then run
-`enginery factory resume RUN --project .` to reconcile those exited workers through
+release its lease/workspace reservation. Run `enginery resume --project .` to lift
+the pause, then `enginery continue RUN --project .` to reconcile those exited workers through
 the authoritative lifecycle. Reconciliation releases the worker lease; a successful
 implementation's workspace remains **retained**, including after verification, until
 explicitly released. `status` and `drain` show that retention and its release command.
@@ -1000,19 +1007,19 @@ A timeout reports the workers still running.
 Read-only inspection by `status` may create SQLite `-wal`/`-shm` sidecars when
 reading a WAL ledger; `status` discloses newly created sidecars in `local_writes`
 without changing ledger content. `drain` is not read-only: it records a pause flag.
-`factory drain --stop` pauses and stops live workers using the existing supervisor
+`drain --stop` pauses and stops live workers using the existing supervisor
 path; successful stop cleanup reports `released: now` for those stopped workers,
 releases their leases/workspace reservations, and removes isolated worker containers
 using each run's bound engine context. Per-worker `container_cleanup` reports removal
 or that a trusted-local run has no container. Removal failures produce partial release
 and a non-success exit code. Workers that had already exited still require
-resume/reconciliation. Partial cleanup is reported explicitly, never called complete.
+continuation/reconciliation. Partial cleanup is reported explicitly, never called complete.
 Neither form cancels or reverses external effects, and the pause remains until
 explicitly lifted.
 
 ### Safe local review packets and repair feedback
 
-`enginery factory review RUN --project PROJECT` renders the same packet as
+`enginery review RUN --project PROJECT` renders the same packet as
 terminal text and as a private HTML file. The packet contains intent, scoped diff,
 reproduction evidence, observed receipts/verdict, available current-head CI, risk,
 routing/cost basis, unresolved findings, and a canonical subject digest.
@@ -1050,7 +1057,7 @@ user preferences, never project policy:
 gh_axi = "/absolute/path/to/gh-axi"
 ```
 
-Then run `enginery factory status RUN --project PROJECT --github-view`.
+Then run `enginery status RUN --project PROJECT --github-view`.
 This display runs only read-only `pr view` and `pr checks`; its outputs are
 escaped and never become evidence, completeness proofs or approval. If no
 executable is configured, status reports an optional-display note, not an
@@ -1060,7 +1067,7 @@ No remote preview, share or export is involved.
 
 ### Review feedback and optional local presentation
 Queue terminal repair feedback with
-`enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
+`enginery feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
 The digest must match the current packet. Feedback enters the existing bounded
 repair path as actionable findings, not approval. Empty feedback and stale
 subjects are refused; exact replays are idempotent. Reports, annotations, scores
@@ -1068,9 +1075,9 @@ and queued prompts cannot acquire authority through these new commands.
 
 To use optional Lavish presentation, configure `[executables].lavish` in private
 user preferences (project policy cannot choose it), then run
-`enginery factory review RUN --project PROJECT --lavish --port PORT --no-open`.
+`enginery review RUN --project PROJECT --lavish --port PORT --no-open`.
 `--no-open` suppresses browser launch. Collect annotations with
-`enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --lavish-poll --port PORT`;
+`enginery feedback RUN --project PROJECT --subject-digest DIGEST --lavish-poll --port PORT`;
 Enginery leaves the session open, including after feedback or timeout; the reviewer
 ends it from Lavish. Only the reviewer's `prompt` is actionable; packet `text` and
 waiting/ended metadata are not feedback, and artifact failures are
@@ -1108,7 +1115,7 @@ Use the actual login reported by `id -un`. The lifetime may be shortened to
 1–1800 seconds, never extended beyond 30 minutes. Registration is local operator
 configuration, not a worker-supplied identity or an approval.
 
-Run `enginery factory review RUN --project PROJECT` on a genuine terminal whose
+Run `enginery review RUN --project PROJECT` on a genuine terminal whose
 stdin and stdout refer to the same TTY. Review lists the available action strings
 and current subject digest and issues a one-time challenge for that registered
 principal. The secret is shown only on that terminal, never in JSON (including
@@ -1119,8 +1126,9 @@ packet but grants no authority.
 An unregistered operator, or a registration naming another OS user or uid, also
 receives the packet and subject digest with a notice to correct `[review_authority]`
 in user preferences; no challenge is issued.
-For a run started with `stage1 --database DB --owner OWNER`, pass those same
-`--database DB --owner OWNER` flags to both `factory review` and `factory decide`.
+For a run started with
+`enginery engine start --database DB --owner OWNER --request REQUEST`, pass those same
+`--database DB --owner OWNER` flags to both `enginery review` and `enginery decide`.
 Decision refusals name one quoted review/decide repair for that run, ledger and
 owner; human-wait repairs include the required `--reason`.
 Pre-implementation waits bind the verified base, request, issue snapshot,
@@ -1128,7 +1136,7 @@ configuration, waiting node IDs and findings with an empty head and diff; they
 offer only their wait actions. No implementation commit is invented for review.
 
 ```text
-enginery factory decide RUN --project PROJECT --action pull_request.open --subject-digest DIGEST --challenge SECRET
+enginery decide RUN --project PROJECT --action pull_request.open --subject-digest DIGEST --challenge SECRET
 ```
 
 `--principal-id ID` is optional and must match the registered principal;
@@ -1147,42 +1155,42 @@ approved, never substitutes for `pull_request.open`.
 Human waits use `human_wait.NODE.approve` or `human_wait.NODE.reject`, with the
 actual node ID in place of `NODE`. Approving `open_pr` uses `pull_request.open`;
 rejecting it uses `human_wait.open_pr.reject`. Follow the exact actions and
-commands reported by review/status. `factory decide` resolves the selected wait
+commands reported by review/status. `decide` resolves the selected wait
 atomically.
 
 **Supported human-wait requeue nodes: none.** Stage 1 cannot complete a requeue
 end to end: deterministic/human nodes do not redispatch the persisted request,
 and implementation requeues retain an obsolete embedded worker task/result path.
-No `human_wait.NODE.requeue` action is offered. Both `factory decide` requeue
-requests and `stage1 resume` refuse with `decision_action_mismatch` and reason
+No `human_wait.NODE.requeue` action is offered. A requeue request through
+`enginery decide` is refused with `decision_action_mismatch` and reason
 `human_wait_requeue_unsupported`, leaving the wait and challenge unchanged.
-This does not affect `factory resume`, which advances the existing request
+This does not affect `enginery continue RUN`, which advances the existing request
 without replacing its attempt/operation identity.
 
-**Breaking change:** `stage1 approve` and `stage1 reject` require
+`engine approve` and `engine reject` require
 `--subject-digest DIGEST --challenge SECRET` and optionally `--principal-id ID`,
 using the same authentication and node-scoped actions. Retain their
-database/owner/run/node flags and supply `--reason REASON`. Human-wait
-`stage1 resume` no longer requeues unsupported work.
-A legacy report or reason-only command no longer authorizes publication or releases work.
+database/owner/run/node flags and supply `--reason REASON`.
+A legacy report or reason-only command never authorizes publication or releases work.
 
 This is a **trusted-local** protocol, not same-user process containment: another
 process with the operator's account privileges can access that account's resources.
 Use the isolated worker boundary for credential/authority separation. Merge,
 release and deployment remain outside this factory decision flow.
 
-`enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json
+`enginery engine review --database DB --owner factory --run-id RUN --report REPORT.json
 --repair-attempt N` records findings using the current repair index (zero initially).
-It does not approve publication. `factory status`/`next_decision` report the fresh
+It does not approve publication. `status`/`next_decision` report the fresh
 review/decide commands for authority-bearing waits. Feedback reports
 `findings_recorded` only when findings were actually submitted. A failed
 implementation without a human-wait node instead reports its failure and the
-matching `factory resume` repair; blocked actions remain holds, never successful
+matching `continue` repair; blocked actions remain holds, never successful
 validation. This path ends at a verified open PR plus outcome observation, not
 merge, release or deployment.
 
-The factory preserves the shared watch document's aggregate `status`, which the existing
-Stage 1 lifecycle may retain as `created`; it does not invent a run-state transition.
+The project entry point preserves the shared inspection document's aggregate
+`status`, which the existing Stage 1 lifecycle may retain as `created`; it does
+not invent a run-state transition.
 Its `terminal_decision: merge_ready` and `workflow_complete: true` require durable
 verification success, the recorded PR outcome, an outcome-observation registration and
 the coordinator's `wait` action. `terminal_evidence` names those source records and fields.
@@ -1197,7 +1205,7 @@ and status creator IDs when GitHub supplies them, but they are not authorization
 constraints: a principal with `statuses:write` can mask an earlier failing context.
 This limitation affects readiness only; merge remains outside the factory.
 Review/status vetoes and non-required failing checks stay queued for a fresh
-observation on resume, without dispatching a new implementation. Required-check
+observation on continuation, without dispatching a new implementation. Required-check
 failures retain the existing bounded implementation-repair path.
 
 ### Manual-path holds
@@ -1206,41 +1214,41 @@ Holds report repairs; replace placeholders with the values reported for the run:
 
 | Hold | Repair |
 |---|---|
-| `human_decision_refused` | Correct the named registration/input error in private user preferences or the command, then run `enginery factory review RUN --project PROJECT` and submit its exact reported decision command. |
+| `human_decision_refused` | Correct the named registration/input error in private user preferences or the command, then run `enginery review RUN --project PROJECT` and submit its exact reported decision command. |
 | `decision_authentication_required` | Run review and decide directly on the same genuine stdin/stdout TTY as the registered OS user; remove pipes/redirection and do not submit through HTTP. |
 | `decision_principal_mismatch` | Set `[review_authority]` to the actual `id -un`/`id -u` identity in user preferences; omit `--principal-id` or use that registered ID, then obtain a fresh terminal review challenge. |
-| `decision_action_mismatch` | Run `enginery factory review RUN --project PROJECT`; use the exact available action for the intended effect and obtain a fresh challenge rather than reusing another action's authorization. |
-| `human_wait_requeue_unsupported` (`decision_action_mismatch`) | No Stage 1 human-wait node supports end-to-end requeue. The wait and challenge are unchanged; run the reported ledger-scoped `factory review` command and choose an available action. Do not retry `stage1 resume` or invent a requeue action. |
-| `decision_subject_mismatch` | Run `enginery factory review RUN --project PROJECT` and copy its current subject digest into `factory decide`; never combine a digest and challenge from different reviews. |
-| `decision_subject_stale` | Review the changed head/diff/config/evidence/findings with `enginery factory review RUN --project PROJECT`, then decide against that new subject and challenge. |
-| `decision_challenge_unknown` | Discard the unrecognized secret; run `enginery factory review RUN --project PROJECT` on the terminal and use the newly issued challenge. |
-| `decision_challenge_expired` | Run `enginery factory review RUN --project PROJECT` again and submit the new decision before its configured expiry. |
-| `decision_challenge_replayed` | Do not replay the consumed challenge. Inspect `enginery factory status RUN --project PROJECT`; if a new decision is needed, obtain a new terminal review challenge. |
-| `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
+| `decision_action_mismatch` | Run `enginery review RUN --project PROJECT`; use the exact available action for the intended effect and obtain a fresh challenge rather than reusing another action's authorization. |
+| `human_wait_requeue_unsupported` (`decision_action_mismatch`) | No Stage 1 human-wait node supports end-to-end requeue. The wait and challenge are unchanged; run the reported ledger-scoped `enginery review` command and choose an available action. Requesting `human_wait.NODE.requeue` through `enginery decide` remains unsupported. |
+| `decision_subject_mismatch` | Run `enginery review RUN --project PROJECT` and copy its current subject digest into `decide`; never combine a digest and challenge from different reviews. |
+| `decision_subject_stale` | Review the changed head/diff/config/evidence/findings with `enginery review RUN --project PROJECT`, then decide against that new subject and challenge. |
+| `decision_challenge_unknown` | Discard the unrecognized secret; run `enginery review RUN --project PROJECT` on the terminal and use the newly issued challenge. |
+| `decision_challenge_expired` | Run `enginery review RUN --project PROJECT` again and submit the new decision before its configured expiry. |
+| `decision_challenge_replayed` | Do not replay the consumed challenge. Inspect `enginery status RUN --project PROJECT`; if a new decision is needed, obtain a new terminal review challenge. |
+| `decision_required` | Run `enginery review RUN --project PROJECT`, then its reported `enginery decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
 | `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
 | `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
 | `github_evidence_incomplete` | Read the exact collection failure detail. Retry transient API changes or repair malformed records/inconsistent totals, then run the ledger-scoped advance command printed by the hold. The operator cap is fixed at 100 pages (an internal test seam may lower it); completion must be proven before page 100, even for a terminal short page, so at most 9,900 records per collection. Never accept a prefix or start a replacement run to bypass completeness. |
-| `github_evidence_blocked` | Inspect the recorded CI/status/review detail with the printed review command; it includes `--database` and `--owner` for both factory runs and explicit Stage 1 ledgers. For a retryable hold, repair the failing check/status, requested changes, closed-unmerged PR or merge conflicts, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance`. Required-check failure at verify, or at wait_for_ci after the repair budget is used, is terminal: factory status/resume exit non-zero, report `status: failed` and `next_decision: null`, and review offers no actions or challenge. Follow the printed new-run guidance instead of retrying this run. |
-| `github_evidence_waiting` | Wait for required current-head checks/statuses and configured reviews, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance` to recollect complete evidence. This is the printed command for both factory and explicit Stage 1 ledgers; preserve its database and owner. Pending or skipped checks do not count as success. |
-| `github_pull_request_merged` | The PR was merged outside Enginery before verification. This run is terminal, not a retryable GitHub hold: factory status/resume exit non-zero with this hold, `status: failed` and `next_decision: null`; review offers no actions or challenge. Inspect its recorded evidence with the printed review command and start a new run only if needed. A merged PR cannot be reopened. |
+| `github_evidence_blocked` | Inspect the recorded CI/status/review detail with the printed review command; it includes `--database` and `--owner` for both project runs and engine-ledger runs. For a retryable hold, repair the failing check/status, requested changes, closed-unmerged PR or merge conflicts, then run the printed `enginery engine next --database DB --owner OWNER --run-id RUN --advance`. Required-check failure at verify, or at wait_for_ci after the repair budget is used, is terminal: `status`/`continue` exit non-zero, report `status: failed` and `next_decision: null`, and review offers no actions or challenge. Follow the printed new-run guidance instead of retrying this run. |
+| `github_evidence_waiting` | Wait for required current-head checks/statuses and configured reviews, then run the printed `enginery engine next --database DB --owner OWNER --run-id RUN --advance` to recollect complete evidence. This is the printed command for both project runs and engine-ledger runs; preserve its database and owner. Pending or skipped checks do not count as success. |
+| `github_pull_request_merged` | The PR was merged outside Enginery before verification. This run is terminal, not a retryable GitHub hold: `status`/`continue` exit non-zero with this hold, `status: failed` and `next_decision: null`; review offers no actions or challenge. Inspect its recorded evidence with the printed review command and start a new run only if needed. A merged PR cannot be reopened. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
-| Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
-| `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |
+| Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery preflight --project .`. |
+| `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery collect --dry-run --project .`. |
 | Missing, duplicate or unknown canonical labels | Use `gh issue edit N --repo OWNER/REPO --remove-label INVALID_LABEL` for conflicting labels, then `gh issue edit N --repo OWNER/REPO --add-label 'enginery/work-kind/<issue\|plan>' --add-label 'enginery/risk/<low\|medium>'`, replacing each quoted placeholder with the human-selected supported value. Exactly one supported label in each family is required; no risk is selected by default. |
-| Missing runner selection | `enginery factory init --runner trusted-local --apply --project .`, or select the intended isolated runner and satisfy its reported admission repair. Trusted-local is not containment. |
+| Missing runner selection | `enginery init --runner trusted-local --apply --project .`, or select the intended isolated runner and satisfy its reported admission repair. Trusted-local is not containment. |
 | Missing or unapproved selected capability | Run the reported `enginery capability preview NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` then `enginery capability install NAME@VERSION --project-source REPOSITORY@COMMIT --project-subdir DIR` from the project. If approval is required, obtain owner approval for the exact closure and lock digest; collection never grants approval or installs packages. |
-| Paused dispatch | `enginery factory pause --lift --project .`. Running workers were not stopped by pause. |
-| Retained workspace blocks a new run | `factory status` reports `workspace.status: retained` for its owner, and a new run reports a hold with the exact `enginery workspace release --database DATABASE --owner factory --repository-id OWNER/REPO --run-id RETAINING_RUN --json` command. Inspect the retained run before explicitly releasing it; then retry the new run. Release is never performed silently. |
-| Issue changed since the run was bound | Inspect `enginery factory status RUN --project .`; drain with `enginery factory drain --stop --project .`. Follow the reported `enginery stage1 cancel --database DATABASE --owner factory --run-id RUN --node-id NODE` commands only for queued/running agent nodes without a live worker: drain already cancels live-worker nodes, and human-waiting non-agent nodes are not cancelled. A never-registered implementation has nothing to cancel. Lift the pause with `enginery factory pause --lift --project .`, then explicitly create the new binding with `enginery factory run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
-| Supersede cannot prove the old run safe | `--supersede` accepts terminal `run.status`, or a terminal latest implementation with no active node lease, no live worker-supervisor attempt and no pending `open_pr` node. It also accepts a never-registered implementation with no active lease, live worker or `open_pr` node. Otherwise the hold reports the blocking statuses, implementation/lease attempt IDs and lease expiry, with cancellation commands only for queued/running agent nodes without a live worker; drain/cancel as directed, lift pause, then retry the explicit supersede repair above. Human-waiting non-agent nodes are not cancelled. An unchanged issue snapshot is refused; use `factory run` or `factory resume` for its existing binding. |
-| `superseded binding` | `status` reports `superseded_by` when the issue binding points at a newer run. The old run remains visible but cannot advance or resume, with no run-state transition or dispatch. Inspect the replacement with the reported `enginery factory status NEW_RUN --project .` command. |
-| Awaiting a human decision | `next_decision` names the waiting node. Independent review reports `enginery stage1 review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` to record findings, not authority. Other waits report `enginery factory review RUN --project PROJECT` and `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET`: publication uses `pull_request.open`; node waits use `human_wait.NODE.approve` or `human_wait.NODE.reject` with `--reason REASON`. Custom Stage 1 ledgers additionally require `--database DB --owner OWNER` on both commands. This boundary is not successful validation. A failed implementation with no wait reports `factory resume` unless a more specific repair exists. |
+| Paused dispatch | `enginery resume --project .`. Running workers were not stopped by pause. |
+| Retained workspace blocks a new run | `status` reports `workspace.status: retained` for its owner, and a new run reports a hold with the exact `enginery workspace release --database DATABASE --owner factory --repository-id OWNER/REPO --run-id RETAINING_RUN --json` command. Inspect the retained run before explicitly releasing it; then retry the new run. Release is never performed silently. |
+| Issue changed since the run was bound | Inspect `enginery status RUN --project .`; drain with `enginery drain --stop --project .`. Follow the reported `enginery engine cancel --database DATABASE --owner factory --run-id RUN --node-id NODE` commands only for queued/running agent nodes without a live worker: drain already cancels live-worker nodes, and human-waiting non-agent nodes are not cancelled. A never-registered implementation has nothing to cancel. Lift the pause with `enginery resume --project .`, then explicitly create the new binding with `enginery run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
+| Supersede cannot prove the old run safe | `--supersede` accepts terminal `run.status`, or a terminal latest implementation with no active node lease, no live worker-supervisor attempt and no pending `open_pr` node. It also accepts a never-registered implementation with no active lease, live worker or `open_pr` node. Otherwise the hold reports the blocking statuses, implementation/lease attempt IDs and lease expiry, with cancellation commands only for queued/running agent nodes without a live worker; drain/cancel as directed, lift pause, then retry the explicit supersede repair above. Human-waiting non-agent nodes are not cancelled. An unchanged issue snapshot is refused; use `run` or `continue` for its existing binding. |
+| `superseded binding` | `status` reports `superseded_by` when the issue binding points at a newer run. The old run remains visible but cannot advance or be continued, with no run-state transition or dispatch. Inspect the replacement with the reported `enginery status NEW_RUN --project .` command. |
+| Awaiting a human decision | `next_decision` names the waiting node. Independent review reports `enginery engine review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` to record findings, not authority. Other waits report `enginery review RUN --project PROJECT` and `enginery decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET`: publication uses `pull_request.open`; node waits use `human_wait.NODE.approve` or `human_wait.NODE.reject` with `--reason REASON`. Engine-ledger runs additionally require `--database DB --owner OWNER` on both commands. This boundary is not successful validation. A failed implementation with no wait reports `continue` unless a more specific repair exists. |
 | Blocked progression | The hold preserves the recorded reason and its matching repair; resolve that cause before resuming. |
-| Catalog, host fingerprint or runner drift | Run `enginery factory doctor --project .`; restore the run's bound configuration, then `enginery factory resume RUN --project .`. Resume never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
+| Catalog, host fingerprint or runner drift | Run `enginery preflight --project .`; restore the run's bound configuration, then `enginery continue RUN --project .`. Continuation never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
 | Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
 
-Only factory `watch` and `evidence` remain proposed and must not be scripted
-against. Scheduled collection/watch is not shipped.
+Scheduled collection and background watching are not shipped. Use manual collection
+and explicit run continuation or engine-ledger advancement.
 
 ## Running a Stage 1 workflow
 
@@ -1250,10 +1258,10 @@ merges — merging is a separately policy-gated Stage 2 action.
 
 ```mermaid
 flowchart LR
-    Start[stage1 start] --> Qualify[qualify]
+    Start[engine start] --> Qualify[qualify]
     Qualify --> Implement[implement]
     Implement --> Validate[validate]
-    Validate --> Review[stage1 review]
+    Validate --> Review[engine review]
     Review -->|approved| OpenPR[open_pr]
     Review -->|repair| Implement
     OpenPR --> WaitCI[wait_for_ci]
@@ -1264,34 +1272,34 @@ flowchart LR
 
 ### Composing a request
 
-`stage1 start --request` needs a JSON document decodable by
-`stage1_request_from_state`. `enginery stage1 build-request` writes one for a
+`engine start --request` needs a JSON document decodable by
+`stage1_request_from_state`. `enginery engine build-request` writes one for a
 GitHub issue, instead of the hand-written Python composition in
 [`docs/examples.md`](examples.md#example-b-real-github-issue-with-an-omp-or-claude-code-harness):
 
 ```bash
-uv run enginery stage1 build-request \
+uv run enginery engine build-request \
   --runner trusted-local \
   --output request.json \
   --run-id issue-142 \
-  --repository <owner>/<repo> \
-  --external-reference "<owner>/<repo>#142" \
-  --base-revision <real base revision> \
-  --repository-path <absolute path to the local checkout> \
-  --workspace-path <absolute path to a fresh workspace directory> \
+  --repository OWNER/REPO \
+  --external-reference "OWNER/REPO#142" \
+  --base-revision BASE_REVISION \
+  --repository-path /absolute/path/to/checkout \
+  --workspace-path /absolute/path/to/fresh-workspace \
   --artifact-root "${XDG_STATE_HOME:-$HOME/.local/state}/enginery/artifacts/issue-142"
 ```
 
 Choose an absolute artifact directory under `$XDG_STATE_HOME` (default
 `~/.local/state`), with no symlink components; the example uses its `enginery/`
-subdirectory. Request construction and `stage1 start` require an absolute path,
+subdirectory. Request construction and `engine start` require an absolute path,
 but the trusted behavioral observer enforces the state-home boundary during
 verification. An arbitrary absolute directory outside that home cannot complete
 behavioral verification.
 
 What the issue decides is not a flag. `build-request` reads the issue named by
 `--external-reference` (`OWNER/REPO#N`, not an issue URL) through the same GitHub
-adapter `stage1 watch --advance` qualifies with — the `gh` named by
+adapter `engine next --advance` qualifies with — the `gh` named by
 `--github-executable` (default `gh`), the `--github-credential-reference`
 (default `operator-gh-cli`), and the repository from `--github-repository`
 (default `--repository`) — and writes the snapshot it returns exactly as returned:
@@ -1299,9 +1307,9 @@ the title, the body (which is also the run's single acceptance criterion), the s
 URL and revision, and the declared classification from the issue's one
 `enginery/work-kind/*` label (`issue` or `plan`) and one `enginery/risk/*` label
 (`low` or `medium`). The request therefore carries the digest that qualification
-recomputes from the same issue, and `watch --advance` qualifies it. If the issue
+recomputes from the same issue, and `engine next --advance` qualifies it. If the issue
 changes after the request is built (its body, its labels, or its update time), the
-next `watch --advance` reports stale evidence (exit code 10) instead of qualifying,
+next `engine next --advance` reports stale evidence (exit code 10) instead of qualifying,
 and the request must be rebuilt. An issue without exactly one declared work-kind
 and one declared risk label, or with a label outside that vocabulary, is refused
 with exit code 2 and no file is written. `--inapplicable-criterion INDEX` marks a
@@ -1337,45 +1345,45 @@ configuration and validated the pins, so a rejected `--model` or `--effort` neve
 reaches GitHub); it never runs
 OMP or Claude Code, and it writes only the local request file.
 
-A new `stage1 start` accepts only a request whose manifest binds the current check
-contracts. Requests written by `v0.5.0`'s `stage1 build-request` (manifest schema 1)
-are rejected at start and must be rebuilt with the current `enginery stage1 build-request`.
+A new `engine start` accepts only a request whose manifest binds the current check
+contracts. Requests written by `v0.5.0` (manifest schema 1)
+are rejected at start and must be rebuilt with the current `enginery engine build-request`.
 A run already started from such a request is read and resumed unchanged. A validation
 command that launches a shell interpreter is also rejected at start.
 
-Every step after `stage1 start` runs through `enginery stage1 watch
+Every step after `engine start` runs through `enginery engine next
 --advance`, which performs **at most one durable next action** derived
 purely from the ledger and returns the next action still pending:
 
 ```bash
-uv run enginery stage1 start --database ledger.db --owner operator --request request.json
-uv run enginery stage1 watch --database ledger.db --owner operator --run-id run-1 --advance
-# repeat until next_action is await_human_review after successful validation
-uv run enginery stage1 review --database ledger.db --owner operator --run-id run-1 \
+uv run enginery engine start --database ledger.db --owner operator --request request.json
+uv run enginery engine next --database ledger.db --owner operator --run-id issue-142 --advance
+# Repeat until next_action is await_human_review after successful validation.
+uv run enginery engine review --database ledger.db --owner operator --run-id issue-142 \
   --report review.json --repair-attempt 0
-uv run enginery factory review run-1 --project <repository> --database ledger.db --owner operator
-uv run enginery factory decide run-1 --project <repository> --database ledger.db --owner operator \
+uv run enginery review issue-142 --project /absolute/path/to/checkout --database ledger.db --owner operator
+uv run enginery decide issue-142 --project /absolute/path/to/checkout --database ledger.db --owner operator \
   --action pull_request.open --subject-digest DIGEST --challenge SECRET
-uv run enginery stage1 watch --database ledger.db --owner operator --run-id run-1 --advance
-# repeat until next_action is wait and the verify node's status is passed
-uv run enginery stage1 evidence --database ledger.db --owner operator --run-id run-1
+uv run enginery engine next --database ledger.db --owner operator --run-id issue-142 --advance
+# Repeat until next_action is wait and the verify node's status is passed.
+uv run enginery engine evidence --database ledger.db --owner operator --run-id issue-142
 ```
 
-`stage1 review` records independent review findings, not an authority decision.
+`engine review` records independent review findings, not an authority decision.
 The diagram's approved edge requires a separate authenticated `pull_request.open`
 decision before publication; a report alone cannot traverse it.
-`stage1 approve` / `stage1 reject` resolve a human-wait node only with the
-authenticated subject/challenge protocol above; `stage1 cancel` terminates a
-running or human-waiting node. `stage1 resume` refuses with
-`human_wait_requeue_unsupported`; no human-wait requeue is supported.
-`stage1 evidence` prints the run's current
+`engine approve` / `engine reject` resolve a human-wait node only with the
+authenticated subject/challenge protocol above; `engine cancel` terminates a
+running or human-waiting node. No human-wait requeue is supported; a requeue
+request through `enginery decide` is refused with `human_wait_requeue_unsupported`.
+`engine evidence` prints the run's current
 status, request digest, source revision, every runtime node's state, and an
 `execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
 — the operator's read path for "what is this run doing and why."
 
 ### Execution selection and receipts
 
-`stage1 build-request` accepts three optional flags that pin the run's execution
+`engine build-request` accepts three optional flags that pin the run's execution
 controls at the run layer:
 
 - `--model` pins an exact model. For `omp` it must be provider-qualified
@@ -1405,7 +1413,7 @@ shown as `host default`, never as a level. Pins are exact: there is no fuzzy
 matching, no fallback model, and no retry with a different model or effort after a
 failure.
 
-`stage1 watch` and `stage1 evidence` print an `execution` block that keeps four
+`engine next` and `engine evidence` print an `execution` block that keeps four
 things apart: `requested` (the value and the layer that supplied it), `selected`,
 `submitted` (the control arguments extracted from the command that was actually
 launched, once the implementation has run) and `effective` (the model the host
@@ -1419,7 +1427,7 @@ not when its process later started, and it is read back from the persisted comma
 than probed again at collection), whether those two differ
 (`observed_version_changed_since_bind`), the version the binding check observed while
 producing this report (`observed_executable_version_at_resume`, the same check every
-dispatch and resume makes before it decides whether to hold), and the protocol
+dispatch and continuation makes before it decides whether to hold), and the protocol
 fingerprint; an observed
 version inside the range is never reported as tested), and any `holds`. A version change
 inside the bound range between the two observations runs normally and is visible there;
@@ -1430,21 +1438,21 @@ matching fingerprint or a captured launch request does not raise a host above
 `experimental`.
 
 A held run is not advanced, and its original binding is never rewritten. Recovery
-depends on the reason, and `stage1 resume` does not clear a hold:
+depends on the reason; neither run continuation nor lifting a dispatch pause clears a hold:
 
 | Hold reason | Cause | Recovery |
 |---|---|---|
-| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and re-run `stage1 watch`, or start a new run from a rebuilt request. |
-| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is outside the version range the run was bound to (or is a pre-release or otherwise non-numeric version), has a different protocol, or cannot be probed. A version change that stays inside the bound range is not a hold. A run bound to a frozen exact-version catalog (1 or 2) holds on any version difference. | Restore a host version inside the bound range and re-run `watch`, or rebuild the request. |
+| `catalog_drift` | The packaged catalog no longer matches the one the run was bound to (for example after upgrading Enginery). It holds unpinned host-default runs too, not only pinned ones. | Restore the Enginery version (catalog) the run was bound to and re-run `engine next`, or start a new run from a rebuilt request. |
+| `host_fingerprint_drift` | A run that pinned a native control, and the installed host is outside the version range the run was bound to (or is a pre-release or otherwise non-numeric version), has a different protocol, or cannot be probed. A version change that stays inside the bound range is not a hold. A run bound to a frozen exact-version catalog (1 or 2) holds on any version difference. | Restore a host version inside the bound range and re-run `engine next`, or rebuild the request. |
 | `effective_control_unverified`, `effective_control_mismatch` | A strict requirement was not met after the worker ran: the effective model was unknown, differed, or the host reported more than one. | Permanent for that run: its implementation attempt is failed. Rebuild the request. |
 | `submitted_controls_mismatch` | The launched command did not carry exactly the selected controls (a missing pin or an extra flag such as `--fallback-model`). | Permanent for that run. Rebuild the request. |
-| `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine, or its identity is unreadable. (A reused pid or a reboot proves the worker gone and is reconciled instead.) | There is no supported release for it in this release: the node keeps its slot. Deal with the worker where it was launched; `stage1 cancel` refuses without signalling (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |
+| `worker_identity_unprovable` | A running implementation's worker cannot be proven alive or dead from this host: its record is from another machine, or its identity is unreadable. (A reused pid or a reboot proves the worker gone and is reconciled instead.) | There is no supported release for it in this release: the node keeps its slot. Deal with the worker where it was launched; `engine cancel` refuses without signalling (see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery)). |
 
 ## Recovery semantics
 
 Enginery permits **one active coordinator per SQLite ledger**. There is no
 separate "recovery mode": restarting the `enginery` process and re-running
-`stage1 watch --advance` against the same `--database` file *is* recovery.
+`engine next --advance` against the same `--database` file *is* recovery.
 The ledger, not any in-memory state, is authoritative. Every coordinator
 epoch and node lease carries a fencing token; a stale process's write is
 rejected even if it is still technically running. If the prior process
@@ -1466,7 +1474,7 @@ process was killed, or a human decides not to continue), that
 reservation can outlive the run. `enginery workspace inspect` lists
 every repository's current reservation (with its workspace `mode` and the resolved base
 object id `base_oid`), from the same durable state
-`stage1`'s coordinator already reads:
+Stage 1's coordinator already reads:
 
 ```bash
 uv run enginery workspace inspect --database ledger.db --owner operator --json
@@ -1497,13 +1505,13 @@ context.
 
 ### Queued work, wakeups and worker recovery
 
-`stage1`'s scheduler enforces one global concurrency slot and one
-per-repository slot by default (matching every documented `stage1`
-invocation above). When the `implement` node is registered while
+Stage 1's scheduler enforces one global concurrency slot and one
+per-repository slot by default (matching the engine-ledger lifecycle
+invocations above). When the `implement` node is registered while
 another run holds the slot, it is a durable, visible `queued` state,
 not an error.
 
-**What `stage1 watch` shows.** The run's `next_action` is
+**What `engine next` shows.** The run's `next_action` is
 `dispatch_queued`, the `implement` node's `status` is `queued`, and its
 `wakeup` record says why it is waiting:
 
@@ -1522,7 +1530,7 @@ answer after a restart.
 
 **How redispatch happens, and its bound.** There is no daemon or
 timer. Readiness is re-derived from the ledger on every
-`stage1 watch --advance`: the first advance of a queued node's own run
+`engine next --advance`: the first advance of a queued node's own run
 after its capacity or dependency is released dispatches that same
 operation exactly once (same operation identity, no second lease or
 worker). Capacity is granted by one fair plan over every run on the
@@ -1537,7 +1545,7 @@ that run's own binding checks. A slot granted to another run stays
 reserved for it: the waiting run shows
 `capacity_reserved_for_other_run` and the `reserved_for` run id. With
 no daemon, a fair winner that is never advanced keeps its reservation;
-recovery is to run `stage1 watch --advance` on that run, or cancel its
+recovery is to run `engine next --advance` on that run, or cancel its
 node so the reservation is released.
 
 **Holds.** A run whose execution catalog binding has drifted has
@@ -1554,7 +1562,7 @@ not applied to other runs' planning, so a run held that way and queued
 as the oldest winner still keeps its reservation until the host is
 restored or the node is cancelled. That is a remaining manual case.
 
-**Worker liveness.** For a `running` node, `watch` and `evidence`
+**Worker liveness.** For a `running` node, `engine next` and `engine evidence`
 report a `worker` object built from the persisted identity: `pid`,
 `process_group_id`, `start_identity`, `host` (`machine_id`, `boot_id`
 and the display-only `hostname`), `identity_version`, `attempt_id`, the
@@ -1603,7 +1611,7 @@ same live worker. A legacy record whose pid is free is still `exited`.
 
 **When a worker dies.** If a `running` implementation has no result
 file and its worker is gone (`exited`, `pid_reused` or `rebooted`),
-the next `stage1 watch --advance` (`next_action: reconcile_worker`)
+the next `engine next --advance` (`next_action: reconcile_worker`)
 looks once more for a result, then records the exit, reconciles it
 through the recovery path and records the node as `failed` with
 `failure_reason: worker_exited_without_result` (`worker_lost_to_reboot`
@@ -1616,7 +1624,7 @@ cancel is pending it is collected first, including one written between
 deriving the action and acting on it. A worker that is alive on this
 host and boot keeps the run at `wait`, including once 60 seconds pass
 without the launching
-epoch being renewed: with no daemon that happens between `watch
+epoch being renewed: with no daemon that happens between `engine next
 --advance` calls, and it shows only as `lease_epoch_active: false` in
 the worker report. A worker that cannot be proven dead is never
 failed: `next_action` is `hold` with `worker_identity_unprovable` and
@@ -1630,8 +1638,8 @@ never recorded as a worker death.
 machine, so nothing here can prove whether it is still running; an
 `unverifiable` record (no identity, or a pre-host-binding record whose
 present pid has a start time that cannot be compared) has nothing to
-prove it from. Recovery refuses automatic resume, `stage1 watch
---advance` reports the hold and `stage1 cancel` refuses, in each case
+prove it from. Recovery refuses automatic resume, `engine next
+--advance` reports the hold and `engine cancel` refuses, in each case
 without signalling anything. There is no supported release for such a
 node in this release: it keeps its workspace and its slot, and no
 command frees them. Deal with the worker where it was launched. A
@@ -1639,7 +1647,7 @@ reused pid and a reboot of a host-bound record are not holds: both
 prove the worker gone and are reconciled automatically, without a
 signal.
 
-**Cancel semantics.** `stage1 cancel --node-id implement` is fenced by
+**Cancel semantics.** `engine cancel --node-id implement` is fenced by
 the current coordinator epoch, so it works from a later process or
 after a restart, when the worker's lease was issued by an earlier
 epoch.
@@ -1653,7 +1661,7 @@ epoch.
   quiescent it is cleaned. If it is not (for example a git lock is
   held), the node stays `awaiting_human` with
   `cancellation_cleanup_reason`, and `next_action` is `wait`: make the
-  workspace quiescent, then run `stage1 cancel --node-id implement`
+  workspace quiescent, then run `engine cancel --node-id implement`
   again.
 - Cancel is safe to repeat. An interruption after the termination
   request, before the exit was recorded, or inside workspace cleanup
@@ -1664,12 +1672,12 @@ epoch.
 
 A cancelled `implement` node leaves the run at `await_human_review`
 with its evidence kept. There is no supported re-implementation inside
-that run: start a new run from a rebuilt request. (`stage1 review` can
+that run: start a new run from a rebuilt request. (`engine review` can
 start a fresh implementation attempt only after a failed required CI
 check, within the run's `repair_limit`.)
 
 **Worker output.** A launched worker does not inherit the coordinator's
-stdin, stdout or stderr, so piping `stage1 watch --advance` to a reader
+stdin, stdout or stderr, so piping `engine next --advance` to a reader
 returns when the command does. The OMP result is read from the worker's
 protocol file. The worker wrapper's own stderr (for example a crash
 trace) is appended to a private file, mode 0600, at
@@ -1688,7 +1696,7 @@ and its stdout is discarded.
 - A worker that died while its workspace is not quiescent (for example
   a git lock is held): the node stays `awaiting_human` with
   `cancellation_cleanup_reason` and `next_action` `wait`. Make the
-  workspace quiescent, then run `stage1 cancel --node-id implement`.
+  workspace quiescent, then run `engine cancel --node-id implement`.
 - Attempt ids are ledger-wide, so `build-request` defaults the
   implementation attempt id to `<run-id>-implement-0` and repair
   attempts are derived as `<run-id>-implement-N`; runs sharing one
@@ -1729,37 +1737,54 @@ the measured local performance baseline from
 
 ## Backup and restore
 
+The operator commands select a ledger explicitly. Replace `ledger.db` with the
+project's reported database path when recovering a project run:
+
 ```bash
-uv run enginery ledger backup --database ledger.db --output backup-dir [--artifacts artifacts-dir]
-uv run enginery ledger restore --backup backup-dir --database ledger.db [--artifacts artifacts-dir]
-uv run enginery ledger verify --database ledger.db [--artifacts artifacts-dir]
+uv run enginery operator pause --database ledger.db --reason "backup and recovery"
+uv run enginery operator drain --database ledger.db --wait-seconds 30
+# Proceed only after status shows no running workers; reconcile exited results if needed.
+uv run enginery operator status --database ledger.db --artifacts artifacts-dir
+uv run enginery operator backup --database ledger.db --output backup-dir --artifacts artifacts-dir
+uv run enginery operator restore --backup backup-dir --database ledger.db --artifacts artifacts-dir
+uv run enginery operator verify --database ledger.db --artifacts artifacts-dir --json
+uv run enginery operator status --database ledger.db --artifacts artifacts-dir
+# After reviewing verification and worker state:
+uv run enginery operator resume --database ledger.db
 ```
 
-`backup` copies files; it never mutates a live ledger's own tables in
-place. `restore` writes into `--database`, so restoring over a live ledger
-discards its current state — back up the current file first if it might
-still be needed. `verify` checks event/projection/artifact consistency
-without mutating anything and is safe to run at any time, including
-against a live ledger. Run `verify` after any restore and before resuming
-a run against a restored ledger.
+Omit `--artifacts artifacts-dir` consistently when there is no artifact store to
+include. `backup` verifies the source ledger and selected artifacts before writing,
+takes the snapshot, then verifies the backup. An unhealthy source writes nothing.
+`restore` verifies the backup before touching the destination and requires the
+current ledger to be paused with no running worker. It preserves that ledger as a
+timestamped pre-restore file and leaves a successful restoration **paused**.
+The explicit `--force-unpaused` override is also required if the current ledger
+cannot be read; do not use it as the routine recovery path.
+
+Recovery commands emit JSON. `operator verify --json` requests JSON for the
+consistency check; verification is read-only and can also inspect a live ledger.
+Review verification and `operator status` after restoring before lifting the
+pause. Lifting a pause does not reconcile a run: use `enginery continue RUN
+--project PROJECT` for a project run or `enginery engine next --database
+ledger.db --owner OWNER --run-id RUN --advance` for an explicit engine-ledger run.
 
 For the operator-side flow (pause, drain, verified backup, restore that keeps the
 prior ledger and starts paused) see [Operator recovery entry
 point](#operator-recovery-entry-point).
 
-`ledger rebuild-projections` recomputes every projection from the stored
+`operator rebuild-projections` recomputes every projection from the stored
 event log; use it if a projection appears stale or inconsistent after a
 manual intervention. It never rewrites historical events.
 
 ## Trust modes and the isolated runner
 
 Every Stage 1 run is bound, when its request is built, to exactly one
-trust mode. `enginery stage1 build-request` requires the choice:
-
-```bash
-uv run enginery stage1 build-request ... --runner trusted-local
-uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sha256:<image id> [--docker-context NAME] [--model-access none|relay]
-```
+trust mode. When [composing a request](#composing-a-request) with
+`enginery engine build-request`, supply `--runner trusted-local` or
+`--runner isolated-oci --runner-image sha256:IMAGE_ID`. The latter also accepts
+`--docker-context NAME` and `--model-access none` or `--model-access relay`.
+The remaining required identity and path arguments are shown in the request example.
 
 - **`trusted-local`** runs the worker as you, in a git worktree of your
   repository, with your filesystem and an explicit allowlist of your environment
@@ -1770,8 +1795,8 @@ uv run enginery stage1 build-request ... --runner isolated-oci --runner-image sh
   which are recorded as unconditional bypasses.
 - **`isolated-oci`** runs the worker in a container built from a pinned image.
   A run bound to it is *held*, never run as `trusted-local`, when no qualified
-  engine, image, or profile is available; `stage1 start` refuses to bind it
-  and `stage1 watch` reports the hold (`runner_unqualified` or
+  engine, image, or profile is available; `engine start` refuses to bind it
+  and `engine next` reports the hold (`runner_unqualified` or
   `runner_fingerprint_drift`) with the retained binding intact.
 
 A request persisted before trust modes existed decodes unchanged as a legacy
@@ -1839,14 +1864,14 @@ host makes from its own intake repository (see [Authority separation](#authority
 They run offline, in the pinned image, which carries `python3`, `node`, `git`, `uv`
 and `sh` but none of a project's own test dependencies: the repository's validation
 must work with what the image and the checkout provide. For that reason an isolated
-run must name its validation commands (`--validation-command` at `stage1
+run must name its validation commands (`--validation-command` at `engine
 build-request`; the host default `uv run pytest -q` is refused for an isolated run at
-build-request and at `stage1 start`). A command whose executable the image lacks is
+build-request and at `engine start`). A command whose executable the image lacks is
 not reported as a failed validation: when a command ends the way a missing executable
 does (exit 127, or the wrapper's `No such file or directory` / `Permission denied`),
 the same container restrictions are asked whether the executable exists
 (`command -v`), and a confirmed absence records the `validate` node as `blocked`
-with the missing tool named in `blocked_reason`. It is not a human wait: `stage1
+with the missing tool named in `blocked_reason`. It is not a human wait: `engine
 approve` cannot turn it into a passed validation, and review and publication also
 refuse a passed `validate` node that has no `validation_artifact_digest`. The request
 is immutable, so the way out is a new run whose validation commands only use what the
@@ -1944,15 +1969,15 @@ run resumes unchanged.
   default `.github/**`, other CI configuration (`.gitlab-ci.yml`, `.gitlab/**`,
   `.circleci/**`, `.buildkite/**`, `azure-pipelines.yml`, `Jenkinsfile`, ...),
   `CODEOWNERS` and `.gitmodules` at any depth, `.enginery/**` and `holdouts/**`.
-  `stage1 build-request
+  `engine build-request
   --protected-path GLOB` (repeatable) adds patterns bound into the request; the
   defaults cannot be narrowed. A match puts the `open_pr` node into a human wait
   (`awaiting_human`), raises a human-action-required error, and pushes nothing.
   The review packet's Risk section shows the protected set, matched paths and digest.
   Review it with
-  `enginery factory review RUN --project PROJECT`, then authenticate the exact
+  `enginery review RUN --project PROJECT`, then authenticate the exact
   `pull_request.open` decision with the returned subject digest and terminal
-  challenge. `stage1 approve --node-id open_pr` requires the same authentication;
+  challenge. `engine approve --node-id open_pr` requires the same authentication;
   a reason alone is not authority. Rejection uses `human_wait.open_pr.reject`.
   The decision is rechecked before publication, including retries and restarts;
   changed head, diff, protected paths, evidence or findings require a fresh
@@ -1968,12 +1993,12 @@ run resumes unchanged.
   afterwards, so uncommitted or untracked leftovers in the worker's workspace
   cannot influence the verdict. The validation node records `validated_revision`.
 - **Hard-dollar budgets are refused, not carried.** No supported harness enforces
-  a dollar budget, so `stage1 build-request` refuses `--implementation-cost-budget`
+  a dollar budget, so `engine build-request` refuses `--implementation-cost-budget`
   (and `--implementation-no-cost-budget` no longer exists: a new request binds no
-  cost budget), and `stage1 start` and implementation dispatch refuse a new run that
+  cost budget), and `engine start` and implementation dispatch refuse a new run that
   binds one. The time budget (`--implementation-time-budget-seconds`) remains
   enforced. A request persisted before this keeps decoding and its digest, and
-  `stage1 watch` reports its number as `"cost_budget": {"value": "5.0",
+  `engine next` reports its number as `"cost_budget": {"value": "5.0",
   "enforced": false}`, never as a limit.
 
 ### Harness permissions
@@ -2096,7 +2121,7 @@ version and security options, image id and recipe digest, profile digest, host
 identity, the container's effective flags as the engine reported them (never
 the requested ones), the permission mapping, and environment key names (never
 values), and the disk and log bounds the attempt ran under with the mechanism that
-enforces the disk bound. `enginery stage1 watch` prints the reference.
+enforces the disk bound. `enginery engine next` prints the reference.
 
 ## Model access through the relay
 
@@ -2129,13 +2154,18 @@ access. `relay down` removes the relay container and then the egress network
 another container is still attached to it; running it again changes nothing.
 
 ```bash
-uv run enginery runner build-relay-image [--docker-context NAME]    # prints the exact relay image id
-uv run enginery runner relay up --relay-image sha256:<relay image id> \
-  --upstream http://host.docker.internal:<gateway port> \
-  --token-file /absolute/path/to/gateway-token [--docker-context NAME] [--recreate]
-uv run enginery runner relay status [--docker-context NAME]         # exit 5 unless healthy
-uv run enginery runner relay down [--docker-context NAME]
+uv run enginery runner build-relay-image    # prints the exact relay image id
+uv run enginery runner relay up --relay-image sha256:RELAY_IMAGE_ID \
+  --upstream http://host.docker.internal:7011 \
+  --token-file /absolute/path/to/gateway-token
+uv run enginery runner relay status         # exit 5 unless healthy
+# When finished with model access:
+uv run enginery runner relay down
 ```
+
+Each command accepts `--docker-context NAME`; use the same context throughout.
+Replace `sha256:RELAY_IMAGE_ID` with the printed image ID and the gateway URL with
+your gateway's endpoint. Add `--recreate` to `relay up` when replacing an existing relay.
 
 - **Image.** `build-relay-image` builds the relay from the packaged recipe (a
   Python 3.12 slim base pinned by index digest and the standard-library-only
@@ -2246,24 +2276,28 @@ its container's mounts as you can read the bearer.
 
 ## Operator recovery entry point
 
-`enginery-operator` is a separate console script for the person operating the
-host. It is meant to be run by you, outside any coding-agent session, and it
+`enginery operator` is the recovery group of the `enginery` console script,
+for the person operating the selected ledger. Run it outside any coding-agent session; it
 imports only the domain, the ledger, the engine control modules and the OCI
 adapter used to qualify an image — never the workflow code — so it keeps working
 when a workflow is broken or a run is wedged. Every subcommand takes
-`--database PATH`, prints JSON on stdout, prints a JSON error on stderr on
-failure, and uses the exit codes of `enginery` (`2` invalid input, `3` missing
-prerequisite, `5` human action required, `12` validation failure, `13`
-timeout).
+`--database PATH`. Recovery commands print JSON on stdout and JSON errors on stderr;
+`verify` retains its optional `--json` report mode, and `rebuild-projections` retains
+its existing result format. They use the exit codes of `enginery` (`2` invalid input,
+`3` missing prerequisite, `5` human action required, `12` validation failure, `13` timeout).
 
 ```bash
-uv run enginery-operator status --database ledger.db [--artifacts artifacts-dir]
-uv run enginery-operator pause  --database ledger.db [--reason TEXT]
-uv run enginery-operator resume --database ledger.db
-uv run enginery-operator drain  --database ledger.db (--wait-seconds N | --stop) [--owner NAME] [--docker-context NAME]
-uv run enginery-operator select-runner --database ledger.db --image sha256:<image id> [--docker-context NAME]
-uv run enginery-operator backup  --database ledger.db --output backup-dir [--artifacts artifacts-dir]
-uv run enginery-operator restore --database ledger.db --backup backup-dir [--artifacts artifacts-dir] [--force-unpaused]
+uv run enginery operator status --database ledger.db
+uv run enginery operator pause --database ledger.db --reason "operator maintenance"
+uv run enginery operator drain --database ledger.db --wait-seconds 30
+# Use the active coordinator epoch's owner if stopping workers instead:
+# uv run enginery operator drain --database ledger.db --stop --owner factory
+uv run enginery operator select-runner --database ledger.db --image sha256:IMAGE_ID
+uv run enginery operator backup --database ledger.db --output backup-dir
+uv run enginery operator restore --database ledger.db --backup backup-dir
+uv run enginery operator verify --database ledger.db --json
+uv run enginery operator status --database ledger.db
+uv run enginery operator resume --database ledger.db
 ```
 
 - **`status`** reports whether dispatch is paused (and why), the supervised
@@ -2284,17 +2318,17 @@ uv run enginery-operator restore --database ledger.db --backup backup-dir [--art
   `--wait-seconds N` waits up to `N` seconds for the running workers to exit on
   their own and exits `13` if any is still running; it signals nothing.
   `--stop` stops each running worker through the existing supervisor cancel path
-  (the same one `stage1 cancel` uses): exact-identity process-group termination,
+  (the same one `engine cancel` uses): exact-identity process-group termination,
   durable cancellation of the node and release of its workspace. Because it is
   fenced by the coordinator epoch, pass `--owner` equal to the owner that holds
-  the active epoch (the `--owner` you gave `stage1`), or wait for that epoch to
+  the active epoch (the `--owner` you gave `engine start`), or wait for that epoch to
   lapse; otherwise the worker is reported as not stopped (`external_conflict`)
   and the exit is `5`. For isolated workers the supervised process is the
   container launcher, which kills and removes its container when it is
   terminated; when a runner has been selected (or `--docker-context` is given)
   `drain --stop` additionally removes each stopped worker's container by its
   deterministic name and fails loudly if it cannot. A worker whose process
-  already exited but has not been reconciled is left for `stage1 watch
+  already exited but has not been reconciled is left for `engine next
   --advance`, so an unreconciled result is never discarded.
 - **`select-runner`** qualifies the engine and the pinned image exactly as
   `runner status` does (admission), and only then records the image id, engine
@@ -2313,8 +2347,9 @@ uv run enginery-operator restore --database ledger.db --backup backup-dir [--art
   deleted), restores, and verifies the restored ledger. If the restored ledger
   fails verification the prior ledger is put back and the failed copy is kept as
   `<database>.failed-restore-<UTC time>`. A successful restore leaves the
-  restored ledger **paused**: run `ledger verify`, check `status`, then
-  `resume`.
+  restored ledger **paused**: run `enginery operator verify --database PATH --json`,
+  check `enginery operator status --database PATH`, then lift the pause with
+  `enginery operator resume --database PATH`.
   A backup whose directory, `manifest.json` or `ledger.db` is missing or
   unreadable, or whose manifest is not valid JSON or has a missing or
   wrong-typed field, is refused as invalid input (exit `2`) with a message naming
@@ -2329,11 +2364,13 @@ the operator holds the gateway bearer; a worker holds only a dummy credential.
 retained receipt:
 
 ```bash
-uv run enginery runner custody-receipt --host macos|ubuntu-lima \
+uv run enginery runner custody-receipt --host macos \
   --gateway-url http://127.0.0.1:7011 --broker-url http://127.0.0.1:7012 \
-  --token-file PATH --output receipt.json [--decision "2026-10-13: label" ...]
+  --token-file /absolute/path/to/gateway-token --output receipt.json
 ```
 
+Use `--host ubuntu-lima` for a Lima receipt and set the gateway and broker URLs
+as that VM reaches them. `--decision TEXT` can be repeated for owner references.
 The receipt records the grant scope (`anthropic` and `openai-codex` reachable
 through the relay allowlist; `google-antigravity` held by the broker but denied
 by the relay), the gateway and broker endpoints, the custody location (`macos`:
@@ -2752,7 +2789,7 @@ build-image`, `enginery runner build-relay-image`):
 ```bash
 uv run python scripts/run_factory_gate.py --scenario runner-boundary \
   --docker-context desktop-linux \
-  --runner-image sha256:<worker image id> --relay-image sha256:<relay image id> \
+  --runner-image sha256:WORKER_IMAGE_ID --relay-image sha256:RELAY_IMAGE_ID \
   --evidence-out evidence/runner-boundary.json
 ```
 
@@ -2813,12 +2850,12 @@ Enginery starts it for you.
 guided setup and layered configuration locally. It needs no container engine, network,
 credential or hosted session: it builds a disposable `HOME` with both XDG directories,
 puts recording `gh` and `omp` stand-ins first on `PATH`, and drives the real `enginery`
-CLI in subprocesses. Its assertions cover `factory init` (preview writes nothing, apply
+CLI in subprocesses. Its assertions cover `init` (preview writes nothing, apply
 performs the previewed plan, repeating it changes nothing, a differing policy is a
 conflict), the run, project and user layers each reaching the `--model` and `--thinking`
 argv the real Stage 1 adapter submitted to the stand-in harness, a project hard
-constraint refusing a run override, an unknown key being refused, `factory doctor`
-holding an unauthenticated `gh` with `gh auth login`, `factory uninstall` removing only
+constraint refusing a run override, an unknown key being refused, `preflight`
+holding an unauthenticated `gh` with `gh auth login`, `uninstall` removing only
 unmodified setup-owned files, and the disposable home's global locations (`~/.config/gh`,
 `~/.omp`, `~/.claude`, `~/.claude.json`, MCP configuration, launchd and systemd
 directories) being byte-identical before and after. Snapshots include `.git`; all git
@@ -2856,24 +2893,24 @@ gate, and operator documentation once it starts. In particular:
   on a cadence, never assumed from elapsed time.
 - Do not run this release expecting a Stage 4 CLI surface, a hosted UI,
 or additional harness/work-ledger providers beyond OMP, Claude Code, and
-GitHub. None of those exist yet. `stage2 status` remains the only Stage 2 CLI
+GitHub. None of those exist yet. `engine status` remains the only Stage 2 CLI
 surface; Stage 3 has no CLI surface at all (library-level only, see above).
 
-### Proposed factory commands (not shipped)
+### Manual control and library boundaries
 
-`enginery factory init`, `doctor`, `explain` and `uninstall` are shipped (see
-[Guided project setup](#guided-project-setup)), as are `collect`, `run`, `status`,
-`resume`, `pause`, `drain`, `review`, `feedback`, `decide`, `calibrate` and `check`
-(see [Manual factory path](#manual-factory-path)).
-`factory explain` without RUN retains its existing configuration/setup explanation;
-with RUN it explains the durable binding. `stage1 review` records independent
-findings; `factory review` presents the packet and offers authenticated decisions.
-`gate status` accepts `--gate G4` only, and `stage1` retains `start`, `watch`,
-`review`, `approve`, `reject`, `cancel`, `resume`, `evidence`, and `build-request`.
+Project setup uses `enginery init`, `enginery preflight`, `enginery explain`
+and `enginery uninstall` (see [Guided project setup](#guided-project-setup)).
+Collection, execution, inspection, review and dispatch control use the root project
+commands in [Manual project path](#manual-project-path). `enginery explain`
+describes current configuration and setup; `enginery status RUN` describes an
+immutable run binding. `enginery engine review` records independent findings;
+`enginery review` presents the packet and offers authenticated decisions.
+`enginery gate status` accepts `--gate G4` only.
 
-Only `factory watch` and `factory evidence` remain proposed. Do not script
-against those names: they are not a compatibility promise. Scheduled collection
-is not shipped. The manual factory boundary is:
+Scheduled collection and background watching are not shipped. Stage 2
+orchestration remains a library workflow; `enginery engine status` is its read-only
+stack inspection. Stage 3 likewise remains a library surface. These are not
+additional executable command families. The manual control boundary is:
 
 - **Manual first.** An operator starts, pauses, drains, and resumes work;
   nothing is scheduled implicitly.
