@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
@@ -368,6 +368,8 @@ class PullRequestReview:
     reviewer: str
     state: str
     head_revision: str
+    review_id: int | None = None
+    submitted_at: str | None = None
 
     def __post_init__(self) -> None:
         if any(not value.strip() for value in (self.reviewer, self.state, self.head_revision)):
@@ -382,12 +384,67 @@ class PullRequestCheck:
     status: str
     conclusion: str | None
     head_revision: str
+    app_id: int | None = None
 
     def __post_init__(self) -> None:
         if any(not value.strip() for value in (self.name, self.status, self.head_revision)):
             raise ValueError("pull request check identity fields must be non-blank")
         if self.conclusion is not None and not self.conclusion.strip():
             raise ValueError("pull request check conclusion must be non-blank when present")
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestStatus:
+    """Latest commit status for one context at the exact observed head."""
+
+    context: str
+    state: str
+    head_revision: str
+    status_id: int
+    created_at: str
+    creator_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                not value.strip()
+                for value in (self.context, self.state, self.head_revision, self.created_at)
+            )
+            or self.status_id < 1
+        ):
+            raise ValueError("pull request status identity fields must be present")
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceCompleteness:
+    """Proof that a bounded API collection reached its actual last page."""
+
+    collection: str
+    page_count: int
+    page_cap: int
+    record_count: int
+    total_count: int | None
+    complete: bool
+    raw_artifact_digests: tuple[Digest, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.collection
+            or self.page_count < 1
+            or self.page_cap < 2
+            or self.record_count < 0
+            or (self.total_count is not None and self.total_count < 0)
+        ):
+            raise ValueError("invalid evidence completeness metadata")
+
+    @property
+    def proven(self) -> bool:
+        return (
+            self.complete
+            and self.page_count < self.page_cap
+            and len(self.raw_artifact_digests) == self.page_count
+            and (self.total_count is None or self.total_count == self.record_count)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,10 +455,63 @@ class PullRequestEvidence:
     reviews: tuple[PullRequestReview, ...]
     checks: tuple[PullRequestCheck, ...]
     mergeable: bool | None
+    statuses: tuple[PullRequestStatus, ...] = ()
+    combined_status: str | None = None
+    completeness: tuple[EvidenceCompleteness, ...] | None = None
+    raw_artifact_digests: tuple[Digest, ...] = ()
 
     def __post_init__(self) -> None:
         if any(check.head_revision != self.pull_request.head_revision for check in self.checks):
             raise ValueError("pull request checks must bind the current pull-request head")
+        if any(status.head_revision != self.pull_request.head_revision for status in self.statuses):
+            raise ValueError("pull request statuses must bind the current pull-request head")
+
+    @property
+    def complete(self) -> bool:
+        # Old normalized fixtures predate raw API captures. A live adapter always supplies
+        # proofs; adding any new evidence metadata opts out of historical fixture decoding.
+        if self.completeness is None:
+            return (
+                not self.raw_artifact_digests and not self.statuses and self.combined_status is None
+            )
+        required = {"reviews", "check_runs", "combined_status", "statuses"}
+        return (
+            {proof.collection for proof in self.completeness} == required
+            and len(self.completeness) == len(required)
+            and all(proof.proven for proof in self.completeness)
+            and bool(self.raw_artifact_digests)
+            and all(
+                digest in self.raw_artifact_digests
+                for proof in self.completeness
+                for digest in proof.raw_artifact_digests
+            )
+        )
+
+    def to_state(self) -> dict[str, object]:
+        """Retain the exact normalized observation alongside its original API bodies."""
+        return {
+            "pull_request": asdict(self.pull_request),
+            "reviews": [asdict(review) for review in self.reviews],
+            "checks": [asdict(check) for check in self.checks],
+            "statuses": [asdict(status) for status in self.statuses],
+            "mergeable": self.mergeable,
+            "combined_status": self.combined_status,
+            "complete": self.complete,
+            "raw_artifact_digests": [str(digest) for digest in self.raw_artifact_digests],
+            "completeness": None
+            if self.completeness is None
+            else [
+                {
+                    **asdict(proof),
+                    "raw_artifact_digests": [str(digest) for digest in proof.raw_artifact_digests],
+                }
+                for proof in self.completeness
+            ],
+        }
+
+    @property
+    def digest(self) -> Digest:
+        return Digest.of_json(self.to_state())
 
 
 class PullRequestPort(Protocol):
@@ -453,6 +563,7 @@ class SourceControlPort(Protocol):
 
 __all__ = [
     "ChangeSet",
+    "EvidenceCompleteness",
     "HarnessOutput",
     "HarnessPort",
     "HarnessResult",
@@ -465,6 +576,7 @@ __all__ = [
     "PullRequestRequest",
     "PullRequestReview",
     "PullRequestSnapshot",
+    "PullRequestStatus",
     "SourceBranch",
     "SourceControlPort",
     "SourceRevision",

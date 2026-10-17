@@ -3,18 +3,24 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
 from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests
+from enginery.application.adapter_types import AdapterAvailability
 from enginery.application.work_ports import PullRequestRequest
 from enginery.domain.errors import (
     AmbiguousExternalSideEffectError,
+    AuthenticationFailureError,
+    ExternalConflictError,
+    RateLimitError,
     StaleEvidenceError,
     TransientProviderFailureError,
 )
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.ledger.artifact_store import ArtifactStore
 
 
 def _config() -> GitHubAdapterConfig:
@@ -22,6 +28,40 @@ def _config() -> GitHubAdapterConfig:
         repository="Mathews-Tom/enginery-provider-smoke",
         credential_reference="github-keyring:default",
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (401, AuthenticationFailureError),
+        (429, RateLimitError),
+        (405, ExternalConflictError),
+        (409, ExternalConflictError),
+        (422, ExternalConflictError),
+    ],
+)
+def test_default_runner_classifies_bounded_stderr(
+    tmp_path: Path, status: int, error_type: type[Exception]
+) -> None:
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!/bin/sh\nprintf 'HTTP {status}: private-diagnostic\\n' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    adapter = GitHubPullRequests(
+        GitHubAdapterConfig(
+            repository="owner/repository",
+            credential_reference="github-keyring:default",
+            executable=str(executable),
+        ),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+    )
+    with pytest.raises(error_type) as caught:
+        adapter.evidence(1)
+    assert "private-diagnostic" not in str(caught.value)
+    if status == 401:
+        assert adapter.probe().availability is AdapterAvailability.MISCONFIGURED
 
 
 def _completed(
@@ -147,20 +187,38 @@ def test_get_binds_head_and_base_revisions() -> None:
     assert calls[0][-1] == "repos/Mathews-Tom/enginery-provider-smoke/pulls/11"
 
 
-def test_evidence_binds_checks_and_reviews_to_current_head() -> None:
+def test_evidence_binds_checks_and_reviews_to_current_head(tmp_path: Path) -> None:
     marker = "<!-- enginery:pull-request:pull-request-1 -->"
     pull = _pull(marker=marker)
     pull["mergeable"] = True
     check = {
+        "id": 1,
         "name": "CI",
         "status": "completed",
         "conclusion": "success",
         "head_sha": "a" * 40,
     }
-    review = {"user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": "a" * 40}
-    responses: list[object] = [pull, [review], {"check_runs": [check]}, pull]
+    review = {
+        "id": 1,
+        "submitted_at": "2026-10-17T10:00:00Z",
+        "user": {"login": "reviewer"},
+        "state": "APPROVED",
+        "commit_id": "a" * 40,
+    }
+    responses: list[object] = [
+        pull,
+        [review],
+        {"total_count": 1, "check_runs": [check]},
+        {"sha": "a" * 40, "state": "pending", "total_count": 0, "statuses": []},
+        [],
+        pull,
+    ]
     calls: list[tuple[str, ...]] = []
-    adapter = GitHubPullRequests(_config(), command_runner=_runner(responses, calls))
+    adapter = GitHubPullRequests(
+        _config(),
+        command_runner=_runner(responses, calls),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+    )
 
     evidence = adapter.evidence(11)
 
@@ -168,21 +226,29 @@ def test_evidence_binds_checks_and_reviews_to_current_head() -> None:
     assert evidence.reviews[0].reviewer == "reviewer"
     assert evidence.reviews[0].head_revision == evidence.pull_request.head_revision
     assert evidence.checks[0].head_revision == evidence.pull_request.head_revision
+    assert evidence.complete
+    assert evidence.reviews[0].review_id == 1
+    assert evidence.reviews[0].submitted_at == "2026-10-17T10:00:00Z"
     assert calls[2][-1].endswith("/check-runs?per_page=100&page=1")
 
 
-def test_evidence_rejects_stale_check_head() -> None:
+def test_evidence_rejects_stale_check_head(tmp_path: Path) -> None:
     marker = "<!-- enginery:pull-request:pull-request-1 -->"
     pull = _pull(marker=marker)
     stale_check = {
+        "id": 1,
         "name": "CI",
         "status": "completed",
         "conclusion": "success",
         "head_sha": "c" * 40,
     }
-    responses: list[object] = [pull, [], {"check_runs": [stale_check]}]
+    responses: list[object] = [pull, [], {"total_count": 1, "check_runs": [stale_check]}]
     calls: list[tuple[str, ...]] = []
-    adapter = GitHubPullRequests(_config(), command_runner=_runner(responses, calls))
+    adapter = GitHubPullRequests(
+        _config(),
+        command_runner=_runner(responses, calls),
+        artifact_store=ArtifactStore(tmp_path / "artifacts"),
+    )
 
     with pytest.raises(StaleEvidenceError, match="stale"):
         adapter.evidence(11)

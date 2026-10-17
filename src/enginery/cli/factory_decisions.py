@@ -42,7 +42,11 @@ from enginery.ledger.service import LedgerService
 from enginery.policy.human_decisions import decision_verifier
 from enginery.policy.rules import HardRuleEnforcer, HardRuleError
 from enginery.policy.schemas import ApprovalSchema
-from enginery.workflows.stage1 import Stage1RunRequest, behavioral_repair_exhausted
+from enginery.workflows.stage1 import (
+    Stage1RunRequest,
+    behavioral_repair_exhausted,
+    github_outcome_terminal,
+)
 
 _PUBLICATION = PolicyAction.PULL_REQUEST_OPEN.value
 
@@ -119,6 +123,15 @@ def _actions(ledger: LedgerService, request: Stage1RunRequest) -> tuple[str, ...
         request,
         _state(ledger, str(request.run.id), "implement"),
         _state(ledger, str(request.run.id), "verify"),
+    ):
+        return ()
+    if any(
+        github_outcome_terminal(
+            request,
+            _state(ledger, str(request.run.id), "implement"),
+            _state(ledger, str(request.run.id), node),
+        )
+        for node in ("wait_for_ci", "verify")
     ):
         return ()
     waiting = preimplementation_waits(ledger, request) or _waits(ledger, request)

@@ -31,7 +31,13 @@ from enginery.cli.factory_control import drain, pause
 from enginery.cli.factory_decisions import decide, issue_for_review
 from enginery.cli.factory_diagnostics import DoctorReport, run_doctor
 from enginery.cli.factory_explain import explain, explain_lines
-from enginery.cli.factory_review import feedback, lavish_feedback, present_review, review
+from enginery.cli.factory_review import (
+    feedback,
+    github_view,
+    lavish_feedback,
+    present_review,
+    review,
+)
 from enginery.cli.factory_run import (
     factory_repairs,
     nonnegative_seconds,
@@ -132,6 +138,11 @@ def add_factory_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     _add_project(status_parser)
     status_parser.add_argument("run_id", nargs="?")
     status_parser.add_argument("--json", action="store_true")
+    status_parser.add_argument(
+        "--github-view",
+        action="store_true",
+        help="Display optional read-only gh-axi views; never used as machine evidence.",
+    )
 
     for name, synopsis in (
         ("calibrate", "Measure behavioral evaluator fault sensitivity with deliberate faults."),
@@ -468,6 +479,10 @@ def run_factory(args: argparse.Namespace) -> int:
     if command in {"run", "status"}:
         project = resolve_project(args.project)
         document = run_issue(project, args) if command == "run" else status(project, args.run_id)
+        if command == "status" and args.github_view:
+            if args.run_id is None:
+                raise InvalidInputError("--github-view requires a run id")
+            document = {**document, "github_view": github_view(project, args.run_id, document)}
         _emit(args, document, document_lines(document))
         return HOLD_EXIT if document.get("holds") else SUCCESS
     if command == "explain":

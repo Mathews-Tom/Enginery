@@ -12,12 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from enginery.adapters.github import GitHubAdapterConfig, GitHubWorkLedger
+from enginery.adapters.github import GitHubAdapterConfig, GitHubPullRequests, GitHubWorkLedger
 from enginery.application.factory_intake import derive_run_id
 from enginery.cli import factory_run
 from enginery.cli.config_locations import private_state_directory, project_identity
 from enginery.cli.main import _build_parser, main
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import AuthenticationFailureError, InvalidInputError
 from enginery.engine.operator_control import OperatorControl
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.events import AppendCommand, EventWrite
@@ -1472,3 +1472,313 @@ def test_intake_failure_repair_uses_configured_github(
         "--project",
         str(project),
     ]
+
+
+@pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "github_evidence_incomplete",
+        "github_evidence_waiting",
+        "github_evidence_blocked",
+    ],
+)
+@pytest.mark.parametrize("wait_seconds", [0, 60])
+def test_wait_seconds_retries_only_retryable_github_holds(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    reason: str,
+    wait_seconds: int,
+) -> None:
+    project, _ = bound_project
+    _, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    ledger = LedgerService.open(Path(report["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=report["run_id"])
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(
+            factory_run.RunId(report["run_id"])
+        )
+    finally:
+        ledger.close()
+    progression = Stage1Progression(Stage1ProgressionAction(node), run)
+    calls = 0
+    clock = 0.0
+
+    def advance(*_: object, **__: object) -> Stage1Progression:
+        nonlocal calls
+        calls += 1
+        return progression
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    enrich = factory_run._enrich
+
+    def held(*args: object, **kwargs: object) -> dict[str, object]:
+        result = enrich(*args, **kwargs)
+        result["next_action"] = node
+        result["nodes"] = [{"node_id": node, "status": "queued", "attempt_id": "attempt"}]
+        result["holds"] = [{"reason": reason}] if calls < 2 else [{"reason": "finished"}]
+        return result
+
+    monkeypatch.setattr(factory_run, "_enrich", held)
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **_: SimpleNamespace(
+            next_action=lambda _: progression,
+            advance=advance,
+        ),
+    )
+    monkeypatch.setattr(factory_run.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(factory_run.time, "sleep", sleep)
+    result = factory_run.advance_run(project, report["run_id"], wait_seconds=wait_seconds)
+    assert calls == (2 if wait_seconds else 1)
+    assert result["holds"] == [{"reason": "finished" if wait_seconds else reason}]
+
+
+def test_wait_seconds_stops_on_default_github_runner_authentication_failure(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project, _ = bound_project
+    _, report = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    executable = tmp_path / "expired-gh"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'HTTP 401: Bad credentials\\n' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    from enginery.ledger.artifact_store import ArtifactStore
+
+    adapter = GitHubPullRequests(
+        GitHubAdapterConfig(
+            repository="owner/repo",
+            credential_reference="github-keyring:default",
+            executable=str(executable),
+        ),
+        artifact_store=ArtifactStore(tmp_path / "auth-artifacts"),
+    )
+    calls = 0
+
+    def advance(*_: object, **__: object) -> None:
+        nonlocal calls
+        calls += 1
+        adapter.evidence(1)
+
+    def unexpected_sleep(_: float) -> None:
+        pytest.fail("authentication failure must not be polled")
+
+    monkeypatch.setattr(
+        factory_run,
+        "advancing_service",
+        lambda **kwargs: SimpleNamespace(
+            advance=advance,
+            next_action=lambda _: Stage1RunService(
+                runtime=kwargs["runtime"], ledger=kwargs["ledger"]
+            ).next_action(factory_run.RunId(report["run_id"])),
+        ),
+    )
+    monkeypatch.setattr(factory_run.time, "sleep", unexpected_sleep)
+    with pytest.raises(AuthenticationFailureError):
+        factory_run.advance_run(project, report["run_id"], wait_seconds=60)
+    assert calls == 1
+
+
+def test_status_github_view_is_optional_display_only(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project, _ = bound_project
+    _, run = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    _, plain = invoke(capsys, project, "status", run["run_id"])
+    _, viewed = invoke(capsys, project, "status", run["run_id"], "--github-view")
+    assert viewed.pop("github_view") == {
+        "display_only": True,
+        "note": "gh-axi is not configured in user preferences [executables].gh_axi",
+    }
+    # Opening a WAL ledger can create sidecars on the first status read only.
+    plain.pop("local_writes")
+    viewed.pop("local_writes")
+    assert viewed == plain
+
+
+@pytest.mark.parametrize(
+    ("node", "reason", "budget_used"),
+    [
+        ("wait_for_ci", "github_pull_request_merged", True),
+        ("wait_for_ci", "github_pull_request_merged", False),
+        ("wait_for_ci", "github_evidence_blocked", True),
+        ("verify", "github_pull_request_merged", True),
+        ("verify", "github_pull_request_merged", False),
+        ("verify", "github_evidence_blocked", True),
+        ("verify", "github_evidence_blocked", False),
+    ],
+)
+def test_terminal_github_outcome_reports_failed_without_decision(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    reason: str,
+    budget_used: bool,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    ledger = LedgerService.open(Path(original["database"]))
+    try:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+        request = run.request
+        generation = factory_run.first_attempt_generation(request.implementation.attempt_id)
+        generation += request.repair_limit if budget_used else 0
+
+        def version(name: str) -> int:
+            projection = ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id=f"{run_id}:{name}"
+            )
+            return 0 if projection is None else projection.aggregate_version
+
+        ledger.append(
+            AppendCommand(
+                correlation_id="terminal-github-outcome",
+                events=tuple(
+                    EventWrite(
+                        aggregate_type="runtime_node",
+                        aggregate_id=f"{run_id}:{name}",
+                        expected_version=version(name),
+                        event_type="runtime_node.fixture_updated",
+                        schema_version=1,
+                        payload=payload,
+                    )
+                    for name, payload in (
+                        (
+                            "implement",
+                            {
+                                "status": "passed",
+                                "attempt_id": f"implement-{generation}",
+                            },
+                        ),
+                        (
+                            "validate",
+                            {
+                                "status": "passed",
+                                "attempt_id": f"validate-{generation}",
+                                "validation_artifact_digest": "sha256:" + "a" * 64,
+                            },
+                        ),
+                        (
+                            node,
+                            {
+                                "status": "failed",
+                                "node_id": node,
+                                "attempt_id": f"{node}-{generation}",
+                                "pull_request_outcome": "blocked",
+                                "reason": reason,
+                                "message": "The GitHub outcome is terminal.",
+                                "repair": "Inspect the evidence and start a new run.",
+                            },
+                        ),
+                    )
+                ),
+            )
+        )
+        progression = Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
+        monkeypatch.setattr(
+            factory_run,
+            "read_only_service",
+            lambda **_: SimpleNamespace(next_action=lambda _: progression),
+        )
+    finally:
+        ledger.close()
+    code, report = invoke(capsys, project, "status", run_id)
+    assert code == 5
+    assert report["status"] == "failed"
+    assert report["holds"][0]["reason"] == reason
+    assert report["next_decision"] is None
+
+
+def test_behavioral_failure_with_stale_github_hold_resumes_repair(
+    bound_project: tuple[Path, StandInGitHub],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _ = bound_project
+    _, original = invoke(capsys, project, "run", "owner/repo#1", "--once")
+    run_id = original["run_id"]
+    with LedgerService.open(Path(original["database"])) as ledger:
+        runtime = factory_run.runtime_for_run(ledger, owner="factory", run_id=run_id)
+        run = Stage1RunService(runtime=runtime, ledger=ledger).read(factory_run.RunId(run_id))
+        request = run.request
+        assert request.repair_limit >= 1
+        generation = factory_run.first_attempt_generation(request.implementation.attempt_id)
+
+        def record(name: str, payload: dict[str, object]) -> None:
+            previous = ledger.read_projection(
+                aggregate_type="runtime_node", aggregate_id=f"{run_id}:{name}"
+            )
+            ledger.append(
+                AppendCommand(
+                    correlation_id=f"behavioral-after-github-hold:{name}:{payload['status']}",
+                    events=(
+                        EventWrite(
+                            aggregate_type="runtime_node",
+                            aggregate_id=f"{run_id}:{name}",
+                            expected_version=0 if previous is None else previous.aggregate_version,
+                            event_type="runtime_node.fixture_updated",
+                            schema_version=1,
+                            payload=payload,
+                        ),
+                    ),
+                )
+            )
+
+        record("implement", {"status": "passed", "attempt_id": request.implementation.attempt_id})
+        record(
+            "validate",
+            {
+                "status": "passed",
+                "attempt_id": f"validate-{generation}",
+                "validation_artifact_digest": "sha256:" + "a" * 64,
+            },
+        )
+        stale_verify = {
+            "status": "queued",
+            "node_id": "verify",
+            "attempt_id": f"verify-{generation}",
+            "reason": "github_evidence_blocked",
+            "message": "complete current-head GitHub evidence blocks readiness",
+            "repair": "Reopen the PR then run stage1 watch --advance",
+        }
+        record("verify", stale_verify)
+        record(
+            "verify",
+            {
+                **stale_verify,
+                "status": "failed",
+                "behavioral_findings": ["behavioral_assertion_failed:check:0"],
+            },
+        )
+        progression = Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
+        advances: list[object] = []
+
+        def advance(*args: object, **kwargs: object) -> Stage1Progression:
+            advances.append(args)
+            return progression
+
+        service = SimpleNamespace(next_action=lambda _: progression, advance=advance)
+        monkeypatch.setattr(factory_run, "read_only_service", lambda **_: service)
+        monkeypatch.setattr(factory_run, "advancing_service", lambda **_: service)
+    for command in ("status", "resume"):
+        code, report = invoke(capsys, project, command, run_id)
+        assert code == 0
+        assert report["status"] != "failed"
+        assert report["next_action"] == "implement"
+        assert not report["holds"]
+    assert len(advances) == 1

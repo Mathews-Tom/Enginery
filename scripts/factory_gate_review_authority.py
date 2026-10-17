@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,6 +71,11 @@ REQUIRED = {
     "http-no-authority": "an HTTP submission forwarded to real CLI ingress grants no authority",
     "changed-evidence-supersedes": "new receipts supersede authority and publication refuses it",
     "authorized-publication": "a new current-subject decision permits exactly one local PR",
+    "github-late-check-held": "a failing later-page check vetoes current GitHub evidence",
+    "github-status-held": "a failing commit status vetoes current GitHub evidence",
+    "github-changes-requested-held": "the latest changes-requested review vetoes approval",
+    "github-cap-held": "a pagination cap produces an explicit incomplete-evidence hold",
+    "github-raw-binding": "current terminal bundle and review packet bind retained GitHub bytes",
     "no-review-triggers": "no review request, mention, merge, release, deploy or hosted call",
     "challenge-secrecy-history": "retained history survives without any plaintext challenge",
 }
@@ -118,6 +124,62 @@ git("commit", "-qm", "feat: implement real local addition")
 print(json.dumps({"type": "agent_end"}), flush=True)
 """
 
+# The normal recording fixture handles intake and mutations; only evidence GETs vary.
+_RAW_GH = r"""#!__PYTHON__
+import json, os, sys
+from pathlib import Path
+from urllib.parse import parse_qs
+here = Path(__file__).resolve().parent
+args = sys.argv[1:]
+endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
+path, _, query = endpoint.partition("?")
+parts = path.split("/")
+method = args[args.index("--method") + 1] if "--method" in args else "GET"
+page = int(parse_qs(query).get("page", ["1"])[0])
+mode_file = here / "evidence-mode"
+mode = mode_file.read_text().strip() if mode_file.exists() else "pass"
+pr_file = here / "gh-pr.json"
+pr = json.loads(pr_file.read_text()) if pr_file.exists() else None
+kind = parts[-1] if parts else ""
+if method != "GET" or pr is None or kind not in {"reviews", "check-runs", "status", "statuses"}:
+    os.execv(sys.executable, [sys.executable, str(here / "gh-manual"), *args])
+with (here / "gh-calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+head = pr["head"]["sha"]
+def check(i, failed=False):
+    return {"id": i, "name": "CI" if i in (1, 101) else "filler-" + str(i),
+            "status": "completed", "conclusion": "failure" if failed else "success",
+            "head_sha": head, "started_at": "2026-10-17T00:00:00Z",
+            "completed_at": "2026-10-17T00:01:00Z"}
+if kind == "check-runs":
+    if mode == "cap":
+        checks = [check((page-1)*100+i) for i in range(1, 101)]
+        value = {"total_count": 100000, "check_runs": checks}
+    elif mode == "late-check":
+        checks = (
+            [check(i) for i in range(1, 101)] if page == 1
+            else ([check(101, True)] if page == 2 else [])
+        )
+        value = {"total_count": 101, "check_runs": checks}
+    else:
+        value = {"total_count": 1, "check_runs": [check(1)] if page == 1 else []}
+elif kind == "reviews":
+    approved = {"id": 1, "user": {"login": "independent-reviewer"}, "state": "APPROVED",
+                "commit_id": head, "submitted_at": "2026-10-16T00:00:00Z"}
+    refused = {**approved, "id": 2, "state": "CHANGES_REQUESTED",
+               "submitted_at": "2026-10-17T00:00:00Z"}
+    reviews = [approved, refused] if mode == "changes-requested" else [approved]
+    value = reviews if page == 1 else []
+else:
+    status = {"id": 1, "context": "legacy-CI",
+              "state": "failure" if mode == "status" else "success", "sha": head,
+              "created_at": "2026-10-17T00:00:00Z", "updated_at": "2026-10-17T00:01:00Z"}
+    statuses = [status] if page == 1 else []
+    combined = {"sha": head, "state": status["state"], "total_count": 1, "statuses": statuses}
+    value = combined if kind == "status" else statuses
+print(json.dumps(value))
+"""
+
 
 def operator_lavish() -> str | None:
     """Read operator selection before constructing the disposable HOME."""
@@ -140,6 +202,9 @@ class ReviewAuthorityGate(ManualPathGate):
         self.report_counter = 0
         self.presenter_session: tuple[Path, int] | None = None
         super().__init__(options, evidence)
+        self.probe_calls: list[list[str]] = []
+        self.probe_launches: list[dict[str, Any]] = []
+        self.probe_engine_calls = 0
 
     def _write_stand_ins(self) -> None:
         super()._write_stand_ins()
@@ -147,7 +212,8 @@ class ReviewAuthorityGate(ManualPathGate):
             '"title": "Bounded local change " + str(number)',
             '"title": ' + repr(HOSTILE) + " + str(number)",
         )
-        (self.bin / "gh").write_text(github.replace("__PYTHON__", sys.executable))
+        (self.bin / "gh-manual").write_text(github.replace("__PYTHON__", sys.executable))
+        (self.bin / "gh").write_text(_RAW_GH.replace("__PYTHON__", sys.executable))
         harness = (
             _HARNESS.replace("__PYTHON__", sys.executable)
             .replace("__HOSTILE__", repr(HOSTILE))
@@ -330,6 +396,10 @@ def _fixture(gate: ReviewAuthorityGate) -> None:
         'commands = ["true"]',
         "commands = [" + json.dumps(command) + "]",
     )
+    if getattr(gate, "github_probe", False):
+        text = text.replace("repair_limit = 1", "repair_limit = 0")
+        if "repair_limit = 0" not in text:
+            text = text.replace("[validation]", "[validation]\nrepair_limit = 0")
     policy.write_text(text)
     gate.git(gate.project, "add", ".")
     gate.git(gate.project, "commit", "-qm", "operator declares installed candidate validation")
@@ -634,6 +704,183 @@ def _supersession_and_publication(gate: ReviewAuthorityGate, issued: TerminalRes
         raise RuntimeError("authorized CLI did not publish the local fixture PR")
 
 
+class GitHubProbeGate(ReviewAuthorityGate):
+    """Independent real run; prerequisite assertions belong to the main authority journey."""
+
+    github_probe = True
+
+    def record(self, key: str, passed: bool, observed: Any, observer: Any = None) -> None:
+        if not passed:
+            raise RuntimeError(f"GitHub probe prerequisite failed: {key}: {observed}")
+
+
+def _github_holds(gate: ReviewAuthorityGate) -> None:
+    for mode, key, reason in (
+        ("late-check", "github-late-check-held", "github_evidence_blocked"),
+        ("status", "github-status-held", "github_evidence_blocked"),
+        ("changes-requested", "github-changes-requested-held", "github_evidence_blocked"),
+        ("cap", "github-cap-held", "github_evidence_incomplete"),
+    ):
+        options = replace(
+            gate.options,
+            evidence_out=gate.options.raw_dir / ("github-" + mode) / "evidence.json",
+        )
+        probe = GitHubProbeGate(options, gate.evidence)
+        try:
+            _fixture(probe)
+            report = probe.report_findings()
+            if report.returncode != 0:
+                raise RuntimeError("GitHub probe findings report refused: " + report.stderr)
+            issued = probe.challenge()
+            approved = probe.decide(issued)
+            if approved.code != 0:
+                raise RuntimeError("GitHub probe publication decision refused: " + approved.text)
+            (probe.bin / "evidence-mode").write_text(mode)
+            (probe.bin / "release-pr").touch()
+            before = len(probe.gh_calls())
+            resumed = probe.cli(
+                "factory",
+                "resume",
+                probe.run_id,
+                "--wait-seconds",
+                "0",
+                "--project",
+                str(probe.project),
+                "--json",
+            )
+            if resumed.returncode != 0:
+                raise RuntimeError("GitHub probe publication did not complete: " + resumed.stderr)
+            # Zero wait publishes first, then stops before the first CI poll. Advance that
+            # existing node once more; this is the sole machine evidence collection.
+            resumed = probe.cli(
+                "factory",
+                "resume",
+                probe.run_id,
+                "--wait-seconds",
+                "0",
+                "--project",
+                str(probe.project),
+                "--json",
+            )
+            status_code, status = probe.factory("status", probe.run_id)
+            calls = probe.gh_calls()[before:]
+            read_count = len(probe.gh_calls())
+            review = probe.interactive("review")
+            no_second_collection = len(probe.gh_calls()) == read_count
+            packet = probe.packet().read_text()
+            text = json.dumps(status) + resumed.stderr + review.text
+            late_page = any(
+                "check-runs?" in arg and "page=2" in arg for call in calls for arg in call
+            )
+            passed = (
+                status_code == 5
+                and reason in text
+                and bool(calls)
+                and no_second_collection
+                and reason in packet
+                and (mode != "late-check" or late_page)
+                and (
+                    mode != "cap"
+                    or (
+                        any(
+                            hold.get("reason") == "github_evidence_incomplete"
+                            for hold in status.get("holds", [])
+                            if isinstance(hold, dict)
+                        )
+                        and "pagination cap reached" in text
+                    )
+                )
+            )
+            observed = {
+                "mode": mode,
+                "reason": reason,
+                "resume_exit": resumed.returncode,
+                "resume_stdout": resumed.stdout,
+                "resume_stderr": resumed.stderr,
+                "status": status,
+                "review": review.text,
+                "packet": packet,
+                "calls": calls,
+                "no_second_collection": no_second_collection,
+            }
+        finally:
+            gate.commands.extend(probe.commands)
+            gate.completed.extend(probe.completed)
+            gate.probe_calls.extend(probe.gh_calls())
+            gate.probe_launches.extend(probe.launches())
+            engine_log = probe.bin / "container-engine-calls.jsonl"
+            if engine_log.exists():
+                gate.probe_engine_calls += len(engine_log.read_text().splitlines())
+            if probe.terminal is not None and gate.terminal is not None:
+                gate.terminal.secrets.update(probe.terminal.secrets)
+            probe.cleanup()
+            gate.evidence.raw_writer = gate.raw_write
+        gate.record(key, passed, observed)
+
+
+def _github_raw_binding(gate: ReviewAuthorityGate) -> None:
+    before = len(gate.gh_calls())
+    reviewed = gate.interactive("review")
+    packet = gate.packet().read_text()
+    bundles: list[dict[str, Any]] = []
+    objects = gate.state / "artifacts" / "objects"
+    for path in objects.glob("*/*/*"):
+        try:
+            value = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict) and value.get("github_evidence_json"):
+            bundles.append(value)
+    bound: list[str] = []
+    observations: list[dict[str, Any]] = []
+    complete = bool(bundles)
+    for bundle in bundles:
+        encoded = bundle["github_evidence_json"]
+        if not isinstance(encoded, list) or len(encoded) != 2:
+            complete = False
+            continue
+        for item in encoded:
+            evidence = json.loads(item) if isinstance(item, str) else item
+            if not isinstance(evidence, dict):
+                complete = False
+                continue
+            observations.append(evidence)
+            digests = evidence.get("raw_artifact_digests", [])
+            proofs = evidence.get("completeness", [])
+            if (
+                evidence.get("complete") is not True
+                or not digests
+                or not isinstance(proofs, list)
+                or len(proofs) != 4
+                or {proof["collection"] for proof in proofs}
+                != {"reviews", "check_runs", "combined_status", "statuses"}
+                or not all(proof.get("complete") for proof in proofs)
+            ):
+                complete = False
+            for digest in digests:
+                algorithm, _, hex_value = digest.partition(":")
+                path = objects / algorithm / hex_value[:2] / hex_value
+                if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != hex_value:
+                    complete = False
+                bound.append(digest)
+    gate.record(
+        "github-raw-binding",
+        complete
+        and bool(bound)
+        and all(digest in packet for digest in bound)
+        and len(gate.gh_calls()) == before,
+        {
+            "bundle_count": len(bundles),
+            "raw_artifact_digests": bound,
+            "observations": observations,
+            "complete": complete,
+            "review": reviewed.text,
+            "packet": packet,
+            "no_second_collection": len(gate.gh_calls()) == before,
+        },
+    )
+
+
 def _post(port: int, path: str, payload: Mapping[str, object]) -> int:
     connection = HTTPConnection("127.0.0.1", port, timeout=180)
     try:
@@ -732,7 +979,7 @@ def _lavish_feedback(gate: ReviewAuthorityGate) -> None:
 
 
 def _capture_boundaries(gate: ReviewAuthorityGate) -> None:
-    calls = gate.gh_calls()
+    calls = gate.gh_calls() + gate.probe_calls
     mutations = [
         call for call in calls if "--method" in call and call[call.index("--method") + 1] != "GET"
     ]
@@ -762,20 +1009,25 @@ def _capture_boundaries(gate: ReviewAuthorityGate) -> None:
         pull_request_creations=len(posts),
         review_requests=len(forbidden),
         container_engine_calls=(
-            len(engine_log.read_text().splitlines()) if engine_log.exists() else 0
+            (len(engine_log.read_text().splitlines()) if engine_log.exists() else 0)
+            + gate.probe_engine_calls
         ),
     )
     gate.record(
         "no-review-triggers",
         not forbidden
-        and len(posts) == 1
+        and len(posts) == 5
         and not engine_log.exists()
-        and all(not launch["hosted_session_requested"] for launch in gate.launches()),
+        and gate.probe_engine_calls == 0
+        and all(
+            not launch["hosted_session_requested"]
+            for launch in gate.launches() + gate.probe_launches
+        ),
         {"forbidden_calls": forbidden, "effects": gate.effects, "gh_calls": calls},
     )
     gate.raw_write("commands.json", gate.completed)
     gate.raw_write("gh-calls.json", calls)
-    gate.raw_write("harness-launches.json", gate.launches())
+    gate.raw_write("harness-launches.json", gate.launches() + gate.probe_launches)
 
 
 def run(gate: ReviewAuthorityGate) -> None:
@@ -792,6 +1044,8 @@ def run(gate: ReviewAuthorityGate) -> None:
         current = _refusals_and_success(gate)
         _http_refusal(gate, current)
         _supersession_and_publication(gate, current)
+        _github_raw_binding(gate)
+        _github_holds(gate)
     finally:
         _capture_boundaries(gate)
 

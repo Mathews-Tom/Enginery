@@ -1021,6 +1021,44 @@ DEL and bidi controls. The HTML has a restrictive CSP with scripts and remote
 loads disabled. Worker HTML is never served as executable packet content.
 Packets and captures stay local; nothing is uploaded or shared.
 
+### Authoritative GitHub evidence and optional display
+
+The active Stage 1 `evidence()` call collects GitHub API evidence through `gh`
+and retains the full raw responses in the existing private `ArtifactStore`.
+The terminal `Stage1EvidenceBundle` binds their content digests and collection
+completeness to the exact PR head; review and status display that recorded
+evidence, including CI, rather than performing a second evidence collection.
+The PR is read before and after collection: changed head/base or PR metadata
+cannot be accepted as one consistent observation.
+
+Reviews, check runs, combined commit status and per-context status history are
+fully paginated, not truncated to the first page. Each collection records its
+page count, explicit page cap, record count, available API total and raw-response
+digests. The operator page cap is fixed at 100 (an internal test seam may lower
+it); completion must be proven before page 100, so at most 9,900 records per
+collection. Reaching the cap, inconsistent totals, malformed responses or
+conflicting status observations holds the run, even at a terminal short page.
+Failures on later pages count: a failed check or current failed/error commit
+status blocks readiness, and a current `CHANGES_REQUESTED` review blocks it.
+Earlier approvals or a successful prefix cannot override those observations.
+
+For an optional, non-authoritative GitHub display, set the executable in private
+user preferences, never project policy:
+
+```toml
+[executables]
+gh_axi = "/absolute/path/to/gh-axi"
+```
+
+Then run `enginery factory status RUN --project PROJECT --github-view`.
+This display runs only read-only `pr view` and `pr checks`; its outputs are
+escaped and never become evidence, completeness proofs or approval. If no
+executable is configured, status reports an optional-display note, not an
+evidence failure. The authoritative evidence remains the active Stage 1
+collection and its retained bundle, regardless of whether this display is used.
+No remote preview, share or export is involved.
+
+### Review feedback and optional local presentation
 Queue terminal repair feedback with
 `enginery factory feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
 The digest must match the current packet. Feedback enters the existing bounded
@@ -1153,6 +1191,15 @@ The existing Stage 1 outcome projection also writes one visible, operation-marke
 comment to the issue and reconciles it before retrying. This is disclosed in gate effect
 counts; it is not a hidden issue reply. Collection itself still performs zero GitHub mutations.
 
+Required checks and commit statuses are matched by check name/status context,
+not by creator app or user identity. Raw API evidence retains check-run app IDs
+and status creator IDs when GitHub supplies them, but they are not authorization
+constraints: a principal with `statuses:write` can mask an earlier failing context.
+This limitation affects readiness only; merge remains outside the factory.
+Review/status vetoes and non-required failing checks stay queued for a fresh
+observation on resume, without dispatching a new implementation. Required-check
+failures retain the existing bounded implementation-repair path.
+
 ### Manual-path holds
 
 Holds report repairs; replace placeholders with the values reported for the run:
@@ -1172,6 +1219,10 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | `decision_required` | Run `enginery factory review RUN --project PROJECT`, then its reported `enginery factory decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET` command before resuming the effect. |
 | `decision_expired` | Obtain a fresh terminal review and action-specific decision, then retry the reported progression command. |
 | `decision_superseded` | Review the new bound inputs and issue a fresh decision; never restore or reuse a superseded authorization. |
+| `github_evidence_incomplete` | Read the exact collection failure detail. Retry transient API changes or repair malformed records/inconsistent totals, then run the ledger-scoped advance command printed by the hold. The operator cap is fixed at 100 pages (an internal test seam may lower it); completion must be proven before page 100, even for a terminal short page, so at most 9,900 records per collection. Never accept a prefix or start a replacement run to bypass completeness. |
+| `github_evidence_blocked` | Inspect the recorded CI/status/review detail with the printed review command; it includes `--database` and `--owner` for both factory runs and explicit Stage 1 ledgers. For a retryable hold, repair the failing check/status, requested changes, closed-unmerged PR or merge conflicts, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance`. Required-check failure at verify, or at wait_for_ci after the repair budget is used, is terminal: factory status/resume exit non-zero, report `status: failed` and `next_decision: null`, and review offers no actions or challenge. Follow the printed new-run guidance instead of retrying this run. |
+| `github_evidence_waiting` | Wait for required current-head checks/statuses and configured reviews, then run the printed `enginery stage1 watch --database DB --owner OWNER --run-id RUN --advance` to recollect complete evidence. This is the printed command for both factory and explicit Stage 1 ledgers; preserve its database and owner. Pending or skipped checks do not count as success. |
+| `github_pull_request_merged` | The PR was merged outside Enginery before verification. This run is terminal, not a retryable GitHub hold: factory status/resume exit non-zero with this hold, `status: failed` and `next_decision: null`; review offers no actions or challenge. Inspect its recorded evidence with the printed review command and start a new run only if needed. A merged PR cannot be reopened. |
 | Missing or unparseable `origin` | `git remote add origin https://github.com/OWNER/REPO.git`; correct an existing remote with `git remote set-url origin https://github.com/OWNER/REPO.git`. |
 | Missing or unauthenticated GitHub CLI | Install `gh`, then `gh auth login`; inspect prerequisites with `enginery factory doctor --project .`. |
 | `issue intake` from `collect` or `run` (GitHub, transient or authentication error) | Run `<configured gh> auth status`, then `enginery factory collect --dry-run --project .`. |

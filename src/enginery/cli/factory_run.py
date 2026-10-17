@@ -64,6 +64,7 @@ from enginery.workflows.stage1 import (
     Stage1RunService,
     behavioral_repair_exhausted,
     first_attempt_generation,
+    github_outcome_terminal,
     stage1_request_from_state,
 )
 
@@ -402,7 +403,7 @@ def advance_run(
         while True:
             before = _node_digest(nodes(ledger, runtime, run_id=run_id))
             report = _enrich(project, ledger, watch_document(ledger, runtime, progression), run_id)
-            if _finished(report):
+            if _finished(report) and not _retryable_github_hold(report):
                 return report
             previous = progression
             if _superseded_by(project, run.request, run_id) is not None:
@@ -421,7 +422,9 @@ def advance_run(
                 watch_document(ledger, runtime, progression, action_taken=previous.action.value),
                 run_id,
             )
-            if once or _finished(report):
+            if once or (_finished(report) and not _retryable_github_hold(report)):
+                return report
+            if wait_seconds == 0 and _retryable_github_hold(report):
                 return report
             digest = _node_digest(cast(list[dict[str, object]], report["nodes"]))
             if progression.action in _EXECUTES_NOW and (
@@ -443,7 +446,9 @@ def advance_run(
                 current_nodes = nodes(ledger, runtime, run_id=run_id)
                 current_digest = _node_digest(current_nodes)
                 report = _enrich(project, ledger, watch_document(ledger, runtime, observed), run_id)
-                if _finished(report) or time.monotonic() >= deadline:
+                if (
+                    _finished(report) and not _retryable_github_hold(report)
+                ) or time.monotonic() >= deadline:
                     return report
                 backoff = min(backoff + 1, len(_BACKOFF_SECONDS) - 1)
                 if (
@@ -476,6 +481,18 @@ def _node_digest(node_states: list[dict[str, object]]) -> tuple[tuple[str, ...],
         )
         for node in node_states
         for worker in (node.get("worker"),)
+    )
+
+
+def _retryable_github_hold(report: Mapping[str, object]) -> bool:
+    holds = report.get("holds")
+    return (
+        report.get("next_action") in {"wait_for_ci", "verify"}
+        and isinstance(holds, list)
+        and len(holds) == 1
+        and isinstance(holds[0], Mapping)
+        and holds[0].get("reason")
+        in {"github_evidence_incomplete", "github_evidence_waiting", "github_evidence_blocked"}
     )
 
 
@@ -587,6 +604,57 @@ def _enrich(
             ),
             **{key: state[key] for key in ("repair", "resolve", "details") if key in state},
         }
+    implementation_state = ledger.read_projection(
+        aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:implement"
+    )
+    terminal_github = None
+    for name in ("verify", "wait_for_ci"):
+        github_node = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE, aggregate_id=f"{run_id}:{name}"
+        )
+        if github_node is not None and github_outcome_terminal(
+            request,
+            {} if implementation_state is None else implementation_state.state,
+            github_node.state,
+        ):
+            terminal_github = github_node.state
+            hold = {
+                key: terminal_github[key]
+                for key in ("reason", "message", "repair")
+                if key in terminal_github
+            }
+            break
+    if hold is None and report["next_action"] in {
+        "wait_for_ci",
+        "verify",
+        "await_human_review",
+        "blocked",
+    }:
+        implementation_projection = ledger.read_projection(
+            aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+            aggregate_id=f"{run_id}:implement",
+        )
+        current_attempt = (
+            request.implementation.attempt_id
+            if implementation_projection is None
+            else str(implementation_projection.state.get("attempt_id", ""))
+        )
+        for name in ("verify", "wait_for_ci"):
+            ci_observation = ledger.read_projection(
+                aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
+                aggregate_id=f"{run_id}:{name}",
+            )
+            state = {} if ci_observation is None else ci_observation.state
+            attempt = state.get("attempt_id")
+            if not isinstance(attempt, str) or first_attempt_generation(
+                attempt
+            ) != first_attempt_generation(current_attempt):
+                continue
+            if isinstance(state.get("reason"), str) and str(state["reason"]).startswith(
+                "github_evidence_",
+            ):
+                hold = {key: state[key] for key in ("reason", "message", "repair") if key in state}
+                break
     node_states = cast(list[dict[str, object]], report["nodes"])
     awaiting = next((node for node in node_states if node["status"] == "awaiting_human"), None)
     prefix = (
@@ -605,7 +673,9 @@ def _enrich(
             verification.state,
         )
     )
-    if exhausted_behavior:
+    if terminal_github is not None:
+        report.update(status="failed", reason=terminal_github["reason"], next_decision=None)
+    elif exhausted_behavior:
         assert verification is not None
         review_command, _ = decision_commands(run_id, str(project), "pull_request.open")
         new_run_command = shlex.join(

@@ -68,13 +68,44 @@ def test_review_authority_exercises_real_cli_and_every_required_assertion(
     assert len(history["decisions"]) == 2
     assert (tmp_path / "evidence.raw" / history["retained_ledger"]).is_file()
     effects = document["external_effect_counts"]
-    assert effects["pull_request_creations"] == 1
+    assert (
+        effects["pull_request_creations"] == 5
+    )  # Main authority run plus four isolated CI probes.
     assert effects["review_requests"] == effects["hosted_sessions"] == 0
     assert effects["container_engine_calls"] == effects["hosted_inference_calls"] == 0
+    for key, reason in (
+        ("github-late-check-held", "github_evidence_blocked"),
+        ("github-status-held", "github_evidence_blocked"),
+        ("github-changes-requested-held", "github_evidence_blocked"),
+        ("github-cap-held", "github_evidence_incomplete"),
+    ):
+        probe = assertions[key]["observed"]
+        assert probe["reason"] == reason
+        assert probe["no_second_collection"] is True
+        assert reason in probe["packet"]
+        assert reason in json.dumps(probe["status"]) + probe["resume_stderr"] + probe["review"]
+    late_calls = assertions["github-late-check-held"]["observed"]["calls"]
+    assert any("check-runs?" in arg and "page=2" in arg for call in late_calls for arg in call)
+    binding = assertions["github-raw-binding"]["observed"]
+    assert binding["bundle_count"] > 0
+    assert binding["raw_artifact_digests"]
+    assert binding["complete"] is True
+    assert len(binding["observations"]) == 2
+    for observation in binding["observations"]:
+        assert observation["complete"] is True
+        assert {proof["collection"] for proof in observation["completeness"]} == {
+            "reviews",
+            "check_runs",
+            "combined_status",
+            "statuses",
+        }
+        assert all(proof["complete"] for proof in observation["completeness"])
+    assert binding["no_second_collection"] is True
+    assert all(digest in binding["packet"] for digest in binding["raw_artifact_digests"])
     assert json.loads(capsys.readouterr().out)["verdict"] == "pass"
 
 
-def test_review_authority_dispatch_is_local_and_has_no_github_pagination_assertions(
+def test_review_authority_dispatch_requires_active_github_pagination_assertions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -84,7 +115,13 @@ def test_review_authority_dispatch_is_local_and_has_no_github_pagination_asserti
 
     assert spec.prepare is authority.prepare and not spec.need_relay
     assert spec.required(options) == authority.REQUIRED
-    assert not any(key.startswith("github-") for key in spec.required(options))
+    assert {
+        "github-late-check-held",
+        "github-status-held",
+        "github-changes-requested-held",
+        "github-cap-held",
+        "github-raw-binding",
+    } <= set(spec.required(options))
     monkeypatch.setattr(authority, "operator_lavish", lambda: "/operator/lavish-axi")
     assert set(spec.required(options)) == set(authority.REQUIRED) | set(authority.LAVISH_REQUIRED)
 

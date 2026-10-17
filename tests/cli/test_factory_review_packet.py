@@ -286,9 +286,11 @@ def test_receipt_display_verifies_digest_without_treating_worker_claim_as_verdic
         factory_review._receipt_document(tmp_path, str(digest))
 
 
+@pytest.mark.parametrize("node_id", ["verify", "wait_for_ci"])
 def test_packet_reads_durable_observation_projection_and_verified_head(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    node_id: str,
 ) -> None:
     from tests.cli.test_stage1 import _request
 
@@ -360,7 +362,7 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
         "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
         "github_evidence": {"status": "passed"},
     }
-    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:verify")] = ci_state
+    states[(factory_review.RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:{node_id}")] = ci_state
     current = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
     assert json.loads(current.ci_evidence_json)["availability"] == "current_head"
     ci_state["configuration_snapshot_digest"] = str(Digest.of_bytes(b"old configuration"))
@@ -375,6 +377,23 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     assert stale_result["availability"] == "not_persisted_for_current_head"
     assert stale_result["receipts"] == []
     assert json.loads(stale.ci_evidence_json)["availability"] == "not_persisted_for_current_head"
+    ci_state.update(
+        head_revision=head,
+        configuration_snapshot_digest=str(request.run.configuration_snapshot_digest),
+        reason="github_evidence_incomplete",
+        repair="retry collection without accepting a prefix",
+        message="collection reached the fixed page cap",
+    )
+    incomplete = factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]
+    incomplete_view = json.loads(incomplete.ci_evidence_json)
+    assert incomplete_view["availability"] == "not_persisted_for_current_head"
+    assert incomplete_view["persisted"] == {}
+    assert incomplete_view["collection_hold"] == {
+        "node_id": node_id,
+        "reason": "github_evidence_incomplete",
+        "repair": "retry collection without accepting a prefix",
+        "message": "collection reached the fixed page cap",
+    }
     monkeypatch.setattr(factory_review, "_revision", lambda *args: "c" * 40)
     with pytest.raises(InvalidInputError, match="head changed"):
         factory_review.build_packet(tmp_path, ledger, request)  # type: ignore[arg-type]

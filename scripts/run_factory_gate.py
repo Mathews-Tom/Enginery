@@ -40,7 +40,7 @@ Scenarios:
 
 ``review-authority``
     Local real CLI/PTY review, feedback, one-time authenticated decisions, refusal cases,
-    evidence supersession and publication. No GitHub pagination assertions are implied.
+    evidence supersession, publication and complete exact-head GitHub evidence holds.
     Like behavioral-acceptance, it rejects hosted, engine, image and custody flags.
 
 The evidence document (schema_version 1) is printed to stdout and written to ``--evidence-out``;

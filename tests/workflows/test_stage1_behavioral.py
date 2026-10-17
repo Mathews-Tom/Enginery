@@ -30,7 +30,11 @@ from enginery.workflows.stage1 import (
 
 
 def _ready_to_verify(
-    ledger_service: LedgerService, tmp_path: Path, *, repair_limit: int = 1
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    *,
+    repair_limit: int = 1,
+    observe_ci: bool = True,
 ) -> tuple[Stage1RunRequest, Stage1RunService, datetime]:
     request, service, runtime, pull_requests, now = _check_disposition_fixture(
         ledger_service, tmp_path, start=False
@@ -71,8 +75,9 @@ def _ready_to_verify(
     )
     AuthenticatedDecisions(ledger_service).approve(request)
     service.open_pull_request(request, now=now, heartbeat_window=heartbeat)
-    service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
-    assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
+    if observe_ci:
+        service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
+        assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
     return request, service, now
 
 

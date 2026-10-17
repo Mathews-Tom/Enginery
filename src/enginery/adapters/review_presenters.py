@@ -282,3 +282,33 @@ class LavishPresenter:
 
     def end(self, packet_path: Path) -> None:
         self._run("end", str(_packet(packet_path, self.packet_root or self.private_state_dir)))
+
+
+@dataclass(frozen=True, slots=True)
+class GhAxiView:
+    executable: str
+
+    def _view(self, command: str, repository: str, number: int) -> str:
+        if not self.executable or self.executable.startswith("-"):
+            raise PresenterError("gh-axi executable must be explicitly configured")
+        parts = repository.split("/")
+        if len(parts) != 2 or any(
+            not part
+            or not part[0].isalnum()
+            or any(not (char.isascii() and (char.isalnum() or char in "-_.")) for char in part)
+            for part in parts
+        ):
+            raise PresenterError("repository must be an owner/name pair")
+        if isinstance(number, bool) or number < 1:
+            raise PresenterError("pull request number must be positive")
+        return escape_terminal(
+            _execute(
+                (self.executable, "pr", command, str(number), "--repo", repository), _environment()
+            )
+        )
+
+    def pr_view(self, repository: str, number: int) -> str:
+        return self._view("view", repository, number)
+
+    def checks(self, repository: str, number: int) -> str:
+        return self._view("checks", repository, number)

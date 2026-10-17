@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from enginery.adapters.git_reader import DIFF_FLAGS, git_bytes
-from enginery.adapters.review_presenters import LavishPresenter, PresenterError
+from enginery.adapters.review_presenters import GhAxiView, LavishPresenter, PresenterError
 from enginery.application.branch_publication import ProtectedPathPolicy
 from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
 from enginery.cli.config_locations import private_state_directory, read_user_layer
@@ -113,7 +113,7 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
     runtime = CoordinatorRuntime(ledger, owner="factory")
     states = {
         name: _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:{name}")
-        for name in ("implement", "validate", "review", "open_pr", "verify")
+        for name in ("implement", "validate", "review", "open_pr", "wait_for_ci", "verify")
     }
     implementation = states["implement"]
     attempt_id = implementation.get("attempt_id")
@@ -182,9 +182,16 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         receipts.append(calibration)
     raw = request.initial_state()
     findings = states["review"].get("finding_ids", [])
+    ci_node = (
+        "verify"
+        if states["verify"].get("github_evidence")
+        or states["verify"].get("reason") == "github_evidence_incomplete"
+        else "wait_for_ci"
+    )
+    ci_state = states[ci_node]
     ci = {
         key: value
-        for key, value in states["verify"].items()
+        for key, value in ci_state.items()
         if key
         in {
             "head_revision",
@@ -195,19 +202,31 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
             "behavioral_receipt_digests",
             "github_evidence",
             "github_evidence_digest",
+            "github_evidence_observations",
+            "evidence_artifact_digest",
+            "reason",
+            "repair",
+            "message",
         }
     }
-    ci_head = ci.get("head_revision")
-    ci_view: dict[str, object] = {
-        "availability": "current_head"
-        if ci
-        and ci_head == head
+    incomplete_collection = ci.get("reason") == "github_evidence_incomplete"
+    ci_is_current = (
+        bool(ci)
+        and not incomplete_collection
+        and ci.get("head_revision") == head
         and ci.get("configuration_snapshot_digest") == configuration_digest
-        else "not_persisted_for_current_head",
-        "persisted": ci
-        if ci_head == head and ci.get("configuration_snapshot_digest") == configuration_digest
-        else {},
+    )
+    ci_view: dict[str, object] = {
+        "availability": "current_head" if ci_is_current else "not_persisted_for_current_head",
+        "persisted": ci if ci_is_current else {},
     }
+    if incomplete_collection:
+        # A failed collection is diagnostic state, never current-subject evidence.
+        collection_hold: dict[str, object] = {"node_id": ci_node}
+        collection_hold.update(
+            {key: ci[key] for key in ("reason", "repair", "message") if key in ci}
+        )
+        ci_view["collection_hold"] = collection_hold
     sections = (
         (
             "Intent",
@@ -493,3 +512,30 @@ def lavish_feedback(
         return feedback(project, run_id, subject_digest=subject_digest, text="\n".join(findings))
     except PresenterError as error:
         raise InvalidInputError(str(error)) from error
+
+
+def github_view(project: Path, run_id: str, report: Mapping[str, object]) -> dict[str, object]:
+    """Optional read-only presentation; none of this output can become evidence."""
+    user = read_user_layer()
+    programs = None if user is None else user.operator_executables
+    result: dict[str, object] = {"display_only": True}
+    if programs is None or programs.gh_axi is None:
+        return {
+            **result,
+            "note": "gh-axi is not configured in user preferences [executables].gh_axi",
+        }
+    pull_request = report.get("pull_request")
+    number = pull_request.get("number") if isinstance(pull_request, Mapping) else None
+    if type(number) is not int:
+        return {**result, "note": "this run has no durable pull request to display"}
+    ledger, request = _open(project, run_id)
+    try:
+        view = GhAxiView(programs.gh_axi)
+        repository = request.execution_configuration.github_repository
+        result["view"] = view.pr_view(repository, number)
+        result["checks"] = view.checks(repository, number)
+        return result
+    except PresenterError as error:
+        return {**result, "note": str(error)}
+    finally:
+        ledger.close()

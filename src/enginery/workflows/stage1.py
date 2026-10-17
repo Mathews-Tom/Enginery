@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from collections.abc import Callable, Mapping
@@ -49,6 +50,7 @@ from enginery.domain.errors import (
     MissingPrerequisiteError,
     OperationTimeoutError,
     StaleEvidenceError,
+    TransientProviderFailureError,
 )
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
 from enginery.domain.execution_selection import (
@@ -90,6 +92,7 @@ from enginery.engine.task_repository import out_path_for, resolve_commit, verifi
 from enginery.engine.workspace import WORKSPACE_MODE_GIT_WORKTREE, WORKSPACE_MODE_TASK_LOCAL_CLONE
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.evidence.acceptance_baseline import load_acceptance_baseline
+from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import Stage1ImplementationExecutor, SupervisedHarness
@@ -768,6 +771,7 @@ class Stage1RunService:
         if (
             wait_for_ci_state.get("status") == "failed"
             and wait_for_ci_state.get("pull_request_outcome") == PullRequestOutcome.BLOCKED.value
+            and wait_for_ci_state.get("reason") != "github_pull_request_merged"
         ):
             # A genuine required-check failure on our own pushed head takes the same
             # bounded repair edge as an actionable review finding: a fresh implementation
@@ -1677,12 +1681,44 @@ class Stage1RunService:
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        evidence = self._require_pull_requests().evidence(pull_request_number)
+        try:
+            evidence = self._require_pull_requests().evidence(pull_request_number)
+        except (TransientProviderFailureError, StaleEvidenceError) as error:
+            self._github_evidence_hold(request, "wait_for_ci", epoch.epoch, now, error)
+            return PullRequestOutcome.WAITING
         outcome = evaluate_pull_request(evidence, requirements)
+        extra: dict[str, object] = {
+            "pull_request_outcome": outcome.value,
+            "head_revision": expected_head_revision,
+            "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+            "github_evidence": evidence.to_state(),
+            "github_evidence_digest": str(evidence.digest),
+            "reason": None,
+            "repair": None,
+            "message": None,
+        }
         if outcome is PullRequestOutcome.WAITING:
+            self._github_pending(request, "wait_for_ci", epoch.epoch, now, extra)
             return outcome
-        extra: dict[str, object] = {"pull_request_outcome": outcome.value}
         failed_checks = _failed_checks(evidence, request.required_checks)
+        if outcome is PullRequestOutcome.BLOCKED:
+            extra.update(
+                self._github_blocked_repair(
+                    request,
+                    terminal=(
+                        evidence.pull_request.merged
+                        or (
+                            bool(failed_checks)
+                            and generation - _generation(request.implementation.attempt_id)
+                            >= request.repair_limit
+                        )
+                    ),
+                    merged=evidence.pull_request.merged,
+                )
+            )
+            if not failed_checks and not evidence.pull_request.merged:
+                self._github_blocked(request, "wait_for_ci", epoch.epoch, now, extra)
+                return outcome
         if failed_checks:
             extra["failed_checks"] = list(failed_checks)
         self.runtime.complete_node(
@@ -1694,6 +1730,142 @@ class Stage1RunService:
             extra=extra,
         )
         return outcome
+
+    def _github_commands(self, request: Stage1RunRequest) -> tuple[str, str]:
+        database = self.ledger.connection.execute("PRAGMA database_list").fetchone()[2]
+        owner = self.runtime.coordinator.owner
+        review, _ = decision_commands(
+            str(request.run.id),
+            str(request.repository_path),
+            "pull_request.open",
+            database=database or None,
+            owner=owner,
+        )
+        advance = shlex.join(
+            (
+                "enginery",
+                "stage1",
+                "watch",
+                "--database",
+                database,
+                "--owner",
+                owner,
+                "--run-id",
+                str(request.run.id),
+                "--advance",
+            )
+        )
+        return review, advance
+
+    def _github_blocked_repair(
+        self, request: Stage1RunRequest, *, terminal: bool = False, merged: bool = False
+    ) -> dict[str, object]:
+        review, advance = self._github_commands(request)
+        if terminal:
+            explanation = (
+                "The PR was merged outside Enginery before verification."
+                if merged
+                else "Required current-head checks failed; this run cannot advance."
+            )
+            return {
+                "reason": "github_pull_request_merged" if merged else "github_evidence_blocked",
+                "repair": (
+                    f"{explanation} Inspect its evidence with {review}. "
+                    "For factory runs, a new attempt requires enginery factory run "
+                    f"{shlex.quote(request.work_snapshot.work_item.external_reference)} "
+                    f"--supersede --project {shlex.quote(str(request.repository_path))} "
+                    "after the issue snapshot changes. For stage1 --database/--owner runs, "
+                    "use stage1 build-request and stage1 start with a new run id."
+                ),
+                "message": explanation,
+            }
+        repair = (
+            f"{review}; repair failing required current-head checks, statuses or requested "
+            "review changes; reopen a closed PR or resolve its merge conflicts as applicable; "
+            f"then run {advance}"
+        )
+        return {
+            "reason": "github_evidence_blocked",
+            "repair": repair,
+            "message": "complete current-head GitHub evidence blocks readiness",
+        }
+
+    def _github_blocked(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        evidence: Mapping[str, object],
+    ) -> None:
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_blocked",
+            repair=str(evidence["repair"]),
+            message=str(evidence["message"]),
+            extra=evidence,
+        )
+
+    def _github_pending(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        evidence: Mapping[str, object],
+    ) -> None:
+        _, advance = self._github_commands(request)
+        repair = (
+            "wait for all required current-head checks/statuses and configured reviews, then "
+            f"run {advance}"
+        )
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_waiting",
+            repair=repair,
+            message="current-head GitHub evidence is complete but not ready",
+            extra=evidence,
+        )
+
+    def _github_evidence_hold(
+        self,
+        request: Stage1RunRequest,
+        node_id: str,
+        epoch: int,
+        now: datetime,
+        error: Exception,
+    ) -> None:
+        _, advance = self._github_commands(request)
+        repair = (
+            "retry transient GitHub API changes or repair malformed records; never accept a "
+            "prefix. The fixed limit is 100 pages; completion must be proven before page 100. "
+            "Collections reaching that page cannot be accepted. Retry "
+            f"{advance}"
+        )
+        message = f"github_evidence_incomplete: {error}; repair: {repair}"
+        self.runtime.record_evidence_hold(
+            run_id=str(request.run.id),
+            node_id=node_id,
+            epoch=epoch,
+            now=now,
+            reason="github_evidence_incomplete",
+            repair=repair,
+            message=message,
+            extra={
+                "github_evidence": None,
+                "github_evidence_digest": None,
+                "github_evidence_observations": None,
+                "pull_request_outcome": None,
+                "head_revision": None,
+                "configuration_snapshot_digest": None,
+            },
+        )
 
     def verify_merge_ready(
         self,
@@ -1758,7 +1930,12 @@ class Stage1RunService:
                     epoch=epoch.epoch,
                     now=now,
                     outcome="failed",
-                    extra={"behavioral_findings": [str(finding) for finding in findings]},
+                    extra={
+                        "behavioral_findings": [str(finding) for finding in findings],
+                        "reason": None,
+                        "repair": None,
+                        "message": None,
+                    },
                 )
                 if (
                     generation - _generation(request.implementation.attempt_id)
@@ -1826,19 +2003,64 @@ class Stage1RunService:
         epoch = self.runtime.register_node(
             dispatch=dispatch, now=now, heartbeat_window=heartbeat_window
         )
-        result = Stage1VerificationExecutor(
-            work_ledger=self._require_work_ledger(),
-            pull_requests=self._require_pull_requests(),
-        ).verify(request=verification_request, observed_at=now)
-        if result.outcome is PullRequestOutcome.WAITING:
-            return result
+        try:
+            result = Stage1VerificationExecutor(
+                work_ledger=self._require_work_ledger(),
+                pull_requests=self._require_pull_requests(),
+            ).verify(request=verification_request, observed_at=now)
+        except (TransientProviderFailureError, StaleEvidenceError) as error:
+            self._github_evidence_hold(request, "verify", epoch.epoch, now, error)
+            return Stage1VerificationResult(PullRequestOutcome.WAITING, None)
         extra: dict[str, object] = {
             "pull_request_outcome": result.outcome.value,
             "head_revision": verification_request.requirements.expected_head_revision,
             "configuration_snapshot_digest": str(request.run.configuration_snapshot_digest),
+            "reason": None,
+            "repair": None,
+            "message": None,
         }
+        if result.github_evidence:
+            extra["github_evidence"] = result.github_evidence[-1].to_state()
+            extra["github_evidence_observations"] = [
+                observation.to_state() for observation in result.github_evidence
+            ]
+            extra["github_evidence_digest"] = str(
+                Digest.of_json(
+                    extra["github_evidence_observations"],
+                )
+            )
+        if result.outcome is PullRequestOutcome.WAITING:
+            self._github_pending(request, "verify", epoch.epoch, now, extra)
+            return result
+        if result.outcome is PullRequestOutcome.BLOCKED:
+            observation = result.github_evidence[-1] if result.github_evidence else None
+            merged = observation is not None and observation.pull_request.merged
+            extra.update(
+                self._github_blocked_repair(
+                    request,
+                    terminal=merged
+                    or bool(observation and _failed_checks(observation, request.required_checks)),
+                    merged=merged,
+                )
+            )
+            if (
+                observation is not None
+                and not merged
+                and not _failed_checks(observation, request.required_checks)
+            ):
+                self._github_blocked(request, "verify", epoch.epoch, now, extra)
+                return result
         if result.evidence is not None:
             extra["evidence_digest"] = str(result.evidence.digest)
+            store = self.ledger.artifact_store or ArtifactStore(
+                request.execution_configuration.artifact_root,
+            )
+            extra["evidence_artifact_digest"] = str(
+                store.publish_bytes(
+                    json.dumps(result.evidence.to_state(), sort_keys=True).encode(),
+                    media_type="application/json",
+                )
+            )
         if not request.execution_selection.legacy:
             extra["execution_selection_digest"] = str(request.execution_selection.digest)
         self.runtime.complete_node(
@@ -2079,6 +2301,31 @@ def behavioral_repair_exhausted(
     )
 
 
+def github_outcome_terminal(
+    request: Stage1RunRequest,
+    implementation: Mapping[str, object],
+    observation: Mapping[str, object],
+) -> bool:
+    """Recognize terminal GitHub outcomes only for the current implementation."""
+    if observation.get("status") != "failed" or observation.get("behavioral_findings"):
+        return False
+    current = implementation.get("attempt_id", request.implementation.attempt_id)
+    observed = observation.get("attempt_id")
+    if not isinstance(current, str) or not isinstance(observed, str):
+        return False
+    generation = first_attempt_generation(current)
+    if first_attempt_generation(observed) != generation:
+        return False
+    return observation.get("reason") == "github_pull_request_merged" or (
+        observation.get("reason") == "github_evidence_blocked"
+        and (
+            observation.get("node_id") == "verify"
+            or generation - first_attempt_generation(request.implementation.attempt_id)
+            >= request.repair_limit
+        )
+    )
+
+
 def first_attempt_generation(attempt_id: str) -> int:
     """Return the generation a run's first implementation attempt id carries, or refuse the id.
 
@@ -2166,7 +2413,7 @@ def _failed_checks(
     for check in evidence.checks:
         if check.name not in required_checks:
             continue
-        if check.status.lower() != "completed" or (
+        if check.status.lower() == "completed" and (
             check.conclusion is None or check.conclusion.lower() != "success"
         ):
             entries.append(

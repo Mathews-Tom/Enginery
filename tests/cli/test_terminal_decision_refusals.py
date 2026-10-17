@@ -144,3 +144,45 @@ def test_exhausted_review_cli_has_no_actions_or_challenge(
     assert "decision_challenge_unknown" in refusal
     repair = refusal.split("repair:", 1)[1]
     assert "factory review" in repair and "factory decide" not in repair
+
+
+@pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
+@pytest.mark.parametrize("reason", ["github_pull_request_merged", "github_evidence_blocked"])
+def test_terminal_github_review_offers_no_authority(
+    ingress: Ingress,  # noqa: F811
+    terminal,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+    node: str,
+    reason: str,
+) -> None:
+    ingress.replace_request(repair_limit=1 if node == "verify" else 0)
+    ingress.update_node("open_pr", status="passed")
+    if node == "verify":
+        ingress.register("wait_for_ci", outcome="passed")
+    ingress.register(node, outcome="failed")
+    ingress.update_node(node, attempt_id=ingress.state("implement")["attempt_id"], reason=reason)
+    assert main(["factory", "review", RUN, *scope(ingress)]) == 0
+    output = capsys.readouterr()
+    assert "Subject digest:" in output.out
+    assert "Decision actions:" not in output.out
+    assert "Decision challenge:" not in output.out
+    assert (
+        main(
+            [
+                "factory",
+                "decide",
+                RUN,
+                *scope(ingress),
+                "--action",
+                "pull_request.open",
+                "--subject-digest",
+                ingress.packet.subject_digest,
+                "--challenge",
+                "0" * 64,
+            ]
+        )
+        == 2
+    )
+    repair = capsys.readouterr().err.split("repair:", 1)[1]
+    assert "factory review" in repair and "factory decide" not in repair
+    assert not list_decisions(ingress.ledger.connection, RUN)
