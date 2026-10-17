@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -48,8 +49,7 @@ def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction |
 def test_root_command_names_and_scope_labels() -> None:
     commands = _subparsers(_build_parser())
     assert commands is not None
-    # Transitional groups may coexist during the cutover; consolidated names are mandatory.
-    assert commands.choices.keys() >= _ROOT_COMMANDS
+    assert commands.choices.keys() == _ROOT_COMMANDS
     labels = {
         **dict.fromkeys(_PROJECT_COMMANDS, "Project:"),
         **dict.fromkeys(_HOST_COMMANDS, "Host:"),
@@ -60,16 +60,51 @@ def test_root_command_names_and_scope_labels() -> None:
     entries = {entry.dest: entry.help for entry in commands._choices_actions}
     assert set(entries) == set(commands.choices)
     for name, help_text in entries.items():
-        assert help_text.startswith(
-            labels.get(name, ("Project:", "Host:", "Engine ledger:", "Operator ledger:", "Policy:"))
-        ), (name, help_text)
+        assert help_text.startswith(labels[name]), (name, help_text)
         sentence = help_text.split(": ", 1)[1]
         assert sentence[0].isupper() and sentence.endswith("."), (name, help_text)
 
 
+def test_engine_command_names() -> None:
+    commands = _subparsers(_build_parser())
+    assert commands is not None
+    engine = _subparsers(commands.choices["engine"])
+    assert engine is not None
+    assert engine.choices.keys() == {
+        "build-request",
+        "start",
+        "next",
+        "review",
+        "approve",
+        "reject",
+        "cancel",
+        "evidence",
+        "status",
+    }
+
+
+def test_project_control_and_explanation_signatures() -> None:
+    commands = _subparsers(_build_parser())
+    assert commands is not None
+    for name in ("resume", "explain"):
+        assert not commands.choices[name]._get_positional_actions()
+    assert {
+        option for action in commands.choices["pause"]._actions for option in action.option_strings
+    } == {"-h", "--help", "--project", "--reason", "--json"}
+    assert {
+        option for action in commands.choices["resume"]._actions for option in action.option_strings
+    } == {"-h", "--help", "--project", "--json"}
+
+
+def test_single_console_script_declaration() -> None:
+    project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    metadata = tomllib.loads(project.read_text(encoding="utf-8"))
+    assert metadata["project"]["scripts"] == {"enginery": "enginery.cli.main:main"}
+
+
 def test_recursive_help_has_no_numbered_workflow_stages() -> None:
     def visit(parser: argparse.ArgumentParser) -> None:
-        # Inspect prose, not transitional parser names printed in usage and choices.
+        # Inspect help prose; root parser names are checked separately.
         prose = [parser.description or ""]
         for action in parser._actions:
             if isinstance(action.help, str):

@@ -26,38 +26,17 @@ def scope(value: Ingress) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("command", ["project", "stage1"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_requeue_cli_refuses_before_authentication(
     ingress: Ingress,  # noqa: F811
     capsys: pytest.CaptureFixture[str],
-    command: str,
     registered: bool,
 ) -> None:
     ingress.register("validate", outcome="awaiting_human")
     if not registered:
         ingress.preferences.write_bytes(b"schema_version = 1\n")
     before = ingress.state("validate")
-    args = (
-        ["decide", RUN, *scope(ingress), "--action", "human_wait.validate.requeue"]
-        if command == "project"
-        else [
-            "stage1",
-            "resume",
-            "--database",
-            str(ingress.database),
-            "--owner",
-            "stage1-cli",
-            "--run-id",
-            RUN,
-            "--node-id",
-            "validate",
-            "--attempt-id",
-            "validate-1",
-            "--operation-id",
-            "operation-1",
-        ]
-    )
+    args = ["decide", RUN, *scope(ingress), "--action", "human_wait.validate.requeue"]
     code = main(
         [
             *args,

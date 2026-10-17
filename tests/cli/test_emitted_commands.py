@@ -266,7 +266,7 @@ def test_source_guard_rejects_unknown_paths() -> None:
         'shlex.join(["enginery", "nonexistent-command", "inspect"])',
         '["enginery", "nonexistent-command", unknown]',
         '"enginery pause --nonexistent-option --project P"',
-        '"enginery explain RUN"',
+        '"enginery status RUN EXTRA"',
     ],
 )
 def test_source_guard_folds_expressions_and_checks_leaf_arguments(expression: str) -> None:
@@ -277,7 +277,11 @@ def test_source_guard_folds_expressions_and_checks_leaf_arguments(expression: st
 
 @pytest.mark.parametrize(
     "arguments",
-    ['"nonexistent-command", run_id', '"pause", "--lift"', '"explain", run_id'],
+    [
+        '"nonexistent-command", run_id',
+        '"pause", "--nonexistent-option"',
+        '"status", run_id, extra',
+    ],
 )
 def test_source_guard_checks_argv_helper_calls(arguments: str) -> None:
     tree = ast.parse(

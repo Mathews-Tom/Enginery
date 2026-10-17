@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 
-from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import StackId
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.stack_coordinator import StackCoordinator
@@ -23,8 +22,6 @@ from enginery.ledger.service import LedgerService
 def run_stage2(args: argparse.Namespace) -> int:
     """Inspect one engine release stack and emit a machine-readable result."""
     command = args.stage2_command
-    if command is None:
-        raise InvalidInputError("engine requires a subcommand")
     if command == "status":
         _status(args)
     else:  # pragma: no cover - argparse restricts command values

@@ -336,7 +336,8 @@ submitted to `engine start` must carry a consistent, current compiled snapshot.
 
 ## Command surface
 
-Use the `enginery` console script. Choose the scope before choosing an action:
+Enginery installs one console script, `enginery`. Choose the scope before choosing
+an action:
 
 | Scope | Command family | State selected |
 |---|---|---|
@@ -2276,7 +2277,7 @@ its container's mounts as you can read the bearer.
 
 ## Operator recovery entry point
 
-`enginery operator` is the recovery group of the `enginery` console script,
+`enginery operator` is the recovery group of the single `enginery` console script,
 for the person operating the selected ledger. Run it outside any coding-agent session; it
 imports only the domain, the ledger, the engine control modules and the OCI
 adapter used to qualify an image — never the workflow code — so it keeps working
