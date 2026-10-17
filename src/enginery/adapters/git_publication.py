@@ -213,17 +213,23 @@ class GitBranchPublisher:
             raise InvalidInputError(
                 "base_revision must be a revision", details={"base_revision": base_revision}
             )
-        base = (
-            git_bytes(
-                self.source_path,
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                f"{base_revision}^{{commit}}",
+        try:
+            base = (
+                git_bytes(
+                    self.source_path,
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    f"{base_revision}^{{commit}}",
+                )
+                .decode("ascii")
+                .strip()
             )
-            .decode("ascii")
-            .strip()
-        )
+        except InvalidInputError as error:
+            raise ExternalConflictError(
+                "the verified repository does not contain the base revision",
+                details={"base_revision": base_revision},
+            ) from error
         if _OBJECT_ID.fullmatch(base) is None:
             raise ExternalConflictError(
                 "the verified repository does not contain the base revision"
