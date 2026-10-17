@@ -8,8 +8,8 @@ import io
 import json
 import os
 import pty
-import subprocess
 import shlex
+import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -353,7 +353,6 @@ def test_real_terminal_issues_hash_only_and_consumes_once(
         assert list_decisions(reopened.connection, RUN)[0] == decisions[0]
 
 
-
 @pytest.mark.parametrize("action", [ACTION, "human_wait.validate.reject"])
 def test_decision_refusal_has_one_context_correct_quoted_repair(
     ingress: Ingress,
@@ -379,6 +378,7 @@ def test_decision_refusal_has_one_context_correct_quoted_repair(
     assert ("--reason" in argv) == action.startswith("human_wait.")
     assert not list_decisions(ingress.ledger.connection, RUN)
 
+
 def test_a_durable_publication_decision_cannot_release_another_action(
     ingress: Ingress,
     terminal: None,
@@ -396,7 +396,9 @@ def test_a_durable_publication_decision_cannot_release_another_action(
     )
 
 
-@pytest.mark.parametrize("registration", [{}, {"os_uid": os.getuid() + 1}, {"os_user": "other-user"}])
+@pytest.mark.parametrize(
+    "registration", [{}, {"os_uid": os.getuid() + 1}, {"os_user": "other-user"}]
+)
 def test_unregistered_operator_still_receives_packet_without_challenge(
     ingress: Ingress,
     terminal: None,
@@ -428,14 +430,16 @@ def test_forged_principal_and_wrong_registered_os_identity_are_refused(
     ingress: Ingress,
     terminal: None,
 ) -> None:
-    with pytest.raises(PrincipalMismatchError):
-        ingress.issue(principal_id="forged")
+    forged = ingress.issue(principal_id="forged")
+    assert forged["challenge_issued"] is False
+    assert forged["challenge_reason"] == "decision_principal_mismatch"
     issued = ingress.issue()
     with pytest.raises(PrincipalMismatchError):
         ingress.decide(issued, principal_id="forged")
     ingress.preferences.write_bytes(_preferences(os_uid=os.getuid() + 1))
-    with pytest.raises(PrincipalMismatchError, match="OS user"):
-        ingress.issue()
+    wrong_uid = ingress.issue()
+    assert wrong_uid["challenge_issued"] is False
+    assert wrong_uid["subject_digest"] == ingress.packet.subject_digest
     ingress.preferences.write_bytes(_preferences(os_user="another-local-user"))
     with pytest.raises(PrincipalMismatchError, match="OS user"):
         ingress.decide(issued)
@@ -835,8 +839,16 @@ def test_missing_implementation_head_without_an_early_wait_is_not_a_review_packe
 @pytest.mark.parametrize(
     "node_id",
     [
-        "qualify", "plan_approval", "no_change_confirmation", "implement", "validate",
-        "review", "repair", "open_pr", "wait_for_ci", "verify",
+        "qualify",
+        "plan_approval",
+        "no_change_confirmation",
+        "implement",
+        "validate",
+        "review",
+        "repair",
+        "open_pr",
+        "wait_for_ci",
+        "verify",
     ],
 )
 def test_every_stage1_requeue_is_refused_without_changing_the_wait(
@@ -844,8 +856,25 @@ def test_every_stage1_requeue_is_refused_without_changing_the_wait(
     terminal: None,
     node_id: str,
 ) -> None:
+    runtime = CoordinatorRuntime(ingress.ledger, owner="stage1-cli")
+    now = datetime.now(UTC)
+    epoch = runtime.claim_epoch(now=now, heartbeat_window=timedelta(seconds=60))
+    if node_id in {"wait_for_ci", "verify"}:
+        runtime.complete_node(
+            run_id=RUN, node_id="open_pr", epoch=epoch.epoch, now=now, outcome="passed"
+        )
+        if node_id == "verify":
+            ingress.register("wait_for_ci", outcome="passed")
     if node_id == "implement":
         ingress.update_node(node_id, status="awaiting_human")
+    elif node_id == "open_pr":
+        runtime.await_human_node(
+            run_id=RUN,
+            node_id=node_id,
+            epoch=epoch.epoch,
+            now=now,
+            reason="operator decision required",
+        )
     else:
         ingress.register(node_id, outcome="awaiting_human")
     before = ingress.state(node_id)

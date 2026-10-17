@@ -282,8 +282,10 @@ def decide_in_ledger(
             database=database or None,
             owner=owner,
         )
-        repair = review if error.details.get("reason") == "human_wait_requeue_unsupported" else (
-            f"{review}; {decide}"
+        repair = (
+            review
+            if error.details.get("reason") == "human_wait_requeue_unsupported"
+            else (f"{review}; {decide}")
         )
         raise type(error)(error.args[0], details={**error.details, "repair": repair}) from error
 
