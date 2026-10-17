@@ -176,14 +176,23 @@ Path("request.json").write_text(json.dumps(request.initial_state(), indent=2), e
 
 The commands below start from the `request.json` that `build-request` wrote:
 
+Run review/decide on the same genuine local terminal after registering the
+operator's `[review_authority]` in user preferences. This successful path assumes
+passing validation/current-head CI and no actionable review findings; repair any
+reported hold rather than treating a transient `wait` as completion.
+
 ```bash
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
 # repeat watch --advance until next_action is `await_human_review`
 uv run enginery stage1 review --database ledger.db --owner operator --run-id issue-142 \
   --report review.json --repair-attempt 0
+uv run enginery factory review issue-142 --project <repository> --database ledger.db --owner operator
+# copy DIGEST and SECRET from that terminal review
+uv run enginery factory decide issue-142 --project <repository> --database ledger.db --owner operator \
+  --action pull_request.open --subject-digest DIGEST --challenge SECRET
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id issue-142 --advance
-# repeat until next_action is `wait` -- the run is merge_ready
+# repeat until status is succeeded and next_action is wait (verify has passed)
 uv run enginery stage1 evidence --database ledger.db --owner operator --run-id issue-142
 ```
 

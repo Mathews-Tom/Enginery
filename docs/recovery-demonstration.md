@@ -115,17 +115,24 @@ attempt and return `wait`, never launch a second worker.
 8. **Continue advancing** until the worker's result file appears and the
    run collects it (`"action_taken": "collect_implementation"`), then
    continues through `validate`, a real independent `stage1 review` report,
-   `factory review RUN --project PROJECT` and authenticated `factory decide RUN
-   --project PROJECT --action pull_request.open --subject-digest DIGEST
-   --challenge SECRET`, then `open_pr`, `wait_for_ci`, and `verify`:
+   `factory review` and authenticated `factory decide` against the same
+   `ledger.db` and `operator` owner, then `open_pr`, `wait_for_ci`, and `verify`.
+   The example assumes successful validation, no actionable review findings,
+   and passing current-head CI. Resolve any reported hold instead of treating it
+   as completion. Review and decide must use the same genuine local terminal;
+   register the operator's `[review_authority]` in user preferences first:
 
    ```bash
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
    # repeat until next_action is await_human_review
    uv run enginery stage1 review --database ledger.db --owner operator --run-id <run-id> \
      --report review.json --repair-attempt 0
+   uv run enginery factory review <run-id> --project <repository> --database ledger.db --owner operator
+   # copy DIGEST and SECRET from the terminal review above
+   uv run enginery factory decide <run-id> --project <repository> --database ledger.db --owner operator \
+     --action pull_request.open --subject-digest DIGEST --challenge SECRET
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
-   # repeat until next_action is wait
+   # repeat until status is succeeded and next_action is wait (verify has passed)
    uv run enginery stage1 evidence --database ledger.db --owner operator --run-id <run-id>
    ```
 

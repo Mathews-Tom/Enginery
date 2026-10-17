@@ -1291,9 +1291,14 @@ purely from the ledger and returns the next action still pending:
 ```bash
 uv run enginery stage1 start --database ledger.db --owner operator --request request.json
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id run-1 --advance
-# repeat `watch --advance` until `next_action` reports `wait`
+# repeat until next_action is await_human_review after successful validation
 uv run enginery stage1 review --database ledger.db --owner operator --run-id run-1 \
   --report review.json --repair-attempt 0
+uv run enginery factory review run-1 --project <repository> --database ledger.db --owner operator
+uv run enginery factory decide run-1 --project <repository> --database ledger.db --owner operator \
+  --action pull_request.open --subject-digest DIGEST --challenge SECRET
+uv run enginery stage1 watch --database ledger.db --owner operator --run-id run-1 --advance
+# repeat until status is succeeded and next_action is wait (verify has passed)
 uv run enginery stage1 evidence --database ledger.db --owner operator --run-id run-1
 ```
 
