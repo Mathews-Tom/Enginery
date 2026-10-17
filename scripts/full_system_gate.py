@@ -85,6 +85,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -97,6 +98,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from unittest.mock import patch
 
 from enginery.adapters.github import (
     GitHubAdapterConfig,
@@ -130,6 +132,9 @@ from enginery.application.work_ports import (
     WorkLedgerPort,
     WorkLedgerSnapshot,
 )
+from enginery.cli.config_binding import bind_behavioral_checks
+from enginery.cli.config_locations import private_state_directory
+from enginery.cli.factory_behavioral import verify_for_stage1
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import EngineryError
@@ -231,8 +236,10 @@ class _FixturePublisher:
 class _TerminalPullRequests:
     """A deterministic local pull-request/CI fixture bound to one work item."""
 
-    def __init__(self, *, pull_request_number: int) -> None:
+    def __init__(self, *, pull_request_number: int, base_revision: str, head_revision: str) -> None:
         self.pull_request_number = pull_request_number
+        self.base_revision = base_revision
+        self.head_revision = head_revision
         self.requests: list[PullRequestRequest] = []
 
     def probe(self) -> object:
@@ -273,9 +280,9 @@ class _TerminalPullRequests:
             url=f"https://example.test/pull/{self.pull_request_number}",
             state="open",
             head_branch=head_branch,
-            head_revision="head-revision",
+            head_revision=self.head_revision,
             base_branch=base_branch,
-            base_revision="base-revision",
+            base_revision=self.base_revision,
         )
 
 
@@ -305,6 +312,7 @@ class _RunFixture:
     request: Stage1RunRequest
     work_ledger: WorkLedgerPort
     pull_requests: PullRequestPort
+    head_revision: str
 
 
 def _snapshot(run_index: int) -> WorkLedgerSnapshot:
@@ -330,6 +338,31 @@ def _snapshot(run_index: int) -> WorkLedgerSnapshot:
 
 def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
     run_id = f"run-gate-{run_index}"
+    workspace = (artifact_root / f"workspace-{run_index}").resolve()
+    workspace.mkdir(parents=True)
+    _git("init", "--initial-branch=main", cwd=workspace)
+    _git("config", "user.email", "full-system-gate@example.invalid", cwd=workspace)
+    _git("config", "user.name", "Full System Gate", cwd=workspace)
+    (workspace / "result.txt").write_text("before\n", encoding="utf-8")
+    policy = workspace / ".enginery" / "project.toml"
+    policy.parent.mkdir()
+    policy.write_text(
+        'schema_version = 1\n[[acceptance.checks]]\nname = "fixture-content"\n'
+        'observer = "command"\nargv = ["cat", "result.txt"]\n'
+        'fault_classes = ["constant_result"]\n[[acceptance.checks.assertions]]\n'
+        'kind = "stdout"\nequals = "observable result\\n"\n',
+        encoding="utf-8",
+    )
+    _git("add", "result.txt", ".enginery/project.toml", cwd=workspace)
+    _git("commit", "-m", "Gate base", cwd=workspace)
+    base_revision = _git("rev-parse", "HEAD", cwd=workspace)
+    repository = (artifact_root / f"repository-{run_index}").resolve()
+    _git("clone", str(workspace), str(repository), cwd=artifact_root)
+    _git("checkout", "-b", f"enginery/{run_id}", cwd=workspace)
+    (workspace / "result.txt").write_text("observable result\n", encoding="utf-8")
+    _git("add", "result.txt", cwd=workspace)
+    _git("commit", "-m", "Gate implementation", cwd=workspace)
+    head_revision = _git("rev-parse", "HEAD", cwd=workspace)
     manifest = stage1_work_manifest()
     manifest = replace(
         manifest,
@@ -352,9 +385,9 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
                 {
                     "name": "fixture-content",
                     "observer": "command",
-                    "argv": ["cat", "README"],
+                    "argv": ["cat", "result.txt"],
                     "fault_classes": ["constant_result"],
-                    "assertions": [{"kind": "stdout", "contains": "fixture"}],
+                    "assertions": [{"kind": "stdout", "equals": "observable result\n"}],
                 }
             ),
         ),
@@ -386,7 +419,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
             workflow_definition_id=WorkflowDefinitionId(manifest.id.value),
             workflow_definition_digest=manifest.content_digest,
             repository=f"repository-{run_index}",
-            base_revision="base-revision",
+            base_revision=base_revision,
             policy_set_version="policy-v1",
             adapter_versions={},
             adapter_fingerprints={},
@@ -399,7 +432,7 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
         manifest=manifest,
         repository_id=f"repository-{run_index}",
         repository_path=(artifact_root / f"repository-{run_index}").resolve(),
-        workspace_path=(artifact_root / f"workspace-{run_index}").resolve(),
+        workspace_path=workspace,
         base_branch="main",
         head_branch=f"enginery/{run_id}",
         validation_commands=config.commands(),
@@ -422,16 +455,23 @@ def _build_fixture(run_index: int, artifact_root: Path) -> _RunFixture:
             harness_provider=compiled.selection.harness,
             harness_credential_reference=config.text("harness_credential_reference"),
             harness_executable=config.text("harness_executable"),
-            artifact_root=(artifact_root / f"artifacts-{run_index}").resolve(),
+            artifact_root=private_state_directory(repository) / "artifacts",
         ),
         protected_paths=config.strings("protected_paths"),
     )
+    bind_behavioral_checks(request)
     return _RunFixture(
         request=request,
         work_ledger=cast(WorkLedgerPort, _TerminalWorkLedger(snapshot)),
         pull_requests=cast(
-            PullRequestPort, _TerminalPullRequests(pull_request_number=100 + run_index)
+            PullRequestPort,
+            _TerminalPullRequests(
+                pull_request_number=100 + run_index,
+                base_revision=base_revision,
+                head_revision=head_revision,
+            ),
         ),
+        head_revision=head_revision,
     )
 
 
@@ -454,6 +494,9 @@ def _service(
         pull_requests=pull_requests,
         branch_publisher=cast(BranchPublicationPort, _FixturePublisher()),
         outcomes=OutcomeCaptureService(ledger=ledger, pull_requests=pull_requests),
+        behavioral_verifier=lambda bound, head: verify_for_stage1(
+            ledger, bound, head, owner=runtime.coordinator.owner
+        ),
     )
     return ledger, service
 
@@ -483,7 +526,7 @@ def _complete_bypassed_nodes(service: Stage1RunService, fixture: _RunFixture) ->
                 repository_id=request.repository_id,
                 repository_path=request.repository_path,
                 workspace_path=request.workspace_path,
-                base_revision="base-revision",
+                base_revision=request.run.base_revision,
                 command=(node_id,),
                 expected_attempt_version=0,
                 operation_id=f"{node_id}:{request.run.id}",
@@ -518,7 +561,7 @@ def _complete_bypassed_nodes(service: Stage1RunService, fixture: _RunFixture) ->
                     schema_version=1,
                     payload={
                         "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                        "result": {"head_revision": "1" * 40},
+                        "result": {"head_revision": fixture.head_revision},
                     },
                 ),
             ),
@@ -1339,8 +1382,11 @@ def run_gate(
             details={"run_count": run_count},
         )
     report = GateReport(stages=stages, restart_between_stages=restart_between_stages)
-    with TemporaryDirectory(prefix="enginery-full-system-gate-") as tmp:
-        artifact_root = Path(tmp)
+    with (
+        TemporaryDirectory(prefix="enginery-full-system-gate-") as tmp,
+        patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(tmp).resolve() / "state")}),
+    ):
+        artifact_root = Path(tmp).resolve()
         if "1" in requested_stages:
             database = artifact_root / "stage1-ledger.db"
             for run_index in range(1, run_count + 1):

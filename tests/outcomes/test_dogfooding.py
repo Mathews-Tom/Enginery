@@ -22,12 +22,25 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from tests.support.behavioral import fixture_behavioral_checks
-from tests.support.branch_publication import HEAD_REVISION, RecordingBranchPublisher
+from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
+from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.execution import selection_for
-from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger, _snapshot
+from tests.workflows.test_stage1_runtime import (
+    RecordingPullRequests,
+    TerminalWorkLedger,
+    _git,
+    _snapshot,
+)
 
-from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
+from enginery.application.work_ports import (
+    PullRequestPort,
+    PullRequestRequest,
+    PullRequestSnapshot,
+    WorkLedgerPort,
+)
+from enginery.cli.config_binding import bind_behavioral_checks
+from enginery.cli.config_locations import private_state_directory
+from enginery.cli.factory_behavioral import verify_for_stage1
 from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.ids import (
@@ -52,6 +65,17 @@ from enginery.workflows.stage1 import (
     Stage1RunRequest,
     Stage1RunService,
 )
+
+
+class _CommittedPullRequests(RecordingPullRequests):
+    """Keep publication and subsequent CI evidence on the reviewed git objects."""
+
+    def create_or_update(self, request: PullRequestRequest) -> PullRequestSnapshot:
+        return replace(
+            super().create_or_update(request),
+            head_revision=self.head_revision,
+            base_revision=self.base_revision,
+        )
 
 
 def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read(
@@ -118,14 +142,32 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             harness_provider="omp",
             harness_credential_reference="test-omp-keyring",
             harness_executable="omp",
-            artifact_root=(tmp_path / "artifacts").resolve(),
+            artifact_root=private_state_directory(repository) / "artifacts",
         ),
     )
+    workspace = request.workspace_path
+    workspace.mkdir()
+    _git("init", "--initial-branch=main", cwd=workspace)
+    _git("config", "user.email", "dogfood@example.invalid", cwd=workspace)
+    _git("config", "user.name", "Dogfood", cwd=workspace)
+    (workspace / "README").write_text("fixture baseline\n", encoding="utf-8")
+    _git("add", "README", cwd=workspace)
+    _git("commit", "-qm", "baseline", cwd=workspace)
+    base_revision = declare_behavioral_policy(workspace)
+    _git("checkout", "-b", request.head_branch, cwd=workspace)
+    (workspace / "README").write_text("fixture implementation\n", encoding="utf-8")
+    _git("commit", "-am", "implementation", cwd=workspace)
+    head_revision = _git("rev-parse", "HEAD", cwd=workspace)
+    _git("clone", str(workspace), str(repository), cwd=tmp_path)
+    request = replace(request, run=replace(request.run, base_revision=base_revision))
+    bind_behavioral_checks(request)
 
     ledger = LedgerService.open(database)
     try:
         runtime = CoordinatorRuntime(ledger, owner="coordinator")
-        pull_requests = RecordingPullRequests()
+        pull_requests = _CommittedPullRequests()
+        pull_requests.head_revision = head_revision
+        pull_requests.base_revision = base_revision
         work_ledger = TerminalWorkLedger(snapshot)
         outcomes = OutcomeCaptureService(
             ledger=ledger, pull_requests=cast(PullRequestPort, pull_requests)
@@ -137,6 +179,9 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
             pull_requests=cast(PullRequestPort, pull_requests),
             branch_publisher=RecordingBranchPublisher(),
             outcomes=outcomes,
+            behavioral_verifier=lambda bound, head: verify_for_stage1(
+                ledger, bound, head, owner=runtime.coordinator.owner
+            ),
         )
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
 
@@ -149,7 +194,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
                     repository_id=request.repository_id,
                     repository_path=request.repository_path,
                     workspace_path=request.workspace_path,
-                    base_revision="base-revision",
+                    base_revision=base_revision,
                     command=(node_id,),
                     expected_attempt_version=0,
                     operation_id=f"{node_id}:run-dogfood",
@@ -190,7 +235,7 @@ def test_a_dogfooded_stage1_run_produces_an_outcome_observation_the_cli_can_read
                         schema_version=1,
                         payload={
                             "artifact_references": [str(Digest.of_bytes(b"implementation"))],
-                            "result": {"head_revision": HEAD_REVISION},
+                            "result": {"head_revision": head_revision},
                         },
                     ),
                 ),
