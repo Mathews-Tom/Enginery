@@ -132,7 +132,7 @@ attempt and return `wait`, never launch a second worker.
    uv run enginery factory decide <run-id> --project <repository> --database ledger.db --owner operator \
      --action pull_request.open --subject-digest DIGEST --challenge SECRET
    uv run enginery stage1 watch --database ledger.db --owner operator --run-id <run-id> --advance
-   # repeat until status is succeeded and next_action is wait (verify has passed)
+   # repeat until next_action is wait and the verify node's status is passed
    uv run enginery stage1 evidence --database ledger.db --owner operator --run-id <run-id>
    ```
 

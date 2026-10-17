@@ -1307,7 +1307,7 @@ uv run enginery factory review run-1 --project <repository> --database ledger.db
 uv run enginery factory decide run-1 --project <repository> --database ledger.db --owner operator \
   --action pull_request.open --subject-digest DIGEST --challenge SECRET
 uv run enginery stage1 watch --database ledger.db --owner operator --run-id run-1 --advance
-# repeat until status is succeeded and next_action is wait (verify has passed)
+# repeat until next_action is wait and the verify node's status is passed
 uv run enginery stage1 evidence --database ledger.db --owner operator --run-id run-1
 ```
 
