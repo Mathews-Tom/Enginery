@@ -66,6 +66,8 @@ from enginery.ledger.redaction import redact_credential_shaped_text
 
 _OMP_PROTOCOL_VERSION = 3
 _HARNESS_ID = "omp"
+# omp 18.10.3: AgentEvent in packages/agent/src/types.ts and AgentSessionEvent in
+# packages/coding-agent/src/session/agent-session-events.ts, plus the JSON session header.
 _KNOWN_EVENT_TYPES = frozenset(
     {
         "session",
@@ -79,6 +81,27 @@ _KNOWN_EVENT_TYPES = frozenset(
         "tool_execution_update",
         "tool_execution_end",
         "agent_end",
+        "tool_stream_update",
+        "auto_compaction_start",
+        "auto_compaction_end",
+        "auto_retry_start",
+        "auto_retry_end",
+        "cache_warming_start",
+        "cache_warming_end",
+        "retry_fallback_applied",
+        "retry_fallback_succeeded",
+        "model_changed",
+        "config_warnings_changed",
+        "advisor_cost_changed",
+        "advisor_yielded",
+        "ttsr_triggered",
+        "todo_reminder",
+        "todo_auto_clear",
+        "irc_message",
+        "notice",
+        "thinking_level_changed",
+        "goal_updated",
+        "queue_update",
     }
 )
 
@@ -545,7 +568,7 @@ def _normalize_events(
         kind = AdapterEventKind.PROGRESS
         if event_type == "agent_start":
             kind = AdapterEventKind.STARTED
-        elif event_type == "agent_end":
+        elif event_type == "agent_end" and payload.get("isTerminal") is not False:
             kind = AdapterEventKind.TERMINAL
             terminal_seen = True
         attributes = {"protocol_version": str(_OMP_PROTOCOL_VERSION)}

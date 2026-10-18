@@ -65,7 +65,22 @@ from enginery.ledger.redaction import redact_credential_shaped_text
 
 _CLAUDE_CODE_EVENT_SCHEMA_VERSION = 1
 _HARNESS_ID = "claude-code"
-_KNOWN_EVENT_TYPES = frozenset({"system", "assistant", "user", "rate_limit_event", "result"})
+# Agent SDK SDKMessage: https://code.claude.com/docs/en/agent-sdk/typescript.md
+_KNOWN_EVENT_TYPES = frozenset(
+    {
+        "system",
+        "assistant",
+        "user",
+        "rate_limit_event",
+        "result",
+        "stream_event",
+        "tool_progress",
+        "auth_status",
+        "tool_use_summary",
+        "prompt_suggestion",
+        "conversation_reset",
+    }
+)
 
 
 class _ClaudeCodeProcess(Protocol):
