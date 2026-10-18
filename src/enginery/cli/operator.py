@@ -460,7 +460,7 @@ def _require_restorable(database: Path, *, force: bool) -> str:
         return "forced"
     if not paused:
         raise HumanActionRequiredError(
-            "restore requires a paused runtime: run `enginery-operator pause` (and drain the "
+            "restore requires a paused runtime: run `enginery operator pause` (and drain the "
             "running workers), or pass --force-unpaused"
         )
     if running:

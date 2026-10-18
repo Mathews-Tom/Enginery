@@ -1,4 +1,4 @@
-"""``stage1 build-request`` pins and the receipt/hold diagnostics of ``watch`` and ``evidence``."""
+"""``engine build-request`` pins and the receipt/hold diagnostics of ``next`` and ``evidence``."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _build_argv(tmp_path: Path, *extra: str, output: Path | None = None) -> list
         )
     )
     return [
-        "stage1",
+        "engine",
         "build-request",
         "--runner",
         "trusted-local",
@@ -263,7 +263,7 @@ def test_evidence_reports_requested_selected_submitted_and_effective_separately(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -278,7 +278,7 @@ def test_evidence_reports_requested_selected_submitted_and_effective_separately(
 
     evidence = _run_json(
         capsys,
-        ["stage1", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     execution = evidence["execution"]
@@ -307,7 +307,7 @@ def test_a_host_default_run_is_reported_as_host_default_never_a_level(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -322,7 +322,7 @@ def test_a_host_default_run_is_reported_as_host_default_never_a_level(
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     execution = watch["execution"]
@@ -351,7 +351,7 @@ def test_watch_holds_a_pinned_run_whose_installed_host_is_not_the_bound_fingerpr
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -366,7 +366,7 @@ def test_watch_holds_a_pinned_run_whose_installed_host_is_not_the_bound_fingerpr
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     assert watch["next_action"] == "hold"
@@ -399,7 +399,7 @@ def test_watch_proceeds_when_the_installed_host_is_the_bound_fingerprint(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -414,7 +414,7 @@ def test_watch_proceeds_when_the_installed_host_is_the_bound_fingerprint(
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     assert watch["next_action"] == "qualify"
@@ -430,7 +430,7 @@ def test_watch_holds_a_run_bound_to_a_catalog_that_is_no_longer_current(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -444,14 +444,14 @@ def test_watch_holds_a_run_bound_to_a_catalog_that_is_no_longer_current(
     )
     bound = _run_json(
         capsys,
-        ["stage1", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
     drifted = replace(load_execution_catalog(), digest=Digest.of_bytes(b"later"), version="3")
     monkeypatch.setattr("enginery.workflows.stage1.load_execution_catalog", lambda: drifted)
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     assert watch["next_action"] == "hold"
@@ -537,7 +537,7 @@ class _Run:
         assert (
             main(
                 [
-                    "stage1",
+                    "engine",
                     "start",
                     "--database",
                     str(self.database),
@@ -607,7 +607,7 @@ class _Run:
             ledger.close()
 
     def command(self, name: str) -> None:
-        argv = ["stage1", name, "--database", str(self.database), "--owner", "op"]
+        argv = ["engine", name, "--database", str(self.database), "--owner", "op"]
         assert main([*argv, "--run-id", "run-1"]) == 0
 
 
@@ -663,7 +663,7 @@ def test_a_strict_run_with_an_unreported_model_shows_the_recorded_hold_everywher
     run.execute()
 
     evidence = _json_of(capsys, run, "evidence")
-    watch = _json_of(capsys, run, "watch")
+    watch = _json_of(capsys, run, "next")
 
     for payload in (evidence, watch):
         hold = payload["hold"]
@@ -683,7 +683,7 @@ def test_a_failed_pinned_run_keeps_its_original_pins_and_is_never_retried_differ
     run.execute()
 
     evidence = _json_of(capsys, run, "evidence")
-    watch = _json_of(capsys, run, "watch")
+    watch = _json_of(capsys, run, "next")
     execution = evidence["execution"]
 
     assert isinstance(execution, dict) and isinstance(before, dict)
@@ -728,7 +728,7 @@ def _build_and_start(tmp_path: Path, banner: str, *flags: str) -> tuple[Path, Pa
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -872,7 +872,7 @@ def test_watch_proceeds_when_the_installed_version_changed_inside_the_bound_rang
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     assert watch["next_action"] == "qualify"
@@ -900,7 +900,7 @@ def test_watch_holds_when_the_installed_version_leaves_the_bound_range(
 
     watch = _run_json(
         capsys,
-        ["stage1", "watch", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
+        ["engine", "next", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
 
     assert watch["next_action"] == "hold"

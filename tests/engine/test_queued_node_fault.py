@@ -910,7 +910,7 @@ def test_a_live_worker_after_the_coordinator_window_waits_and_is_collected_norma
     assert runtime.lease_epoch_active(run_id="run-fault", node_id="implement", now=now) is True
     assert runtime.lease_epoch_active(run_id="run-fault", node_id="implement", now=later) is False
 
-    # The launching epoch has lapsed, as it always does between `watch --advance` calls.
+    # The launching epoch has lapsed, as it always does between `engine next --advance` calls.
     # The worker is alive on this host and boot, so the run simply waits: no hold.
     # Advancing right away, with the worker certainly still running, changes nothing.
     assert _advance(service, request, later) is Stage1ProgressionAction.WAIT

@@ -61,21 +61,19 @@ REQUIRED: dict[str, str] = {
         "run compiles the deterministic durable request and dispatches a live worker"
     ),
     "tampered-request-refused": (
-        "stage1 start refuses a tampered request through configuration binding"
+        "engine start refuses a tampered request through configuration binding"
     ),
     "client-kill-worker-survives": (
         "SIGKILL of the waiting client leaves the same durable worker alive"
     ),
     "client-resume-same-identity": (
-        "resume collects the exited worker without a new request/workspace"
+        "continue collects the exited worker without a new request/workspace"
     ),
     "status-explain-binding": (
-        "status/explain expose the bound request, settings, sources and budget"
+        "per-run status exposes the bound request, settings, sources and budget"
     ),
-    "repeat-run-same-identity": (
-        "factory run of the same snapshot resumes the existing request and run"
-    ),
-    "terminal-review-findings-only": "stage1 review records findings without publication authority",
+    "repeat-run-same-identity": ("run of the same snapshot continues the existing request and run"),
+    "terminal-review-findings-only": "engine review records findings without publication authority",
     "terminal-publication-decision": (
         "a registered operator reviews and authorizes the current subject on one real terminal"
     ),
@@ -83,7 +81,7 @@ REQUIRED: dict[str, str] = {
         "SIGKILL occurs after PR creation before its response is delivered"
     ),
     "coordinator-resume-single-pr": (
-        "resume reconciles the same operation to one PR and the same head"
+        "continue reconciles the same operation to one PR and the same head"
     ),
     "verified-open-pr-outcome": (
         "the run succeeds with verified open PR checks/reviews and no merge"
@@ -91,7 +89,7 @@ REQUIRED: dict[str, str] = {
     "retained-workspace-hold-repair": (
         "a second run holds on the first retained workspace and names its exact release command"
     ),
-    "pause-second-issue-hold": "project pause blocks a second bound issue and names pause --lift",
+    "pause-second-issue-hold": "project pause blocks a second bound issue and names resume",
     "drain-releases-resources": "drain waits through the existing path and leaves no live resource",
     "pause-lift-and-list-both": "pause can be lifted and status lists both durable run identities",
     "global-locations-byte-identical": "global locations and non-private home paths stay unchanged",
@@ -420,9 +418,9 @@ class ManualPathGate(SetupGate):
         )
 
     def factory(self, command: str, *arguments: str) -> tuple[int, dict[str, Any]]:
-        result = self.cli("factory", command, *arguments, "--project", str(self.project), "--json")
+        result = self.cli(command, *arguments, "--project", str(self.project), "--json")
         if not result.stdout.strip():
-            raise RuntimeError(f"factory {command} exited {result.returncode}: {result.stderr}")
+            raise RuntimeError(f"{command} exited {result.returncode}: {result.stderr}")
         return result.returncode, dict(json.loads(result.stdout))
 
     def acceptance_checks(self) -> list[dict[str, Any]]:
@@ -444,8 +442,7 @@ class ManualPathGate(SetupGate):
     def publication_hold(self, reason: str = "decision_required") -> tuple[int, dict[str, Any]]:
         """Observe an intentional authority refusal without treating other CLI errors as holds."""
         result = self.cli(
-            "factory",
-            "resume",
+            "continue",
             self.run_id,
             "--wait-seconds",
             "1",
@@ -508,7 +505,7 @@ class ManualPathGate(SetupGate):
     def interactive(self, command: str, *arguments: str) -> TerminalResult:
         if self.terminal is None:
             self.terminal = TerminalSession()
-        args = ["factory", command, self.run_id, "--project", str(self.project), *arguments]
+        args = [command, self.run_id, "--project", str(self.project), *arguments]
         result = self.terminal.run(
             [sys.executable, "-m", "enginery.cli.main", *args],
             cwd=self.root,
@@ -557,7 +554,7 @@ class ManualPathGate(SetupGate):
         )
 
     def launch(self, command: str, *arguments: str) -> subprocess.Popen[str]:
-        args = ("factory", command, *arguments, "--project", str(self.project), "--json")
+        args = (command, *arguments, "--project", str(self.project), "--json")
         self.commands.append("enginery " + shlex.join(args))
         client = subprocess.Popen(
             [sys.executable, "-m", "enginery.cli.main", *args],
@@ -831,7 +828,7 @@ def step_client_recovery(gate: ManualPathGate) -> None:
     tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
     refused_db = gate.root / "tampered-ledger.sqlite"
     refused = gate.cli(
-        "stage1",
+        "engine",
         "start",
         "--database",
         str(refused_db),
@@ -887,8 +884,8 @@ def step_client_recovery(gate: ManualPathGate) -> None:
 
     _wait(completed, "supervised worker exit")
     wait_code, waited = gate.factory("drain", "--wait-seconds", "5")
-    lift_code, lifted = gate.factory("pause", "--lift")
-    code, resumed = gate.factory("resume", gate.run_id, "--wait-seconds", "30")
+    lift_code, lifted = gate.factory("resume")
+    code, resumed = gate.factory("continue", gate.run_id, "--wait-seconds", "30")
     commits = gate.git(
         gate.workspace,
         "rev-list",
@@ -921,27 +918,24 @@ def step_client_recovery(gate: ManualPathGate) -> None:
 
 def step_inspection_review(gate: ManualPathGate) -> None:
     code, status = gate.factory("status", gate.run_id)
-    explain_code, explained = gate.factory("explain", gate.run_id)
     request = _read(gate.request_path())
     gate.record(
         "status-explain-binding",
-        code == explain_code == 0
-        and status.get("request_digest") == explained.get("request_digest")
-        and bool(status.get("request_digest"))
+        code == 0
+        and status.get("run_id") == gate.run_id
+        and status.get("request_digest") == str(stage1_request_from_state(request).digest)
         and status.get("configuration_snapshot_digest")
         == request["run"]["data"]["configuration_snapshot_digest"]
-        and explained.get("configuration_snapshot_digest")
-        == status.get("configuration_snapshot_digest")
-        and explained.get("selection") == request["execution_selection"]
-        and explained.get("runner") == request["runner"]
-        and explained.get("permitted_capabilities")
+        and status.get("selection") == request["execution_selection"]
+        and status.get("runner") == request["runner"]
+        and status.get("permitted_capabilities")
         == request["implementation"]["permitted_capabilities"]
-        and bool(explained.get("fields"))
-        and bool(explained.get("nodes"))
+        and bool(status.get("fields"))
+        and bool(status.get("nodes"))
         and status.get("budget", {}).get("time_budget_seconds")
         == request["implementation"]["time_budget_seconds"]
         and status.get("budget", {}).get("cost") == "unenforced",
-        {"status_exit": code, "status": status, "explain_exit": explain_code, "explain": explained},
+        {"status_exit": code, "status": status},
         {"request": request},
     )
     code, repeated = gate.factory("run", ISSUE)
@@ -966,7 +960,7 @@ def step_inspection_review(gate: ManualPathGate) -> None:
         encoding="utf-8",
     )
     result = gate.cli(
-        "stage1",
+        "engine",
         "review",
         "--database",
         str(gate.database),
@@ -980,7 +974,7 @@ def step_inspection_review(gate: ManualPathGate) -> None:
         "0",
     )
     if not result.stdout.strip():
-        raise RuntimeError(f"stage1 review exited {result.returncode}: {result.stderr}")
+        raise RuntimeError(f"engine review exited {result.returncode}: {result.stderr}")
     report = dict(json.loads(result.stdout))
     gate.record(
         "terminal-review-findings-only",
@@ -1007,7 +1001,7 @@ def step_inspection_review(gate: ManualPathGate) -> None:
 
 
 def step_pr_recovery(gate: ManualPathGate) -> None:
-    coordinator = gate.launch("resume", gate.run_id, "--wait-seconds", "600")
+    coordinator = gate.launch("continue", gate.run_id, "--wait-seconds", "600")
     window = gate.bin / "pr-created.json"
     _wait(lambda: window.exists() or coordinator.poll() is not None, "PR creation response window")
     if not window.exists():
@@ -1030,7 +1024,7 @@ def step_pr_recovery(gate: ManualPathGate) -> None:
         {"killed": killed, "pr": pr},
         {"response_still_blocked": still_waiting, "hook": persisted},
     )
-    code, resumed = gate.factory("resume", gate.run_id, "--wait-seconds", "30")
+    code, resumed = gate.factory("continue", gate.run_id, "--wait-seconds", "30")
     status_code, status = gate.factory("status", gate.run_id)
     calls = gate.gh_calls()
     creates = [
@@ -1086,7 +1080,7 @@ def step_pr_recovery(gate: ManualPathGate) -> None:
         },
     )
     # A final retry also proves completion is idempotent, rather than only surviving one retry.
-    retry_code, retried = gate.factory("resume", gate.run_id)
+    retry_code, retried = gate.factory("continue", gate.run_id)
     endpoints = [
         next((value for value in call if value.startswith("repos/")), "") for call in calls
     ]
@@ -1169,7 +1163,7 @@ def step_control(gate: ManualPathGate) -> None:
     )
     pause_code, paused = gate.factory("pause", "--reason", "manual gate")
     hold_code, held = gate.factory("run", SECOND_ISSUE)
-    repair = f"enginery factory pause --lift --project {gate.project}"
+    repair = f"enginery resume --project {gate.project}"
     gate.record(
         "pause-second-issue-hold",
         code == second_code == pause_code == 0
@@ -1255,7 +1249,7 @@ def step_control(gate: ManualPathGate) -> None:
             "runner_mode": "trusted-local",
         },
     )
-    lift_code, lifted = gate.factory("pause", "--lift")
+    lift_code, lifted = gate.factory("resume")
     list_code, listed = gate.factory("status")
     runs = listed.get("runs", [])
     gate.record(

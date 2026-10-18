@@ -192,7 +192,7 @@ def paused_hold(project: Path) -> list[dict[str, str]]:
                 "prerequisite": "dispatch",
                 "detail": "dispatch is paused by the operator",
                 "resolve": (
-                    "enginery-operator resume --database "
+                    "enginery operator resume --database "
                     + shlex.quote(str(database_path(project)))
                 ),
             }
@@ -216,7 +216,7 @@ def intake_prerequisites(
             {
                 "prerequisite": item.name,
                 "detail": item.detail,
-                "resolve": item.resolve or "enginery factory doctor",
+                "resolve": item.resolve or "enginery preflight",
             }
             for item in _check_github(compiled.config.text("github_executable"), probe)
             if item.status == "hold"
@@ -227,7 +227,7 @@ def intake_prerequisites(
 def github_ledger(configuration: ProjectConfiguration, repository: str) -> GitHubWorkLedger:
     compiled = configuration.compiled
     if compiled is None:
-        raise InvalidInputError("declare a runner with enginery factory init first")
+        raise InvalidInputError("declare a runner with enginery init first")
     return GitHubWorkLedger(
         GitHubAdapterConfig(
             repository=repository,
@@ -264,6 +264,14 @@ def classification_repair(
                 command.extend(("--remove-label", label))
             command.extend(("--add-label", placeholder))
     return shlex.join(command)
+
+
+def _auth_repair(project: Path, executable: str) -> str:
+    return (
+        shlex.quote(executable)
+        + " auth status; enginery collect --project "
+        + shlex.quote(str(project))
+    )
 
 
 def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
@@ -321,11 +329,7 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                 {
                     "prerequisite": "issue intake",
                     "detail": str(error),
-                    "resolve": (
-                        shlex.quote(compiled.config.text("github_executable"))
-                        + " auth status; enginery factory collect --project "
-                        + shlex.quote(str(project))
-                    ),
+                    "resolve": _auth_repair(project, compiled.config.text("github_executable")),
                 }
             )
             effects["github_reads"] = adapter.github_reads
@@ -371,11 +375,7 @@ def collect(project: Path, *, dry_run: bool) -> dict[str, object]:
                 hold = {
                     "prerequisite": "issue intake",
                     "detail": str(error),
-                    "resolve": (
-                        shlex.quote(compiled.config.text("github_executable"))
-                        + " auth status; enginery factory collect --project "
-                        + shlex.quote(str(project))
-                    ),
+                    "resolve": _auth_repair(project, compiled.config.text("github_executable")),
                 }
                 row["classification"] = {"hold": str(error)}
                 row["holds"] = [hold]

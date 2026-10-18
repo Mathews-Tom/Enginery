@@ -73,7 +73,7 @@ def test_default_behavioral_repair_keeps_review_and_publication_available(tmp_pa
         for _ in range(16):
             decision = report.get("next_decision") or {}
             launches = len(gate.launches())
-            if decision.get("action") == "stage1 review":
+            if decision.get("action") == "engine review":
                 if launches >= 2:
                     assert report.get("status") != "failed", report
                     assert "--repair-attempt 1" in decision["command"]
@@ -86,12 +86,12 @@ def test_default_behavioral_repair_keeps_review_and_publication_available(tmp_pa
             elif "pull_request.open" in json.dumps(decision):
                 if repaired_review:
                     assert report.get("status") != "failed", report
-                    assert "factory review" in decision["review_command"]
-                    assert "factory decide" in decision["command"]
+                    assert "enginery review" in decision["review_command"]
+                    assert "enginery decide" in decision["command"]
                     return
                 executable = str(Path(sys.executable).with_name("enginery"))
                 issued = gate.terminal.run(
-                    [executable, "factory", "review", run_id, "--project", str(gate.project)],
+                    [executable, "review", run_id, "--project", str(gate.project)],
                     cwd=gate.root,
                     env=gate.environment(),
                 )
@@ -99,7 +99,6 @@ def test_default_behavioral_repair_keeps_review_and_publication_available(tmp_pa
                 decided = gate.terminal.run(
                     [
                         executable,
-                        "factory",
                         "decide",
                         run_id,
                         "--project",
@@ -117,8 +116,7 @@ def test_default_behavioral_repair_keeps_review_and_publication_available(tmp_pa
                 assert decided.code == 0, decided.text
             assert report.get("status") != "failed", report
             result = gate.cli(
-                "factory",
-                "resume",
+                "continue",
                 run_id,
                 "--wait-seconds",
                 "60",

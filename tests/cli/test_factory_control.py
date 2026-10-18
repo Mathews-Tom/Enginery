@@ -58,7 +58,7 @@ def test_changed_snapshot_repairs_execute_with_live_implementation(
         code, held = invoke(capsys, project, "run", "owner/repo#1", "--once")
         assert code == 5
         commands = held["holds"][0]["resolve"].split("; ")
-        assert commands[0].startswith("enginery factory drain --stop ")
+        assert commands[0].startswith("enginery drain --stop ")
         assert all("--node-id implement" not in command for command in commands)
         assert all("--node-id qualify" not in command for command in commands)
         for command in commands:
@@ -81,7 +81,7 @@ def test_collect_paused_project_reports_factory_pause_repair(
     code, held = invoke(capsys, project, "collect")
     assert code == 5
     dispatch_hold = next(hold for hold in held["holds"] if hold["prerequisite"] == "dispatch")
-    assert dispatch_hold["resolve"] == f"enginery factory pause --lift --project {project}"
+    assert dispatch_hold["resolve"] == f"enginery resume --project {project}"
 
 
 def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
@@ -94,9 +94,9 @@ def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
         code, paused = invoke(capsys, project, "pause", "--reason", "operator maintenance")
         assert code == 0 and paused["paused"]
         assert paused["scope"] == f"project ledger {run['database']}"
-        code, held = invoke(capsys, project, "resume", run["run_id"])
+        code, held = invoke(capsys, project, "continue", run["run_id"])
         assert code == 5
-        assert held["holds"][0]["resolve"] == f"enginery factory pause --lift --project {project}"
+        assert held["holds"][0]["resolve"] == f"enginery resume --project {project}"
         assert held["worker"]["pid"] == run["worker"]["pid"]
         monkeypatch.setattr(
             factory_run,
@@ -104,7 +104,7 @@ def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
             lambda configuration: paused_hold(configuration.project),
         )
         code, held = invoke(capsys, project, "run", "owner/repo#2")
-        assert code == 5 and "pause --lift" in held["holds"][0]["resolve"]
+        assert code == 5 and "enginery resume" in held["holds"][0]["resolve"]
         code, drained = invoke(capsys, project, "drain", "--stop")
         assert code == 0 and drained["drained"] and drained["paused"]
         assert drained["released"] == "now"
@@ -125,7 +125,7 @@ def test_pause_holds_resume_and_run_then_drain_stops_and_releases_resources(
             assert reservations and all(item.state["status"] == "cleaned" for item in reservations)
         finally:
             ledger.close()
-        code, lifted = invoke(capsys, project, "pause", "--lift")
+        code, lifted = invoke(capsys, project, "resume")
         assert code == 0 and not lifted["paused"]
     finally:
         invoke(capsys, project, "drain", "--stop")
@@ -150,7 +150,7 @@ def test_resume_reconciles_a_killed_worker_without_new_request_or_workspace(
     try:
         recovered = {}
         for _ in range(3):
-            _, recovered = invoke(capsys, project, "resume", run["run_id"])
+            _, recovered = invoke(capsys, project, "continue", run["run_id"])
             ledger = LedgerService.open(Path(run["database"]))
             try:
                 worker = ledger.read_process_manager_state(
@@ -193,7 +193,7 @@ def test_resume_preserves_bound_request_after_project_configuration_changes(
             encoding="utf-8",
         )
         args = _build_parser().parse_args(
-            ["factory", "run", "owner/repo#1", "--project", str(project), "--once"]
+            ["run", "owner/repo#1", "--project", str(project), "--once"]
         )
         recompiled = factory_run.compile_request(
             factory_run.request_inputs(project, "owner/repo#1", run["run_id"], args)
@@ -205,7 +205,7 @@ def test_resume_preserves_bound_request_after_project_configuration_changes(
             != bound["configuration_snapshot_digest"]
         )
 
-        code = main(["factory", "resume", run["run_id"], "--project", str(project), "--json"])
+        code = main(["continue", run["run_id"], "--project", str(project), "--json"])
         output = capsys.readouterr()
         assert request.read_bytes() == original
         assert code == 0, output.err
@@ -222,8 +222,8 @@ def test_resume_unknown_run_does_not_create_a_ledger(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, _ = bound_project
-    assert main(["factory", "resume", "unknown", "--project", str(project), "--json"]) == 2
-    assert "unknown factory run" in capsys.readouterr().err
+    assert main(["continue", "unknown", "--project", str(project), "--json"]) == 2
+    assert "unknown project run" in capsys.readouterr().err
     assert not database_path(project).exists()
 
 

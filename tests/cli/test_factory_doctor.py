@@ -69,7 +69,7 @@ def project(tmp_path: Path) -> Path:
 
 def _doctor(capsys: pytest.CaptureFixture[str], project: Path) -> tuple[int, dict[str, object]]:
     capsys.readouterr()
-    code = main(["factory", "doctor", "--project", str(project), "--json"])
+    code = main(["preflight", "--project", str(project), "--json"])
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -248,7 +248,7 @@ def test_a_project_without_a_declared_trust_mode_is_held_with_the_init_command(
     assert code == HOLD
     (hold,) = report["holds"]  # type: ignore[misc]
     assert hold["name"] == "trust-mode"
-    assert hold["resolve"].startswith("enginery factory init --runner")
+    assert hold["resolve"].startswith("enginery init --runner")
 
 
 def test_a_malformed_project_policy_is_invalid_input_not_a_hold(
@@ -258,7 +258,7 @@ def test_a_malformed_project_policy_is_invalid_input_not_a_hold(
         "schema_version = 1\nsurprise = true\n", encoding="utf-8"
     )
 
-    assert main(["factory", "doctor", "--project", str(project)]) == exit_code_for(
+    assert main(["preflight", "--project", str(project)]) == exit_code_for(
         FailureClass.INVALID_INPUT
     )
     assert "surprise" in capsys.readouterr().err
@@ -417,7 +417,7 @@ def test_invalid_capability_name_is_not_rendered_as_command(
     policy.write_text(
         policy.read_text() + '\n[implementation]\npermitted_capabilities = ["$(id)"]\n'
     )
-    assert main(["factory", "doctor", "--project", str(project), "--json"]) == 2
+    assert main(["preflight", "--project", str(project), "--json"]) == 2
     output = capsys.readouterr()
     assert "implementation.permitted_capabilities" in output.err
     assert "enginery capability preview" not in output.out
@@ -552,9 +552,9 @@ def test_container_context_is_disclosed_and_user_preference_is_accepted(
         resolve = runner["resolve"]
         if "image" not in hold_message:
             assert "docker_context in [runner] in $XDG_CONFIG_HOME/enginery/user.toml" in resolve
-            assert "enginery stage1 build-request --docker-context <name>" in resolve
+            assert "enginery engine build-request --docker-context <name>" in resolve
         assert ".enginery/project.toml" not in resolve
-        assert "factory doctor --docker-context" not in resolve
+        assert "preflight --docker-context" not in resolve
         commands = resolve.replace("<id>", "sha256:" + "a" * 64).split(", then ")
         for command in commands:
             if not command.startswith(("enginery runner ", "`enginery runner ")):

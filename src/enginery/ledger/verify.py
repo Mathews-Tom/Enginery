@@ -1,6 +1,6 @@
 """Ledger and artifact-store consistency checks.
 
-``verify_ledger`` is the single entry point behind ``enginery ledger
+``verify_ledger`` is the single entry point behind ``enginery operator
 verify``. It never mutates the ledger: a corruption finding is reported,
 not repaired — repair is always an explicit operator action (restore from
 backup, or a future targeted admin command), matching "no catch-and-

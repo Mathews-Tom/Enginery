@@ -241,7 +241,7 @@ class EffectiveConfig:
         if mapping["schema_version"] != LAYER_SCHEMA_VERSION:
             raise InvalidInputError(
                 "unsupported configuration snapshot schema; rebuild the request with the "
-                "current `enginery stage1 build-request`",
+                "current `enginery engine build-request`",
                 details={"schema_version": str(mapping["schema_version"])},
             )
         catalog = _mapping(mapping["catalog"], "snapshot catalog")

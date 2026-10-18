@@ -64,7 +64,7 @@ def test_shared_watch_document_preserves_the_stage1_watch_shape_and_values(
     request_path.write_text(json.dumps(document), encoding="utf-8")
     assert _start(database, request_path) == 0
     capsys.readouterr()
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
     cli_document = json.loads(capsys.readouterr().out)
 
     ledger = LedgerService.open(database)

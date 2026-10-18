@@ -4,14 +4,14 @@ Everything runs against a disposable home: ``HOME`` and both XDG directories nam
 temporary tree, ``gh`` and the ``omp`` harness are recording stand-ins first on ``PATH``, and
 every step drives the real ``enginery`` CLI in a subprocess. The scenario asserts that
 
-* ``factory init`` previews without writing, applies exactly its preview, is idempotent, and
+* ``init`` previews without writing, applies exactly its preview, is idempotent, and
   reports a differing user-owned policy as a conflict instead of overwriting it;
 * the run, project and user layers each reach the selection the real Stage 1 adapter *submits*
   to the harness (the recorded ``--model`` and ``--thinking`` argv), not just ``explain``;
 * a project hard constraint refuses a run-layer override and an unknown key is refused, each
   before any request is written;
-* ``factory doctor`` holds an unsatisfied authentication with the exact resolving command;
-* ``factory uninstall`` previews without removing, removes only unmodified setup-owned files,
+* ``preflight`` holds an unsatisfied authentication with the exact resolving command;
+* ``uninstall`` previews without removing, removes only unmodified setup-owned files,
   keeps a user-modified one, never touches bystanders, and is idempotent; and
 * the disposable home's global locations (``~/.config/gh``, ``~/.omp``, ``~/.claude``,
   ``~/.claude.json``, MCP configuration, launchd and systemd directories) are byte-identical
@@ -48,13 +48,11 @@ SCENARIO = "setup"
 
 REQUIRED: dict[str, str] = {
     "setup-preview-writes-nothing": (
-        "factory init without --apply lists every file, install, network access and auth "
+        "init without --apply lists every file, install, network access and auth "
         "requirement and writes nothing"
     ),
-    "setup-apply-performs-previewed-plan": (
-        "factory init --apply performs exactly the previewed plan"
-    ),
-    "setup-repeat-init-no-change": "repeating factory init with the same choices changes nothing",
+    "setup-apply-performs-previewed-plan": "init --apply performs exactly the previewed plan",
+    "setup-repeat-init-no-change": "repeating init with the same choices changes nothing",
     "setup-conflict-user-owned-not-overwritten": (
         "a differing existing project policy is a user-owned conflict and is never overwritten"
     ),
@@ -72,12 +70,12 @@ REQUIRED: dict[str, str] = {
     ),
     "unknown-key-refused": "an unknown key in project policy is refused naming the file and key",
     "doctor-hold-names-resolving-command": (
-        "factory doctor holds an unsatisfied authentication with the exact resolving command "
+        "preflight holds an unsatisfied authentication with the exact resolving command "
         "and changes nothing"
     ),
-    "uninstall-preview-writes-nothing": "factory uninstall without --apply removes nothing",
+    "uninstall-preview-writes-nothing": "uninstall without --apply removes nothing",
     "uninstall-removes-only-owned-unmodified": (
-        "factory uninstall --apply removes only setup-owned files that still match the record "
+        "uninstall --apply removes only setup-owned files that still match the record "
         "and never a bystander"
     ),
     "uninstall-keeps-user-modified-and-is-idempotent": (
@@ -391,7 +389,6 @@ def _json(process: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 def _init_args(project: Path, *extra: str) -> tuple[str, ...]:
     return (
-        "factory",
         "init",
         "--project",
         str(project),
@@ -570,7 +567,7 @@ def _submit(
     project = gate.new_project(name)
     init = gate.cli(*_init_args(project, *init_extra), "--apply")
     if init.returncode != 0:
-        raise RuntimeError(f"factory init failed: {init.stderr.strip()[:300]}")
+        raise RuntimeError(f"init failed: {init.stderr.strip()[:300]}")
     # New runs require operator-owned behavioral checks bound at the base revision.
     policy = project / ".enginery" / "project.toml"
     with policy.open("a", encoding="utf-8") as stream:
@@ -586,7 +583,7 @@ def _submit(
     run_dir.mkdir()
     request = run_dir / "request.json"
     build = gate.cli(
-        "stage1",
+        "engine",
         "build-request",
         "--output",
         str(request),
@@ -612,14 +609,14 @@ def _submit(
     fields = document["effective_config"]["fields"]
     database = str(run_dir / "ledger.db")
     common = ("--database", database, "--owner", "gate")
-    started = gate.cli("stage1", "start", *common, "--request", str(request))
+    started = gate.cli("engine", "start", *common, "--request", str(request))
     if started.returncode != 0:
-        raise RuntimeError(f"stage1 start failed: {started.stderr.strip()[:300]}")
+        raise RuntimeError(f"engine start failed: {started.stderr.strip()[:300]}")
     already = len(gate.launches())
     for _ in range(20):
-        step = gate.cli("stage1", "watch", *common, "--run-id", f"run-{name}", "--advance")
+        step = gate.cli("engine", "next", *common, "--run-id", f"run-{name}", "--advance")
         if step.returncode != 0:
-            raise RuntimeError(f"stage1 watch failed: {step.stderr.strip()[:300]}")
+            raise RuntimeError(f"engine next failed: {step.stderr.strip()[:300]}")
         state = json.loads(step.stdout.strip().splitlines()[-1])
         gate.raw_write(f"submission/{name}-state.json", state)
         implement = next((n for n in state["nodes"] if n["node_id"] == "implement"), None)
@@ -722,7 +719,7 @@ def step_refusals(gate: SetupGate) -> None:
         run_dir.mkdir()
         request = run_dir / "request.json"
         process = gate.cli(
-            "stage1",
+            "engine",
             "build-request",
             "--output",
             str(request),
@@ -806,10 +803,9 @@ def step_doctor(gate: SetupGate) -> None:
     project = gate.new_project("doctor")
     gate.cli(*_init_args(project), "--apply")
     tree_before = snapshot(project, gate.xdg_config, gate.xdg_state, base=gate.root)
-    ok = gate.cli("factory", "doctor", "--project", str(project), "--json")
+    ok = gate.cli("preflight", "--project", str(project), "--json")
     held = gate.cli(
-        "factory",
-        "doctor",
+        "preflight",
         "--project",
         str(project),
         "--json",
@@ -868,7 +864,7 @@ def step_uninstall(gate: SetupGate) -> None:
 
     start = len(gate.commands)
     before = tree()
-    preview = gate.cli("factory", "uninstall", "--project", str(clean), "--json")
+    preview = gate.cli("uninstall", "--project", str(clean), "--json")
     _record(
         gate,
         "uninstall-preview-writes-nothing",
@@ -886,7 +882,7 @@ def step_uninstall(gate: SetupGate) -> None:
     )
 
     start = len(gate.commands)
-    applied = gate.cli("factory", "uninstall", "--project", str(clean), "--apply", "--json")
+    applied = gate.cli("uninstall", "--project", str(clean), "--apply", "--json")
     plan = _json(applied)
     policy_clean = clean / ".enginery" / "project.toml"
     _record(
@@ -923,13 +919,11 @@ def step_uninstall(gate: SetupGate) -> None:
     )
 
     start = len(gate.commands)
-    kept = gate.cli("factory", "uninstall", "--project", str(modified), "--apply", "--json")
+    kept = gate.cli("uninstall", "--project", str(modified), "--apply", "--json")
     kept_plan = _json(kept)
     after_first = tree()
-    again_clean = gate.cli("factory", "uninstall", "--project", str(clean), "--apply", "--json")
-    again_modified = gate.cli(
-        "factory", "uninstall", "--project", str(modified), "--apply", "--json"
-    )
+    again_clean = gate.cli("uninstall", "--project", str(clean), "--apply", "--json")
+    again_modified = gate.cli("uninstall", "--project", str(modified), "--apply", "--json")
     _record(
         gate,
         "uninstall-keeps-user-modified-and-is-idempotent",

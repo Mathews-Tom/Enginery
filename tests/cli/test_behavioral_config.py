@@ -109,7 +109,7 @@ def test_refused_stage1_start_leaves_no_custody(
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(tmp_path / "ledger.db"),
@@ -125,7 +125,7 @@ def test_refused_stage1_start_leaves_no_custody(
     message = output.out + output.err
     assert str(repository / ".enginery/project.toml") in message
     assert request.base_branch in message
-    assert "enginery stage1 build-request" in message
+    assert "enginery engine build-request" in message
     assert not path.parent.exists()
 
 
@@ -144,10 +144,10 @@ def test_factory_corrupt_custody_repair_names_factory_command(tmp_path: Path) ->
         bind_behavioral_checks(request)
     assert f"rm -- {shlex.quote(str(path))}" in str(caught.value)
     assert (
-        f"enginery factory run {shlex.quote(request.work_snapshot.work_item.external_reference)} "
+        f"enginery run {shlex.quote(request.work_snapshot.work_item.external_reference)} "
         f"--project {shlex.quote(str(repository))}"
     ) in str(caught.value)
-    assert "stage1 build-request" not in str(caught.value)
+    assert "engine build-request" not in str(caught.value)
     path.unlink()
     assert bind_behavioral_checks(request) == read_behavioral_checks(request)
 
@@ -166,7 +166,7 @@ def test_corrupt_custody_names_file_and_repair(tmp_path: Path) -> None:
         bind_behavioral_checks(request)
     assert str(path) in str(caught.value)
     assert "rm --" in str(caught.value)
-    assert "enginery stage1 build-request" in str(caught.value)
+    assert "enginery engine build-request" in str(caught.value)
 
 
 def test_custody_publication_only_exposes_complete_private_bytes(
@@ -223,7 +223,7 @@ def test_killed_custody_publisher_names_repair_and_can_rebind(
             operation(request)
         assert str(path) in str(caught.value)
         assert f"rm -- {shlex.quote(str(path))}" in str(caught.value)
-        assert "enginery stage1 build-request" in str(caught.value)
+        assert "enginery engine build-request" in str(caught.value)
     path.unlink()
     assert bind_behavioral_checks(request) == read_behavioral_checks(request)
     assert path.stat().st_nlink == 1

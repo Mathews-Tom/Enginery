@@ -1,4 +1,4 @@
-"""``enginery runner`` and the isolated flags of ``stage1 build-request`` / ``stage1 start``.
+"""``enginery runner`` and the isolated flags of ``engine build-request`` / ``engine start``.
 
 The container engine is the only seam replaced: the CLI's own engine/admission constructors are
 swapped for ones backed by the in-memory fake docker, so everything else (argument parsing, the
@@ -238,7 +238,7 @@ def test_runner_without_a_subcommand_asks_for_one(capsys: pytest.CaptureFixture[
     assert "custody-receipt" in error
 
 
-# --- stage1 build-request --------------------------------------------------------------
+# --- engine build-request --------------------------------------------------------------
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -269,7 +269,7 @@ def _build_argv(
     output = tmp_path / "request.json"
     return (
         [
-            "stage1",
+            "engine",
             "build-request",
             *runner,
             "--output",
@@ -392,12 +392,12 @@ def test_a_trusted_local_request_records_an_explicit_trust_mode_without_an_image
     assert stage1_request_from_state(raw).runner.isolated_mode is False
 
 
-# --- stage1 start of an isolated request -----------------------------------------------
+# --- engine start of an isolated request -----------------------------------------------
 
 
 def _start_argv(tmp_path: Path, request: Path) -> list[str]:
     return [
-        "stage1",
+        "engine",
         "start",
         "--database",
         str(tmp_path / "ledger.db"),
@@ -449,13 +449,13 @@ def test_starting_an_isolated_request_on_a_qualified_engine_records_the_run(
     assert any(call[:2] == ("image", "inspect") for call in fake.calls)
 
 
-# --- stage1 watch of an isolated run ----------------------------------------------------
+# --- engine next of an isolated run -----------------------------------------------------
 
 
 def _watch_argv(tmp_path: Path, *extra: str) -> list[str]:
     return [
-        "stage1",
-        "watch",
+        "engine",
+        "next",
         "--database",
         str(tmp_path / "ledger.db"),
         "--owner",

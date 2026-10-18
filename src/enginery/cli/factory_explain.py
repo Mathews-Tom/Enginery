@@ -1,6 +1,6 @@
-"""``enginery factory explain``: why every compiled field has the value it has.
+"""``enginery explain``: why every compiled field has the value it has.
 
-Reads the same compiler output ``doctor`` and ``build-request`` use. For every field it
+Reads the same compiler output ``preflight`` and ``engine build-request`` use. For every field it
 reports the value, the winning layer, each shadowed lower-layer value, the hard constraints
 that applied and the source file and sha256 of every layer; it reports the files setup
 created with their ownership status; and it lists the current configuration holds. It changes

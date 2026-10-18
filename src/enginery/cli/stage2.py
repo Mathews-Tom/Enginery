@@ -1,4 +1,4 @@
-"""``enginery stage2``: read-only inspection of one plan's Stage 2 stack.
+"""``enginery engine status``: read-only inspection of one plan's release stack.
 
 Interactive merge/prepare/build/publish orchestration for a live Stage 2
 run is driven directly through ``Stage2ReleaseWorkflow`` (see
@@ -21,10 +21,10 @@ from enginery.ledger.service import LedgerService
 
 
 def run_stage2(args: argparse.Namespace) -> int:
-    """Run one Stage 2 command and emit a machine-readable result."""
+    """Inspect one engine release stack and emit a machine-readable result."""
     command = args.stage2_command
     if command is None:
-        raise InvalidInputError("stage2 requires a subcommand")
+        raise InvalidInputError("engine requires a subcommand")
     if command == "status":
         _status(args)
     else:  # pragma: no cover - argparse restricts command values

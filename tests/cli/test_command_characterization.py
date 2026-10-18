@@ -176,3 +176,66 @@ def test_operator_verify_missing_ledger_matches_nonzero_exit(
     assert old == new
     assert new[0] == 12
     assert new[1]["healthy"] is False
+
+
+def test_transitional_ledger_backup_restore_round_trip(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.cli.test_ledger import _seed_ledger_with_artifact
+
+    database, artifacts = tmp_path / "ledger.db", tmp_path / "artifacts"
+    _seed_ledger_with_artifact(database, artifacts)
+    backup = tmp_path / "backup"
+    assert (
+        main(
+            [
+                "ledger",
+                "backup",
+                "--database",
+                str(database),
+                "--output",
+                str(backup),
+                "--artifacts",
+                str(artifacts),
+            ]
+        )
+        == 0
+    )
+    assert "backup written to" in capsys.readouterr().out
+    restored = tmp_path / "restored.db"
+    restored_artifacts = tmp_path / "restored-artifacts"
+    assert (
+        main(
+            [
+                "ledger",
+                "restore",
+                "--backup",
+                str(backup),
+                "--database",
+                str(restored),
+                "--artifacts",
+                str(restored_artifacts),
+            ]
+        )
+        == 0
+    )
+    assert "restored" in capsys.readouterr().out
+    assert (
+        main(
+            [
+                "ledger",
+                "verify",
+                "--database",
+                str(restored),
+                "--artifacts",
+                str(restored_artifacts),
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "healthy"
+
+
+def test_transitional_bare_ledger_refuses(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["ledger"]) == 2
+    assert "ledger subcommand is required" in capsys.readouterr().err

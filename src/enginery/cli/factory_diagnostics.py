@@ -1,4 +1,4 @@
-"""``enginery factory doctor``: lazy, read-only prerequisite diagnostics.
+"""``enginery preflight``: lazy, read-only prerequisite diagnostics.
 
 Only what the project's compiled selection needs is checked: git always; the GitHub CLI and
 its read-only ``auth status`` for the GitHub-backed Stage 1 workflow; the selected harness
@@ -215,7 +215,7 @@ def trust_mode_resolution(policy_path: Path) -> str:
             f'set mode = "trusted-local" or "isolated-oci" in the [runner] table of '
             f"{policy_path} (add the table if it is absent)"
         )
-    return "enginery factory init --runner <trusted-local|isolated-oci> --apply"
+    return "enginery init --runner <trusted-local|isolated-oci> --apply"
 
 
 def _check_runner(compiled: CompiledConfig) -> Check:
@@ -253,7 +253,7 @@ def _check_runner(compiled: CompiledConfig) -> Check:
         resolve = (
             "install, start and qualify the container engine; set docker_context in [runner] "
             "in $XDG_CONFIG_HOME/enginery/user.toml (or use "
-            "enginery stage1 build-request --docker-context <name> for the run), "
+            "enginery engine build-request --docker-context <name> for the run), "
             "then " + runner_resolution_command(compiled, "status --image <id>")
         )
     return Check(

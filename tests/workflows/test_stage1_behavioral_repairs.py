@@ -101,7 +101,7 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
     )
     assert service.next_action(bound.run.id).action is expected
     if repair_limit:
-        assert "stage1 watch" in str(caught.value.details["repair"])
+        assert "engine next" in str(caught.value.details["repair"])
         assert "commit the corrected head" not in str(caught.value.details["repair"])
         # Exercise Stage 1's real dispatch/repair-context construction, without
         # launching an unrelated harness process from this semantic-verifier test.
@@ -136,10 +136,10 @@ def test_first_candidate_failure_is_named_and_takes_bounded_repair(
         assert "this run cannot pass" in repair
         assert "decision" not in repair
         assert "change the issue snapshot" in repair
-        assert "enginery factory run ISSUE --project PROJECT --supersede" in repair
-        assert "enginery stage1 build-request" in repair
-        assert "enginery stage1 build-request --run-id NEW_RUN_ID" in repair
-        assert "enginery stage1 start --request REQUEST" in repair
+        assert "enginery run ISSUE --project PROJECT --supersede" in repair
+        assert "enginery engine build-request" in repair
+        assert "enginery engine build-request --run-id NEW_RUN_ID" in repair
+        assert "enginery engine start --request REQUEST" in repair
 
 
 def test_inconclusive_calibration_retries_after_observer_recovers(
@@ -182,7 +182,7 @@ def test_inconclusive_calibration_retries_after_observer_recovers(
         with pytest.raises(HumanActionRequiredError, match="observer_service_conflict") as caught:
             service.verify_merge_ready(request, now=now, heartbeat_window=timedelta(seconds=60))
         repair = str(caught.value.details["repair"])
-        assert "factory calibrate run-check" in repair
+        assert "enginery calibrate run-check" in repair
         assert "--database" in repair and "--owner operator" in repair
         assert list(observer.evaluator_directory.glob("calibration-*.json"))
     assert service.next_action(request.run.id).action is Stage1ProgressionAction.VERIFY
@@ -203,8 +203,8 @@ def test_missing_composed_observer_does_not_suggest_unconsumed_factory_check(
         replace(service, behavioral_verifier=None).verify_merge_ready(
             request, now=now, heartbeat_window=timedelta(seconds=60)
         )
-    assert "factory check" not in str(caught.value)
-    assert "stage1 watch" in str(caught.value)
+    assert "enginery check" not in str(caught.value)
+    assert "engine next" in str(caught.value)
 
 
 def test_behavioral_failure_clears_retryable_github_hold(

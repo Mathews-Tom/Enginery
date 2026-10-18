@@ -34,7 +34,7 @@ def _factory(
     capsys: pytest.CaptureFixture[str], project: Path, command: str, *extra: str
 ) -> tuple[int, dict[str, object]]:
     capsys.readouterr()
-    code = main(["factory", command, "--project", str(project), "--json", *extra])
+    code = main([command, "--project", str(project), "--json", *extra])
     out = capsys.readouterr().out
     return code, json.loads(out) if out.strip() else {}
 
@@ -49,10 +49,7 @@ def project(tmp_path: Path) -> Path:
 @pytest.fixture
 def setup(project: Path, capsys: pytest.CaptureFixture[str]) -> Path:
     capsys.readouterr()
-    assert (
-        main(["factory", "init", "--project", str(project), "--runner", "trusted-local", "--apply"])
-        == 0
-    )
+    assert main(["init", "--project", str(project), "--runner", "trusted-local", "--apply"]) == 0
     return project.resolve()
 
 

@@ -1,4 +1,4 @@
-"""``enginery factory init``: preview and apply guided project setup.
+"""``enginery init``: preview and apply guided project setup.
 
 Setup resolves explicit choices into a project policy file and nothing else. A plan is
 computed first and is the only thing ``--apply`` performs: it lists every file setup would
@@ -10,12 +10,12 @@ preview, which writes nothing.
   when the file exists and differs from what init would write it is user-owned, and init
   reports a conflict and writes nothing at all.
 * The private ownership record (see :mod:`enginery.cli.setup_files`) lists the files setup
-  created so ``factory uninstall`` removes only what is still exactly as setup wrote it.
+  created so ``enginery uninstall`` removes only what is still exactly as setup wrote it.
 * Capabilities are never installed by init. For each selected capability that is not
   already installed it returns an actionable hold naming the exact ``enginery capability``
   commands; approvals stay digest-bound through the policy registry.
 * Credentials, OS services (launchd, systemd, cron), MCP servers and global configuration are
-  never touched: authentication is only detected read-only, by ``factory doctor``.
+  never touched: authentication is only detected read-only, by ``enginery preflight``.
 """
 
 from __future__ import annotations

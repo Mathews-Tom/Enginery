@@ -4,13 +4,13 @@
 Installs exactly one artifact -- a built wheel, a built sdist, or a published
 requirement -- into a fresh virtual environment, then drives the installed
 `enginery` entry point through the consumer surface a new release must keep
-working: the reported version, `doctor`, the G4 and Stage 1 request commands'
+working: the reported version, `doctor`, the G4 and engine request commands'
 help, execution-selection pinning (an unsupported pin and a contradictory strict
 requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged
 acceptance baseline and execution catalog, the fail-closed G4 gate, and the isolated-runner
-surface: `runner` and `enginery-operator` help, the packaged worker and relay recipes (their
-digests equal the source tree's and every recipe file is in the wheel), the Stage 1 runner flags,
+surface: `runner` and `operator` help, the packaged worker and relay recipes (their
+digests equal the source tree's and every recipe file is in the wheel), the engine runner flags,
 and -- only when a container engine is reachable -- that `runner status` holds an absent image.
 A check that cannot run is reported as NOT RUN; any NOT RUN check makes the run INCOMPLETE
 (exit status 3), never a PASS. An engine that is reachable but unqualified is reported as such,
@@ -155,13 +155,13 @@ def _check_help(executable: Path, *, root: Path) -> None:
         ["gate", "record-g4-deficiency-evidence", "--help"],
     ):
         _require_success([str(executable), *command], cwd=root)
-    result = _require_success([str(executable), "stage1", "build-request", "--help"], cwd=root)
+    result = _require_success([str(executable), "engine", "build-request", "--help"], cwd=root)
     missing = [
         flag for flag in ("--model", "--effort", "--strict-effective") if flag not in result.stdout
     ]
     if missing:
-        raise ConsumerSmokeError(f"`stage1 build-request --help` does not list {missing}")
-    _note("gate and stage1 build-request help; --model/--effort/--strict-effective listed")
+        raise ConsumerSmokeError(f"`engine build-request --help` does not list {missing}")
+    _note("gate and engine build-request help; --model/--effort/--strict-effective listed")
 
 
 _STAND_IN_GITHUB = """#!__PYTHON__
@@ -224,7 +224,7 @@ def _build_request_command(executable: Path, *, root: Path, output: Path) -> lis
     ).stdout.strip()
     return [
         str(executable),
-        "stage1",
+        "engine",
         "build-request",
         "--runner",
         "trusted-local",
@@ -521,30 +521,27 @@ _ENGINE_PROGRAM = (
 def _check_runner_help(executable: Path, *, root: Path) -> None:
     for command in (["runner", "--help"], ["runner", "status", "--help"]):
         _require_success([str(executable), *command], cwd=root)
-    operator = executable.with_name("enginery-operator")
-    if not operator.is_file():
-        raise ConsumerSmokeError(
-            f"the `enginery-operator` entry point is not installed: {operator}"
-        )
-    result = _require_success([str(operator), "--help"], cwd=root)
+    result = _require_success([str(executable), "operator", "--help"], cwd=root)
     missing = [
-        word for word in ("status", "pause", "backup", "restore") if word not in result.stdout
+        word
+        for word in ("status", "pause", "resume", "backup", "restore")
+        if word not in result.stdout
     ]
     if missing:
-        raise ConsumerSmokeError(f"`enginery-operator --help` does not list {missing}")
-    _note("runner --help, runner status --help and enginery-operator --help run")
+        raise ConsumerSmokeError(f"`operator --help` does not list {missing}")
+    _note("runner --help, runner status --help and operator --help run")
 
 
 def _check_stage1_runner_flags(executable: Path, *, root: Path) -> None:
-    result = _require_success([str(executable), "stage1", "build-request", "--help"], cwd=root)
+    result = _require_success([str(executable), "engine", "build-request", "--help"], cwd=root)
     missing = [
         flag
         for flag in ("--runner", "--runner-image", "--model-access")
         if flag not in result.stdout
     ]
     if missing:
-        raise ConsumerSmokeError(f"`stage1 build-request --help` does not list {missing}")
-    _note("stage1 build-request lists --runner, --runner-image and --model-access")
+        raise ConsumerSmokeError(f"`engine build-request --help` does not list {missing}")
+    _note("engine build-request lists --runner, --runner-image and --model-access")
 
 
 def _recipe_report(python: Path, *, root: Path, source: Path | None) -> Mapping[str, object]:

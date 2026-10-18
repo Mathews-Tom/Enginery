@@ -1,7 +1,7 @@
 """Render a project policy file from the explicit choices of guided setup.
 
 Pure and deterministic: the same choices always render the same bytes, which is what makes
-``factory init`` idempotent. The text is user-owned once written; setup never rewrites it.
+``enginery init`` idempotent. The text is user-owned once written; setup never rewrites it.
 Every rendered document is a valid layer document (the caller parses it back through
 :func:`enginery.application.layered_config.parse_layer_document` before using it).
 """
@@ -15,8 +15,8 @@ BUILTIN_CAPABILITIES: frozenset[str] = frozenset({"git"})
 """Capability names the factory provides itself; any other permitted name is a package."""
 
 _HEADER = (
-    "# Enginery project policy (tracked). Written once by `enginery factory init`; from then on\n"
-    "# it is yours: setup never edits it again and `enginery factory uninstall` keeps it if you\n"
+    "# Enginery project policy (tracked). Written once by `enginery init`; from then on\n"
+    "# it is yours: setup never edits it again and `enginery uninstall` keeps it if you\n"
     "# change it. Secrets never belong here; name opaque credential references only.\n"
 )
 

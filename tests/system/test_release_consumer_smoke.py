@@ -96,8 +96,8 @@ def test_the_real_consumer_surface_passes(
         "packaged execution catalog",
         "valid pins write requests",
         "gate status --gate G4 remains fail-closed",
-        "runner --help, runner status --help and enginery-operator --help",
-        "stage1 build-request lists --runner, --runner-image and --model-access",
+        "runner --help, runner status --help and operator --help",
+        "engine build-request lists --runner, --runner-image and --model-access",
         "packaged worker and relay recipe files are present",
     ]
     assert len(observed) == len(expected_fragments)
@@ -439,17 +439,14 @@ def test_without_a_source_tree_the_digest_comparison_is_reported_not_run(
     assert "installed recipe digests equal" not in printed
 
 
-def test_the_operator_entry_point_must_be_installed(tmp_path: Path) -> None:
-    launcher = _launcher(tmp_path, "exit 0")
-    with pytest.raises(ConsumerSmokeError, match="enginery-operator"):
+def test_an_operator_help_failure_is_reported(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, 'if [ "$1" = operator ]; then exit 2; fi')
+    with pytest.raises(ConsumerSmokeError, match="operator"):
         release_consumer_smoke._check_runner_help(launcher, root=tmp_path)
 
 
 def test_an_operator_help_without_its_commands_fails(tmp_path: Path) -> None:
-    launcher = _launcher(tmp_path, "exit 0")
-    operator = tmp_path / "enginery-operator"
-    operator.write_text("#!/bin/sh\necho usage: enginery-operator\n", encoding="utf-8")
-    operator.chmod(operator.stat().st_mode | stat.S_IXUSR)
+    launcher = _launcher(tmp_path, 'echo "usage: enginery operator"')
     with pytest.raises(ConsumerSmokeError, match="does not list"):
         release_consumer_smoke._check_runner_help(launcher, root=tmp_path)
 

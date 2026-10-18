@@ -62,7 +62,7 @@ def _minimal_argv(
 ) -> list[str]:
     github = github or write_stand_in_gh(tmp_path / "github")
     return [
-        "stage1",
+        "engine",
         "build-request",
         "--runner",
         "trusted-local",
@@ -108,7 +108,7 @@ def test_build_request_output_round_trips_through_stage1_start_unmodified(
     database = tmp_path / "ledger.db"
     start_exit = main(
         [
-            "stage1",
+            "engine",
             "start",
             "--database",
             str(database),
@@ -399,7 +399,7 @@ def _start_and_advance(tmp_path: Path, request_path: Path) -> int:
     assert (
         main(
             [
-                "stage1",
+                "engine",
                 "start",
                 "--database",
                 str(database),
@@ -413,8 +413,8 @@ def _start_and_advance(tmp_path: Path, request_path: Path) -> int:
     )
     return main(
         [
-            "stage1",
-            "watch",
+            "engine",
+            "next",
             "--database",
             str(database),
             "--owner",

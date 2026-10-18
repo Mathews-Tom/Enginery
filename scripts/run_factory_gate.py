@@ -23,10 +23,10 @@ Scenarios:
     401/403/429 or a deadline in a live run are also a HOLD, never a product failure.
 
 ``setup``
-    Guided setup and layered configuration end to end in a disposable HOME: ``factory init``
+    Guided setup and layered configuration end to end in a disposable HOME: ``init``
     preview/apply/repeat/conflict, the run, project and user layers reaching the argv the real
     Stage 1 adapter submits to a recording stand-in harness, hard-policy and unknown-key
-    refusals, ``factory doctor`` holds, ``factory uninstall`` ownership, and byte-identical
+    refusals, ``preflight`` holds, ``uninstall`` ownership, and byte-identical
     global locations. Local only: no hosted session, container engine or custody; ``--live``,
     ``--harness``, ``--model`` and the gateway, image and custody flags are rejected for it.
 

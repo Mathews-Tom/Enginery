@@ -60,7 +60,7 @@ def authenticated_decisions(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.setattr(factory_decisions, "operator_registration", lambda: registration)
 
         def authenticated(database: Path, command: str, *arguments: str) -> int:
-            if command not in {"approve", "reject", "resume"}:
+            if command not in {"approve", "reject"}:
                 return original(database, command, *arguments)
             run_id = arguments[arguments.index("--run-id") + 1]
             with LedgerService.open(database) as ledger:
@@ -110,7 +110,7 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     assert _start(database, request_path) == 0
     assert json.loads(capsys.readouterr().out) == {"run_id": "run-stage1", "status": "created"}
 
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
     watched = json.loads(capsys.readouterr().out)
     assert watched["run_id"] == "run-stage1"
     assert watched["nodes"] == []
@@ -174,24 +174,55 @@ def test_stage1_refuses_requeue_without_changing_wait_or_consuming_challenge(
     request = _start_request(database, tmp_path)
     capsys.readouterr()
     _register_qualify_and_human_node(database, request, node_id="plan_approval")
+    scope = [
+        "--project",
+        str(request.repository_path),
+        "--database",
+        str(database),
+        "--owner",
+        "stage1-cli",
+    ]
+    assert main(["review", "run-stage1", *scope, "--json"]) == 0
+    report_text, challenge_line = capsys.readouterr().out.strip().rsplit("\n", 1)
+    report = json.loads(report_text)
+    assert report["challenge_issued"] is True
+    challenge = challenge_line.removeprefix("Decision challenge: ")
+    assert challenge_line != challenge
 
     assert (
-        _lifecycle(
-            database,
-            "resume",
-            "--run-id",
-            "run-stage1",
-            "--node-id",
-            "plan_approval",
-            "--attempt-id",
-            "plan-approval-1",
-            "--operation-id",
-            "plan-approval:run-stage1:1",
+        main(
+            [
+                "stage1",
+                "resume",
+                "--database",
+                str(database),
+                "--owner",
+                "stage1-cli",
+                "--run-id",
+                "run-stage1",
+                "--node-id",
+                "plan_approval",
+                "--attempt-id",
+                "plan-approval-1",
+                "--operation-id",
+                "plan-approval:run-stage1:1",
+                "--subject-digest",
+                report["subject_digest"],
+                "--challenge",
+                challenge,
+                "--reason",
+                "operator investigated wait",
+            ]
         )
         == 2
     )
     assert "human_wait_requeue_unsupported" in capsys.readouterr().err
     assert _node_state(database, "plan_approval")["status"] == "awaiting_human"
+    with LedgerService.open(database) as ledger:
+        row = ledger.connection.execute(
+            "SELECT consumed_at FROM human_decision_challenges"
+        ).fetchone()
+        assert row["consumed_at"] is None
 
     assert (
         _lifecycle(
@@ -376,7 +407,7 @@ def _node_state(database: Path, node_id: str) -> dict[str, object]:
 def _start(database: Path, request_path: Path) -> int:
     return main(
         [
-            "stage1",
+            "engine",
             "start",
             "--database",
             str(database),
@@ -390,7 +421,7 @@ def _start(database: Path, request_path: Path) -> int:
 
 def _lifecycle(database: Path, command: str, *arguments: str) -> int:
     return main(
-        ["stage1", command, "--database", str(database), "--owner", "stage1-cli", *arguments]
+        ["engine", command, "--database", str(database), "--owner", "stage1-cli", *arguments]
     )
 
 
@@ -635,7 +666,7 @@ def test_read_only_diagnostics_never_create_harness_state_and_never_crash_on_the
     assert _start(database, request_path) == 0
     capsys.readouterr()
 
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
 
     watched = json.loads(capsys.readouterr().out)
     assert watched["next_action"] == expected_action
@@ -675,7 +706,7 @@ def test_a_host_default_run_is_never_probed_by_read_only_diagnostics(
     assert _start(database, request_path) == 0
     capsys.readouterr()
 
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
 
     watched = json.loads(capsys.readouterr().out)
     assert watched["next_action"] == "qualify"
@@ -691,7 +722,7 @@ def test_watch_reports_a_new_runs_absent_cost_budget_as_unenforced(
     assert _start(database, request_path) == 0
     capsys.readouterr()
 
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
 
     assert json.loads(capsys.readouterr().out)["cost_budget"] == {"value": None, "enforced": False}
 
@@ -718,7 +749,7 @@ def test_watch_never_presents_a_legacy_carried_dollar_number_as_enforcement(
     finally:
         ledger.close()
 
-    assert _lifecycle(database, "watch", "--run-id", "run-stage1") == 0
+    assert _lifecycle(database, "next", "--run-id", "run-stage1") == 0
     watched = json.loads(capsys.readouterr().out)
     assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
     evidence = json.loads(capsys.readouterr().out)
@@ -743,7 +774,7 @@ def test_factory_explicit_stage1_ledger_refuses_unsupported_requeue(
         "--owner",
         "stage1-cli",
     ]
-    assert main(["factory", "review", "run-stage1", *scope, "--json"]) == 0
+    assert main(["review", "run-stage1", *scope, "--json"]) == 0
     report_text, challenge_line = capsys.readouterr().out.strip().rsplit("\n", 1)
     report = json.loads(report_text)
     assert report["challenge_issued"] is True
@@ -752,7 +783,6 @@ def test_factory_explicit_stage1_ledger_refuses_unsupported_requeue(
     assert (
         main(
             [
-                "factory",
                 "decide",
                 "run-stage1",
                 *scope,

@@ -57,7 +57,7 @@ def _build(tmp_path: Path, repository: Path, base: str, *extra: str) -> tuple[in
 def _start(tmp_path: Path, request: Path) -> int:
     return main(
         [
-            "stage1",
+            "engine",
             "start",
             "--database",
             str(tmp_path / "ledger.db"),
@@ -311,7 +311,7 @@ def test_start_refuses_a_request_that_predates_layered_configuration(
     capsys.readouterr()
 
     assert _start(tmp_path, output) == INVALID
-    assert "enginery stage1 build-request" in capsys.readouterr().err
+    assert "enginery engine build-request" in capsys.readouterr().err
 
 
 def test_a_started_run_resumes_without_its_request_document(tmp_path: Path) -> None:
@@ -323,8 +323,8 @@ def test_a_started_run_resumes_without_its_request_document(tmp_path: Path) -> N
     assert (
         main(
             [
-                "stage1",
-                "watch",
+                "engine",
+                "next",
                 "--database",
                 str(tmp_path / "ledger.db"),
                 "--owner",
@@ -372,7 +372,7 @@ def test_start_refuses_configuration_source_drift(
     error = capsys.readouterr().err
     assert (
         f"configuration changed since the request was built: {path}; "
-        "rebuild it with `enginery stage1 build-request`"
+        "rebuild it with `enginery engine build-request`"
     ) in error
 
 
@@ -507,7 +507,7 @@ def test_start_refuses_changed_user_configuration_location(
     previous = tmp_path / "first" / "enginery" / "user.toml"
     assert (
         f"configuration changed since the request was built: {current} "
-        f"(previously {previous}); rebuild it with `enginery stage1 build-request`"
+        f"(previously {previous}); rebuild it with `enginery engine build-request`"
     ) in capsys.readouterr().err
 
 

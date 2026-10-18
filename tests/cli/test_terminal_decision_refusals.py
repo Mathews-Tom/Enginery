@@ -26,7 +26,7 @@ def scope(value: Ingress) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("command", ["factory", "stage1"])
+@pytest.mark.parametrize("command", ["project", "stage1"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_requeue_cli_refuses_before_authentication(
     ingress: Ingress,  # noqa: F811
@@ -39,8 +39,8 @@ def test_requeue_cli_refuses_before_authentication(
         ingress.preferences.write_bytes(b"schema_version = 1\n")
     before = ingress.state("validate")
     args = (
-        ["factory", "decide", RUN, *scope(ingress), "--action", "human_wait.validate.requeue"]
-        if command == "factory"
+        ["decide", RUN, *scope(ingress), "--action", "human_wait.validate.requeue"]
+        if command == "project"
         else [
             "stage1",
             "resume",
@@ -73,7 +73,7 @@ def test_requeue_cli_refuses_before_authentication(
     assert code == 2
     assert "human_wait_requeue_unsupported" in output.err
     repair = output.err.split("repair:", 1)[1]
-    assert "factory review" in repair and "factory decide" not in repair
+    assert "enginery review" in repair and "enginery decide" not in repair
     assert ingress.state("validate") == before
     assert not list_decisions(ingress.ledger.connection, RUN)
 
@@ -86,7 +86,6 @@ def test_mismatched_action_cli_only_suggests_review(
     issued = ingress.issue()
     code = main(
         [
-            "factory",
             "decide",
             RUN,
             *scope(ingress),
@@ -103,7 +102,7 @@ def test_mismatched_action_cli_only_suggests_review(
     output = capsys.readouterr()
     assert code == 2 and "decision_action_mismatch" in output.err
     repair = output.err.split("repair:", 1)[1]
-    assert "factory review" in repair and "factory decide" not in repair
+    assert "enginery review" in repair and "enginery decide" not in repair
 
 
 def test_exhausted_review_cli_has_no_actions_or_challenge(
@@ -117,7 +116,7 @@ def test_exhausted_review_cli_has_no_actions_or_challenge(
     ingress.register("wait_for_ci", outcome="passed")
     ingress.register("verify", outcome="failed")
     ingress.update_node("verify", attempt_id=attempt, behavioral_findings=["assertion failed"])
-    assert main(["factory", "review", RUN, *scope(ingress)]) == 0
+    assert main(["review", RUN, *scope(ingress)]) == 0
     output = capsys.readouterr()
     assert "Subject digest:" in output.out
     assert "Decision actions:" not in output.out
@@ -126,7 +125,6 @@ def test_exhausted_review_cli_has_no_actions_or_challenge(
     assert (
         main(
             [
-                "factory",
                 "decide",
                 RUN,
                 *scope(ingress),
@@ -143,7 +141,7 @@ def test_exhausted_review_cli_has_no_actions_or_challenge(
     refusal = capsys.readouterr().err
     assert "decision_challenge_unknown" in refusal
     repair = refusal.split("repair:", 1)[1]
-    assert "factory review" in repair and "factory decide" not in repair
+    assert "enginery review" in repair and "enginery decide" not in repair
 
 
 @pytest.mark.parametrize("node", ["wait_for_ci", "verify"])
@@ -161,7 +159,7 @@ def test_terminal_github_review_offers_no_authority(
         ingress.register("wait_for_ci", outcome="passed")
     ingress.register(node, outcome="failed")
     ingress.update_node(node, attempt_id=ingress.state("implement")["attempt_id"], reason=reason)
-    assert main(["factory", "review", RUN, *scope(ingress)]) == 0
+    assert main(["review", RUN, *scope(ingress)]) == 0
     output = capsys.readouterr()
     assert "Subject digest:" in output.out
     assert "Decision actions:" not in output.out
@@ -169,7 +167,6 @@ def test_terminal_github_review_offers_no_authority(
     assert (
         main(
             [
-                "factory",
                 "decide",
                 RUN,
                 *scope(ingress),
@@ -184,5 +181,5 @@ def test_terminal_github_review_offers_no_authority(
         == 2
     )
     repair = capsys.readouterr().err.split("repair:", 1)[1]
-    assert "factory review" in repair and "factory decide" not in repair
+    assert "enginery review" in repair and "enginery decide" not in repair
     assert not list_decisions(ingress.ledger.connection, RUN)
