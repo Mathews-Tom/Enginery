@@ -2367,12 +2367,13 @@ _MAX_RECORDED_PROTECTED_PATHS = 200
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
-    name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
+    name = f"enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     if request.runner.isolated_mode:
         # The worker writes its result into the per-attempt output directory, the only
-        # writable mount besides its task-local workspace, never into a host-owned path.
+        # writable mount besides its task-local workspace, never into a host-owned path. The
+        # launch spec accepts only a plain, non-hidden file name there.
         return out_path_for(request.workspace_path) / name
-    return request.workspace_path / name
+    return request.workspace_path / f".{name}"
 
 
 def _scheduled_implementation(

@@ -8,6 +8,7 @@ and on observable host effects (markers a host-run command would leave), not on 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -23,11 +24,13 @@ from tests.adapters.oci.support import FakeDocker
 from tests.engine.test_isolated_workspace import _WORKER as WORKER_SCRIPT
 from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.execution import selection_for
+from tests.support.runner_context import harness_task, isolated_context
 from tests.support.verified_implementation import verified_head
 
 from enginery.adapters.oci import image as oci_image
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
+from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.adapter_types import NormalizedAdapterEvent
 from enginery.application.runner_ports import RunnerAdmissionDecision
 from enginery.application.work_ports import (
@@ -43,7 +46,7 @@ from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import RunnerProfile, RunnerSelection
+from enginery.domain.runner import LaunchSpec, RunnerProfile, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
@@ -812,6 +815,33 @@ def test_the_isolated_result_path_is_in_the_out_directory_and_trusted_local_stay
         _reap(trusted_dispatch)
         trusted_path = trusted_dispatch.result_path
         assert trusted_path.parent == trusted.request.workspace_path
+
+
+def test_the_isolated_result_path_is_a_file_name_the_real_launch_spec_accepts(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    isolated = _build(
+        ledger_service, tmp_path / "iso", runner=_isolated(), admission=ScriptedAdmission()
+    )
+    _qualify(isolated)
+    dispatch = _dispatch(isolated)
+    _reap(dispatch)
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+        command_runner=lambda arguments: subprocess.CompletedProcess(
+            arguments, 0, stdout="omp v18.10.3\n\nUSAGE\n", stderr=""
+        ),
+        runner=isolated_context(tmp_path / "receipts"),
+    )
+
+    command = harness.supervised_command(
+        harness_task(tmp_path / "workspace", "omp"), result_path=dispatch.result_path
+    )
+
+    spec = LaunchSpec.from_state(json.loads(command[command.index("--spec") + 1]))
+    assert spec.out_path == str(out_path_for(isolated.request.workspace_path))
+    assert spec.result_name == dispatch.result_path.name
 
 
 def test_the_implementation_node_persists_the_workspace_mode_of_its_trust_mode(
