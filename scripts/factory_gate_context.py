@@ -106,6 +106,8 @@ class GateOptions:
     subject_commit: str | None = None
     campaign_id: str | None = None
     campaign_config: Path | None = None
+    reuse_evidence: bool = False
+    install_receipts: tuple[Path, ...] = ()
 
     @property
     def mode(self) -> str:

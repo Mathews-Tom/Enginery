@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "constant-output",
+      "owner": "factory-maintainers",
+      "rung": "evaluator",
+      "assertion": "stdout",
+      "expected_outcome": "caught",
+      "fault_class": "constant_result",
+      "fault_sha256": "97cf46a4faf0757335aaf140cde0333a3f8ac5d4a64cb8e2ba4dc95bb421640b"
+    },
+    {
+      "id": "weak-exit-status",
+      "owner": "factory-maintainers",
+      "rung": null,
+      "assertion": "exit_status",
+      "expected_outcome": "escaped",
+      "next_rung": "evaluator",
+      "next_assertion": "stdout",
+      "next_expected_outcome": "caught",
+      "fault_class": "constant_result",
+      "fault_sha256": "97cf46a4faf0757335aaf140cde0333a3f8ac5d4a64cb8e2ba4dc95bb421640b"
+    },
+    {
+      "id": "withheld-output",
+      "owner": "factory-maintainers",
+      "rung": null,
+      "assertion": "stdout",
+      "expected_outcome": "not_injected",
+      "fault_class": "constant_result",
+      "fault_sha256": "97cf46a4faf0757335aaf140cde0333a3f8ac5d4a64cb8e2ba4dc95bb421640b"
+    },
+    {
+      "id": "missing-observer",
+      "owner": "factory-maintainers",
+      "rung": null,
+      "assertion": "stdout",
+      "expected_outcome": "inconclusive",
+      "fault_class": "constant_result",
+      "fault_sha256": "97cf46a4faf0757335aaf140cde0333a3f8ac5d4a64cb8e2ba4dc95bb421640b"
+    }
+  ]
+}

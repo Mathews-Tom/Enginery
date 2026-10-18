@@ -55,13 +55,19 @@ _ABSENT_IMAGE = "sha256:" + "0" * 63 + "1"
 _CLAUDE_MODEL = "claude-sonnet-4-5"
 _OMP_MODEL = "anthropic/claude-sonnet-4-5"
 
+_COMMANDS: list[dict[str, object]] = []
+
+
+def _record_command(command: list[str], result: subprocess.CompletedProcess[str]) -> None:
+    _COMMANDS.append({"argv": list(command), "exit_code": result.returncode})
+
 
 class ConsumerSmokeError(RuntimeError):
     """Raised when a released consumer command does not meet its contract."""
 
 
 def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         command,
         cwd=cwd,
         capture_output=True,
@@ -73,6 +79,8 @@ def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
             "XDG_STATE_HOME": str(cwd / "xdg-state"),
         },
     )
+    _record_command(command, result)
+    return result
 
 
 def _describe(command: list[str], result: subprocess.CompletedProcess[str]) -> str:
@@ -556,6 +564,7 @@ def _recipe_report(python: Path, *, root: Path, source: Path | None) -> Mapping[
         check=False,
         env=environment,
     )
+    _record_command([str(python), "-c", _RECIPE_PROGRAM], result)
     if result.returncode != 0:
         raise ConsumerSmokeError(
             f"recipe probe failed\n{_describe([str(python), '-c', '<recipe probe>'], result)}"
@@ -647,6 +656,7 @@ def _check_runner_engine(executable: Path, python: Path, *, root: Path) -> list[
         text=True,
         check=False,
     )
+    _record_command([str(python), "-c", _ENGINE_PROGRAM], probe)
     if probe.returncode != 0:
         reason = (probe.stdout.strip() or probe.stderr.strip() or "no answer")[:300]
         if probe.returncode == _ENGINE_UNQUALIFIED_EXIT or reason.startswith("unqualified:"):
@@ -747,35 +757,73 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="fail, rather than report NOT RUN, when no qualified container engine is reachable",
     )
+    parser.add_argument(
+        "--install-receipt", type=Path, help="write a machine-readable install receipt"
+    )
     args = parser.parse_args(argv)
     version = expected_version(wheel=args.wheel, sdist=args.sdist, package=args.package)
     artifact: Path | None = args.wheel or args.sdist
     if artifact is not None and not artifact.is_file():
         raise ConsumerSmokeError(f"artifact does not exist: {artifact}")
-    with tempfile.TemporaryDirectory(prefix="enginery-consumer-") as temporary_directory:
-        root = Path(temporary_directory)
-        venv = root / "venv"
-        _require_success([sys.executable, "-m", "venv", str(venv)], cwd=root)
-        python = venv / "bin" / "python"
-        install = _installer(python)
-        install.append(str(artifact.resolve()) if artifact is not None else args.package)
-        _require_success(install, cwd=root)
-        print(
-            f"installed {artifact.name if artifact is not None else args.package} "
-            f"sha256={_sha256(artifact) if artifact is not None else 'n/a'} "
-            f"installer={install[0]} python={platform.python_version()} "
-            f"platform={platform.platform()}",
-            flush=True,
-        )
-        not_run = exercise_surface(
-            executable=venv / "bin" / "enginery",
-            python=python,
-            root=root,
-            version=version,
-            wheel=args.wheel,
-            require_engine=args.require_engine,
-        )
-    return report_outcome(not_run)
+    _COMMANDS.clear()
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "distribution": platform.freedesktop_os_release() if sys.platform == "linux" else {},
+        },
+        "python": {"version": platform.python_version(), "executable": sys.executable},
+        "artifact": {
+            "kind": "wheel" if args.wheel else "sdist" if args.sdist else "package",
+            "name": artifact.name if artifact else args.package,
+            "sha256": _sha256(artifact) if artifact else None,
+        },
+        "installed_version": None,
+        "entry_point": None,
+        "commands": _COMMANDS,
+        "outcome": "fail",
+        "exit_code": 1,
+        "not_run": [],
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="enginery-consumer-") as temporary_directory:
+            root = Path(temporary_directory)
+            venv = root / "venv"
+            _require_success([sys.executable, "-m", "venv", str(venv)], cwd=root)
+            python = venv / "bin" / "python"
+            receipt["python"] = {"version": platform.python_version(), "executable": str(python)}
+            install = _installer(python)
+            install.append(str(artifact.resolve()) if artifact is not None else args.package)
+            _require_success(install, cwd=root)
+            executable = venv / "bin" / "enginery"
+            receipt["entry_point"] = str(executable)
+            print(
+                f"installed {artifact.name if artifact is not None else args.package} "
+                f"sha256={_sha256(artifact) if artifact is not None else 'n/a'} "
+                f"installer={install[0]} python={platform.python_version()} "
+                f"platform={platform.platform()}",
+                flush=True,
+            )
+            not_run = exercise_surface(
+                executable=executable,
+                python=python,
+                root=root,
+                version=version,
+                wheel=args.wheel,
+                require_engine=args.require_engine,
+            )
+            receipt["installed_version"] = version
+            receipt["not_run"] = not_run
+            code = report_outcome(not_run)
+            receipt["outcome"] = "pass" if code == 0 else "incomplete"
+            receipt["exit_code"] = code
+            return code
+    finally:
+        if args.install_receipt is not None:
+            args.install_receipt.parent.mkdir(parents=True, exist_ok=True)
+            args.install_receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":
