@@ -100,33 +100,40 @@ for the tickets you are migrating.
 ## Step 2 (mandatory): back up the Enginery ledger
 
 **Run this before any command that touches your Enginery `--database`
-file**, including the very first `enginery stage1 start` you run as part
+file**, including the very first `enginery engine start` you run as part
 of this migration. If the ledger file does not exist yet, this step is
 trivially satisfied by starting from a fresh, empty, tracked ledger path —
 but once it exists, back it up before every subsequent import:
 
 ```bash
-uv run enginery ledger backup --database ledger.db --output backup-$(date -u +%Y%m%dT%H%M%SZ)
+uv run enginery operator pause --database ledger.db --reason "migration backup"
+uv run enginery operator backup --database ledger.db --output backup-$(date -u +%Y%m%dT%H%M%SZ)
+uv run enginery operator resume --database ledger.db
 ```
 
-If an import goes wrong, recover with `ledger restore`. **`restore`
-refuses to overwrite an existing destination file** — move the current
-ledger aside first:
+Backup verifies the ledger (and artifacts when `--artifacts` is given) and returns
+a JSON receipt.
+Pause dispatch before backup and resume it only when maintenance is complete.
+If an import goes wrong, pause the destination ledger before restoring a verified
+backup. Restore verifies the backup and restored result and returns JSON; it
+requires paused state rather than a manual file rename. Do not use
+`--force-unpaused` as a routine recovery shortcut.
 
 ```bash
-mv ledger.db ledger.db.bad-$(date -u +%Y%m%dT%H%M%SZ)
-uv run enginery ledger restore --backup backup-<timestamp> --database ledger.db
-uv run enginery ledger verify --database ledger.db
+uv run enginery operator pause --database ledger.db --reason "migration recovery"
+uv run enginery operator restore --backup backup-<timestamp> --database ledger.db
+uv run enginery operator verify --database ledger.db
+uv run enginery operator resume --database ledger.db
 ```
 
-`ledger verify` is safe to run at any time, including against a live
-ledger, and never mutates anything — use it after every restore and
-whenever you are unsure of a ledger's state.
+`operator verify` provides read-only integrity inspection; SQLite may create
+sidecars when opening a WAL ledger. Run it after every restore and whenever
+ledger integrity is uncertain.
 
 ## Step 3: build one Enginery request per active ticket
 
 Enginery has no CLI command that accepts a hand-written "friendly" JSON
-document for a new work item in this release: `enginery stage1 start
+document for a new work item in this release: `enginery engine start
 --request request.json` expects the exact internal serialization of a
 `Stage1RunRequest` (bound run/work-item/manifest digests included) plus the
 compiled configuration snapshot it was built from, which is not something to
@@ -181,7 +188,7 @@ work_item = WorkItem(
 snapshot = WorkLedgerSnapshot(work_item=work_item, source_revision="manual-migration")
 
 # This manual migration deliberately skips project policy and user preferences (project=None,
-# user=None), unlike `stage1 build-request`, which reads both through config_locations.
+# user=None), unlike `engine build-request`, which reads both through config_locations.
 # Unspecified choices fall through to the packaged workflow and factory layers; no host
 # probe is supplied, so installed-harness model/effort observations are also skipped.
 compiled = compile_effective_config(
@@ -250,7 +257,7 @@ request = Stage1RunRequest(
     protected_paths=config.strings("protected_paths"),
 )
 
-# `stage1 start` verifies the request against the snapshot it was compiled from, so the
+# `engine start` verifies the request against the snapshot it was compiled from, so the
 # document carries both.
 document = {**request.initial_state(), "effective_config": config.to_state()}
 Path("request.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -259,11 +266,11 @@ Path("request.json").write_text(json.dumps(document, indent=2), encoding="utf-8"
 Then, having already completed the mandatory backup in Step 2:
 
 ```bash
-uv run enginery stage1 start --database ledger.db --owner migration-operator --request request.json
-uv run enginery stage1 evidence --database ledger.db --owner migration-operator --run-id sage-migration-auth-004
+uv run enginery engine start --database ledger.db --owner migration-operator --request request.json
+uv run enginery engine evidence --database ledger.db --owner migration-operator --run-id sage-migration-auth-004
 ```
 
-`stage1 start` is idempotent for an unchanged request: re-running the same
+`engine start` is idempotent for an unchanged request: re-running the same
 command against the same `--database` and request document is safe and
 returns the same `run_id`/`status` without creating a duplicate run.
 Re-running it with a *changed* request for the same run ID is rejected
@@ -287,53 +294,40 @@ schema, `dependencies` on) another ticket:
 ## Step 4: verify
 
 ```bash
-uv run enginery ledger verify --database ledger.db
-uv run enginery stage1 evidence --database ledger.db --owner migration-operator --run-id <run-id>
+uv run enginery operator verify --database ledger.db
+uv run enginery engine evidence --database ledger.db --owner migration-operator --run-id <run-id>
 ```
 
 Confirm the run's `request_digest` and `source_revision` match what you
-expect, and that `enginery ledger verify` reports the ledger healthy. From
+expect, and that `enginery operator verify` reports the ledger healthy. From
 here the run progresses through the normal Stage 1 lifecycle described in
 [`docs/operations.md`](operations.md#running-a-stage-1-workflow) — this
 guide's job ends once the ticket exists as a durable, evidence-bound
 Enginery run.
 
-## Worked example
+## Worked sequence
 
-The sequence above was executed against a real constructed fixture — a
-`.sage/tickets/index.json` and `.sage/tickets/AUTH-004.md` matching the
-real schema described above, one `blockedBy`/dependency relationship, and
-a real local git repository — through this repository's actual `enginery`
-CLI:
+The original migration exercise used a constructed `.sage/tickets` fixture and
+a real local git repository. The current command sequence below is a runbook,
+not a transcript of that historical output. Substitute the reviewed request and
+backup paths; keep the same database and owner for the engine run.
 
-```text
-$ enginery stage1 start --database ledger.db --owner migration-operator --request request.json
-{"run_id": "sage-migration-auth-004", "status": "created"}
-
-$ enginery ledger backup --database ledger.db --output backup-1
-backup written to backup-1 (schema version 5)
-
-$ enginery stage1 evidence --database ledger.db --owner migration-operator --run-id sage-migration-auth-004
-{"base_revision": "main", "nodes": [], "request_digest": "sha256:3f0ac...", "run_id": "sage-migration-auth-004", "run_status": "created", "source_revision": "manual-migration"}
-
-$ enginery ledger verify --database ledger.db
-healthy
-
-$ mv ledger.db ledger.db.bad
-$ enginery ledger restore --backup backup-1 --database ledger.db
-restored ledger.db (schema version 5)
-
-$ enginery ledger verify --database ledger.db
-healthy
+```bash
+enginery engine start --database ledger.db --owner migration-operator --request request.json
+enginery engine evidence --database ledger.db --owner migration-operator --run-id sage-migration-auth-004
+enginery operator pause --database ledger.db --reason "migration checkpoint"
+enginery operator backup --database ledger.db --output backup-1
+enginery operator verify --database ledger.db
+# Only if recovery is required, while the destination remains paused:
+enginery operator restore --backup backup-1 --database ledger.db
+enginery operator verify --database ledger.db
+enginery operator resume --database ledger.db
 ```
 
-This confirms, against real command output rather than a hypothetical
-walkthrough: the request-building step and the read-only inspection step
-never mutate the ledger; the first mutating command is `stage1 start`;
-`stage1 start` is idempotent under a re-run with the same request; `ledger
-backup` followed by `ledger restore` recovers the exact prior state after
-simulated damage; and `ledger verify` correctly reports the restored
-ledger healthy.
+Request construction does not write the ledger; `engine start` creates the run
+and is idempotent for an unchanged request. Evidence inspection is read-only.
+Operator maintenance returns verified JSON receipts; pause and resume affect
+ledger dispatch, not the immutable request or its evidence.
 
 ## What this migration explicitly does not do
 

@@ -198,27 +198,31 @@ The near-term focus is workflow integrity for a local operator: binding runs to 
 
 The planned first backend binds supported external actions to stable operation IDs and keeps production and publication credentials in fixed broker code outside agent workspaces. It does not prevent an agent process from accessing the user’s account, filesystem, network, keychain, or other host processes; that guarantee ships with the future container or VM backend. Product copy must not imply otherwise.
 
-### Shipped manual factory path and proposed controls
+### Manual project path
 
-Guided configuration ships through `enginery factory init`, `doctor`, `explain`,
+Guided configuration ships through `enginery init`, `preflight`, `explain`,
 and `uninstall`. `collect --dry-run` previews GitHub intake; `collect` records
-private cursors. `run`, `status`, `explain RUN` and `resume` share the existing
+private cursors. `run`, `status RUN` and `continue RUN` share the existing
 Stage 1 coordinator and immutable request binding. `pause` and `drain` control
-project-ledger dispatch; `factory pause --lift` lifts the pause.
+project-ledger dispatch; `resume` lifts the pause.
 
-`factory calibrate` and `check` bind independent observations and semantic verdicts
-to the current build. `factory review RUN` renders safe local terminal/HTML packets
+`calibrate` and `check` bind independent observations and semantic verdicts
+to the current build. `review RUN` renders safe local terminal/HTML packets
 and issues a one-time challenge only on a genuine same stdin/stdout TTY.
-`factory decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
+`decide RUN --action ACTION --subject-digest DIGEST --challenge SECRET`
 authenticates the registered local operator; publication uses `pull_request.open`.
 Decisions expire and changed bound inputs supersede them. Feedback and Stage 1
 review reports supply findings, never authority. Human-wait approve/reject
-commands require the same node-scoped authenticated protocol; `stage1 resume`
-refuses with `human_wait_requeue_unsupported` (no supported requeue nodes). See
+commands require the same node-scoped authenticated protocol; human-wait requeue
+via `decide RUN --action human_wait.NODE.requeue` refuses with
+`human_wait_requeue_unsupported` (no supported requeue nodes). See
 [operator registration and decisions](operations.md#authenticated-terminal-decisions).
 This trusted-local protocol does not contain another process running as the same
-OS user. Only factory `watch` and `evidence` remain proposed; scheduled
-collection/watch is not shipped.
+OS user. `enginery explain` takes no run ID and explains current configuration.
+`enginery resume` lifts dispatch pause only; `enginery continue RUN` reconciles
+and advances a particular run. Host `enginery doctor` is separate from project
+`enginery preflight`. Use `enginery engine evidence` with explicit database,
+owner and run ID for retained evidence. Scheduled collection is not shipped.
 The manual path ends at a verified open PR and outcome observation, never merge,
 release or deployment. Those actions retain their separate workflow policy gates.
 Shipped control is deterministic and local; models do not poll, schedule or decide
