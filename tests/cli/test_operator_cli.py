@@ -1025,4 +1025,4 @@ def test_operator_without_a_subcommand_is_invalid_input(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert main([]) == 2
-    assert "enginery-operator" in capsys.readouterr().err
+    assert "enginery operator" in capsys.readouterr().err
