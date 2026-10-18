@@ -24,6 +24,7 @@ import enginery.adapters.oci as oci_package
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.runner import (
+    ISOLATED_SHELL_COMMANDS,
     WORKSPACE_MOUNT,
     isolated_permission_mapping,
     trusted_local_permission_mapping,
@@ -126,6 +127,18 @@ def test_policy_overlay_denies_publishing_and_allows_only_listed_commands() -> N
     # Every deny rule precedes every allow rule: the first matching rule wins.
     order = [rule["approval"] for rule in rules]
     assert order == sorted(order, key=lambda value: value != "deny")
+
+
+def test_isolated_shell_instructions_match_both_harness_allowlists() -> None:
+    policy = yaml.safe_load(POLICY_ASSET.read_text(encoding="utf-8"))
+    allowed = {rule["match"] for rule in policy["bash"]["patterns"] if rule["approval"] == "allow"}
+    assert allowed == {command + "*" for command in ISOLATED_SHELL_COMMANDS}
+
+    arguments = isolated_permission_mapping("claude-code").arguments
+    start = arguments.index("--allowedTools") + 1
+    end = arguments.index("--disallowedTools")
+    bash_entries = tuple(entry for entry in arguments[start:end] if entry.startswith("Bash("))
+    assert bash_entries == tuple(f"Bash({command}:*)" for command in ISOLATED_SHELL_COMMANDS)
 
 
 @dataclass(frozen=True, slots=True)

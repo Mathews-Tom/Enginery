@@ -46,7 +46,12 @@ from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import LaunchSpec, RunnerProfile, RunnerSelection
+from enginery.domain.runner import (
+    ISOLATED_SHELL_COMMANDS,
+    LaunchSpec,
+    RunnerProfile,
+    RunnerSelection,
+)
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
@@ -718,6 +723,42 @@ def test_an_isolated_worker_is_told_to_commit_locally_and_never_to_push(
     assert task.head_branch == "enginery/run-isolated"
     assert task.base_revision == _git("rev-parse", "HEAD", cwd=built.repository)
     assert task.base_revision in constraint
+    assert all(command in constraint for command in ISOLATED_SHELL_COMMANDS)
+    assert (
+        f"First run `git checkout -b {task.head_branch} {task.base_revision}` as a single command."
+    ) in constraint
+    assert "Run one command per tool call." in constraint
+    assert "Do not use &&, ;, pipes, redirection or command substitution." in constraint
+    assert "including test runners and cat, is refused" in constraint
+    assert "git commit -m 'Describe the change'" in constraint
+    assert "must not contain parentheses, quotes, $, backticks" in constraint
+    assert "Read and edit files with the file tools." in constraint
+    assert "operator runs the project's validation after you commit" in constraint
+
+
+def test_an_isolated_repair_worker_gets_the_shell_rules_without_a_new_checkout(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    from enginery.workflows.stage1 import _implementation_task
+
+    built = _build(ledger_service, tmp_path, runner=_isolated(), admission=ScriptedAdmission())
+    task = _implementation_task(
+        built.request,
+        attempt_id="run-isolated-implement-1",
+        operation_id=OperationId("repair-1"),
+        repair_context="Repair the validation failure.",
+        base_revision="b149833689718a287ec635312ad74cdd9de592b1",
+    )
+    constraint = task.constraints[-1]
+
+    assert "Continue only on the existing branch 'enginery/run-isolated'" in constraint
+    assert "do not create a new branch" in constraint
+    assert "First run" not in constraint
+    assert all(command in constraint for command in ISOLATED_SHELL_COMMANDS)
+    assert "Run one command per tool call." in constraint
+    assert "must not contain parentheses, quotes, $, backticks" in constraint
+    assert "Read and edit files with the file tools." in constraint
+    assert "operator runs the project's validation after you commit" in constraint
 
 
 def test_a_symbolic_base_reaches_the_worker_as_a_full_object_id_and_the_bundle_verifies(
@@ -789,6 +830,9 @@ def test_a_trusted_local_worker_is_told_the_same_it_commits_locally_and_never_pu
     assert "push the completed change to origin" not in constraint
     assert task.head_branch is None, "no bundle binding: the trusted worker is not bundled"
     assert task.base_revision is None
+    assert "Run only these shell commands" not in constraint
+    assert "one command per tool call" not in constraint
+    assert "First run `git checkout" not in constraint
 
 
 def test_the_isolated_result_path_is_in_the_out_directory_and_trusted_local_stays_in_the_workspace(

@@ -1201,6 +1201,21 @@ _TRUSTED_LOCAL_PERMISSIONS: dict[str, PermissionMapping] = {
 # overlay shipped in the worker image that allows only the same shell commands and wins over any
 # repository setting. Its file tools are not path-confined; the container's mounts are what keep
 # them inside the workspace.
+ISOLATED_SHELL_COMMANDS = (
+    "git status",
+    "git add",
+    "git commit",
+    "git diff",
+    "git log",
+    "git show",
+    "git switch",
+    "git checkout -b",
+    "git branch",
+    "git rev-parse",
+    "git ls-files",
+)
+
+
 _ISOLATED_PERMISSIONS: dict[str, PermissionMapping] = {
     "claude-code": PermissionMapping(
         harness="claude-code",
@@ -1224,17 +1239,7 @@ _ISOLATED_PERMISSIONS: dict[str, PermissionMapping] = {
             "Write",
             "Glob",
             "Grep",
-            "Bash(git status:*)",
-            "Bash(git add:*)",
-            "Bash(git commit:*)",
-            "Bash(git diff:*)",
-            "Bash(git log:*)",
-            "Bash(git show:*)",
-            "Bash(git switch:*)",
-            "Bash(git checkout -b:*)",
-            "Bash(git branch:*)",
-            "Bash(git rev-parse:*)",
-            "Bash(git ls-files:*)",
+            *(f"Bash({command}:*)" for command in ISOLATED_SHELL_COMMANDS),
             "--disallowedTools",
             "Bash(git push:*)",
             "Bash(git remote:*)",

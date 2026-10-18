@@ -64,7 +64,11 @@ from enginery.domain.execution_selection import (
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
+from enginery.domain.runner import (
+    ISOLATED_SHELL_COMMANDS,
+    LEGACY_RUNNER_SELECTION,
+    RunnerSelection,
+)
 from enginery.domain.serialization import (
     run_from_dict,
     run_to_dict,
@@ -2248,6 +2252,26 @@ def _implementation_task(
                 if operator_publishes
                 else "Commit and push the corrected change to origin."
             )
+        )
+    if isolated:
+        first_step = (
+            f"First run `git checkout -b {request.head_branch} {base_revision}` "
+            "as a single command. "
+            if repair_context is None
+            else f"Continue on the existing branch {request.head_branch!r}. "
+        )
+        branch_constraint += (
+            " "
+            + first_step
+            + "Run only these shell commands: "
+            + ", ".join(ISOLATED_SHELL_COMMANDS)
+            + ". Run one command per tool call. Do not use &&, ;, pipes, redirection or "
+            "command substitution. Every other shell command, including test runners and "
+            "cat, is refused. Commit with a plain message in single quotes, such as "
+            "git commit -m 'Describe the change'; the message must not contain parentheses, "
+            "quotes, $, backticks, ;, &, |, < or >, or the commit is refused. Read and edit "
+            "files with the file tools. The operator runs the project's validation after you "
+            "commit."
         )
     return HarnessTask(
         run_id=request.run.id,
