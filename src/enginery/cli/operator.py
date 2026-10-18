@@ -5,7 +5,7 @@ running workers, select the pinned runner image, and back up or restore the ledg
 only the domain, the ledger, the engine control modules and the OCI adapter used to qualify an
 image -- never the workflows -- so it keeps working when a workflow is broken or a run is
 wedged. Recovery commands print JSON; verify and rebuild-projections preserve the ledger
-consistency commands' text/JSON output. The legacy console script remains supported.
+consistency commands' text/JSON output.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ def main(
     engine_factory: Callable[[str | None], OciEngine] = lambda context: OciEngine(context=context),
     clock: Callable[[], datetime] = _utc_now,
 ) -> int:
-    """Run one operator command; the keyword arguments are test seams, unused by the script."""
+    """Run one operator command with injectable admission, engine and clock test seams."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.operator_command is None:

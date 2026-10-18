@@ -440,7 +440,7 @@ SCENARIOS = (
     ),
     FaultScenario(
         name="digest_mismatch",
-        description="tampered artifact bytes fail both direct read and ledger verify",
+        description="tampered artifact bytes fail both direct read and ledger verification",
         run=_scenario_digest_mismatch,
     ),
     FaultScenario(

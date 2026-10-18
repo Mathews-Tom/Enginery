@@ -11,7 +11,7 @@ belongs in release docs.
 
 Stage 2-4 performance is out of scope: this milestone measures only the
 Stage-1 issue-to-merge-ready path, one SQLite ledger append throughput,
-and one ``ledger verify`` pass, matching the ``v0.1.0`` train's own
+and one ledger verification pass, matching the ``v0.1.0`` train's own
 Stage-1-only cumulative gate.
 """
 
@@ -81,7 +81,7 @@ def _measure_ledger_verify(database: Path) -> Measurement:
     elapsed = time.perf_counter() - started
     if not report.healthy:
         raise EngineryError(
-            "ledger verify reported an inconsistency during the performance measurement",
+            "ledger verification reported an inconsistency during the performance measurement",
             details={"issues": [str(issue) for issue in report.issues]},
         )
     return Measurement("ledger_verify", elapsed, "seconds")

@@ -64,7 +64,7 @@ def run_rebuild_projections(*, database: Path) -> RebuildReport:
 
 
 def run_rebuild_projections_command(*, database: Path) -> int:
-    """Rebuild projections and report the same count as the legacy ledger command."""
+    """Rebuild projections and print the operator command's rebuilt count."""
     report = run_rebuild_projections(database=database)
     print(f"rebuilt {report.aggregates_rebuilt} projection(s)")
     return SUCCESS
