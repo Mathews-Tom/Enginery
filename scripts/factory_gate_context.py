@@ -104,6 +104,8 @@ class GateOptions:
     session_deadline_seconds: int = 900
     custody_receipt: Path | None = None
     subject_commit: str | None = None
+    campaign_id: str | None = None
+    campaign_config: Path | None = None
 
     @property
     def mode(self) -> str:

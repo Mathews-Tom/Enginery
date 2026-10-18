@@ -104,6 +104,7 @@ SCENARIO_SETUP = "setup"
 SCENARIO_MANUAL_PATH = "manual-path"
 SCENARIO_BEHAVIORAL = "behavioral-acceptance"
 SCENARIO_REVIEW_AUTHORITY = "review-authority"
+SCENARIO_PROTOCOL = "protocol"
 SCENARIO_NAMES = (
     SCENARIO_BOUNDARY,
     SCENARIO_AUTH,
@@ -111,6 +112,7 @@ SCENARIO_NAMES = (
     SCENARIO_MANUAL_PATH,
     SCENARIO_BEHAVIORAL,
     SCENARIO_REVIEW_AUTHORITY,
+    SCENARIO_PROTOCOL,
 )
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
@@ -137,6 +139,7 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_behavioral as behavioral
     import factory_gate_boundary as boundary
     import factory_gate_manual_path as manual_path
+    import factory_gate_protocol as protocol
     import factory_gate_review_authority as review_authority
     import factory_gate_setup as setup
 
@@ -173,6 +176,13 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             review_authority.finalize,
             prepare=review_authority.prepare,
         ),
+        SCENARIO_PROTOCOL: ScenarioSpec(
+            protocol.required_assertions,
+            False,
+            protocol.run,
+            protocol.finalize,
+            prepare=protocol.prepare,
+        ),
     }
 
 
@@ -185,12 +195,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evidence-out", required=True, type=Path, help="evidence JSON path (raw dir beside it)"
     )
-    parser.add_argument("--harness", choices=("omp", "claude"), help="harness (runner-auth)")
+    parser.add_argument(
+        "--harness", choices=("omp", "claude"), help="runner-auth or protocol harness"
+    )
+    parser.add_argument("--campaign-id", help="shared protocol campaign identifier")
+    parser.add_argument(
+        "--campaign-config", type=Path, help="live campaign identity and project JSON"
+    )
     parser.add_argument(
         "--live",
         action="store_true",
-        help="runner-auth only: use the real gateway (owner-authorized, exactly one session; "
-        "needs --custody-receipt)",
+        help="use real external services; protocol shares a four-session campaign budget",
     )
     parser.add_argument(
         "--confirm-single-session",
@@ -233,8 +248,15 @@ def parse_options(
     args = parser.parse_args(arguments)
     environment = os.environ if environ is None else environ
     scenario: str = args.scenario
-    if scenario == SCENARIO_AUTH and args.harness is None:
-        parser.error("--harness {omp,claude} is required for --scenario runner-auth")
+    if scenario in {SCENARIO_AUTH, SCENARIO_PROTOCOL} and args.harness is None:
+        parser.error(f"--harness {{omp,claude}} is required for --scenario {scenario}")
+    if scenario == SCENARIO_PROTOCOL:
+        from factory_gate_campaign import CAMPAIGN_ID
+
+        if args.campaign_id is None or not CAMPAIGN_ID.fullmatch(args.campaign_id):
+            parser.error("--campaign-id is required and must match [a-z0-9][a-z0-9-]{2,62}")
+    elif args.campaign_id is not None or args.campaign_config is not None:
+        parser.error("--campaign-id and --campaign-config apply only to protocol campaigns")
     if scenario in {
         SCENARIO_SETUP,
         SCENARIO_MANUAL_PATH,
@@ -274,8 +296,8 @@ def parse_options(
             parser.error("--live requires --custody-receipt (`enginery runner custody-receipt`)")
         if not confirmed:
             parser.error(
-                "--live runs one real subscription session; confirm it with "
-                f"--confirm-single-session (or {CONFIRMATION_ENVIRONMENT}=1)"
+                "--live authorizes the scenario budget (protocol: four shared campaign slots); "
+                f"confirm with --confirm-single-session (or {CONFIRMATION_ENVIRONMENT}=1)"
             )
     elif args.confirm_single_session:
         parser.error("--confirm-single-session applies only with --live")
@@ -300,6 +322,16 @@ def parse_options(
     subject_commit = args.subject_commit or environment.get(SUBJECT_COMMIT_ENVIRONMENT)
     if subject_commit is not None and not _COMMIT_SHA.fullmatch(subject_commit):
         parser.error("--subject-commit must be a full 40 or 64 hex git commit id")
+    if scenario == SCENARIO_PROTOCOL and args.live:
+        for flag, value in (
+            ("--runner-image", args.runner_image),
+            ("--relay-image", args.relay_image),
+            ("--docker-context", args.docker_context),
+            ("--subject-commit", subject_commit),
+            ("--campaign-config", args.campaign_config),
+        ):
+            if value is None:
+                parser.error(f"live protocol requires {flag}")
     return GateOptions(
         scenario=scenario,
         evidence_out=Path(os.path.abspath(args.evidence_out)),
@@ -315,6 +347,8 @@ def parse_options(
         session_deadline_seconds=args.session_deadline_seconds,
         custody_receipt=custody,
         subject_commit=subject_commit,
+        campaign_id=args.campaign_id,
+        campaign_config=None if args.campaign_config is None else args.campaign_config.absolute(),
     )
 
 
@@ -493,8 +527,18 @@ def _execute(
     )
     leaked = _scan_for_secrets(options, scrubber, document)
     if leaked:
-        document["verdict"] = "fail"
+        campaign_scenario = options.scenario == SCENARIO_PROTOCOL
+        document["verdict"] = VERDICT_HOLD if campaign_scenario else "fail"
         document["reason"] = "a registered secret value was found in: " + ", ".join(leaked)
+        if campaign_scenario:
+            document["details"]["secret_hold"] = {"sources": leaked, "scrubbed": True}
+            for path in options.raw_dir.rglob("*"):
+                if path.is_file():
+                    content = path.read_bytes().decode("utf-8", errors="surrogateescape")
+                    if scrubber.contains(content):
+                        path.write_bytes(
+                            scrubber.text(content).encode("utf-8", errors="surrogateescape")
+                        )
     code = exit_code_for(document)
     if interrupted:
         code = 130
@@ -544,6 +588,17 @@ def main(
         sys.stderr.write(f"run_factory_gate: cannot write {options.evidence_out}: {error}\n")
         sys.stdout.write(text)
         return EXIT_HOLD if code == 0 else code
+    if options.scenario == SCENARIO_PROTOCOL:
+        from factory_gate_campaign import Campaign
+
+        try:
+            Campaign(options).record_protocol_evidence(str(options.harness), options.evidence_out)
+        except (OSError, ValueError, GateHoldError) as error:
+            document["verdict"] = VERDICT_HOLD
+            document["reason"] = f"protocol verdict could not be bound: {error}"
+            text = dumps(document)
+            options.evidence_out.write_text(text, encoding="utf-8")
+            code = EXIT_HOLD
     sys.stdout.write(text)
     return code
 
