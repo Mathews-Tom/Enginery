@@ -174,6 +174,78 @@ A task carries an execution selection. When it pins a model or an effort, each a
 - **Isolated requests never probe the host binary.** `engine build-request --runner isolated-oci` does not run the operator's own `omp` or `claude` when it binds a pinned model or effort: the pinned image's harness is what runs, and it is probed from the image when the run is launched. A pinned control is therefore not refused because the host binary is outside the accepted range, and no host version is recorded as observed at bind time. A trusted-local request keeps the host probe described above.
 - **Fingerprints are not qualification.** A capture of the launch arguments, or a matching fingerprint, never raises a host above `experimental`.
 
+### Reference harness support matrix
+
+The digest-frozen execution catalog remains authoritative. Accepted ranges and
+catalog-tested versions are distinct from the image versions observed in the live
+campaign below; both reference harnesses remain **experimental**.
+
+| Harness | Accepted executable versions | Catalog-tested version and protocol | Worker image pin | Native controls | Tier |
+| --- | --- | --- | --- | --- | --- |
+| OMP (`omp`) | `>=18.10.3,<19.0.0` | `18.10.3`, `json-protocol=3` | `18.10.3` | exact `provider/id` via `--model`; native levels via `--thinking` | experimental |
+| Claude Code (`claude-code`) | `>=2.1.296,<3.0.0` | `2.1.296`, `stream-json-schema=1` | `2.1.296` | full model name via `--model`; native levels via `--effort` | experimental |
+
+On **2026-10-19**, live campaign `m33-synthetic-dd5` passed both protocol gates
+(OMP **8/8**, Claude Code **8/8**) on **Docker Desktop**, context `desktop-linux`,
+on **macOS arm64**, against `Mathews-Tom/enginery-qualification-calc`. Claude
+Code's first invocation held when the window expired during CI; the identical
+rerun reconciled the same run without a new worker and passed. Manual bootstrap
+passed on its third invocation, after the operator recorded calibration and
+supplied the runner-boundary evidence; neither earlier invocation launched a worker.
+The observed image executables were OMP **18.10.3** and Claude Code **2.1.296**,
+not workstation binaries. Both workers reported effective model
+`anthropic/claude-sonnet-5-5`; these are worker reports, not trusted enforcement.
+Effective effort was `UNKNOWN` for both despite the submitted `medium` pin.
+The exact runner image was
+`sha256:83fbcaaece41d5a9cfd771e96858f20fa5420cfef2203f75451373e9b79d750b`;
+the relay was
+`sha256:dff73cee2d5a9f72d4ce9a3882f86b6638e73844fd3094e6f03220d1218b31f9`.
+Retained evidence SHA-256 digests:
+
+| Campaign evidence | Result | SHA-256 |
+| --- | --- | --- |
+| `protocol-omp.json` | PASS 8/8 | `b5c0810f175bd0863016619c78ccab21da69a418307f68e3aac8577536f3b6b5` |
+| `protocol-claude.json` | PASS 8/8 | `4772a7a4ebeef3745a179737d5303853fa2ba9cba1f9314c017b9adafb42d20b` |
+| `manual-bootstrap.json` | PASS 10/10; zero worker creates | `fa588067a41f2d11f08dd1a86390d34144f620e248da8ca356c2be2502c786b2` |
+
+Qualification evidence records its target class as `qualification_target`:
+`synthetic` identifies a designated qualification repository (including local
+stand-ins); `real` identifies a real-project target. Read that field in the
+campaign's protocol evidence and frozen bootstrap index to identify which class
+the support claim came from. Synthetic evidence demonstrates factory mechanics,
+not usefulness on real projects. This campaign's target class was `synthetic`.
+
+Selected controls come from the bound effective configuration; submitted tokens
+come from the actual execution receipt. Effective model remains explicit `UNKNOWN`
+unless the harness reports it, and a worker report is labelled as such, not trusted
+enforcement. Effective effort is explicit `UNKNOWN` for both reference hosts. The
+product refuses an unsupported effort or model form before launch, with no fallback
+(`enginery engine build-request` exits 2 and writes nothing). The `protocol` gate
+records that refusal as a hold in its evidence without reserving a campaign slot.
+
+For isolated work, the canonical lifecycle is supervised launch and collection,
+coordinator cancellation, then reconciliation of that same operation. The first
+observable cancellation event is the durable supervisor's worker/container-start
+event. Harness JSON progress is not observable while the pinned worker is running;
+it is collected at termination. Cancelled local adapter sessions do not require a
+success terminal marker.
+
+The worker merges stdout and stderr before capture. Campaign "raw originals" are
+the product-retained, secret-redacted artifact bytes copied beside the receipt and
+recovered by content digest after continuation. They are **not** separate streams
+or an unredacted transcript. A cancellation records collected output or its explicit
+absence; no redaction count is invented when the product does not expose one.
+
+The installed bootstrap procedure is described in
+[the operator guide](operations.md#reference-harness-bootstrap-campaign).
+macOS and Ubuntu (Lima) install receipts passed for this campaign's wheel.
+Lima/Ubuntu was covered **only by an install receipt**, not a live protocol run;
+these receipts qualify their recorded wheel and command outcomes, not untested
+host/engine combinations. Native Windows supervision remains
+unsupported. Untested versions and hosts remain experimental or unsupported, and
+successful campaign evidence never automatically changes a catalog support tier.
+
+
 ## Worked example: writing a new `WorkLedgerPort` adapter
 
 Sketch (eliding validation and error handling already covered above; see
