@@ -10,6 +10,7 @@ refused with the missing requirement named, never worked around.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -216,10 +217,20 @@ class SubprocessCopy:
                 env=engine_environment(),
             )
             try:
-                assert process.stdout is not None
-                reader(process.stdout)
+                stdout = process.stdout
+                assert isinstance(stdout, io.BufferedReader)
+                if not stdout.peek(1):
+                    # A failed copy (a missing source path) writes no archive at all: return its
+                    # status and stderr so the caller raises ObjectNotFoundError, rather than
+                    # handing the reader an empty stream it would report as unreadable.
+                    returncode = process.wait(timeout=timeout)
+                    if returncode != 0:
+                        return subprocess.CompletedProcess(
+                            tuple(argv), returncode, "", _stderr_of(errors)
+                        )
+                reader(stdout)
                 # A reader may stop at the end of the archive; let the engine finish writing.
-                rest = process.stdout.read(_DRAIN_BYTES)
+                rest = stdout.read(_DRAIN_BYTES)
                 if len(rest) == _DRAIN_BYTES:
                     process.kill()  # far more than padding: the engine is not done, stop it
                 returncode = process.wait(timeout=timeout)

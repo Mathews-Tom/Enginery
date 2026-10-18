@@ -705,6 +705,29 @@ def test_a_copy_of_a_path_the_container_does_not_have_is_an_object_not_found_err
         engine.copy_out("worker", "/out/x", lambda stream: None)
 
 
+def test_a_missing_path_through_the_docker_cli_is_an_object_not_found_error_not_a_bad_archive(
+    tmp_path: Path,
+) -> None:
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "echo 'Error response from daemon: Could not find the file /out/x in container c' >&2\n"
+        "exit 1\n"
+    )
+    docker.chmod(0o755)
+    engine = OciEngine(executable=str(docker), runner=lambda argv, **_: _completed(argv))
+    opened: list[str] = []
+
+    def read(stream: Any) -> None:
+        opened.append("tar")
+        with tarfile.open(fileobj=stream, mode="r|"):
+            pass
+
+    with pytest.raises(ObjectNotFoundError):
+        engine.copy_out("worker", "/out/x", read)
+    assert opened == []
+
+
 def test_a_failed_copy_in_is_an_engine_error_that_names_the_engines_reason() -> None:
     copier = _Copier(returncode=1, stderr="no space left on device")
     engine = OciEngine(runner=lambda argv, **_: _completed(argv), copier=copier)
@@ -812,7 +835,7 @@ def test_real_engine_copies_a_tree_through_a_running_container_with_a_capped_tmp
         assert "./seed.txt" in names or "seed.txt" in names
 
         with pytest.raises(ObjectNotFoundError):
-            real_engine.copy_out(container, "/workspace/absent", lambda stream: stream.read())
+            real_engine.copy_out(container, "/workspace/absent", read)
         volume_document = real_engine.volume_inspect(volume)
         assert volume_document["Options"] == {
             "device": "tmpfs",
