@@ -257,7 +257,9 @@ class ClaudeCodeHarness:
         output, _ = process.communicate()
         redacted = redact_credential_shaped_text(output)
         digest = self.artifact_store.publish_bytes(redacted.encode(), media_type="application/json")
-        events, terminal_status = _normalize_events(redacted, session.operation_id)
+        events, terminal_status = _normalize_events(
+            redacted, session.operation_id, cancelled=session.session_id in self._cancelled
+        )
         status = "cancelled" if session.session_id in self._cancelled else terminal_status
         result = HarnessResult(
             session_id=session.session_id,
@@ -534,16 +536,19 @@ def probe_installed_host(
 
 
 def _normalize_events(
-    output: str, operation_id: OperationId
+    output: str, operation_id: OperationId, *, cancelled: bool = False
 ) -> tuple[tuple[NormalizedAdapterEvent, ...], str]:
     events: list[NormalizedAdapterEvent] = []
     terminal_status: str | None = None
-    for line in output.splitlines():
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
         if not line.strip():
             continue
         try:
             payload = cast(dict[str, object], json.loads(line))
         except json.JSONDecodeError as error:
+            if cancelled and index == len(lines) - 1:
+                break
             raise WorkerFailureError("Claude Code emitted malformed JSON event") from error
         event_type = payload.get("type")
         if not isinstance(event_type, str) or event_type not in _KNOWN_EVENT_TYPES:
@@ -570,9 +575,9 @@ def _normalize_events(
                 attributes=attributes,
             )
         )
-    if terminal_status is None:
+    if terminal_status is None and not cancelled:
         raise WorkerFailureError("Claude Code output ended without a result event")
-    return tuple(events), terminal_status
+    return tuple(events), "cancelled" if cancelled else str(terminal_status)
 
 
 def _assistant_model(payload: dict[str, object]) -> str | None:

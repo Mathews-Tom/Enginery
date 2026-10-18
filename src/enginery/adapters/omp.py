@@ -256,7 +256,9 @@ class OmpHarness:
         output, _ = process.communicate()
         redacted = redact_credential_shaped_text(output)
         digest = self.artifact_store.publish_bytes(redacted.encode(), media_type="application/json")
-        events = _normalize_events(redacted, session.operation_id)
+        events = _normalize_events(
+            redacted, session.operation_id, cancelled=session.session_id in self._cancelled
+        )
         if session.session_id in self._cancelled:
             status = "cancelled"
         elif process.returncode == 0:
@@ -524,13 +526,18 @@ def _render_task(task: HarnessTask) -> str:
     )
 
 
-def _normalize_events(output: str, operation_id: OperationId) -> tuple[NormalizedAdapterEvent, ...]:
+def _normalize_events(
+    output: str, operation_id: OperationId, *, cancelled: bool = False
+) -> tuple[NormalizedAdapterEvent, ...]:
     events: list[NormalizedAdapterEvent] = []
     terminal_seen = False
-    for line in output.splitlines():
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
         try:
             payload = cast(dict[str, object], json.loads(line))
         except json.JSONDecodeError as error:
+            if cancelled and index == len(lines) - 1:
+                break
             raise WorkerFailureError("OMP emitted malformed JSON event") from error
         event_type = payload.get("type")
         if not isinstance(event_type, str) or event_type not in _KNOWN_EVENT_TYPES:
@@ -554,7 +561,7 @@ def _normalize_events(output: str, operation_id: OperationId) -> tuple[Normalize
                 attributes=attributes,
             )
         )
-    if not terminal_seen:
+    if not terminal_seen and not cancelled:
         raise WorkerFailureError("OMP output ended without an agent_end event")
     return tuple(events)
 
