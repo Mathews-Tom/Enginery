@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TypeGuard, cast
 from urllib.parse import quote
@@ -544,7 +544,11 @@ class GitHubPullRequests:
         history = self._evidence_pages(f"{commit}/statuses", "statuses", raw, proofs)
         current_statuses = _latest_statuses(history, snapshot.head_revision)
         combined_statuses = _latest_statuses(combined, snapshot.head_revision)
-        if current_statuses != combined_statuses:
+        # The combined-status endpoint omits each status's creator, which only the statuses
+        # list carries; compare everything both endpoints report and keep the list's creator.
+        if [replace(status, creator_id=None) for status in current_statuses] != [
+            replace(status, creator_id=None) for status in combined_statuses
+        ]:
             raise StaleEvidenceError("GitHub combined and per-context statuses disagree")
         latest_payload = self._evidence_object(endpoint, raw)
         latest = _pull_request_snapshot(latest_payload)
