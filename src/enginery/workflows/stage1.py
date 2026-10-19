@@ -1450,7 +1450,7 @@ class Stage1RunService:
             PullRequestRequest(
                 head_branch=request.head_branch,
                 base_branch=request.base_branch,
-                title=request.work_snapshot.work_item.objective,
+                title=request.work_snapshot.work_item.title,
                 body=(
                     f"Implements {request.work_snapshot.work_item.external_reference}.\n\n"
                     f"Enginery run: {request.run.id}"
