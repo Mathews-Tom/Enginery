@@ -12,6 +12,7 @@ import copy
 import json
 import shutil
 import stat
+import subprocess
 import sys
 import zipfile
 from importlib import metadata
@@ -580,3 +581,67 @@ def test_require_engine_turns_a_skipped_engine_check_into_a_failure(
         release_consumer_smoke.exercise_surface(
             **arguments, version=_version(), require_engine=True
         )
+
+
+@pytest.mark.parametrize("not_run", [[], ["engine NOT RUN (unreachable)"]])
+def test_install_receipt_retains_identity_and_incomplete_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, not_run: list[str]
+) -> None:
+    wheel = tmp_path / "enginery-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"bound artifact")
+    output = tmp_path / "receipt.json"
+
+    def successful(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        result = subprocess.CompletedProcess(command, 0, "", "")
+        release_consumer_smoke._record_command(command, result)
+        return result
+
+    monkeypatch.setattr(release_consumer_smoke, "_run", successful)
+    monkeypatch.setattr(release_consumer_smoke, "exercise_surface", lambda **kwargs: not_run)
+    code = release_consumer_smoke.main(["--wheel", str(wheel), "--install-receipt", str(output)])
+    receipt = json.loads(output.read_text())
+    assert receipt["artifact"] == {
+        "kind": "wheel",
+        "name": wheel.name,
+        "sha256": release_consumer_smoke._sha256(wheel),
+    }
+    assert receipt["installed_version"] == "1.2.3"
+    assert receipt["entry_point"].endswith("/venv/bin/enginery")
+    assert receipt["platform"]["system"]
+    assert receipt["python"]["version"]
+    assert len(receipt["commands"]) == 2
+    assert all(command["exit_code"] == 0 for command in receipt["commands"])
+    assert receipt["not_run"] == not_run
+    assert receipt["exit_code"] == code == (3 if not_run else 0)
+    assert receipt["outcome"] == ("incomplete" if not_run else "pass")
+
+
+def test_install_failure_receipt_cannot_qualify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / "enginery-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"bound artifact")
+    output = tmp_path / "failed.json"
+
+    def failed(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        result = subprocess.CompletedProcess(command, 9, "", "installation failed")
+        release_consumer_smoke._record_command(command, result)
+        return result
+
+    monkeypatch.setattr(release_consumer_smoke, "_run", failed)
+    with pytest.raises(ConsumerSmokeError, match="command failed"):
+        release_consumer_smoke.main(["--wheel", str(wheel), "--install-receipt", str(output)])
+    receipt = json.loads(output.read_text())
+    assert receipt["outcome"] == "fail"
+    assert receipt["exit_code"] == 1
+    assert receipt["installed_version"] is None
+    assert receipt["commands"][0]["exit_code"] == 9
+
+
+def test_command_receipt_records_expected_nonzero_exit(tmp_path: Path) -> None:
+    release_consumer_smoke._COMMANDS.clear()
+    result = release_consumer_smoke._run(
+        [sys.executable, "-c", "raise SystemExit(3)"], cwd=tmp_path
+    )
+    assert result.returncode == 3
+    assert release_consumer_smoke._COMMANDS[-1]["exit_code"] == 3

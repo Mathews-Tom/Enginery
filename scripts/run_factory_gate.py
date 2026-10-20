@@ -105,6 +105,7 @@ SCENARIO_MANUAL_PATH = "manual-path"
 SCENARIO_BEHAVIORAL = "behavioral-acceptance"
 SCENARIO_REVIEW_AUTHORITY = "review-authority"
 SCENARIO_PROTOCOL = "protocol"
+SCENARIO_MANUAL_BOOTSTRAP = "manual-bootstrap"
 SCENARIO_NAMES = (
     SCENARIO_BOUNDARY,
     SCENARIO_AUTH,
@@ -113,6 +114,7 @@ SCENARIO_NAMES = (
     SCENARIO_BEHAVIORAL,
     SCENARIO_REVIEW_AUTHORITY,
     SCENARIO_PROTOCOL,
+    SCENARIO_MANUAL_BOOTSTRAP,
 )
 CONFIRMATION_ENVIRONMENT = "ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION"
 MAX_SESSION_DEADLINE_SECONDS = 900
@@ -138,6 +140,7 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
     import factory_gate_auth as auth
     import factory_gate_behavioral as behavioral
     import factory_gate_boundary as boundary
+    import factory_gate_manual_bootstrap as manual_bootstrap
     import factory_gate_manual_path as manual_path
     import factory_gate_protocol as protocol
     import factory_gate_review_authority as review_authority
@@ -183,6 +186,13 @@ def default_scenarios() -> dict[str, ScenarioSpec]:
             protocol.finalize,
             prepare=protocol.prepare,
         ),
+        SCENARIO_MANUAL_BOOTSTRAP: ScenarioSpec(
+            manual_bootstrap.required_assertions,
+            False,
+            manual_bootstrap.run,
+            manual_bootstrap.finalize,
+            prepare=manual_bootstrap.prepare,
+        ),
     }
 
 
@@ -198,9 +208,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--harness", choices=("omp", "claude"), help="runner-auth or protocol harness"
     )
-    parser.add_argument("--campaign-id", help="shared protocol campaign identifier")
+    parser.add_argument("--campaign-id", help="shared protocol/bootstrap campaign identifier")
     parser.add_argument(
         "--campaign-config", type=Path, help="live campaign identity and project JSON"
+    )
+    parser.add_argument(
+        "--reuse-evidence",
+        action="store_true",
+        help="reuse terminal campaign evidence without workers",
+    )
+    parser.add_argument(
+        "--install-receipt",
+        type=Path,
+        action="append",
+        default=[],
+        help="wheel consumer install receipt",
     )
     parser.add_argument(
         "--live",
@@ -219,12 +241,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gateway-token-file", type=Path, help="0600 file holding the gateway token"
     )
-    parser.add_argument("--model", help="runner-auth only: pin a model for the session")
+    parser.add_argument("--model", help="runner-auth or protocol: pin a model for the session")
     parser.add_argument(
         "--session-deadline-seconds",
         type=int,
         default=None,
-        help=f"runner-auth process-group deadline (1..{MAX_SESSION_DEADLINE_SECONDS})",
+        help=f"supervised process-group deadline (1..{MAX_SESSION_DEADLINE_SECONDS})",
     )
     parser.add_argument(
         "--custody-receipt",
@@ -250,13 +272,22 @@ def parse_options(
     scenario: str = args.scenario
     if scenario in {SCENARIO_AUTH, SCENARIO_PROTOCOL} and args.harness is None:
         parser.error(f"--harness {{omp,claude}} is required for --scenario {scenario}")
-    if scenario == SCENARIO_PROTOCOL:
+    if scenario in {SCENARIO_PROTOCOL, SCENARIO_MANUAL_BOOTSTRAP}:
         from factory_gate_campaign import CAMPAIGN_ID
 
         if args.campaign_id is None or not CAMPAIGN_ID.fullmatch(args.campaign_id):
             parser.error("--campaign-id is required and must match [a-z0-9][a-z0-9-]{2,62}")
     elif args.campaign_id is not None or args.campaign_config is not None:
-        parser.error("--campaign-id and --campaign-config apply only to protocol campaigns")
+        parser.error(
+            "--campaign-id and --campaign-config apply only to protocol and manual-bootstrap"
+        )
+    if scenario != SCENARIO_MANUAL_BOOTSTRAP and (args.reuse_evidence or args.install_receipt):
+        parser.error("--reuse-evidence and --install-receipt apply only to manual-bootstrap")
+    if scenario == SCENARIO_MANUAL_BOOTSTRAP:
+        if args.harness is not None or args.model is not None:
+            parser.error("--harness and --model are invalid for manual-bootstrap")
+        if args.live and not args.reuse_evidence:
+            parser.error("live manual-bootstrap requires --reuse-evidence")
     if scenario in {
         SCENARIO_SETUP,
         SCENARIO_MANUAL_PATH,
@@ -322,7 +353,7 @@ def parse_options(
     subject_commit = args.subject_commit or environment.get(SUBJECT_COMMIT_ENVIRONMENT)
     if subject_commit is not None and not _COMMIT_SHA.fullmatch(subject_commit):
         parser.error("--subject-commit must be a full 40 or 64 hex git commit id")
-    if scenario == SCENARIO_PROTOCOL and args.live:
+    if scenario in {SCENARIO_PROTOCOL, SCENARIO_MANUAL_BOOTSTRAP} and args.live:
         for flag, value in (
             ("--runner-image", args.runner_image),
             ("--relay-image", args.relay_image),
@@ -331,7 +362,7 @@ def parse_options(
             ("--campaign-config", args.campaign_config),
         ):
             if value is None:
-                parser.error(f"live protocol requires {flag}")
+                parser.error(f"live {scenario} requires {flag}")
     return GateOptions(
         scenario=scenario,
         evidence_out=Path(os.path.abspath(args.evidence_out)),
@@ -349,6 +380,8 @@ def parse_options(
         subject_commit=subject_commit,
         campaign_id=args.campaign_id,
         campaign_config=None if args.campaign_config is None else args.campaign_config.absolute(),
+        reuse_evidence=bool(args.reuse_evidence),
+        install_receipts=tuple(path.absolute() for path in args.install_receipt),
     )
 
 
@@ -527,7 +560,7 @@ def _execute(
     )
     leaked = _scan_for_secrets(options, scrubber, document)
     if leaked:
-        campaign_scenario = options.scenario == SCENARIO_PROTOCOL
+        campaign_scenario = options.scenario in {SCENARIO_PROTOCOL, SCENARIO_MANUAL_BOOTSTRAP}
         document["verdict"] = VERDICT_HOLD if campaign_scenario else "fail"
         document["reason"] = "a registered secret value was found in: " + ", ".join(leaked)
         if campaign_scenario:
@@ -539,6 +572,27 @@ def _execute(
                         path.write_bytes(
                             scrubber.text(content).encode("utf-8", errors="surrogateescape")
                         )
+    if options.scenario == SCENARIO_MANUAL_BOOTSTRAP and gate is not None:
+        from factory_gate_manual_bootstrap import freeze
+
+        if leaked:
+            gate.reasons.append("secret-scan")
+        if evidence._hold is not None or evidence._abort is not None or interrupted:
+            gate.reasons.append("scenario-did-not-pass")
+        try:
+            freeze(gate, evidence)
+        except Exception as error:
+            gate.reasons.append("frozen-bootstrap-index")
+            evidence.abort(f"index freezing stopped on {type(error).__name__}: {error}")
+        finally:
+            gate.record_reuse()
+        if not leaked:
+            document = evidence.build(
+                identities=identities,
+                effects=effects,
+                raw_artifacts_dir=(options.raw_dir.name if options.raw_dir.exists() else None),
+                ended_at=utc_now(),
+            )
     code = exit_code_for(document)
     if interrupted:
         code = 130
