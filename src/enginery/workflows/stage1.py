@@ -64,7 +64,11 @@ from enginery.domain.execution_selection import (
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.outcome import OutcomeKind
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
+from enginery.domain.runner import (
+    ISOLATED_SHELL_COMMANDS,
+    LEGACY_RUNNER_SELECTION,
+    RunnerSelection,
+)
 from enginery.domain.serialization import (
     run_from_dict,
     run_to_dict,
@@ -1446,7 +1450,7 @@ class Stage1RunService:
             PullRequestRequest(
                 head_branch=request.head_branch,
                 base_branch=request.base_branch,
-                title=request.work_snapshot.work_item.objective,
+                title=request.work_snapshot.work_item.title,
                 body=(
                     f"Implements {request.work_snapshot.work_item.external_reference}.\n\n"
                     f"Enginery run: {request.run.id}"
@@ -2249,6 +2253,26 @@ def _implementation_task(
                 else "Commit and push the corrected change to origin."
             )
         )
+    if isolated:
+        first_step = (
+            f"First run `git checkout -b {request.head_branch} {base_revision}` "
+            "as a single command. "
+            if repair_context is None
+            else f"Continue on the existing branch {request.head_branch!r}. "
+        )
+        branch_constraint += (
+            " "
+            + first_step
+            + "Run only these shell commands: "
+            + ", ".join(ISOLATED_SHELL_COMMANDS)
+            + ". Run one command per tool call. Do not use &&, ;, pipes, redirection or "
+            "command substitution. Every other shell command, including test runners and "
+            "cat, is refused. Commit with a plain message in single quotes, such as "
+            "git commit -m 'Describe the change'; the message must not contain parentheses, "
+            "quotes, $, backticks, ;, &, |, < or >, or the commit is refused. Read and edit "
+            "files with the file tools. The operator runs the project's validation after you "
+            "commit."
+        )
     return HarnessTask(
         run_id=request.run.id,
         node_id=NodeId("implement"),
@@ -2367,12 +2391,13 @@ _MAX_RECORDED_PROTECTED_PATHS = 200
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
-    name = f".enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
+    name = f"enginery-omp-{Digest.of_bytes(str(operation_id).encode())}.json"
     if request.runner.isolated_mode:
         # The worker writes its result into the per-attempt output directory, the only
-        # writable mount besides its task-local workspace, never into a host-owned path.
+        # writable mount besides its task-local workspace, never into a host-owned path. The
+        # launch spec accepts only a plain, non-hidden file name there.
         return out_path_for(request.workspace_path) / name
-    return request.workspace_path / name
+    return request.workspace_path / f".{name}"
 
 
 def _scheduled_implementation(

@@ -223,6 +223,88 @@ def test_omp_harness_rejects_malformed_unknown_or_incomplete_events(
         tuple(harness.events(session))
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        "tool_stream_update",
+        "auto_compaction_start",
+        "auto_compaction_end",
+        "auto_retry_start",
+        "auto_retry_end",
+        "cache_warming_start",
+        "cache_warming_end",
+        "retry_fallback_applied",
+        "retry_fallback_succeeded",
+        "model_changed",
+        "config_warnings_changed",
+        "advisor_cost_changed",
+        "advisor_yielded",
+        "ttsr_triggered",
+        "todo_reminder",
+        "todo_auto_clear",
+        "irc_message",
+        "notice",
+        "thinking_level_changed",
+        "goal_updated",
+        "queue_update",
+    ),
+)
+def test_omp_harness_accepts_pinned_session_events(tmp_path: Path, event_type: str) -> None:
+    payload = {"type": event_type, "toolCallId": "t", "toolName": "edit"}
+    process = RecordedProcess(json.dumps(payload) + "\n" + _events())
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+        process_factory=lambda arguments, workspace: process,
+    )
+    session = harness.start(_task(tmp_path))
+
+    events = tuple(harness.events(session))
+
+    assert events[0].kind.value == "progress"
+    assert events[0].summary == f"OMP {event_type}"
+    assert sum(event.kind.value == "terminal" for event in events) == 1
+
+
+@pytest.mark.parametrize("terminal_flag", (True, None, 0, "false"))
+def test_omp_harness_resumes_after_a_nonterminal_agent_end(
+    tmp_path: Path, terminal_flag: object
+) -> None:
+    records = [
+        {"type": "agent_start"},
+        {"type": "agent_end", "isTerminal": False},
+        {"type": "agent_start"},
+        {"type": "agent_end", "isTerminal": terminal_flag},
+    ]
+    process = RecordedProcess("\n".join(json.dumps(record) for record in records))
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+        process_factory=lambda arguments, workspace: process,
+    )
+    session = harness.start(_task(tmp_path))
+
+    assert [event.kind.value for event in harness.events(session)] == [
+        "started",
+        "progress",
+        "started",
+        "terminal",
+    ]
+
+
+def test_omp_harness_requires_a_terminal_agent_end(tmp_path: Path) -> None:
+    process = RecordedProcess(json.dumps({"type": "agent_end", "isTerminal": False}))
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+        process_factory=lambda arguments, workspace: process,
+    )
+    session = harness.start(_task(tmp_path))
+
+    with pytest.raises(WorkerFailureError, match="without an agent_end"):
+        tuple(harness.events(session))
+
+
 def test_omp_harness_cancels_the_process_group(tmp_path: Path) -> None:
     process = RecordedProcess(_events(), returncode=-15)
     terminated: list[int] = []

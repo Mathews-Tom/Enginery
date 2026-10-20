@@ -1056,6 +1056,7 @@ def test_stage1_waits_for_exact_head_ci_before_terminal_progression(
     assert service.next_action(request.run.id).action.value == "open_pr"
     service.open_pull_request(request, now=now, heartbeat_window=timedelta(seconds=60))
 
+    assert pull_requests.requests[-1].title == "Bounded change"
     assert service.next_action(request.run.id).action.value == "wait_for_ci"
     pull_requests.check_status = "in_progress"
     pull_requests.check_conclusion = None

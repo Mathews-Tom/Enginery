@@ -246,6 +246,20 @@ def test_combined_and_per_context_disagreement_holds(tmp_path: Path) -> None:
         adapter.evidence(11)
 
 
+def test_a_combined_status_without_its_creator_agrees_with_the_statuses_list(
+    tmp_path: Path,
+) -> None:
+    # GitHub's combined-status entries omit `creator`; only the statuses list carries it.
+    responses = _responses(statuses=[_status()])
+    responses[4] = [{**_status(), "creator": {"id": 136622811, "login": "coderabbitai[bot]"}}]
+    adapter, _, _, _ = _adapter(tmp_path, responses)
+
+    evidence = adapter.evidence(11)
+
+    assert evidence.statuses[0].creator_id == 136622811
+    assert _outcome(evidence, check="legacy-ci") is PullRequestOutcome.MERGE_READY
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_current_changes_request_vetoes_prior_approval(tmp_path: Path, reverse: bool) -> None:
     reviews = [

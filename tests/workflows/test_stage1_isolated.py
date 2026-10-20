@@ -8,6 +8,7 @@ and on observable host effects (markers a host-run command would leave), not on 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -23,11 +24,13 @@ from tests.adapters.oci.support import FakeDocker
 from tests.engine.test_isolated_workspace import _WORKER as WORKER_SCRIPT
 from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.execution import selection_for
+from tests.support.runner_context import harness_task, isolated_context
 from tests.support.verified_implementation import verified_head
 
 from enginery.adapters.oci import image as oci_image
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
+from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.adapter_types import NormalizedAdapterEvent
 from enginery.application.runner_ports import RunnerAdmissionDecision
 from enginery.application.work_ports import (
@@ -43,7 +46,12 @@ from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.execution_selection import ExecutionHold, HoldReason
 from enginery.domain.ids import NodeId, OperationId, RunId, WorkflowDefinitionId, WorkItemId
 from enginery.domain.run import Run, RunState
-from enginery.domain.runner import RunnerProfile, RunnerSelection
+from enginery.domain.runner import (
+    ISOLATED_SHELL_COMMANDS,
+    LaunchSpec,
+    RunnerProfile,
+    RunnerSelection,
+)
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
@@ -715,6 +723,42 @@ def test_an_isolated_worker_is_told_to_commit_locally_and_never_to_push(
     assert task.head_branch == "enginery/run-isolated"
     assert task.base_revision == _git("rev-parse", "HEAD", cwd=built.repository)
     assert task.base_revision in constraint
+    assert all(command in constraint for command in ISOLATED_SHELL_COMMANDS)
+    assert (
+        f"First run `git checkout -b {task.head_branch} {task.base_revision}` as a single command."
+    ) in constraint
+    assert "Run one command per tool call." in constraint
+    assert "Do not use &&, ;, pipes, redirection or command substitution." in constraint
+    assert "including test runners and cat, is refused" in constraint
+    assert "git commit -m 'Describe the change'" in constraint
+    assert "must not contain parentheses, quotes, $, backticks" in constraint
+    assert "Read and edit files with the file tools." in constraint
+    assert "operator runs the project's validation after you commit" in constraint
+
+
+def test_an_isolated_repair_worker_gets_the_shell_rules_without_a_new_checkout(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    from enginery.workflows.stage1 import _implementation_task
+
+    built = _build(ledger_service, tmp_path, runner=_isolated(), admission=ScriptedAdmission())
+    task = _implementation_task(
+        built.request,
+        attempt_id="run-isolated-implement-1",
+        operation_id=OperationId("repair-1"),
+        repair_context="Repair the validation failure.",
+        base_revision="b149833689718a287ec635312ad74cdd9de592b1",
+    )
+    constraint = task.constraints[-1]
+
+    assert "Continue only on the existing branch 'enginery/run-isolated'" in constraint
+    assert "do not create a new branch" in constraint
+    assert "First run" not in constraint
+    assert all(command in constraint for command in ISOLATED_SHELL_COMMANDS)
+    assert "Run one command per tool call." in constraint
+    assert "must not contain parentheses, quotes, $, backticks" in constraint
+    assert "Read and edit files with the file tools." in constraint
+    assert "operator runs the project's validation after you commit" in constraint
 
 
 def test_a_symbolic_base_reaches_the_worker_as_a_full_object_id_and_the_bundle_verifies(
@@ -786,6 +830,9 @@ def test_a_trusted_local_worker_is_told_the_same_it_commits_locally_and_never_pu
     assert "push the completed change to origin" not in constraint
     assert task.head_branch is None, "no bundle binding: the trusted worker is not bundled"
     assert task.base_revision is None
+    assert "Run only these shell commands" not in constraint
+    assert "one command per tool call" not in constraint
+    assert "First run `git checkout" not in constraint
 
 
 def test_the_isolated_result_path_is_in_the_out_directory_and_trusted_local_stays_in_the_workspace(
@@ -812,6 +859,33 @@ def test_the_isolated_result_path_is_in_the_out_directory_and_trusted_local_stay
         _reap(trusted_dispatch)
         trusted_path = trusted_dispatch.result_path
         assert trusted_path.parent == trusted.request.workspace_path
+
+
+def test_the_isolated_result_path_is_a_file_name_the_real_launch_spec_accepts(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    isolated = _build(
+        ledger_service, tmp_path / "iso", runner=_isolated(), admission=ScriptedAdmission()
+    )
+    _qualify(isolated)
+    dispatch = _dispatch(isolated)
+    _reap(dispatch)
+    harness = OmpHarness(
+        OmpAdapterConfig(credential_reference="omp-auth-profile:default"),
+        ArtifactStore(tmp_path / "artifacts"),
+        command_runner=lambda arguments: subprocess.CompletedProcess(
+            arguments, 0, stdout="omp v18.10.3\n\nUSAGE\n", stderr=""
+        ),
+        runner=isolated_context(tmp_path / "receipts"),
+    )
+
+    command = harness.supervised_command(
+        harness_task(tmp_path / "workspace", "omp"), result_path=dispatch.result_path
+    )
+
+    spec = LaunchSpec.from_state(json.loads(command[command.index("--spec") + 1]))
+    assert spec.out_path == str(out_path_for(isolated.request.workspace_path))
+    assert spec.result_name == dispatch.result_path.name
 
 
 def test_the_implementation_node_persists_the_workspace_mode_of_its_trust_mode(

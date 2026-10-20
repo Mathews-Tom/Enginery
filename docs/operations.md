@@ -2825,6 +2825,27 @@ container that the launcher should have removed itself, or if the engine could n
 (`z-cleanup-no-stray-containers`). A run killed with SIGKILL cannot clean up: remove
 its `enginery-gate-<id>-*` networks and `enginery-*` containers and volumes by hand.
 
+The installed live protocol driver (`scripts/factory_gate_protocol_live.py`) counts
+worker creates through digest-bound, overlapping engine-event windows. Its durable
+raw coverage index starts at the observed worker create and advances every five
+seconds while completing the workflow. Each window must contain the preceding
+checkpoint; the original create may leave Docker's bounded history only after a
+retained window covers it. Missing or modified windows, an evicted/replaced latest
+checkpoint, unavailable engine history, or any second worker create hold the normal
+live gate. During interrupted reconciliation, unprovable worker history instead
+returns `terminal_status: "failed"` with `worker_count_status: "unprovable"` after
+confirming that the worker group and container are gone.
+An interrupted worker still alive after its original lifetime is stopped and
+recorded as a cleanup abort. Reconciliation then receives a fresh bounded
+read-only observation window, not a new worker lifetime; the slot fails rather
+than qualifying completion or canonical cancellation.
+Interrupted reconciliation reads and extends the original raw index and windows
+at the absolute location bound in the worker observation, even when the recovering
+invocation uses a different `--evidence-out`; it never starts a fresh counting
+window. While a run awaits an unchanged owner decision, the driver polls its
+read-only ledger at one-second intervals instead of repeatedly launching
+OCI-probing status/continue clients. Decisions are still made by the real owner.
+
 ### The live authentication scenario
 
 `--scenario runner-auth --harness omp|claude` runs exactly one non-mutating

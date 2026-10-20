@@ -218,6 +218,34 @@ def test_session_id_is_stable_for_the_same_operation_id(tmp_path: Path) -> None:
     assert first_uuid == second_uuid
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        "stream_event",
+        "tool_progress",
+        "auth_status",
+        "tool_use_summary",
+        "prompt_suggestion",
+        "conversation_reset",
+    ),
+)
+def test_harness_accepts_documented_sdk_progress_events(tmp_path: Path, event_type: str) -> None:
+    output = (
+        json.dumps({"type": event_type, "message": {"model": "not-an-assistant-model"}})
+        + "\n"
+        + _events()
+    )
+    harness = _harness(tmp_path, process=RecordedProcess(output))
+    session = harness.start(_task(tmp_path))
+
+    events = tuple(harness.events(session))
+
+    assert events[0].kind.value == "progress"
+    assert events[0].summary == f"Claude Code {event_type}"
+    assert "model" not in events[0].attributes
+    assert harness.result(session).terminal_status == "succeeded"
+
+
 def test_harness_normalizes_events_and_redacts_artifact_output(tmp_path: Path) -> None:
     harness = _harness(tmp_path, process=RecordedProcess(_events(secret=True)))
     session = harness.start(_task(tmp_path))

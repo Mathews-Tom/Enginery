@@ -212,6 +212,58 @@ def test_cancellation_and_a_coordinator_triggered_timeout_share_one_code_path(
 
 
 @pytest.mark.parametrize("provider", _PROVIDERS, ids=lambda provider: provider.name)
+@pytest.mark.parametrize("output", ["", "started", '{"type": "agent_st', '{"type":"system","subt'])
+def test_cancelled_stream_needs_no_success_terminal_marker(
+    tmp_path: Path, provider: _Provider, output: str
+) -> None:
+    partial = provider.success_output().splitlines()[0] if output == "started" else output
+    process = _RecordedProcess(partial, returncode=-15)
+    terminated: list[int] = []
+    harness = provider.build(tmp_path, process=process, terminator=terminated.append)
+    task = _task(tmp_path, harness=provider.name)
+    session = harness.start(task)  # type: ignore[attr-defined]
+
+    harness.cancel(session, operation_id=task.operation_id)  # type: ignore[attr-defined]
+    tuple(harness.events(session))  # type: ignore[attr-defined]
+    result = harness.result(session)  # type: ignore[attr-defined]
+
+    assert result.terminal_status == "cancelled"
+    assert terminated == [process.pid]
+    assert (
+        harness.reconcile(operation_id=task.operation_id)  # type: ignore[attr-defined]
+        is ReconciliationResult.FOUND_MATCHING
+    )
+
+
+@pytest.mark.parametrize("provider", _PROVIDERS, ids=lambda provider: provider.name)
+@pytest.mark.parametrize("output", ["", "started", '{"type": "agent_st', '{"type":"system","subt'])
+def test_uncancelled_stream_still_requires_its_terminal_marker(
+    tmp_path: Path, provider: _Provider, output: str
+) -> None:
+    partial = provider.success_output().splitlines()[0] if output == "started" else output
+    harness = provider.build(tmp_path, process=_RecordedProcess(partial))
+    session = harness.start(_task(tmp_path, harness=provider.name))  # type: ignore[attr-defined]
+
+    with pytest.raises(WorkerFailureError):
+        harness.result(session)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("provider", _PROVIDERS, ids=lambda provider: provider.name)
+def test_cancelled_stream_rejects_malformed_nonfinal_line(
+    tmp_path: Path, provider: _Provider
+) -> None:
+    output = '{"type": "broken\n' + provider.success_output().splitlines()[0]
+    process = _RecordedProcess(output, returncode=-15)
+    harness = provider.build(tmp_path, process=process, terminator=lambda _: None)
+    task = _task(tmp_path, harness=provider.name)
+    session = harness.start(task)  # type: ignore[attr-defined]
+    harness.cancel(session, operation_id=task.operation_id)  # type: ignore[attr-defined]
+
+    with pytest.raises(WorkerFailureError, match="malformed JSON"):
+        harness.result(session)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("provider", _PROVIDERS, ids=lambda provider: provider.name)
 def test_reconcile_before_any_start_reports_not_found(tmp_path: Path, provider: _Provider) -> None:
     harness = provider.build(tmp_path)
 
