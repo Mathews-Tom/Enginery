@@ -77,12 +77,13 @@ def test_a_missing_sdist_is_rejected_before_anything_is_installed(tmp_path: Path
         release_consumer_smoke.main(["--sdist", str(tmp_path / "enginery-0.6.0.tar.gz")])
 
 
-def test_the_real_consumer_surface_passes(
+def test_real_editable_surface_is_not_installed_workflow_proof(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    not_run = release_consumer_smoke.exercise_surface(
-        executable=_EXECUTABLE, python=_PYTHON, root=tmp_path, version=_version()
-    )
+    with pytest.raises(ConsumerSmokeError, match="outside consumer venv"):
+        release_consumer_smoke.exercise_surface(
+            executable=_EXECUTABLE, python=_PYTHON, root=tmp_path, version=_version()
+        )
     assert (tmp_path / "request-claude-code.json").is_file()
     assert (tmp_path / "request-omp.json").is_file()
     assert not (tmp_path / "rejected-request.json").exists()
@@ -107,11 +108,7 @@ def test_the_real_consumer_surface_passes(
     for line, fragment in zip(observed, expected_fragments, strict=True):
         assert fragment in line
     skipped = [line for line in output if "NOT RUN" in line]
-    assert skipped == not_run
     assert sum("recipe digests equal" in line for line in skipped) == 1
-    engine_lines = [line for line in output if line.startswith("engine ")]
-    assert len(engine_lines) == 1
-    assert engine_lines[0].startswith("engine ok") != (engine_lines[0] in not_run)
 
 
 @pytest.fixture
@@ -667,6 +664,7 @@ def test_a_wheel_is_claimed_byte_identical_only_when_it_was_compared(
 def test_require_engine_turns_a_skipped_engine_check_into_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(release_consumer_smoke, "_check_installed_workflow", _unavailable_workflow)
     monkeypatch.setattr(
         release_consumer_smoke,
         "_check_runner_engine",
@@ -694,8 +692,14 @@ def test_install_receipt_retains_identity_and_incomplete_status(
         release_consumer_smoke._record_command(command, result)
         return result
 
+    step = {"name": "installed-manual-path", "status": "pass", "assertion_count": 20}
+
+    def surface(**kwargs: object) -> list[str]:
+        release_consumer_smoke._STEPS.append(step)
+        return not_run
+
     monkeypatch.setattr(release_consumer_smoke, "_run", successful)
-    monkeypatch.setattr(release_consumer_smoke, "exercise_surface", lambda **kwargs: not_run)
+    monkeypatch.setattr(release_consumer_smoke, "exercise_surface", surface)
     code = release_consumer_smoke.main(["--wheel", str(wheel), "--install-receipt", str(output)])
     receipt = json.loads(output.read_text())
     assert receipt["artifact"] == {
@@ -709,6 +713,7 @@ def test_install_receipt_retains_identity_and_incomplete_status(
     assert receipt["python"]["version"]
     assert len(receipt["commands"]) == 2
     assert all(command["exit_code"] == 0 for command in receipt["commands"])
+    assert receipt["steps"] == [step]
     assert receipt["not_run"] == not_run
     assert receipt["exit_code"] == code == (3 if not_run else 0)
     assert receipt["outcome"] == ("incomplete" if not_run else "pass")
@@ -743,3 +748,141 @@ def test_command_receipt_records_expected_nonzero_exit(tmp_path: Path) -> None:
     )
     assert result.returncode == 3
     assert release_consumer_smoke._COMMANDS[-1]["exit_code"] == 3
+
+
+def _unavailable_workflow(*args: object, **kwargs: object) -> list[str]:
+    message = "NOT RUN installed manual-path workflow (test has an editable installation)"
+    release_consumer_smoke._STEPS.append(
+        {"name": "installed-manual-path", "status": "not-run", "reason": message}
+    )
+    print(message)
+    return [message]
+
+
+@pytest.fixture
+def workflow_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    source = tmp_path / "snapshot" / "src"
+    source.mkdir(parents=True)
+    script = source.parent / "scripts" / "run_factory_gate.py"
+    script.parent.mkdir()
+    script.touch()
+    python = tmp_path / "venv" / "bin" / "python"
+    state: dict[str, object] = {
+        "python": python,
+        "source": source,
+        "version": "0.7.0",
+        "code": 0,
+        "write": True,
+        "module": str(python.parent.parent / "lib" / "enginery" / "__init__.py"),
+        "document": {
+            "scenario": "manual-path",
+            "verdict": "pass",
+            "assertions": [{"ran": True, "status": "pass"} for _ in range(20)],
+        },
+    }
+
+    def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        assert command[0] == str(python)
+        if command[1] == "-c":
+            stdout = json.dumps({"module": state["module"], "version": state["version"]})
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+        assert command[1:3] == ["-B", str(script)]
+        assert command[3:5] == ["--scenario", "manual-path"]
+        if state["write"]:
+            Path(command[-1]).write_text(json.dumps(state["document"]))
+        return subprocess.CompletedProcess(command, int(state["code"]), "", "")  # type: ignore[call-overload]
+
+    monkeypatch.setattr(release_consumer_smoke, "_run", run)
+    release_consumer_smoke._STEPS.clear()
+    return state
+
+
+def _workflow(state: dict[str, object], root: Path) -> list[str]:
+    return release_consumer_smoke._check_installed_workflow(
+        state["python"],
+        root=root,
+        version="0.7.0",
+        source_root=state["source"],  # type: ignore[arg-type]
+    )
+
+
+def test_installed_workflow_retains_import_identity_and_full_evidence(
+    tmp_path: Path,
+    workflow_runner: dict[str, object],
+) -> None:
+    assert _workflow(workflow_runner, tmp_path) == []
+    step = release_consumer_smoke._STEPS[-1]
+    assert step["status"] == "pass"
+    assert step["assertion_count"] == 20
+    assert step["evidence"] == workflow_runner["document"]
+    assert step["evidence_sha256"] == release_consumer_smoke._sha256(
+        tmp_path / "installed-manual-path.json"
+    )
+    assert step["installed"]["module"] == workflow_runner["module"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"version": "0.6.0"},
+        {"module": "/checkout/src/enginery/__init__.py"},
+        {"write": False},
+        {"code": 3},
+        {"document": {"scenario": "manual-path", "verdict": "pass", "assertions": []}},
+        {
+            "document": {
+                "scenario": "manual-path",
+                "verdict": "pass",
+                "assertions": [{"ran": False, "status": "pass"} for _ in range(20)],
+            }
+        },
+        {
+            "document": {
+                "scenario": "setup",
+                "verdict": "pass",
+                "assertions": [{"ran": True, "status": "pass"} for _ in range(20)],
+            }
+        },
+    ],
+)
+def test_installed_workflow_rejects_unproven_facts(
+    tmp_path: Path,
+    workflow_runner: dict[str, object],
+    change: dict[str, object],
+) -> None:
+    workflow_runner.update(change)
+    with pytest.raises(ConsumerSmokeError):
+        _workflow(workflow_runner, tmp_path)
+    assert not release_consumer_smoke._STEPS
+
+
+def test_missing_workflow_source_is_incomplete_not_pass(tmp_path: Path) -> None:
+    release_consumer_smoke._STEPS.clear()
+    not_run = release_consumer_smoke._check_installed_workflow(
+        _PYTHON, root=tmp_path, version=_version(), source_root=None
+    )
+    assert len(not_run) == 1 and "NOT RUN" in not_run[0]
+    assert release_consumer_smoke._STEPS[-1]["status"] == "not-run"
+    assert release_consumer_smoke.report_outcome(not_run) == 3
+
+
+def test_skipped_workflow_step_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(release_consumer_smoke, "_check_installed_workflow", lambda *a, **kw: [])
+    with pytest.raises(ConsumerSmokeError, match="workflow step was skipped"):
+        release_consumer_smoke.exercise_surface(
+            executable=_EXECUTABLE, python=_PYTHON, root=tmp_path, version=_version()
+        )
+
+
+def test_consumer_commands_remove_inherited_pythonpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "/checkout/src")
+    result = release_consumer_smoke._run(
+        [str(_PYTHON), "-c", "import os; print('PYTHONPATH' in os.environ)"], cwd=tmp_path
+    )
+    assert result.stdout.strip() == "False"
