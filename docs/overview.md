@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** `v0.6.0` published on PyPI and GitHub Releases (2026-10-13), alongside `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (Stage 1, 2, and 3 shipped; no new stage since `v0.3.0`); Stage 4 gate-deferred
+- **Status:** `v0.7.0` is the current release line: isolated runners, verified capabilities, layered setup, manual project workflows and authenticated behavioral review. Earlier releases `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11) and `v0.6.0` (2026-10-13) were published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred.
 - **Date:** 2026-07-14 (original authoring date; the status line above reflects the current release)
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 

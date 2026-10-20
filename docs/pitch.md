@@ -2,7 +2,7 @@
 
 - **Conversation memo**
 - **Purpose:** Test whether this is a problem worth solving with engineers, potential collaborators, and engineering leaders.
-- **Status:** `v0.6.0` published on PyPI and GitHub Releases (2026-10-13), alongside `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (Stage 1, 2, and 3 shipped; `v0.4.0`, `v0.5.0`, and `v0.6.0` add operator commands, gate evidence, and recovery behavior, not a workflow stage); Stage 4 remains gate-deferred and unclaimed. The manual-first project command layer is shipped; see the operator guide. This memo predates that delivery and is retained as the historical record of the original pitch and the gate-G1 pilot decision that authorized the `v0.2.0` train.
+- **Status:** `v0.7.0` is the current release line, with isolated execution, verified capabilities, setup, manual project workflows, behavioral checks and authenticated decisions. Earlier versions `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11) and `v0.6.0` (2026-10-13) were published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the shipped workflow surface; Stage 4 remains gate-deferred and unclaimed. Both harness tiers remain experimental; synthetic qualification proves mechanics, not real-project usefulness. This memo predates the manual project layer and is retained as the historical record of the original pitch and gate-G1 pilot decision that authorized the `v0.2.0` train; see the operator guide for current behavior.
 
 ## The short version
 

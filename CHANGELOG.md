@@ -4,6 +4,54 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [0.7.0] - 2026-10-20
+
+Current release line for isolated execution and the manual-first project workflow. No new workflow stage.
+
+### Added
+
+- `enginery engine build-request --runner trusted-local|isolated-oci` selects explicit execution boundaries. Isolated OCI execution separates worker and broker authority, host-side scoped push and model-access relay; `enginery runner custody-receipt` exposes custody. Trusted-local execution is not containment.
+- Capability package closure locks (schema 2) bind every file's path, kind, hash, size and executable bit plus dependency pins and strict `capability.json`. `enginery capability inspect|preview|install|uninstall` supports typed project, user, pinned git and Armory sources with documented precedence.
+- Per-package exact-template license/NOTICE screening; unknown licenses hold. Digest-bound policy-registry approvals, install hold exit 5 with actual digests, private verified command copies, argv/interpreter-only execution, shell-shebang rules, canonical JSON/schema bounds and bounded timeout/output. No automatic approval command.
+- Tracked `.enginery/project.toml`, private `$XDG_CONFIG_HOME/enginery/user.toml`, packaged `standard`/`careful` profiles and factory defaults. Strict schema 1, bounded 1 MiB reads and actionable file/key/value diagnostics. Precedence is run > project > user > workflow > factory; hard constraints conjunct. Project policy cannot choose executable paths or Docker context and rejects credential-shaped values.
+- `enginery init` and `uninstall` preview by default; `--apply` creates private ownership records or removes only unchanged owned files. User-owned conflicts exit 9; capability/harness holds are explicit. `preflight` checks prerequisites read-only with repairs; `explain` reports source chains, ownership and holds. Setup never silently changes credentials, services, MCP or global configuration.
+- `collect [--dry-run]` reads open origin issues with canonical kind/risk labels, deduplication, workflow/harness/model/effort provenance and runner/budget basis. Reports `external_effects` and `local_writes`, including dry-read SQLite sidecars; no GitHub mutation. Intake writes only private cursor/index/lock; missing labels, authentication/configuration/capability or pause conditions hold exit 5 with repairs.
+- `run OWNER/REPO#N [--once|--wait-seconds N] [--supersede]` binds stable `fr-…` identities to project, issue and snapshot through the existing coordinator. Drift holds; supersession needs safe-old-run proof. `status [RUN]` reports worker/container, settings, budget, holds, repairs, decisions and supersession. `continue RUN` reconciles interrupted worker/branch/PR operations without a new run. Project `pause`, `resume` and `drain` bind context and report released resources.
+- Behavioral evidence categories distinguish worker claims, instrument observations and evaluated verdicts; PNG validation and base-bound operator `[acceptance]` checks enter evaluator custody. Missing checks hold `no_behavioral_checks`. Command, loopback service and digest-verified browser observers are explicit; unqualified browsers hold. Isolated command checks run network-none; service/browser checks hold `behavioral_observer_requires_isolation`.
+- `calibrate RUN`, `check RUN`, terminal/private CSP HTML `review RUN`, repair-only `feedback RUN`, and authenticated `decide` with `[review_authority]` principals and one-use same-terminal challenges. Current-head evaluated pass precedes verify; repair is bounded with terminal exhaustion/build-mismatch guidance. Optional Lavish rendering has telemetry off.
+- Repository-only qualification tooling: `scripts/run_factory_gate.py` scenarios `runner-boundary`, `runner-auth`, `setup`, `manual-path`, `behavioral-acceptance`, `review-authority`, `protocol` and `manual-bootstrap`; campaign binding/reuse flags; `release_consumer_smoke.py --install-receipt` schema-1 platform/artifact/hash/command-exit/version/outcome receipts. These scripts are not installed product commands.
+
+### Changed
+
+- Scoped `engine` and `operator` groups replace roadmap-shaped namespaces; project verbs are top-level. Host `doctor`, `adapter`, `runner`, and separate `outcome`, `gate`, `workspace`, `policy` and `capability` groups retain their scopes. The command consolidation itself preserves JSON key/type and exit-code contracts, persisted owners and historical schemas; emitted decision labels use `review|decide` / `engine review`. Separate execution-report changes are listed under Breaking.
+- Catalog v3 separates accepted numeric executable ranges, tested versions and observed receipt versions; historical exact-schema semantics remain. `engine build-request`, `engine next` and `engine evidence` preserve that distinction.
+- Git must be at least 2.45.1 or a supported patched 2.39.4/2.40.2/2.41.1/2.42.2/2.43.4/2.44.1 branch. Operator git configuration comes from a fixed non-repository directory; includeIf-only credential helpers are not carried over.
+- Installed capability locks must equal retained pins; state paths are link-safe; uninstall revokes first without deleting the store, locks, ledger or evidence. Pinned Armory reads verify blob identities.
+- GitHub evidence retains complete raw responses with bounded, pagination-proven collection, latest-review veto, classified failures and terminal failed outcomes. `status RUN --github-view` uses gh-axi for display only, never authority.
+
+### Breaking
+
+- Migrate `stage1 …` to `engine …`, including `stage1 watch` → `engine next`; `stage1 resume` is removed, not project dispatch `resume`. `stage2 status` → `engine status`. `ledger verify|rebuild-projections` → `operator verify|rebuild-projections`; raw `ledger backup|restore` are removed in favor of checked `operator backup|restore`. Removed paths fail as unknown commands (exit 2), without aliases.
+- The never-published `factory` group becomes top-level project verbs: `factory doctor` → `preflight`, `factory resume` → `continue`, `factory pause --lift` → `resume`, and `factory explain RUN` → `status RUN`. The intra-train `enginery-operator` executable folds into `enginery operator`; neither `factory` nor that executable shipped in 0.6.0. Only the `enginery` console script is installed.
+- `engine build-request` now compiles the labelled GitHub issue snapshot named by `--external-reference OWNER/REPO#N`, requiring working `gh` access and exactly one `enginery/work-kind/{issue,plan}` label plus one `enginery/risk/{low,medium}` label. The 0.6.0 values `--work-kind milestone|incident|factory_change` and `--risk-class high` have no label equivalent and are refused. Removed source/content flags: `--work-item-id`, `--source-provider`, `--work-kind`, `--source-snapshot-reference`, `--source-revision`, `--title`, `--objective`, `--acceptance-criterion`, `--constraint`, `--risk-class`. Move those inputs into the issue rather than merely renaming the old command. `--inapplicable-criterion` now indexes the issue's own acceptance criteria (0-based), not a supplied criterion list. `--implementation-no-cost-budget` is removed, and `--implementation-cost-budget` is always refused because no supported harness enforces a hard-dollar budget; use the enforced time budget.
+- `engine next` and `engine evidence` JSON replace `execution.tested_host` with `execution.host`, separating accepted, tested and observed executable versions, and add `execution.runner`. Update consumers of the old host key; a tested version is not an observed version.
+- Removed `--configuration-snapshot-digest` / `--configuration-snapshot-file`. Rebuild new requests with `engine build-request` to bind actual `effective_config` and its digest; `engine start` refuses absent/mismatched snapshots, violated constraints and changed sources/location. Already-started historical runs retain state.
+- Legacy single-blob capability locks are read-only; re-resolve with explicit `--replace-legacy-lock`. Custom sources must replace `CapabilitySourcePort.fetch` with `fetch_closure`; `discover()` now returns `CapabilityListing`.
+- `engine review` findings alone no longer authorize publication. Opening/protected publication requires current exact-subject authority through `decide`; `engine approve|reject` use it. Human-wait requeue remains refused (`human_wait_requeue_unsupported`), distinct from project dispatch `resume` and interrupted-run `continue`.
+
+### Fixed
+
+- Both adapters report cancellation even without a terminal marker and accept pinned harnesses' full supported event vocabularies; unknown events still fail closed.
+- Isolated results use a plain filename; a missing copied path is reported directly instead of as an unreadable empty archive. Workers receive actual permitted single-command git/shell constraints and usable commit-message guidance.
+- Combined commit-status evidence may omit creator without falsely holding valid evidence; PR titles use the issue title, not its body.
+- Observer failures retain their original cause when macOS returns EPERM for an already-exited process group.
+
+### Not part of this release
+
+- Both harness tiers remain experimental. Live qualification used a designated synthetic qualification repository, proving factory mechanics, not usefulness on real projects or all platform/engine combinations. Effective effort remains UNKNOWN; a worker-reported model is not trusted enforcement. A Lima install receipt is not live Lima two-harness qualification.
+- G4 remains deferred/fail-closed; no Stage 4, hosted/multi-tenant service, unattended authority, scheduled collection, self-development or upgrade claim. Merge, release and deployment remain separate decisions after a verified open PR.
+- No dependency changes since 0.6.0. Publication hashes and published-artifact qualification belong to separate post-publication evidence, not preparation notes.
+
 ## [0.6.0] - 2026-10-13
 
 Sixth release. `v0.6.0` makes the merged substrate-contract, execution-selection, and queue-liveness work available to consumers. It adds no workflow stage.
