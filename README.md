@@ -10,9 +10,10 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.6.0` is the current published release (PyPI and GitHub Release, 2026-10-13).
-`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, and `v0.5.0` (2026-08-11) are also
-published on PyPI and GitHub Releases. Enginery ships three of its four planned
+`v0.7.0` is the current release line: isolated execution, verified capabilities,
+layered setup, manual project workflows, behavioral checks, and authenticated decisions.
+Earlier releases were published on PyPI and GitHub Releases: `v0.1.0` through
+`v0.4.0`, `v0.5.0` (2026-08-11) and `v0.6.0` (2026-10-13). Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered
@@ -26,6 +27,12 @@ factory self-improvement) is gate-deferred with no committed date; run
 `enginery gate status --gate G4 --database ledger.db` to see exactly which entry conditions
 are currently met. See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) and
 [`CHANGELOG.md`](CHANGELOG.md) for the full compatibility statement.
+
+The CLI uses top-level project verbs, `engine` for engine-ledger operations, and
+`operator` for verified recovery. Removed `stage1`, `stage2`, `ledger`, and unreleased
+`factory` command paths have no aliases. Both harness tiers remain experimental;
+live qualification against a designated synthetic qualification repository proves
+factory mechanics, not usefulness on real projects.
 
 ### Guided setup and manual factory execution
 

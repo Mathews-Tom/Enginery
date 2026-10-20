@@ -693,6 +693,105 @@ def _check_runner_engine(executable: Path, python: Path, *, root: Path) -> list[
     return []
 
 
+_CONSOLIDATED_COMMANDS = {
+    (): (
+        "init",
+        "preflight",
+        "collect",
+        "run",
+        "status",
+        "explain",
+        "check",
+        "calibrate",
+        "review",
+        "feedback",
+        "decide",
+        "continue",
+        "pause",
+        "resume",
+        "drain",
+        "uninstall",
+        "engine",
+        "operator",
+    ),
+    ("engine",): (
+        "build-request",
+        "start",
+        "next",
+        "review",
+        "approve",
+        "reject",
+        "cancel",
+        "evidence",
+        "status",
+    ),
+    ("operator",): (
+        "status",
+        "pause",
+        "resume",
+        "drain",
+        "select-runner",
+        "backup",
+        "restore",
+        "verify",
+        "rebuild-projections",
+    ),
+}
+_REMOVED_COMMANDS = (
+    ("stage1",),
+    ("stage1", "watch"),
+    ("stage1", "resume"),
+    ("stage2", "status"),
+    ("ledger", "verify"),
+    ("ledger", "rebuild-projections"),
+    ("ledger", "backup"),
+    ("ledger", "restore"),
+    ("factory",),
+    ("factory", "doctor"),
+    ("factory", "resume"),
+    ("factory", "pause"),
+    ("factory", "explain"),
+    ("engine", "watch"),
+    ("engine", "resume"),
+)
+
+
+def _check_consolidated_surface(executable: Path, python: Path, *, root: Path) -> None:
+    for group, commands in _CONSOLIDATED_COMMANDS.items():
+        command = [str(executable), *group, "--help"]
+        result = _require_success(command, cwd=root)
+        for name in commands:
+            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", result.stdout) is None:
+                raise ConsumerSmokeError(f"consolidated help missing {name!r}: {command}")
+        # Individual help proves these are parsable commands, not just prose in group help.
+        for name in commands:
+            _require_success([str(executable), *group, name, "--help"], cwd=root)
+    for path in _REMOVED_COMMANDS:
+        command = [str(executable), *path, "--help"]
+        result = _run(command, cwd=root)
+        removed = path[1] if path[0] == "engine" else path[0]
+        if result.returncode != 2 or f"invalid choice: '{removed}'" not in result.stderr:
+            raise ConsumerSmokeError(
+                f"removed command did not fail as unknown\n{_describe(command, result)}"
+            )
+    result = _require_success(
+        [
+            str(python),
+            "-c",
+            "import json; from importlib.metadata import distribution; "
+            "print(json.dumps(sorted(e.name for e in distribution('enginery').entry_points "
+            "if e.group == 'console_scripts')))",
+        ],
+        cwd=root,
+    )
+    if (
+        json.loads(result.stdout) != ["enginery"]
+        or (executable.parent / "enginery-operator").exists()
+    ):
+        raise ConsumerSmokeError("expected exactly one console script: enginery")
+    _note("consolidated project/engine/operator help, removed commands exit 2, one console script")
+
+
 def exercise_surface(
     *,
     executable: Path,
@@ -711,6 +810,7 @@ def exercise_surface(
     _check_version(executable, root=root, version=version)
     _check_doctor(executable, root=root, version=version)
     _check_help(executable, root=root)
+    _check_consolidated_surface(executable, python, root=root)
     _check_rejected_pins(executable, root=root)
     packaged = _check_packaged_data(python, root=root)
     _check_valid_pins(executable, root=root, packaged=packaged)
@@ -750,7 +850,7 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--wheel", type=Path)
     source.add_argument("--sdist", type=Path)
     source.add_argument(
-        "--package", help="published distribution requirement, for example enginery==0.6.0"
+        "--package", help="published distribution requirement, for example enginery==0.7.0"
     )
     parser.add_argument(
         "--require-engine",

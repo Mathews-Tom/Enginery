@@ -37,6 +37,7 @@ def _version() -> str:
         ({"wheel": Path("dist/enginery-0.6.0-py3-none-any.whl")}, "0.6.0"),
         ({"sdist": Path("dist/enginery-0.6.0.tar.gz")}, "0.6.0"),
         ({"package": "enginery==0.6.0"}, "0.6.0"),
+        ({"package": "enginery==0.7.0"}, "0.7.0"),
         ({"wheel": Path("dist/enginery-1.2.3rc1-py3-none-any.whl")}, "1.2.3rc1"),
     ],
 )
@@ -93,6 +94,7 @@ def test_the_real_consumer_surface_passes(
         "enginery --version",
         "enginery doctor",
         "help",
+        "consolidated project/engine/operator help",
         "unsupported pins exit 2",
         "packaged execution catalog",
         "valid pins write requests",
@@ -110,6 +112,102 @@ def test_the_real_consumer_surface_passes(
     engine_lines = [line for line in output if line.startswith("engine ")]
     assert len(engine_lines) == 1
     assert engine_lines[0].startswith("engine ok") != (engine_lines[0] in not_run)
+
+
+@pytest.fixture
+def consolidated_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[tuple[str, ...], tuple[int, str, str]]:
+    overrides: dict[tuple[str, ...], tuple[int, str, str]] = {}
+
+    def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        args = tuple(command[1:])
+        if args in overrides:
+            code, stdout, stderr = overrides[args]
+        elif command[0] == str(_PYTHON):
+            code, stdout, stderr = 0, '["enginery"]', ""
+        elif args[:-1] in release_consumer_smoke._REMOVED_COMMANDS:
+            path = args[:-1]
+            removed = path[1] if path[0] == "engine" else path[0]
+            code, stdout, stderr = 2, "", f"invalid choice: '{removed}'"
+        else:
+            group = args[:-1]
+            code, stdout, stderr = (
+                0,
+                " ".join(release_consumer_smoke._CONSOLIDATED_COMMANDS.get(group, ())),
+                "",
+            )
+        return subprocess.CompletedProcess(command, code, stdout, stderr)
+
+    monkeypatch.setattr(release_consumer_smoke, "_run", run)
+    return overrides
+
+
+@pytest.mark.parametrize("path", release_consumer_smoke._REMOVED_COMMANDS)
+def test_accepted_obsolete_command_is_rejected(
+    tmp_path: Path,
+    consolidated_runner: dict[tuple[str, ...], tuple[int, str, str]],
+    path: tuple[str, ...],
+) -> None:
+    consolidated_runner[(*path, "--help")] = (0, "old command", "")
+    with pytest.raises(ConsumerSmokeError, match="removed command"):
+        release_consumer_smoke._check_consolidated_surface(_EXECUTABLE, _PYTHON, root=tmp_path)
+
+
+@pytest.mark.parametrize("code,stderr", [(1, "invalid choice: 'stage1'"), (2, "unrelated")])
+def test_obsolete_command_requires_real_unknown_command_exit_and_message(
+    tmp_path: Path,
+    consolidated_runner: dict[tuple[str, ...], tuple[int, str, str]],
+    code: int,
+    stderr: str,
+) -> None:
+    consolidated_runner[("stage1", "--help")] = (code, "", stderr)
+    with pytest.raises(ConsumerSmokeError, match="removed command"):
+        release_consumer_smoke._check_consolidated_surface(_EXECUTABLE, _PYTHON, root=tmp_path)
+
+
+@pytest.mark.parametrize("group", [(), ("engine",), ("operator",)])
+def test_missing_consolidated_command_is_rejected(
+    tmp_path: Path,
+    consolidated_runner: dict[tuple[str, ...], tuple[int, str, str]],
+    group: tuple[str, ...],
+) -> None:
+    consolidated_runner[(*group, "--help")] = (0, "usage: nothing", "")
+    with pytest.raises(ConsumerSmokeError, match="consolidated help missing"):
+        release_consumer_smoke._check_consolidated_surface(_EXECUTABLE, _PYTHON, root=tmp_path)
+
+
+def test_an_extra_console_script_is_rejected(
+    tmp_path: Path,
+    consolidated_runner: dict[tuple[str, ...], tuple[int, str, str]],
+) -> None:
+    script = tmp_path / "enginery-operator"
+    script.touch()
+    with pytest.raises(ConsumerSmokeError, match="exactly one console script"):
+        release_consumer_smoke._check_consolidated_surface(
+            tmp_path / "enginery", _PYTHON, root=tmp_path
+        )
+
+
+def test_an_extra_metadata_console_script_is_rejected(
+    tmp_path: Path,
+    consolidated_runner: dict[tuple[str, ...], tuple[int, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = release_consumer_smoke._run
+
+    def extra_script(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        result = run(command, cwd=cwd)
+        if command[0] == str(_PYTHON):
+            return subprocess.CompletedProcess(command, 0, '["enginery", "enginery-operator"]', "")
+        return result
+
+    monkeypatch.setattr(release_consumer_smoke, "_run", extra_script)
+    assert not (tmp_path / "enginery-operator").exists()
+    with pytest.raises(ConsumerSmokeError, match="exactly one console script"):
+        release_consumer_smoke._check_consolidated_surface(
+            tmp_path / "enginery", _PYTHON, root=tmp_path
+        )
 
 
 def test_a_doctor_reporting_another_version_fails_the_doctor_check(tmp_path: Path) -> None:
