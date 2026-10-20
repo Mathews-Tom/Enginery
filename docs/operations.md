@@ -2866,6 +2866,226 @@ at most 900 seconds, and records the relay's request counts, the usage the
 harness reports and that the token value appears in no artifact. Nothing in
 Enginery starts it for you.
 
+### Reference harness bootstrap campaign
+
+`protocol` and `manual-bootstrap` share one durable campaign manifest. Keep all
+three evidence files under the same absolute `ROOT`; the manifest lives at
+`ROOT/campaigns/ID/manifest.json`. An ID matches
+`[a-z0-9][a-z0-9-]{2,62}`. Atomic, locked updates bind the exact subject commit,
+wheel and installed distribution, catalog, runner/relay images, engine/context,
+host custody receipt, gateway, allowlisted repository, issue snapshots and model
+pins. A changed binding holds before any worker reservation.
+
+Without `--live`, both protocol harnesses and bootstrap reuse run against
+deterministic stand-ins: zero hosted inference calls and zero OCI launches.
+Local success is not a live qualification. With `--live`, protocol drives the
+installed `enginery` entry point on two owner-approved issues in a separate trusted
+repository, one approved completed workflow per harness. The operator supplies a
+fresh wheel installation and campaign JSON through `--campaign-config`; it names
+`qualification_target` (required, exactly `"synthetic"` or `"real"`; no default),
+`wheel`, `executable`, `project_path`, `project_paths` (one per harness),
+`repository`, `issues` (`omp` and `claude` issue numbers), `designated_workflow`,
+`engine_kind`, `validation_commands` (nonempty command strings that, after
+shell-splitting, exactly match the project's configured commands), and optional
+per-harness `model_pins` and `effort_pins`. Each harness's configured project must
+match its bound harness, exact image/context and `model_access = "relay"`, with
+`repair_limit = 0` and committed, independent `[acceptance]` checks for the real
+change. Use separate configured working copies when the harness policies differ.
+The gate neither authors behavioral assertions nor overwrites a conflicting policy.
+Do not put credentials in this JSON.
+The target class is immutable in the campaign binding and recorded in protocol
+evidence and the frozen bootstrap index. Stand-in campaigns record `"synthetic"`.
+A synthetic target proves factory mechanics (lifecycle, isolation, cancel/reconcile,
+verified PR, human decision and recovery), not usefulness on real projects.
+
+On the first live protocol invocation, custody receipt conformance/host checks,
+engine-kind qualification against the real engine, bound-relay health, and the
+**invoking harness's** effective-policy `explain` image/context matching and origin
+allowlisting all pass **before the first binding is written**, as well as before
+worker reservation. These checks cover only that harness's project and values;
+the other harness's project path, model/effort pins and issue are bound without
+checking that harness's project. A mistaken value can be corrected only while no
+binding has been written. Both prepared projects and their policies must already
+exist; the gate does not initialize them.
+
+Once written, the binding is immutable even if a later prerequisite holds with no
+slot reserved. Changing bound config values (`engine_kind`, `repository`,
+`validation_commands`, project paths), CLI images/context/gateway URL, the custody
+receipt digest or any other bound identity permanently holds the campaign. Only
+changes outside the binding are free to retry: for example token-file mode/owner,
+engine or relay availability, project policy content and the project's git origin.
+Before the first invocation, check engine kind and exact image IDs, both projects'
+`explain` outputs and origins, both model/effort pins and both issues. A wrong bound
+value for the other harness discovered on its later invocation is already immutable
+and holds the campaign. After binding, repair external prerequisites to match the
+binding, never rewrite the binding.
+
+Both issue snapshots freeze when the campaign's **first binding is written**. Do not change
+an issue's number, title, body, state or labels until that harness's completed slot
+is reserved. Only those task-dependent fields and their exact digest are bound;
+comments, reactions and `updated_at` are not task inputs. Changing a frozen task
+input, or finding an existing project run for that issue, permanently holds this
+campaign; do not repair the binding or invent a new campaign ID to bypass it.
+
+Product qualification also precedes reservation. If a qualifying command committed
+nothing and engine events prove no worker create that its intent could own, its
+intent is discarded and qualification may retry freely. Cancellation counts a
+create matching its exact operation label **or** container name. Completed-workflow
+counts only runner-labelled creates with an `implement:` operation ID not already
+recorded in campaign slots, excluding relay and `-store` containers. `validate:`
+and every other operation, unlabelled creates and another slot's recorded worker
+do not block requalification; an unrecorded `implement:` worker create still holds.
+A matching qualified run left before reservation is reused only when immutable
+bindings and engine/supervisor evidence prove no worker launched.
+A committed held run, or a run not ready for `implement`, holds that harness unless
+the product later reports `next_action: implement` with no holds and without any
+frozen task-input change. Do not run `enginery continue` on that run outside the gate. Conflicting,
+dispatched or unprovable qualification state holds permanently; no slot is un-consumed.
+
+Use absolute paths and exact image IDs for every variable below. `SUBJECT` is the
+full source commit used to build `WHEEL`; `CONFIG` binds that wheel and the fresh
+virtual environment's installed `enginery` executable. `CUSTODY` is a conforming
+receipt for the current host, gateway and private token file. The binding alone
+selects the model, and `model_pins` may be omitted. The commands below therefore
+pass no `--model`. To cross-check a pinned model, add `--model MODEL` to a
+`protocol` command only: it must equal `model_pins[harness]`, and an empty value
+is refused as a mismatch. `manual-bootstrap` rejects `--model`.
+Runner-boundary evidence must
+already pass for `RUNNER`, not just for an older image.
+
+Follow these operator steps in order:
+
+1. Prepare both qualification projects and a repository check named **`CI`**:
+   the factory default is `required_checks = ["CI"]`. Without that check the
+   completed workflow waits at `wait_for_ci`. Every acceptance assertion must catch
+   a semantic fault (`constant_result` or `skipped_persistence`): for command output,
+   assert the exact output, not merely exit status 0. Follow
+   [the behavioral acceptance calibration guidance](#behavioral-check-custody-and-receipts).
+2. Include `boundary_evidence` in the campaign JSON, pointing to passing
+   runner-boundary evidence for the **exact runner image**; live bootstrap refuses to
+   freeze its index without it. Also list `baseline_evidence`: passing setup,
+   manual-path, behavioral-acceptance and review-authority journey evidence, which
+   the frozen index records alongside the campaign's protocol journeys.
+3. Run the two protocol commands below sequentially. For each completed workflow,
+   `PROJECT` is that harness's prepared project directory from the campaign JSON,
+   and `RUN` is the run ID of its completed-workflow issue, as listed by
+   `enginery status --project "$PROJECT"`; `DATABASE` is the ledger path that
+   command reports, and `OWNER` is `factory`, the owner of project runs. Record an
+   independent review report with
+   `enginery engine review --database "$DATABASE" --owner "$OWNER" --run-id "$RUN" --report "$REPORT" --repair-attempt 0`
+   before the human decision is available. Use that workflow's ledger, owner and
+   run ID and the independent reviewer's report, not a report invented by the gate.
+   The owner then runs `enginery review "$RUN" --project "$PROJECT"` with stdout
+   **directly attached to the terminal**: no pipe or redirect. Run the printed
+   `enginery decide` command on the **same terminal**, using the printed subject
+   digest and challenge for the verified current head. A piped review cannot issue
+   the terminal-bound challenge.
+4. After both protocols pass, set `DESIGNATED_PROJECT` and `DESIGNATED_RUN` to the
+   `PROJECT` and `RUN` of the harness named by `designated_workflow`, and run
+   `enginery calibrate "$DESIGNATED_RUN" --project "$DESIGNATED_PROJECT"` before
+   `manual-bootstrap`. Require qualified calibration with
+   no holds for its current head. Workflow verification calibrates internally, but
+   only this explicit command records the calibration evidence bootstrap reads.
+5. Run the manual-bootstrap command below with both installation receipts.
+   It reuses the campaign and starts no worker.
+
+```bash
+uv run python scripts/run_factory_gate.py --scenario protocol --harness omp \
+  --campaign-id "$ID" --campaign-config "$CONFIG" --live \
+  --docker-context "$CONTEXT" --runner-image "$RUNNER" --relay-image "$RELAY" \
+  --gateway-url "$GATEWAY" --gateway-token-file "$TOKEN_FILE" \
+  --custody-receipt "$CUSTODY" --subject-commit "$SUBJECT" \
+  --session-deadline-seconds 900 --confirm-single-session \
+  --evidence-out "$ROOT/protocol-omp.json"
+uv run python scripts/run_factory_gate.py --scenario protocol --harness claude \
+  --campaign-id "$ID" --campaign-config "$CONFIG" --live \
+  --docker-context "$CONTEXT" --runner-image "$RUNNER" --relay-image "$RELAY" \
+  --gateway-url "$GATEWAY" --gateway-token-file "$TOKEN_FILE" \
+  --custody-receipt "$CUSTODY" --subject-commit "$SUBJECT" \
+  --session-deadline-seconds 900 --confirm-single-session \
+  --evidence-out "$ROOT/protocol-claude.json"
+enginery calibrate "$DESIGNATED_RUN" --project "$DESIGNATED_PROJECT"
+uv run python scripts/run_factory_gate.py --scenario manual-bootstrap \
+  --campaign-id "$ID" --campaign-config "$CONFIG" --reuse-evidence --live \
+  --docker-context "$CONTEXT" --runner-image "$RUNNER" --relay-image "$RELAY" \
+  --gateway-url "$GATEWAY" --gateway-token-file "$TOKEN_FILE" \
+  --custody-receipt "$CUSTODY" --subject-commit "$SUBJECT" \
+  --session-deadline-seconds 900 --confirm-single-session \
+  --install-receipt "$MACOS_INSTALL_RECEIPT" --install-receipt "$UBUNTU_INSTALL_RECEIPT" \
+  --evidence-out "$ROOT/bootstrap.json"
+```
+
+Despite the retained flag name, confirmation authorizes the **campaign budget**:
+four worker sessions total, including failed or interrupted attempts, concurrency
+one, with a process-group deadline of at most 900 seconds for each slot.
+`ENGINERY_FACTORY_GATE_CONFIRM_SINGLE_SESSION=1` is the equivalent explicit
+confirmation. Each harness has one `completed-workflow` slot and one
+`cancellation` slot; a slot is persisted before launch and can never be reserved
+again. The completed journey kills the waiting coordinator/client once while the
+worker survives, then uses `enginery continue` to reconcile that same worker.
+Cancellation uses a separate engine-ledger run of the same approved issue, never
+advances publication, and cannot replace or consume the completed project run.
+A dead invocation is reconciled, **never relaunched**; failed evidence is not
+repaired by a hidden retry or a new campaign ID.
+The invocation window starts at pre-reservation qualification, before host reads
+and product qualification. The worker receives `budget - min(120, budget // 3)`
+seconds **from launch** (780 at a 900-second budget); qualification and launch
+consume part of the remaining margin. Publication, CI and verification usually
+overrun the first window. The gate never extends the worker's persisted deadline.
+
+Protocol records actual selected/submitted controls, observed image executable
+versions, effective unknowns, engine-created container counts, current-head
+PR/check/review snapshots, and retained product artifacts. While the live protocol
+waits, or after it holds for a missing decision, the operator runs the normal
+`enginery review` and `enginery decide` commands at a real terminal for the recorded
+run and **verified current head**. The live gate never issues a decision or merges
+the PR. If the invocation window expires before the workflow completes (for example
+while awaiting the decision or CI), rerun the identical protocol command, with the
+same campaign ID, config, flags and evidence path, to reconcile without launching a
+replacement worker.
+When the worker has exited after `implement` passed, reconciliation gets a fresh
+invocation window for publication, CI, verification and the external decision.
+A deadline hit while `implement` is still running cancels the worker and ends in a
+failed slot; that slot cannot be retried. A missing or failed worker is never
+replaced. A hold is actionable evidence, not qualification.
+
+Live bootstrap requires `--reuse-evidence` and launches no worker. It refuses
+missing or failed protocol verdicts, changed digests, PR closure/merge/head/review/path
+drift, missing current-head human decisions or failing independent behavioral
+evidence. It requires macOS and Ubuntu `release_consumer_smoke.py --wheel ...`
+receipts emitted with `--install-receipt PATH` for the same wheel; unrun install
+checks remain incomplete. Bootstrap exercises workflow-free
+`enginery operator pause`, `resume`, `drain`, `select-runner`, `backup`, `restore`
+and `verify`: restoration is into a **fresh** ledger/artifact path, never over the
+live project. It verifies equivalent retained domain history/artifacts and uses
+engine events to prove zero harness-container creates.
+Recorded queued/in-progress check runs may progress to completed/success only;
+check identity, head and membership cannot change.
+
+Only after every fail-closed check, zero-container observation and secret scan
+passes does the gate write the frozen index beside bootstrap evidence. It binds
+journey digests, architecture boundary checks, exact-image isolation evidence,
+resource limits and the digest-registered, role-owned calibration set with stable
+per-entry outcomes, not run-specific calibration bodies. Identical reruns reuse it.
+Calibration locally demonstrates `caught`, `escaped` under a weaker evaluator
+assertion followed by a stronger evaluator catch, `not_injected`, and observer/
+infrastructure `inconclusive`, in both modes. Worker streams are
+merged and secret-redacted before retention; digest recovery proves those retained
+bytes, not separate or unredacted streams. Neither campaign completion nor the
+index changes the [experimental support tiers](adapters.md#reference-harness-support-matrix).
+
+Observed live result: **2026-10-19**, campaign `m33-synthetic-dd5`, Docker Desktop
+(`desktop-linux`) on macOS arm64, target class **`synthetic`**, repository
+`Mathews-Tom/enginery-qualification-calc`: OMP protocol **PASS 8/8**, Claude Code
+protocol **PASS 8/8**, manual-bootstrap **PASS 10/10** with **zero worker creates**
+during bootstrap. The campaign included passing macOS and Ubuntu (Lima) wheel
+installation receipts; Lima/Ubuntu did not run a live protocol campaign.
+Observed image versions, effective-model reports, exact image IDs and all three
+evidence SHA-256 digests are recorded in the
+[support matrix](adapters.md#reference-harness-support-matrix).
+This synthetic result qualifies factory mechanics, not usefulness on real projects,
+and leaves both catalog support tiers experimental.
+
 ### The setup scenario
 
 `scripts/run_factory_gate.py --scenario setup --evidence-out evidence/setup.json` qualifies
