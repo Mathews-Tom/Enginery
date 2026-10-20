@@ -11,14 +11,19 @@ request whose execution selection is bound to the packaged catalog), the package
 acceptance baseline and execution catalog, the fail-closed G4 gate, and the isolated-runner
 surface: `runner` and `operator` help, the packaged worker and relay recipes (their
 digests equal the source tree's and every recipe file is in the wheel), the engine runner flags,
-and -- only when a container engine is reachable -- that `runner status` holds an absent image.
+the consolidated commands and rejection of removed spellings, and a 20-assertion manual project
+workflow using the installed Python with checkout imports refused and PYTHONPATH removed.
+Only when a container engine is reachable, `runner status` must hold an absent image.
 A check that cannot run is reported as NOT RUN; any NOT RUN check makes the run INCOMPLETE
 (exit status 3), never a PASS. An engine that is reachable but unqualified is reported as such,
 distinct from an unreachable one, and a digest or byte-identity claim is made only when the
 comparison was actually made.
 
-No hosted model or GitHub call is made and nothing is written outside the temporary
-directory: the request commands read their issue from a stand-in `gh` written there.
+No hosted model or GitHub call is made: requests read a local stand-in `gh`.
+Consumer working files and workflow evidence stay in the smoke's temporary directory.
+The optional install receipt is written to its requested path. The manual-path gate
+creates and cleans up its own system temporary directory; it runs with bytecode
+writes disabled so the staged scripts are not modified.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ _CLAUDE_MODEL = "claude-sonnet-4-5"
 _OMP_MODEL = "anthropic/claude-sonnet-4-5"
 
 _COMMANDS: list[dict[str, object]] = []
+_STEPS: list[dict[str, object]] = []
 
 
 def _record_command(command: list[str], result: subprocess.CompletedProcess[str]) -> None:
@@ -74,7 +80,7 @@ def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         env={
-            **os.environ,
+            **{key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
             "XDG_CONFIG_HOME": str(cwd / "xdg-config"),
             "XDG_STATE_HOME": str(cwd / "xdg-state"),
         },
@@ -792,6 +798,82 @@ def _check_consolidated_surface(executable: Path, python: Path, *, root: Path) -
     _note("consolidated project/engine/operator help, removed commands exit 2, one console script")
 
 
+def _check_installed_workflow(
+    python: Path, *, root: Path, version: str, source_root: Path | None
+) -> list[str]:
+    script = None if source_root is None else source_root.parent / "scripts" / "run_factory_gate.py"
+    if script is None or not script.is_file() or not source_root.is_dir():
+        message = "NOT RUN installed manual-path workflow (no source snapshot beside scripts/)"
+        _STEPS.append({"name": "installed-manual-path", "status": "not-run", "reason": message})
+        print(message, flush=True)
+        return [message]
+    identity = _require_success(
+        [
+            str(python),
+            "-c",
+            "import json, enginery; from importlib.metadata import version; "
+            "print(json.dumps({'module': enginery.__file__, 'version': version('enginery')}))",
+        ],
+        cwd=root,
+    )
+    installed = json.loads(identity.stdout)
+    venv = python.parent.parent.resolve()
+    if (
+        not isinstance(installed, dict)
+        or installed.get("version") != version
+        or not isinstance(installed.get("module"), str)
+        or not Path(installed["module"]).resolve().is_relative_to(venv)
+    ):
+        raise ConsumerSmokeError(
+            f"installed workflow import/version is outside consumer venv: {installed}"
+        )
+    evidence = root / "installed-manual-path.json"
+    result = _run(
+        [
+            str(python),
+            "-B",
+            str(script),
+            "--scenario",
+            "manual-path",
+            "--evidence-out",
+            str(evidence),
+        ],
+        cwd=root,
+    )
+    if result.returncode != 0 or not evidence.is_file():
+        raise ConsumerSmokeError(
+            f"installed workflow failed or missing evidence\n{_describe(result.args, result)}"
+        )
+    document = json.loads(evidence.read_text(encoding="utf-8"))
+    assertions = document.get("assertions", []) if isinstance(document, dict) else []
+    if (
+        not isinstance(document, dict)
+        or document.get("scenario") != "manual-path"
+        or document.get("verdict") != "pass"
+        or not isinstance(assertions, list)
+        or len(assertions) != 20
+        or any(
+            not isinstance(item, dict)
+            or item.get("ran") is not True
+            or item.get("status") != "pass"
+            for item in assertions
+        )
+    ):
+        raise ConsumerSmokeError("installed manual-path workflow must pass all 20 assertions")
+    _STEPS.append(
+        {
+            "name": "installed-manual-path",
+            "status": "pass",
+            "installed": installed,
+            "assertion_count": len(assertions),
+            "evidence_sha256": _sha256(evidence),
+            "evidence": document,
+        }
+    )
+    _note(f"installed manual-path workflow passes 20/20 assertions; module={installed['module']}")
+    return []
+
+
 def exercise_surface(
     *,
     executable: Path,
@@ -807,6 +889,7 @@ def exercise_surface(
     Returns the checks that could not run (each already printed as ``NOT RUN``); a check that
     cannot run is never counted as a pass, and ``require_engine`` turns one into a failure.
     """
+    _STEPS.clear()
     _check_version(executable, root=root, version=version)
     _check_doctor(executable, root=root, version=version)
     _check_help(executable, root=root)
@@ -818,6 +901,11 @@ def exercise_surface(
     _check_runner_help(executable, root=root)
     _check_stage1_runner_flags(executable, root=root)
     not_run = _check_runner_recipes(python, root=root, source_root=source_root, wheel=wheel)
+    not_run += _check_installed_workflow(
+        python, root=root, version=version, source_root=source_root
+    )
+    if not any(step.get("name") == "installed-manual-path" for step in _STEPS):
+        raise ConsumerSmokeError("installed manual-path workflow step was skipped")
     not_run += _check_runner_engine(executable, python, root=root)
     unrun_engine = [item for item in not_run if item.startswith("engine NOT RUN")]
     if require_engine and unrun_engine:
@@ -866,6 +954,7 @@ def main(argv: list[str] | None = None) -> int:
     if artifact is not None and not artifact.is_file():
         raise ConsumerSmokeError(f"artifact does not exist: {artifact}")
     _COMMANDS.clear()
+    _STEPS.clear()
     receipt: dict[str, object] = {
         "schema_version": 1,
         "platform": {
@@ -883,6 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         "installed_version": None,
         "entry_point": None,
         "commands": _COMMANDS,
+        "steps": _STEPS,
         "outcome": "fail",
         "exit_code": 1,
         "not_run": [],
