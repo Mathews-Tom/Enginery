@@ -34,7 +34,7 @@ from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.behavioral_acceptance import BehavioralAcceptanceService
-from enginery.workflows.stage1 import Stage1RunRequest, Stage1RunService
+from enginery.workflows.run_lifecycle import Stage1RunRequest, Stage1RunService
 
 
 class _AcceptanceArguments(TypedDict):

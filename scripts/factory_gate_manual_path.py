@@ -35,7 +35,7 @@ from enginery.cli.factory_collect import database_path
 from enginery.engine.operator_control import live_workers
 from enginery.engine.recovery import assess_worker
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import stage1_request_from_state
+from enginery.workflows.run_lifecycle import stage1_request_from_state
 from factory_gate_behavioral import _toml
 from factory_gate_context import GateHoldError, GateOptions
 from factory_gate_evidence import EvidenceBuilder

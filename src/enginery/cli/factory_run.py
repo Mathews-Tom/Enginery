@@ -58,7 +58,7 @@ from enginery.engine.runtime import (
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ProgressionAction,
     Stage1RunRequest,
     Stage1RunService,

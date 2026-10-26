@@ -48,7 +48,7 @@ from enginery.engine.supervisor import probe_process
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1ProgressionAction,
@@ -955,7 +955,7 @@ def test_a_worker_that_published_its_result_but_has_not_exited_is_waited_on_then
     from enginery.application.worker_environment import TRUSTED_LOCAL_WORKER_KEYS
 
     monkeypatch.setattr(
-        "enginery.workflows.stage1.TRUSTED_LOCAL_WORKER_KEYS",
+        "enginery.workflows.run_lifecycle.TRUSTED_LOCAL_WORKER_KEYS",
         (*TRUSTED_LOCAL_WORKER_KEYS, "PYTHONPATH"),
     )
     monkeypatch.setenv("PYTHONPATH", str(lingering))

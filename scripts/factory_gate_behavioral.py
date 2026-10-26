@@ -16,7 +16,7 @@ from enginery.domain.workflow.node import ActorType
 from enginery.engine.runtime import CoordinatorRuntime, _request_state
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService, _fixture_dispatch
+from enginery.workflows.run_lifecycle import Stage1RunService, _fixture_dispatch
 from factory_gate_context import GateOptions
 from factory_gate_evidence import EvidenceBuilder
 from factory_gate_setup import SetupGate

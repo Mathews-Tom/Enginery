@@ -1,7 +1,7 @@
 """``enginery engine build-request``: compose a valid ``--request`` document.
 
 The command builds the same `Stage1RunRequest` that `engine start` decodes
-(`enginery.workflows.stage1.stage1_request_from_state`) and writes the identical
+(`enginery.workflows.run_lifecycle.stage1_request_from_state`) and writes the identical
 JSON shape. The source issue is read, not typed: the work item, its source
 revision, and its declared classification (the canonical `enginery/work-kind/*`
 and `enginery/risk/*` labels) come through the same GitHub adapter that
@@ -56,7 +56,7 @@ from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId
 from enginery.domain.run import Run, RunState
 from enginery.domain.runner import MODEL_ACCESS_MODES
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,

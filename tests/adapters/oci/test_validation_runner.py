@@ -37,7 +37,7 @@ from enginery.domain.runner import (
 )
 from enginery.engine.task_repository import out_path_for
 from enginery.ledger.artifact_store import ArtifactStore
-from enginery.workflows.stage1_runtime import _redacted_validation_report
+from enginery.workflows.node_executors import _redacted_validation_report
 
 from .support import IMAGE_ID
 

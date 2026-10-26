@@ -448,7 +448,7 @@ def test_live_zero_container_guard_reads_real_event_window(
 
 def test_operator_guard_rejects_workflow_import_from_installed_entry_point(tmp_path: Path) -> None:
     entry = tmp_path / "enginery"
-    entry.write_text("import enginery.workflows.stage1\n", encoding="utf-8")
+    entry.write_text("import enginery.workflows.run_lifecycle\n", encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,

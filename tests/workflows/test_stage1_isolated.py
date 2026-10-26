@@ -62,7 +62,7 @@ from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationDispatch,
     Stage1ImplementationRequest,
@@ -739,7 +739,7 @@ def test_an_isolated_worker_is_told_to_commit_locally_and_never_to_push(
 def test_an_isolated_repair_worker_gets_the_shell_rules_without_a_new_checkout(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:
-    from enginery.workflows.stage1 import _implementation_task
+    from enginery.workflows.run_lifecycle import _implementation_task
 
     built = _build(ledger_service, tmp_path, runner=_isolated(), admission=ScriptedAdmission())
     task = _implementation_task(

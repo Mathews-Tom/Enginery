@@ -31,7 +31,7 @@ from enginery.cli.main import _build_parser
 from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService, _exhausted_behavioral_repair
+from enginery.workflows.run_lifecycle import Stage1RunService, _exhausted_behavioral_repair
 from tests.cli.test_stage1 import _request
 
 _SOURCE = Path(__file__).resolve().parents[2] / "src" / "enginery"

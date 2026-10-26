@@ -74,14 +74,14 @@ from enginery.engine.task_repository import intake_path_for, validation_path_for
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.human_decisions import list_decisions
 from enginery.ledger.service import LedgerService
+from enginery.workflows.node_executors import Stage1ValidationResult
 from enginery.workflows.review import ReviewReport
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     DEFAULT_VALIDATION_COMMAND,
     Stage1ProgressionAction,
     Stage1RunService,
     stage1_request_from_state,
 )
-from enginery.workflows.stage1_runtime import Stage1ValidationResult
 
 BRANCH = "enginery/run-isolated"
 _AMBIENT_SECRETS = {

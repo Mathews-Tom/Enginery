@@ -40,7 +40,7 @@ from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
 from enginery.workflows.pull_request import PullRequestOutcome
 from enginery.workflows.review import ReviewReport
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ProgressionAction,
     Stage1RunRequest,
     stage1_request_from_state,
@@ -705,7 +705,7 @@ def test_collect_implementation_gives_the_executor_the_services_own_catalog(
         def collect(self, **kwargs: object) -> str:
             return "collected"
 
-    monkeypatch.setattr("enginery.workflows.stage1.Stage1ImplementationExecutor", _Spy)
+    monkeypatch.setattr("enginery.workflows.run_lifecycle.Stage1ImplementationExecutor", _Spy)
     monkeypatch.setattr(
         "enginery.engine.runtime.CoordinatorRuntime.recover_dispatched",
         lambda self, **kwargs: None,

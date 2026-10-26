@@ -195,7 +195,7 @@ from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.merge_policy import MergePolicyService
 from enginery.workflows.plan_to_release import Stage2ReleaseWorkflow
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport, route_review
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
