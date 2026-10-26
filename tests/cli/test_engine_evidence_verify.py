@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from enginery.cli._exit_codes import exit_code_for
-from enginery.cli.main import main
 from enginery.domain.artifact import ArtifactKind, RedactionClassification
 from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass
