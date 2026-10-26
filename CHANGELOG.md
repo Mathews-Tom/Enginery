@@ -6,6 +6,10 @@ for the current compatibility statement.
 
 ## [Unreleased]
 
+### Fixed
+
+- Before publication, actionable independent review findings and redacted `enginery feedback` now dispatch the next bounded implementation repair generation with actionable finding text in its worker task. Review repair context is deduplicated and capped at 32 KiB with an explicit truncation marker; feedback retains its 1 MiB input limit. Exhausted budgets and blocking findings still await human review; publication authority is unchanged.
+
 ### Added
 
 - The pinned worker image includes CPython 3.12 and Enginery's hash-locked runtime dependencies alongside Debian Python 3.11.2. The Python-shebang `enginery-checkout` command runs the current candidate's `./src/enginery` for network-free isolated self-development validation and behavioral acceptance checks, without installing or modifying the checkout.

@@ -433,6 +433,15 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
             raise InvalidInputError("feedback subject is stale; run enginery review again")
         finding_ids = tuple(dict.fromkeys((*prior_ids, finding_id)))
         _json(list(finding_ids))
+        prior_actionable = _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:review").get(
+            "actionable_finding_ids"
+        )
+        actionable_ids = (
+            {value for value in prior_actionable if isinstance(value, str)}
+            if isinstance(prior_actionable, list)
+            else set(prior_ids)
+        )
+        actionable_ids.add(finding_id)
         runtime = runtime_for_run(ledger, owner="factory", run_id=run_id)
         implementation = _projection(ledger, RUNTIME_NODE_AGGREGATE_TYPE, f"{run_id}:implement")
         attempt = implementation.get("attempt_id")
@@ -448,11 +457,13 @@ def feedback(project: Path, run_id: str, *, subject_digest: str, text: str) -> d
                 producer="implementation_worker",
                 reviewer="packet_feedback",
                 findings=tuple(
-                    ReviewFinding(value, actionable=True, blocking=False) for value in finding_ids
+                    ReviewFinding(value, actionable=value in actionable_ids, blocking=False)
+                    for value in finding_ids
                 ),
             ),
             repair_attempt=repair_attempt,
             packet_feedback_digest=Digest.of_json(payload).hex_value,
+            feedback_text=payload["text"],
             now=datetime.now(UTC),
             heartbeat_window=HEARTBEAT_WINDOW,
         )

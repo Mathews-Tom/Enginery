@@ -2213,6 +2213,345 @@ def _check_disposition_fixture(
     return request, service, runtime, pull_requests, now
 
 
+def _review_repair_fixture(
+    ledger_service: LedgerService, tmp_path: Path, *, repair_limit: int = 1
+) -> tuple[Stage1RunRequest, Stage1RunService, CoordinatorRuntime, datetime]:
+    def agent_implementation(manifest: WorkflowManifest) -> WorkflowManifest:
+        return replace(
+            manifest,
+            nodes={
+                **manifest.nodes,
+                NodeId("implement"): replace(
+                    manifest.nodes[NodeId("implement")], actor_type=ActorType.AGENT
+                ),
+            },
+        )
+
+    request, service, runtime, _, now = _check_disposition_fixture(
+        ledger_service, tmp_path, start=False, manifest_transform=agent_implementation
+    )
+    repository = request.repository_path
+    _git("init", cwd=repository)
+    _git("config", "user.email", "test@example.invalid", cwd=repository)
+    _git("config", "user.name", "Test", cwd=repository)
+    (repository / "tracked.txt").write_text("candidate\n", encoding="utf-8")
+    _git("add", "tracked.txt", cwd=repository)
+    _git("commit", "-m", "candidate", cwd=repository)
+    fake_omp = tmp_path / "fake-omp"
+    fake_omp.write_text(
+        f"#!{sys.executable}\n"
+        "import json, subprocess\n"
+        "from pathlib import Path\n"
+        f"subprocess.run(['git', 'checkout', '-B', {request.head_branch!r}], "
+        "check=True, capture_output=True)\n"
+        "path = Path('tracked.txt')\n"
+        "path.write_text(path.read_text() + 'implemented\\n')\n"
+        "subprocess.run(['git', 'commit', '-am', 'implement candidate'], "
+        "check=True, capture_output=True)\n"
+        "for event in ('session', 'agent_start', 'agent_end'):\n"
+        "    print(json.dumps({'type': event}))\n",
+        encoding="utf-8",
+    )
+    fake_omp.chmod(0o755)
+    request = replace(
+        request,
+        run=replace(request.run, base_revision=_git("rev-parse", "HEAD", cwd=repository)),
+        repair_limit=repair_limit,
+        validation_commands=((sys.executable, "-c", "pass"),),
+        execution_configuration=replace(
+            request.execution_configuration, harness_executable=str(fake_omp)
+        ),
+    )
+    service = replace(
+        service,
+        harness=OmpHarness(
+            OmpAdapterConfig(credential_reference="test-keyring", executable=str(fake_omp)),
+            ArtifactStore(tmp_path / "artifacts"),
+        ),
+    )
+    service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+    _complete_check_node(runtime, request, "qualify", now)
+    service.dispatch_implementation(
+        request,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    deadline = time.monotonic() + 10
+    while (
+        service.next_action(request.run.id).action
+        is not Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+    ):
+        if time.monotonic() >= deadline:
+            pytest.fail("supervised review fixture worker did not finish")
+        time.sleep(0.01)
+    service.collect_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.VALIDATE
+    service.validate_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
+    return request, service, runtime, now
+
+
+def test_stage1_historical_review_without_actionable_ids_still_dispatches_findings(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, now = _review_repair_fixture(ledger_service, tmp_path)
+    finding = "Repair this finding recorded before actionable classifications"
+    dispatch = WorkflowNodeDispatch(
+        replace(
+            _check_node_dispatch(request, "validate").request,
+            node_id="review",
+            attempt_id="review-legacy-0",
+            operation_id="review-legacy:run-check",
+            dependencies=((str(request.run.id), "validate"),),
+        ),
+        request.manifest,
+    )
+    epoch = runtime.register_node(
+        dispatch=dispatch, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.await_human_node(
+        run_id=str(request.run.id),
+        node_id="review",
+        epoch=epoch.epoch,
+        now=now,
+        reason="independent review required",
+    )
+    runtime.resolve_human_wait(
+        run_id=str(request.run.id),
+        node_id="review",
+        epoch=epoch.epoch,
+        now=now,
+        outcome="passed",
+        extra={"review_outcome": "repair_requested", "finding_ids": [finding]},
+    )
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.IMPLEMENT
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    worker = runtime.read_node_request(run_id=str(request.run.id), node_id="implement")
+    assert finding in " ".join(worker.command)
+
+
+def test_stage1_stale_review_cannot_repeat_repair_and_current_review_exhausts_budget(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, now = _review_repair_fixture(ledger_service, tmp_path)
+    report = ReviewReport(
+        producer="omp-agent",
+        reviewer="independent-reviewer",
+        findings=(ReviewFinding("Preserve the selected format", actionable=True, blocking=False),),
+    )
+    service.review_implementation(
+        request, report, repair_attempt=0, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    deadline = time.monotonic() + 10
+    while (
+        service.next_action(request.run.id).action
+        is not Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+    ):
+        if time.monotonic() >= deadline:
+            pytest.fail("supervised repair fixture worker did not finish")
+        time.sleep(0.01)
+    service.collect_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
+    service.validate_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    with pytest.raises(ExternalConflictError, match="requires actionable review findings"):
+        service.dispatch_implementation(
+            request,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=60),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+    result = service.review_implementation(
+        request, report, repair_attempt=1, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    assert result.outcome is ReviewOutcome.REPAIR_EXHAUSTED
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+
+
+@pytest.mark.parametrize(
+    ("repair_limit", "blocking", "expected_outcome", "expected_action"),
+    [
+        (1, False, ReviewOutcome.REPAIR_REQUESTED, Stage1ProgressionAction.IMPLEMENT),
+        (0, False, ReviewOutcome.REPAIR_EXHAUSTED, Stage1ProgressionAction.AWAIT_HUMAN_REVIEW),
+        (1, True, ReviewOutcome.REJECTED, Stage1ProgressionAction.AWAIT_HUMAN_REVIEW),
+    ],
+)
+def test_stage1_actionable_review_dispatches_bounded_repair_with_findings(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    repair_limit: int,
+    blocking: bool,
+    expected_outcome: ReviewOutcome,
+    expected_action: Stage1ProgressionAction,
+) -> None:
+    request, service, runtime, now = _review_repair_fixture(
+        ledger_service, tmp_path, repair_limit=repair_limit
+    )
+    finding = "Return the persisted result rather than the placeholder"
+    note = "Optional wording suggestion; no repair is needed"
+    result = service.review_implementation(
+        request,
+        ReviewReport(
+            producer="omp-agent",
+            reviewer="independent-reviewer",
+            findings=(
+                ReviewFinding(finding, actionable=True, blocking=blocking),
+                ReviewFinding(note, actionable=False, blocking=False),
+            ),
+        ),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    assert result.outcome is expected_outcome
+    assert service.next_action(request.run.id).action is expected_action
+    assert (
+        ledger_service.read_projection(
+            aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:wait_for_ci"
+        )
+        is None
+    )
+    review = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:review"
+    )
+    assert review is not None
+    assert review.state["finding_ids"] == [finding, note]
+    assert review.state["actionable_finding_ids"] == [finding]
+    assert "feedback_text" not in review.state  # Historical review states need no new field.
+    if expected_action is Stage1ProgressionAction.IMPLEMENT:
+        service.advance(
+            request.run.id,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=60),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+        worker = runtime.read_node_request(run_id=str(request.run.id), node_id="implement")
+        assert worker.attempt_id == f"{request.run.id}-implement-1"
+        assert finding in " ".join(worker.command)
+        assert note not in " ".join(worker.command)
+        assert service.read(request.run.id).request.digest == request.digest
+    else:
+        service.advance(
+            request.run.id,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=60),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+        assert (
+            runtime.read_node_request(run_id=str(request.run.id), node_id="implement").attempt_id
+            == request.implementation.attempt_id
+        )
+        with pytest.raises(ExternalConflictError):
+            service.dispatch_implementation(
+                request,
+                now=now,
+                heartbeat_window=timedelta(seconds=60),
+                lease_window=timedelta(seconds=60),
+                limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+            )
+
+
+def test_stage1_approved_review_still_proceeds_to_publication_gate(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, _, now = _review_repair_fixture(ledger_service, tmp_path)
+    result = service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="independent-reviewer", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    assert result.outcome is ReviewOutcome.APPROVED
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.OPEN_PR
+    assert (
+        ledger_service.read_projection(
+            aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:open_pr"
+        )
+        is None
+    )
+
+
+def test_stage1_feedback_after_publication_cannot_dispatch_a_review_repair(
+    ledger_service: LedgerService, tmp_path: Path
+) -> None:
+    request, service, runtime, now = _review_repair_fixture(ledger_service, tmp_path)
+    service.review_implementation(
+        request,
+        ReviewReport(producer="omp-agent", reviewer="independent-reviewer", findings=()),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    publication = WorkflowNodeDispatch(
+        replace(
+            _check_node_dispatch(request, "validate").request,
+            node_id="open_pr",
+            attempt_id="open-pr-0",
+            operation_id="open-pr:run-check",
+            dependencies=((str(request.run.id), "review"),),
+        ),
+        request.manifest,
+    )
+    epoch = runtime.register_node(
+        dispatch=publication, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    runtime.complete_node(
+        run_id=str(request.run.id),
+        node_id="open_pr",
+        epoch=epoch.epoch,
+        now=now,
+        extra={
+            "pull_request_number": 17,
+            "head_revision": _git("rev-parse", "HEAD", cwd=request.workspace_path),
+        },
+    )
+    finding = "Repair this late feedback without reopening the published candidate"
+    result = service.review_implementation(
+        request,
+        ReviewReport(
+            producer="implementation_worker",
+            reviewer="packet_feedback",
+            findings=(ReviewFinding(finding, actionable=True, blocking=False),),
+        ),
+        repair_attempt=0,
+        packet_feedback_digest=Digest.of_bytes(finding.encode()).hex_value,
+        feedback_text=finding,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    assert result.outcome is ReviewOutcome.REPAIR_REQUESTED
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.AWAIT_HUMAN_REVIEW
+    with pytest.raises(ExternalConflictError, match="requires actionable review findings"):
+        service.dispatch_implementation(
+            request,
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+            lease_window=timedelta(seconds=60),
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+    assert (
+        runtime.read_node_request(run_id=str(request.run.id), node_id="implement").attempt_id
+        == request.implementation.attempt_id
+    )
+
+
 def _check_node_dispatch(request: Stage1RunRequest, node_id: str) -> WorkflowNodeDispatch:
     previous = {"implement": "qualify", "validate": "implement"}
     return WorkflowNodeDispatch(

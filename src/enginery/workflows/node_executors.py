@@ -267,6 +267,7 @@ class Stage1ReviewExecutor:
         now: datetime,
         heartbeat_window: timedelta,
         packet_feedback: bool = False,
+        feedback_text: str | None = None,
     ) -> Stage1ReviewResult:
         """Record a review decision after its human-owned node is durable."""
         outcome = route_review(report, repair_attempt=repair_attempt, repair_limit=repair_limit)
@@ -297,6 +298,14 @@ class Stage1ReviewExecutor:
                 "reviewer": report.reviewer,
                 "producer": report.producer,
                 "finding_ids": [finding.finding_id for finding in report.findings],
+                "actionable_finding_ids": [
+                    finding.finding_id for finding in report.findings if finding.actionable
+                ],
+                **(
+                    {}
+                    if feedback_text is None
+                    else {"feedback_text": redact_credential_shaped_text(feedback_text)}
+                ),
                 **(
                     {}
                     if execution_selection_digest is None

@@ -1070,9 +1070,21 @@ No remote preview, share or export is involved.
 Queue terminal repair feedback with
 `enginery feedback RUN --project PROJECT --subject-digest DIGEST --text TEXT`.
 The digest must match the current packet. Feedback enters the existing bounded
-repair path as actionable findings, not approval. Empty feedback and stale
-subjects are refused; exact replays are idempotent. Reports, annotations, scores
-and queued prompts cannot acquire authority through these new commands.
+repair path as actionable findings, not approval. When the current implementation's
+independent review requests repair before publication and budget remains, `status` reports
+`next_action: implement`; `continue` dispatches the next implementation generation
+with actionable finding text (including redacted feedback) in its worker task.
+Feedback retains the existing 1 MiB input limit. The complete review repair
+context is capped at 32 KiB of UTF-8, with an explicit truncation marker directing
+the worker to the recorded review for full text; repeated packet-feedback JSON
+is rendered as deduplicated text, not copied into the prompt. Non-actionable
+review notes are retained for display but excluded from new repair prompts.
+Historical review states without actionable classifications still use their
+recorded finding IDs. The same repair limit bounds review, CI and behavioral repairs.
+Exhausted repair budgets and blocking review findings still await a human;
+approved reviews proceed to the separate publication gate. Empty feedback and
+stale subjects are refused; exact replays are idempotent. Reports, annotations,
+scores and queued prompts cannot acquire authority through these commands.
 
 To use optional Lavish presentation, configure `[executables].lavish` in private
 user preferences (project policy cannot choose it), then run
@@ -1243,7 +1255,7 @@ Holds report repairs; replace placeholders with the values reported for the run:
 | Issue changed since the run was bound | Inspect `enginery status RUN --project .`; drain with `enginery drain --stop --project .`. Follow the reported `enginery engine cancel --database DATABASE --owner factory --run-id RUN --node-id NODE` commands only for queued/running agent nodes without a live worker: drain already cancels live-worker nodes, and human-waiting non-agent nodes are not cancelled. A never-registered implementation has nothing to cancel. Lift the pause with `enginery resume --project .`, then explicitly create the new binding with `enginery run OWNER/REPO#N --supersede --project .`. The old run remains durable and visible. |
 | Supersede cannot prove the old run safe | `--supersede` accepts terminal `run.status`, or a terminal latest implementation with no active node lease, no live worker-supervisor attempt and no pending `open_pr` node. It also accepts a never-registered implementation with no active lease, live worker or `open_pr` node. Otherwise the hold reports the blocking statuses, implementation/lease attempt IDs and lease expiry, with cancellation commands only for queued/running agent nodes without a live worker; drain/cancel as directed, lift pause, then retry the explicit supersede repair above. Human-waiting non-agent nodes are not cancelled. An unchanged issue snapshot is refused; use `run` or `continue` for its existing binding. |
 | `superseded binding` | `status` reports `superseded_by` when the issue binding points at a newer run. The old run remains visible but cannot advance or be continued, with no run-state transition or dispatch. Inspect the replacement with the reported `enginery status NEW_RUN --project .` command. |
-| Awaiting a human decision | `next_decision` names the waiting node. Independent review reports `enginery engine review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` to record findings, not authority. Other waits report `enginery review RUN --project PROJECT` and `enginery decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET`: publication uses `pull_request.open`; node waits use `human_wait.NODE.approve` or `human_wait.NODE.reject` with `--reason REASON`. Engine-ledger runs additionally require `--database DB --owner OWNER` on both commands. This boundary is not successful validation. A failed implementation with no wait reports `continue` unless a more specific repair exists. |
+| Awaiting a human decision | `next_decision` names the waiting node. Independent review reports `enginery engine review --database DB --owner factory --run-id RUN --report REPORT.json --repair-attempt N` to record findings, not authority. Before publication, actionable non-blocking findings with repair budget remaining change `next_action` to `implement`; continue the run to dispatch a repair carrying those findings. Blocking findings and exhausted budgets still await a human. Other waits report `enginery review RUN --project PROJECT` and `enginery decide RUN --project PROJECT --action ACTION --subject-digest DIGEST --challenge SECRET`: publication uses `pull_request.open`; node waits use `human_wait.NODE.approve` or `human_wait.NODE.reject` with `--reason REASON`. Engine-ledger runs additionally require `--database DB --owner OWNER` on both commands. This boundary is not successful validation. A failed implementation with no wait reports `continue` unless a more specific repair exists. |
 | Blocked progression | The hold preserves the recorded reason and its matching repair; resolve that cause before resuming. |
 | Catalog, host fingerprint or runner drift | Run `enginery preflight --project .`; restore the run's bound configuration, then `enginery continue RUN --project .`. Continuation never silently rebinds a run. See [Execution selection and receipts](#execution-selection-and-receipts) for reason-specific permanent holds. |
 | Worker identity cannot be proven | Resolve the worker on its launching host. No automatic resumption or forced cancellation is supported for an unprovable identity; see [Queued work, wakeups and worker recovery](#queued-work-wakeups-and-worker-recovery). |
