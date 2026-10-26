@@ -20,6 +20,7 @@ import pytest
 
 from enginery.adapters.oci import image
 from enginery.adapters.oci.engine import OciEngine
+from enginery.adapters.runner_launch import worker_environment
 from enginery.domain.runner import ImageIdentity
 
 
@@ -54,6 +55,8 @@ HARDENED_FLAGS = (
     "65532:65532",
     "--network",
     "none",
+    "--env",
+    f"PATH={dict(worker_environment(()))['PATH']}",
     "--tmpfs",
     "/tmp:rw,nosuid,nodev,exec,size=256m",
     "--tmpfs",
@@ -124,7 +127,12 @@ def test_the_image_runs_as_the_worker_user_with_no_entrypoint(
         (["omp", "--help"], "omp v18.10.3"),
         (["claude", "--version"], "2.1.296 "),
         (["git", "--version"], "git version 2."),
-        (["python3", "--version"], "Python 3."),
+        (["python3", "--version"], "Python 3.11.2"),
+        (["python3.12", "--version"], "Python 3.12.15"),
+        (
+            ["python3.12", "-c", "import cryptography; print(cryptography.__version__)"],
+            "49.0.0",
+        ),
         (["uv", "--version"], "uv 0.13.0 "),
         (["bun", "--version"], "1.3.14"),
     ],
@@ -136,6 +144,46 @@ def test_every_tool_runs_under_the_hardened_flags(
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines()[0].startswith(first_line_prefix)
+
+
+@pytest.mark.parametrize("argv", [("--version",), ("engine", "--help")])
+def test_checkout_cli_runs_read_only_without_network(
+    engine: OciEngine, built: ImageIdentity, argv: tuple[str, ...]
+) -> None:
+    checkout = Path(__file__).resolve().parents[3]
+    completed = hardened_run(
+        engine,
+        built,
+        ["enginery-checkout", *argv],
+        extra=("--volume", f"{checkout}:/workspace:ro"),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith("enginery 0.7.0\n" if argv == ("--version",) else "usage:")
+
+
+def test_checkout_cli_refuses_a_missing_candidate(engine: OciEngine, built: ImageIdentity) -> None:
+    completed = hardened_run(engine, built, ["enginery-checkout", "--version"])
+    assert completed.returncode == 2
+    assert "./src/enginery is absent; run from an Enginery checkout" in completed.stderr
+
+
+def test_python_runtime_and_checkout_entry_are_root_owned_and_not_worker_writable(
+    engine: OciEngine, built: ImageIdentity
+) -> None:
+    script = (
+        "import importlib.util, os, pathlib;"
+        "roots = [pathlib.Path(p) for p in "
+        "('/opt/enginery-python', '/opt/enginery/runtime', "
+        "'/usr/local/bin/enginery-checkout', '/opt/enginery/runtime-requirements.txt')];"
+        "paths = [p for root in roots for p in (root, *root.rglob('*'))];"
+        "assert all(p.stat().st_uid == 0 and p.stat().st_gid == 0 "
+        "and not p.stat().st_mode & 0o022 for p in paths);"
+        "assert all(importlib.util.find_spec(name) is None for name in ('pytest', 'ruff', 'mypy'));"
+        "print('runtime root-owned, read-only, no development tools')"
+    )
+    completed = hardened_run(engine, built, ["python3.12", "-c", script])
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "runtime root-owned, read-only, no development tools\n"
 
 
 def test_only_the_scratch_filesystems_are_writable_and_no_capability_remains(

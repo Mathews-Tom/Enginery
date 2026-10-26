@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -142,6 +143,8 @@ def test_packaged_recipe_pins_every_input() -> None:
     assert pins["OMP_VERSION"] == "18.10.3"
     assert pins["BUN_VERSION"] == "1.3.14"
     assert pins["WORKER_UID"] == pins["WORKER_GID"] == "65532"
+    assert pins["PYTHON3_VERSION"] == "3.11.2-1+b1"
+    assert pins["CPYTHON_VERSION"] == "3.12.15"
     assert list(image.pinned_args(dockerfile)) == sorted(image.pinned_args(dockerfile))
     text = dockerfile.decode()
     assert re.search(r"^ENTRYPOINT \[\]$", text, re.MULTILINE)
@@ -218,6 +221,44 @@ def test_the_dockerfile_installs_harnesses_only_from_the_lockfile() -> None:
 def test_the_lock_assets_are_part_of_the_recipe(name: str) -> None:
     assert name in image.RECIPE_FILES
     assert name in image.load_recipe()
+
+
+def test_runtime_requirements_match_the_locked_runtime_closure_on_both_architectures() -> None:
+    lock = tomllib.loads((Path(__file__).resolve().parents[3] / "uv.lock").read_text())
+    packages = {package["name"]: package for package in lock["package"]}
+    pending = [dependency["name"] for dependency in packages["enginery"]["dependencies"]]
+    closure: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name not in closure:
+            closure.add(name)
+            pending.extend(
+                dependency["name"] for dependency in packages[name].get("dependencies", [])
+            )
+
+    requirements = image.load_recipe()[image.RUNTIME_REQUIREMENTS_NAME].decode()
+    entries = [
+        line.strip()
+        for line in requirements.replace("\\\n", "").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert {line.split("==")[0] for line in entries} == closure
+    for line in entries:
+        name, version = line.split()[0].split("==")
+        package = packages[name]
+        assert version == package["version"]
+        hashes = set(re.findall(r"--hash=(sha256:[0-9a-f]{64})", line))
+        assert hashes
+        assert hashes <= {wheel["hash"] for wheel in package["wheels"]}
+        for arch in ("aarch64", "x86_64"):
+            assert any(
+                wheel["hash"] in hashes
+                and (
+                    (f"{arch}.whl" in wheel["url"] and "manylinux" in wheel["url"])
+                    or "py3-none-any.whl" in wheel["url"]
+                )
+                for wheel in package["wheels"]
+            ), (name, arch)
 
 
 def test_worker_entry_uses_only_the_standard_library() -> None:

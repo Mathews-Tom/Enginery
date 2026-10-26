@@ -1796,7 +1796,7 @@ Build and qualify the pinned worker image as described below, then preview or ap
 
 ```bash
 enginery init --project /path/to/Enginery --runner isolated-oci \
-  --runner-image sha256:IMAGE_ID --validation-command "python3 -m unittest"
+  --runner-image sha256:IMAGE_ID --validation-command "enginery-checkout engine --help"
 # Add --apply to create the previewed project policy and private ownership record.
 ```
 
@@ -1804,6 +1804,16 @@ The worker's source workspace and output are tmpfs-backed container volumes popu
 by copy-in/out, not host bind mounts. The root filesystem is read-only. The installed
 runtime, user configuration, per-project ledger, and host credentials are not mounted
 into the worker. This does not change human `review`/`decide` authority.
+
+For Enginery self-development, use `enginery-checkout` in validation commands (for
+example `--validation-command "enginery-checkout engine --help"`) and in committed
+`[acceptance]` command checks (for example `argv = ["enginery-checkout", "--version"]`
+with a stdout assertion). It invokes the candidate checkout's `./src/enginery` and
+reads its version metadata from `pyproject.toml`, using the image's pinned Python 3.12
+and hash-locked runtime dependencies without installation or network access; it refuses
+a working directory without `./src/enginery`. Debian `python3` remains 3.11.2; use
+`python3.12` for other candidate Python commands. The image does not include development
+tools such as pytest, ruff or mypy.
 
 ### Upgrade from outside the installed runtime
 
