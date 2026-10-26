@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,7 +23,8 @@ from enginery.cli.run_composition import (
     start_bound_run,
     watch_document,
 )
-from enginery.domain.errors import FailureClass, InvalidInputError
+from enginery.cli.setup_files import refuse_links
+from enginery.domain.errors import FailureClass, InvalidInputError, MissingPrerequisiteError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
@@ -198,8 +200,22 @@ def _cancel(args: argparse.Namespace) -> None:
         ledger.close()
 
 
+def _open_read_only(database: Path) -> LedgerService:
+    path = database.expanduser().absolute()
+    refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
+    if not path.is_file():
+        raise MissingPrerequisiteError(
+            "enginery engine evidence --verify requires an existing engine ledger",
+            details={"database": str(path)},
+        )
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=1")
+    return LedgerService(connection)
+
+
 def _evidence(args: argparse.Namespace) -> int:
-    ledger = LedgerService.open(args.database)
+    ledger = _open_read_only(args.database) if args.verify else LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
         run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id))

@@ -201,6 +201,7 @@ def test_evidence_verify_reports_every_retained_artifact_intact(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database, artifact_root, digests = _verified_run(tmp_path)
+    capsys.readouterr()
     assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
     plain = json.loads(capsys.readouterr().out)
 
@@ -227,6 +228,7 @@ def test_evidence_verify_reports_a_deleted_artifact_missing_without_writes(
     ledger_before = _ledger_dump(database)
     store_before = _tree(artifact_root)
 
+    capsys.readouterr()
     code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
 
     verification = json.loads(capsys.readouterr().out)["verification"]
@@ -251,6 +253,7 @@ def test_evidence_verify_reports_overwritten_artifact_bytes_tampered(
     ledger_before = _ledger_dump(database)
     store_before = _tree(artifact_root)
 
+    capsys.readouterr()
     code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
 
     verification = json.loads(capsys.readouterr().out)["verification"]
@@ -275,6 +278,76 @@ def test_evidence_verify_fails_loudly_when_the_artifact_root_is_absent(
     assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
     assert "intact" not in captured.out
 
+
+def test_evidence_verify_does_not_create_a_missing_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "absent" / "ledger.db"
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert "engine ledger" in captured.err
+    assert not database.parent.exists()
+
+
+@pytest.mark.parametrize("damage", ("missing", "tampered"))
+def test_evidence_verify_checks_artifacts_recorded_in_runtime_node_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], damage: str
+) -> None:
+    database = tmp_path / "ledger.db"
+    request = _start_request(database, tmp_path)
+    artifact_root = (tmp_path / "artifacts").resolve()
+    ledger = LedgerService.open(database, artifact_store_root=artifact_root)
+    try:
+        digest = ledger.publish_artifact_bytes(b"validation bytes")
+        runtime = CoordinatorRuntime(ledger, owner="stage1-cli")
+        now = datetime.now(tz=UTC)
+        epoch = runtime.register_node(
+            dispatch=WorkflowNodeDispatch(
+                _dispatch(request, node_id="qualify", dependencies=()), request.manifest
+            ),
+            now=now,
+            heartbeat_window=timedelta(seconds=60),
+        )
+        runtime.complete_node(
+            run_id=str(request.run.id),
+            node_id="qualify",
+            epoch=epoch.epoch,
+            now=now,
+            extra={"validation_artifact_digest": str(digest)},
+        )
+    finally:
+        ledger.close()
+    capsys.readouterr()
+
+    assert _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify") == 0
+    intact = json.loads(capsys.readouterr().out)["verification"]
+    assert intact["artifacts"] == [
+        {
+            "artifact_id": "qualify:validation_artifact_digest",
+            "digest": str(digest),
+            "status": "intact",
+        }
+    ]
+
+    path = ArtifactStore(artifact_root).path_for(digest)
+    if damage == "missing":
+        path.unlink()
+    else:
+        path.write_bytes(b"overwritten")
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    verification = json.loads(capsys.readouterr().out)["verification"]
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert verification["artifacts"] == [
+        {
+            "artifact_id": "qualify:validation_artifact_digest",
+            "digest": str(digest),
+            "status": damage,
+        }
+    ]
 
 
 def test_stage1_cli_lease_window_exceeds_the_omp_time_budget(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from enginery.domain.digests import Digest
-from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
+from enginery.domain.errors import MissingPrerequisiteError, ValidationFailureError
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.errors import ArtifactDigestMismatchError, ArtifactMissingError
@@ -34,7 +34,7 @@ def verify_run_artifacts(
             "the run's artifact store root does not exist",
             details={"artifact_root": str(artifact_root)},
         )
-    store = ledger.artifact_store or ArtifactStore(artifact_root, create_directories=False)
+    store = ArtifactStore(artifact_root, create_directories=False)
     checks = [
         ArtifactCheck(artifact_id, digest, _status(store, digest))
         for artifact_id, digest in sorted(_references(ledger, run_id))
@@ -53,7 +53,7 @@ def verify_run_artifacts(
 def all_intact(verification: dict[str, object]) -> bool:
     summary = verification["summary"]
     assert isinstance(summary, dict)
-    return summary["missing"] == 0 and summary["tampered"] == 0
+    return bool(summary["missing"] == 0 and summary["tampered"] == 0)
 
 
 def _status(store: ArtifactStore, digest_text: str) -> str:
@@ -61,7 +61,7 @@ def _status(store: ArtifactStore, digest_text: str) -> str:
     try:
         digest = Digest(algorithm=algorithm, hex_value=hex_value)
     except Exception as error:
-        raise InvalidInputError(
+        raise ValidationFailureError(
             "a run record references a malformed artifact digest",
             details={"digest": digest_text},
         ) from error
