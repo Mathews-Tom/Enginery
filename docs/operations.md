@@ -7,7 +7,7 @@ running real workflows.
 
 Commands shown here follow the shipped CLI definitions; examples use placeholders
 where operator-specific values are required. The current release line documented in
-[`README.md`](../README.md#status) is `v0.7.0`. The Stage 1
+[`README.md`](../README.md#status) is `v0.8.0` (release candidate). The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `engine status` remains the only Stage 2 CLI command (a
@@ -23,9 +23,7 @@ gate-deferred — see
 
 ## Installation
 
-The current release line is `v0.7.0`. Earlier releases were published to PyPI and
-GitHub Releases: `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11) and `v0.6.0`
-(2026-10-13). Install the available published package with:
+The current release candidate is `v0.8.0`. Releases `v0.1.0` through `v0.7.0` (2026-10-20) were published to PyPI and GitHub Releases. Install the available published package with:
 
 ```bash
 pip install enginery
@@ -55,7 +53,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.7.0 installed
+[ok] package_metadata: enginery 0.8.0 installed
 ```
 
 `enginery doctor --json` emits the same host report as a machine-readable
@@ -3268,7 +3266,7 @@ diagnostic commands and `v0.5.0` adds measurable G4 evidence, source
 classification, and authority verification; `v0.6.0` adds
 reconciled public contracts, per-run execution selection with receipts, and
 queued-work and worker-liveness recovery; none of them adds a workflow stage.
-The current `v0.7.0` release line adds isolated runners, closure-locked capabilities,
+The `v0.7.0` release line added isolated runners, closure-locked capabilities,
 layered setup, manual project verbs, behavioral acceptance and authenticated decisions,
 with consolidated `engine` and `operator` namespaces. Both harness tiers remain
 experimental. Live qualification used a designated synthetic qualification repository:
