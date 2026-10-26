@@ -8,6 +8,47 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.7.0`
+
+Post-publication evidence for the M33b release-preparation pass on 2026-10-20 (UTC), recorded on 2026-10-26 from the receipts retained by that pass.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#221](https://github.com/Mathews-Tom/Enginery/pull/221) | `build(release): prepare coherent metadata and consumer gates` | `e6c873f508e29ae70f605a839ed8858fdf5337ff` |
+| [#222](https://github.com/Mathews-Tom/Enginery/pull/222) | `test(release): prove clean platform consumer workflows` | `c53434630800177dde2aaade4aa339becfa30305` |
+| [#223](https://github.com/Mathews-Tom/Enginery/pull/223) | `docs(release): finalize truthful release notes` | `1bcec96a9e723f9cd422d26e2ac596207f600803` |
+
+The tagged release commit passed `uv run python scripts/release_gate.py --version 0.7.0` (docs currency, version consistency, `uv build`, `twine check`, and a clean wheel install smoke) and `uv run python scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` (`stage1_runs=2 stage2_evidence=yes stage3_evidence=yes`, evidence digest `sha256:59816e69246f36c6404d06eca9d00c9293bf9b65dfa2e7283c1217c5c3754ddb`). The `main` CI run [39507533653](https://github.com/Mathews-Tom/Enginery/actions/runs/39507533653) for that commit concluded `success`. Before the tag, the built wheel and sdist were installed into fresh environments on macOS arm64 (Python 3.12.8) and in a Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), and `scripts/release_consumer_smoke.py` passed on all four cells, each including the 20-assertion `installed-manual-path` workflow.
+
+### Tag and artifacts
+
+Annotated tag `v0.7.0` (object `66a5087c85483fa7307eeaffbf3f116a26e5f507`, created 2026-10-20T23:31:54Z) targets `1bcec96a9e723f9cd422d26e2ac596207f600803`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.7.0-py3-none-any.whl` | `13b30960113f59820bd2cd805cb924b6ff1031032ef4fd759832a1aed2252e3f` |
+| `enginery-0.7.0.tar.gz` | `c196e4f6301976f4c93ac909a7a65d5a5a16553ad0e66589db12344d5fa76097` |
+
+The same hashes were produced by `release_gate.py` on the tagged commit, attached to the GitHub Release, and reported by PyPI for the uploaded files.
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.7.0/>. The sdist was uploaded at 2026-10-20T23:32:13Z and the wheel at 2026-10-20T23:32:16Z.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.7.0>, published 2026-10-20T23:32:06Z with exactly the wheel and the sdist as assets.
+- **Human approval:** the owner's message "Approved. Proceed with the recommended next steps." followed exposure of the exact candidate hashes and preceded the tag, GitHub Release, and PyPI upload.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...`, re-run on 2026-10-26 while recording this section, independently verified the non-draft GitHub Release target and both GitHub and PyPI artifact hashes (`PASS verify-published-release version=0.7.0 tag=v0.7.0`). No-project consumers installed `enginery==0.7.0` from PyPI on macOS arm64 (Python 3.12.8) and in the Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), and `scripts/release_consumer_smoke.py --package enginery==0.7.0` passed on both, including the 20-assertion `installed-manual-path` workflow. The wheel with the published hash passed the same smoke again on both platforms after publication.
+
+### Not claimed
+
+Live qualification of the reference harness lifecycle and the manual bootstrap (M33, PRs #218–#220) ran against a designated synthetic qualification repository; it proves mechanics, not usefulness on real projects. A live requalification of the published wheel against the same synthetic repository was attempted on 2026-10-21 and ended `hold` (the live implementation failed and no replacement worker was allowed), so no live qualification is claimed for the published artifact; its local runner-boundary check passed 64/64 assertions. Both agent hosts remain `experimental`. Ubuntu consumer proof uses a Lima VM, not supported-host qualification. G4 remains fail-closed and Stage 4 self-improvement remains unimplemented with no committed date.
+
+### Final verdict
+
+**GO.** `v0.7.0` is tagged from verified main and published on PyPI and GitHub Releases with matching wheel and sdist hashes. It adds no workflow stage.
+
 ## `v0.6.0`
 
 Post-publication evidence for the M27b release-preparation pass on 2026-10-13.
