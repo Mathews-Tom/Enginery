@@ -425,7 +425,7 @@ def test_starting_an_isolated_request_on_an_unqualified_engine_is_held_and_recor
     request = _isolated_request(tmp_path)
     fake = _runner_image_fake()
     fake.unreachable = True
-    monkeypatch.setattr("enginery.cli.stage1_runner.OciRunnerAdmission", _admission_factory(fake))
+    monkeypatch.setattr("enginery.cli.runner_wiring.OciRunnerAdmission", _admission_factory(fake))
     capsys.readouterr()
 
     exit_code = main(_start_argv(tmp_path, request))
@@ -440,7 +440,7 @@ def test_starting_an_isolated_request_on_a_qualified_engine_records_the_run(
 ) -> None:
     request = _isolated_request(tmp_path)
     fake = _runner_image_fake()
-    monkeypatch.setattr("enginery.cli.stage1_runner.OciRunnerAdmission", _admission_factory(fake))
+    monkeypatch.setattr("enginery.cli.runner_wiring.OciRunnerAdmission", _admission_factory(fake))
 
     exit_code = main(_start_argv(tmp_path, request))
 
@@ -469,14 +469,14 @@ def _watch_argv(tmp_path: Path, *extra: str) -> list[str]:
 def _started_isolated_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     request = _isolated_request(tmp_path)
     fake = _runner_image_fake()
-    monkeypatch.setattr("enginery.cli.stage1_runner.OciRunnerAdmission", _admission_factory(fake))
+    monkeypatch.setattr("enginery.cli.runner_wiring.OciRunnerAdmission", _admission_factory(fake))
     assert main(_start_argv(tmp_path, request)) == 0
 
 
 def _drift_the_current_profile(monkeypatch: pytest.MonkeyPatch) -> RunnerProfile:
     stricter = RunnerProfile(resources=ResourceLimits(memory_mib=2048))
     assert stricter.digest != RunnerProfile().digest
-    monkeypatch.setattr("enginery.cli.stage1_runner.RunnerProfile", lambda: stricter)
+    monkeypatch.setattr("enginery.cli.runner_wiring.RunnerProfile", lambda: stricter)
     return stricter
 
 
@@ -508,7 +508,7 @@ def test_watch_of_a_run_whose_profile_still_matches_reports_no_hold(
 ) -> None:
     _started_isolated_run(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "enginery.cli.stage1_composition.probe_installed_omp",
+        "enginery.cli.run_composition.probe_installed_omp",
         lambda executable, runner=None: InstalledHost("18.10.3", "json-protocol=3"),
     )
     capsys.readouterr()

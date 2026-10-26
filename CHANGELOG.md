@@ -9,6 +9,7 @@ for the current compatibility statement.
 ### Breaking
 
 - Python import paths for the run-workflow modules are renamed by responsibility, without aliases: `enginery.workflows.stage1` → `enginery.workflows.run_lifecycle` and `enginery.workflows.stage1_runtime` → `enginery.workflows.node_executors`. Class and function names, CLI commands, persisted `stage1` identifiers and request digests are unchanged.
+- The CLI implementation modules follow suit: `enginery.cli.stage1` → `enginery.cli.engine_runs`, `stage1_request` → `request_compiler`, `stage1_composition` → `run_composition`, `stage1_runner` → `runner_wiring`, `stage1_execution` → `execution_diagnostics`, and `enginery.cli.stage2` → `enginery.cli.stack_status`. Commands, options, JSON output and exit codes are unchanged.
 
 ## [0.7.0] - 2026-10-20
 

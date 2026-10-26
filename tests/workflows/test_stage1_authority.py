@@ -52,7 +52,7 @@ from enginery.application.branch_publication import (
 from enginery.application.human_decisions import HumanDecision
 from enginery.application.work_ports import PullRequestPort, PullRequestRequest, PullRequestSnapshot
 from enginery.application.worker_environment import LAUNCHER_KEYS, TRUSTED_LOCAL_WORKER_KEYS
-from enginery.cli.stage1_composition import branch_publisher
+from enginery.cli.run_composition import branch_publisher
 from enginery.domain.digests import Digest
 from enginery.domain.errors import (
     ExternalConflictError,

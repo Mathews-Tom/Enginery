@@ -13,7 +13,7 @@ from enginery.application.work_ports import DeclaredWorkClassification
 from enginery.capabilities.serialization import write_lock
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
-from enginery.cli.stage1_request import (
+from enginery.cli.request_compiler import (
     _LOCAL_ENVIRONMENT_DIGEST,
     _NO_CAPABILITY_LOCK_DIGEST,
 )

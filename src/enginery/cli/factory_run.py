@@ -32,7 +32,8 @@ from enginery.cli.factory_collect import (
     write_document,
 )
 from enginery.cli.factory_setup import LOCKFILE_RELATIVE, load_project_configuration
-from enginery.cli.stage1_composition import (
+from enginery.cli.request_compiler import RequestInputs, compile_request
+from enginery.cli.run_composition import (
     HEARTBEAT_WINDOW,
     advancing_service,
     lease_window,
@@ -42,7 +43,6 @@ from enginery.cli.stage1_composition import (
     start_bound_run,
     watch_document,
 )
-from enginery.cli.stage1_request import RequestInputs, compile_request
 from enginery.domain.errors import EngineryError, InvalidInputError
 from enginery.domain.ids import NodeId, RunId
 from enginery.domain.outcome import OutcomeKind

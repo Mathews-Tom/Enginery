@@ -21,7 +21,7 @@ import pytest
 
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
-from enginery.cli.stage1_composition import harness_for, worker_report
+from enginery.cli.run_composition import harness_for, worker_report
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.supervisor import probe_host

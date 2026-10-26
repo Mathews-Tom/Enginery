@@ -20,8 +20,8 @@ from enginery.cli.factory_collect import (
     read_ledger,
     require_state_path,
 )
+from enginery.cli.run_composition import HEARTBEAT_WINDOW, read_only_service, runtime_for_run
 from enginery.cli.setup_files import read_regular, refuse_links, write_private_atomically
-from enginery.cli.stage1_composition import HEARTBEAT_WINDOW, read_only_service, runtime_for_run
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.ids import NodeId, RunId

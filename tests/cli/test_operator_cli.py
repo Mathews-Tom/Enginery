@@ -15,7 +15,7 @@ import pytest
 from enginery.adapters.oci.admission import OciRunnerAdmission
 from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import container_name_for
-from enginery.cli import stage1_runner
+from enginery.cli import runner_wiring
 from enginery.cli.operator import main
 from enginery.domain.errors import HumanActionRequiredError
 from enginery.domain.runner import EngineIdentity, ImageIdentity
@@ -475,8 +475,8 @@ def test_drain_stop_looks_up_the_container_stage1_recovery_looks_up(
 ) -> None:
     _dispatch(ledger_service, tmp_path, worker_groups, seconds=60)
     engine = _FakeEngine(exists=False, names={container_name_for("operation-1")})
-    monkeypatch.setattr(stage1_runner, "OciEngine", lambda *, context=None: engine)
-    gone = stage1_runner.container_gone_for(_isolated())
+    monkeypatch.setattr(runner_wiring, "OciEngine", lambda *, context=None: engine)
+    gone = runner_wiring.container_gone_for(_isolated())
     assert gone is not None and gone("operation-1") is False
 
     code, report, _ = _run(

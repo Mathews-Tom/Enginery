@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from enginery.cli.stage1_request import (
+from enginery.cli.request_compiler import (
     RequestInputs,
     add_build_request_parser,
     build_request,

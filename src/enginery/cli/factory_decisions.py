@@ -368,7 +368,7 @@ def _decide_in_ledger(
     def release(decision: HumanDecision) -> None:
         if node_id is None or node_id not in _waits(ledger, request):
             return
-        from enginery.cli.stage1_composition import HEARTBEAT_WINDOW, runtime_for_run
+        from enginery.cli.run_composition import HEARTBEAT_WINDOW, runtime_for_run
 
         runtime = runtime_for_run(ledger, owner=owner, run_id=run_id)
         epoch = runtime.claim_epoch(now=decision.decided_at, heartbeat_window=HEARTBEAT_WINDOW)
