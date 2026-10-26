@@ -21,7 +21,7 @@ from enginery.cli.main import main
 from enginery.domain.execution_catalog import InstalledHost
 from enginery.domain.runner import ImageIdentity, ResourceLimits, RunnerProfile
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import stage1_request_from_state
+from enginery.workflows.run_lifecycle import stage1_request_from_state
 from tests.adapters.oci.support import IMAGE_ID, FakeDocker, image_identity
 from tests.support.github import StandInGitHub, write_stand_in_gh
 

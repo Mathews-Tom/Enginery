@@ -31,7 +31,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, Workflo
 from enginery.ledger.human_decisions import issue_challenge
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,

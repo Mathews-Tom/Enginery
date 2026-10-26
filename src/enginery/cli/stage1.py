@@ -26,7 +26,7 @@ from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
-from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunService, stage1_request_from_state
 
 
 def run_stage1(args: argparse.Namespace) -> int:

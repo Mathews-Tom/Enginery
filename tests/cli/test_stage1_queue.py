@@ -26,7 +26,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.supervisor import probe_host
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService, stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunService, stage1_request_from_state
 from tests.cli.test_stage1_execution_cli import _build_argv, _Run
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
 
@@ -314,7 +314,7 @@ def test_build_request_rejects_a_run_id_too_long_for_its_derived_attempt_ids(
 
 def test_a_legacy_run_whose_repair_id_would_overflow_fails_loudly_at_derivation() -> None:
     from enginery.domain.errors import InvalidInputError
-    from enginery.workflows.stage1 import implementation_attempt_id
+    from enginery.workflows.run_lifecycle import implementation_attempt_id
 
     assert implementation_attempt_id("r" * 116, 0) == f"{'r' * 116}-implement-0"
     with pytest.raises(InvalidInputError, match="too long to derive"):

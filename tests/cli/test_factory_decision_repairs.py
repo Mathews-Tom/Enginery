@@ -14,9 +14,9 @@ from enginery.application.human_decisions import (
 )
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.service import LedgerService
-from enginery.workflows import stage1
+from enginery.workflows import run_lifecycle
 from enginery.workflows.review import ReviewOutcome
-from enginery.workflows.stage1 import Stage1RunService
+from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.cli.test_stage1 import _request
 
 
@@ -46,7 +46,7 @@ def test_publication_requires_record_bound_by_decided_protected_digest(
     request = _request(tmp_path)
     fields = {} if decided_digest is None else {"protected_publication_digest": decided_digest}
     monkeypatch.setattr(
-        stage1,
+        run_lifecycle,
         "list_decisions",
         lambda *args: [SimpleNamespace(id="authenticated-decision", subject_fields=fields)],
     )
@@ -107,7 +107,7 @@ def test_stage1_publication_hold_names_quoted_explicit_ledger_commands(
             ledger=ledger,
             publication_authorizer=refuse,
         )
-        with pytest.raises(stage1.HumanActionRequiredError) as refused:
+        with pytest.raises(run_lifecycle.HumanActionRequiredError) as refused:
             service.open_pull_request(
                 request, now=datetime.now(tz=UTC), heartbeat_window=timedelta(seconds=60)
             )

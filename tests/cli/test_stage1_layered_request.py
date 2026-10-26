@@ -11,7 +11,7 @@ from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_selection import SelectionLayer, SelectionMode
-from enginery.workflows.stage1 import stage1_request_from_state
+from enginery.workflows.run_lifecycle import stage1_request_from_state
 from tests.cli.test_stage1_request_builder import _minimal_argv
 from tests.cli.test_stage1_request_builder import _repository as _empty_repository
 from tests.support.behavioral import declare_behavioral_policy

@@ -26,7 +26,7 @@ from enginery.domain.runner import (
     RunnerProfile,
     RunnerSelection,
 )
-from enginery.workflows.stage1 import Stage1RunRequest
+from enginery.workflows.run_lifecycle import Stage1RunRequest
 
 _RECEIPT_DIRECTORY = "runner-receipts"
 

@@ -24,7 +24,7 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.leases import LeaseWrite
 from enginery.ledger.process_manager import ProcessManagerStateWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1Progression,
     Stage1ProgressionAction,
     Stage1RunService,

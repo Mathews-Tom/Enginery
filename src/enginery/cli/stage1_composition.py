@@ -38,7 +38,7 @@ from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import SupervisedHarness
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1ExecutionConfiguration,
     Stage1Progression,
     Stage1Run,

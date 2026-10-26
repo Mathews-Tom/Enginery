@@ -22,7 +22,7 @@ from enginery.domain.errors import ExternalConflictError, MissingPrerequisiteErr
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import (
+from enginery.workflows.run_lifecycle import (
     Stage1RunRequest,
     Stage1RunService,
     stage1_request_from_state,
@@ -447,7 +447,7 @@ def test_watch_holds_a_run_bound_to_a_catalog_that_is_no_longer_current(
         ["engine", "evidence", "--database", str(database), "--owner", "op", "--run-id", "run-1"],
     )
     drifted = replace(load_execution_catalog(), digest=Digest.of_bytes(b"later"), version="3")
-    monkeypatch.setattr("enginery.workflows.stage1.load_execution_catalog", lambda: drifted)
+    monkeypatch.setattr("enginery.workflows.run_lifecycle.load_execution_catalog", lambda: drifted)
 
     watch = _run_json(
         capsys,

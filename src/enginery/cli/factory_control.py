@@ -20,7 +20,7 @@ from enginery.domain.runner import RunnerSelection
 from enginery.engine.operator_control import OperatorControl, WorkerView, drain_wait
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService
+from enginery.workflows.run_lifecycle import Stage1RunService
 
 
 def _now() -> datetime:

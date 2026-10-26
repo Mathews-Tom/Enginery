@@ -34,7 +34,7 @@ from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
 from enginery.domain.ids import RunId
-from enginery.workflows.stage1 import Stage1RunRequest, stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunRequest, stage1_request_from_state
 from tests.cli.test_stage1_request_builder import _git, _minimal_argv, _repository
 
 

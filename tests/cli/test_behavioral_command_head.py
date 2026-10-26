@@ -14,7 +14,7 @@ from enginery.domain.runner import RunnerProfile, RunnerSelection
 from enginery.engine.task_repository import intake_path_for
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import Stage1RunService
+from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.evidence.test_behavioral_acceptance import _repository
 from tests.workflows.test_stage1_behavioral import _ready_to_verify
 

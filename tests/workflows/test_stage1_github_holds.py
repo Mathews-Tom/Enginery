@@ -12,7 +12,7 @@ from enginery.application.work_ports import PullRequestCheck, PullRequestEvidenc
 from enginery.domain.errors import StaleEvidenceError, TransientProviderFailureError
 from enginery.ledger.service import LedgerService
 from enginery.workflows.pull_request import PullRequestOutcome
-from enginery.workflows.stage1 import Stage1ProgressionAction
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction
 
 
 @pytest.mark.parametrize("running", [False, True])

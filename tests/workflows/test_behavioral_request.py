@@ -9,7 +9,7 @@ from tests.workflows.test_stage1_runtime import _check_disposition_fixture
 
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import stage1_request_from_state
+from enginery.workflows.run_lifecycle import stage1_request_from_state
 
 
 def test_historical_request_keeps_digest_and_omitted_checks(

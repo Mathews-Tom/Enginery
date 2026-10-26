@@ -23,7 +23,7 @@ from enginery.domain.runner import RunnerProfile, RunnerSelection
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from enginery.workflows.stage1 import stage1_request_from_state
+from enginery.workflows.run_lifecycle import stage1_request_from_state
 from tests.cli.test_factory_run import bound_project as bound_project
 from tests.cli.test_factory_run import invoke
 from tests.support.github import StandInGitHub

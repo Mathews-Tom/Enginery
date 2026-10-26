@@ -4,6 +4,12 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [Unreleased]
+
+### Breaking
+
+- Python import paths for the run-workflow modules are renamed by responsibility, without aliases: `enginery.workflows.stage1` → `enginery.workflows.run_lifecycle` and `enginery.workflows.stage1_runtime` → `enginery.workflows.node_executors`. Class and function names, CLI commands, persisted `stage1` identifiers and request digests are unchanged.
+
 ## [0.7.0] - 2026-10-20
 
 Current release line for isolated execution and the manual-first project workflow. No new workflow stage.
