@@ -1,0 +1,24 @@
+# Enginery project policy (tracked). Written once by `enginery init`; from then on
+# it is yours: setup never edits it again and `enginery uninstall` keeps it if you
+# change it. Secrets never belong here; name opaque credential references only.
+
+schema_version = 1
+
+[execution]
+harness = "omp"
+
+[runner]
+mode = "isolated-oci"
+# Set runner.image and runner.docker_context in user preferences or run flags.
+model_access = "relay"
+
+[validation]
+commands = ["enginery-checkout engine --help"]
+required_checks = ["gate (ubuntu-latest)", "gate (macos-latest)"]
+# One initial implementation plus at most one repair (CI or behavioural).
+repair_limit = 1
+
+[acceptance]
+checks = [
+  { name = "evidence-verify", observer = "command", argv = ["python3.12", ".enginery/checks/evidence_verify.py"], assertions = [{ kind = "stdout", equals = "PASS legacy\nPASS intact\nPASS missing\nPASS tampered\nPASS read-only\nevidence-verify: ok\n" }], fault_classes = ["constant_result"] },
+]
