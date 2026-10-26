@@ -5,7 +5,8 @@ Installs exactly one artifact -- a built wheel, a built sdist, or a published
 requirement -- into a fresh virtual environment, then drives the installed
 `enginery` entry point through the consumer surface a new release must keep
 working: the reported version, `doctor`, the G4 and engine request commands'
-help, execution-selection pinning (an unsupported pin and a contradictory strict
+help, read-only evidence verification (a missing database exits 3 and creates nothing),
+execution-selection pinning (an unsupported pin and a contradictory strict
 requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged
 acceptance baseline and execution catalog, the fail-closed G4 gate, and the isolated-runner
@@ -506,6 +507,41 @@ def _check_g4_fail_closed(executable: Path, *, root: Path) -> None:
     _note("gate status --gate G4 remains fail-closed (exit 3, overall fail)")
 
 
+def _check_evidence_verify(executable: Path, *, root: Path) -> None:
+    help_command = [str(executable), "engine", "evidence", "--help"]
+    result = _require_success(help_command, cwd=root)
+    if "--verify" not in result.stdout:
+        raise ConsumerSmokeError("`engine evidence --help` does not list --verify")
+    _note("engine evidence --help lists --verify")
+
+    database = root / "missing-evidence" / "ledger.db"
+    command = [
+        str(executable),
+        "engine",
+        "evidence",
+        "--database",
+        str(database),
+        "--owner",
+        "factory",
+        "--run-id",
+        "x",
+        "--verify",
+    ]
+    result = _run(command, cwd=root)
+    if result.returncode != 3:
+        raise ConsumerSmokeError(
+            f"missing evidence database did not exit 3 (missing prerequisite)\n"
+            f"{_describe(command, result)}"
+        )
+    if database.exists() or database.parent.exists():
+        raise ConsumerSmokeError(
+            f"evidence --verify created the missing database or its parent: {database}"
+        )
+    _note(
+        "engine evidence --verify exits 3 for a missing database without creating it or its parent"
+    )
+
+
 _RECIPE_PROGRAM = (
     "import json\n"
     "from importlib import resources\n"
@@ -898,6 +934,7 @@ def exercise_surface(
     _check_doctor(executable, root=root, version=version)
     _check_help(executable, root=root)
     _check_consolidated_surface(executable, python, root=root)
+    _check_evidence_verify(executable, root=root)
     _check_rejected_pins(executable, root=root)
     packaged = _check_packaged_data(python, root=root)
     _check_valid_pins(executable, root=root, packaged=packaged)
