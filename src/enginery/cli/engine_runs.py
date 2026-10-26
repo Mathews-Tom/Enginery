@@ -7,9 +7,11 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.execution_diagnostics import execution_report
 from enginery.cli.factory_decisions import decide_in_ledger
 from enginery.cli.request_compiler import run_build_request
+from enginery.cli.run_artifact_verification import all_intact, verify_run_artifacts
 from enginery.cli.run_composition import (
     HEARTBEAT_WINDOW,
     advancing_service,
@@ -20,7 +22,7 @@ from enginery.cli.run_composition import (
     start_bound_run,
     watch_document,
 )
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
@@ -43,7 +45,7 @@ def run_stage1(args: argparse.Namespace) -> int:
     elif command == "cancel":
         _cancel(args)
     elif command == "evidence":
-        _evidence(args)
+        return _evidence(args)
     elif command == "build-request":
         return run_build_request(args)
     else:  # pragma: no cover - argparse restricts command values
@@ -196,7 +198,7 @@ def _cancel(args: argparse.Namespace) -> None:
         ledger.close()
 
 
-def _evidence(args: argparse.Namespace) -> None:
+def _evidence(args: argparse.Namespace) -> int:
     ledger = LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
@@ -204,23 +206,32 @@ def _evidence(args: argparse.Namespace) -> None:
         progression = read_only_service(
             runtime=runtime, ledger=ledger, request=run.request
         ).next_action(RunId(args.run_id))
-        _print(
-            {
-                "run_id": str(run.request.run.id),
-                "run_status": run.status.value,
-                "request_digest": str(run.request.digest),
-                "source_revision": run.request.work_snapshot.source_revision,
-                "base_revision": run.request.run.base_revision,
-                "nodes": nodes(ledger, runtime, run_id=str(run.request.run.id)),
-                "hold": None if progression.hold is None else progression.hold.to_state(),
-                "execution": execution_report(
-                    ledger,
-                    run,
-                    hold=progression.hold,
-                    observed_at_resume=progression.observed_host_version,
-                ),
-            }
-        )
+        payload: dict[str, object] = {
+            "run_id": str(run.request.run.id),
+            "run_status": run.status.value,
+            "request_digest": str(run.request.digest),
+            "source_revision": run.request.work_snapshot.source_revision,
+            "base_revision": run.request.run.base_revision,
+            "nodes": nodes(ledger, runtime, run_id=str(run.request.run.id)),
+            "hold": None if progression.hold is None else progression.hold.to_state(),
+            "execution": execution_report(
+                ledger,
+                run,
+                hold=progression.hold,
+                observed_at_resume=progression.observed_host_version,
+            ),
+        }
+        intact = True
+        if args.verify:
+            verification = verify_run_artifacts(
+                ledger,
+                run_id=str(run.request.run.id),
+                artifact_root=run.request.execution_configuration.artifact_root,
+            )
+            payload["verification"] = verification
+            intact = all_intact(verification)
+        _print(payload)
+        return 0 if intact else exit_code_for(FailureClass.VALIDATION_FAILURE)
     finally:
         ledger.close()
 

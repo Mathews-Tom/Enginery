@@ -17,17 +17,30 @@ import pytest
 from enginery.application.human_decisions import ReviewAuthority
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli import factory_decisions
+from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.cli.run_composition import lease_window
+from enginery.domain.artifact import ArtifactKind, RedactionClassification
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
-from enginery.domain.errors import InvalidInputError
+from enginery.domain.errors import FailureClass, InvalidInputError
 from enginery.domain.execution_selection import ExecutionSelection
-from enginery.domain.ids import OperationId, RunId, WorkflowDefinitionId, WorkItemId
+from enginery.domain.ids import (
+    ArtifactId,
+    NodeAttemptId,
+    NodeId,
+    OperationId,
+    RunId,
+    WorkflowDefinitionId,
+    WorkItemId,
+)
 from enginery.domain.run import Run, RunState
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.artifacts import ArtifactMetadataWrite
+from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.human_decisions import issue_challenge
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
@@ -120,6 +133,148 @@ def test_stage1_start_watch_and_evidence_are_ledger_backed(
     evidence = json.loads(capsys.readouterr().out)
     assert evidence["request_digest"] == bound_document(_request(tmp_path))["request_digest"]
     assert evidence["source_revision"] == "issue-revision-1"
+
+
+def _retain_artifacts(
+    database: Path, artifact_root: Path, payloads: dict[str, bytes]
+) -> dict[str, Digest]:
+    ledger = LedgerService.open(database, artifact_store_root=artifact_root)
+    try:
+        digests = {name: ledger.publish_artifact_bytes(data) for name, data in payloads.items()}
+        ledger.append(
+            AppendCommand(
+                correlation_id="retain-artifacts",
+                events=(
+                    EventWrite(
+                        aggregate_type="artifact_fixture",
+                        aggregate_id="run-stage1",
+                        expected_version=0,
+                        event_type="artifacts.retained",
+                        schema_version=1,
+                        payload={},
+                    ),
+                ),
+                artifact_references=tuple(
+                    ArtifactMetadataWrite(
+                        artifact_id=ArtifactId(name),
+                        digest=digests[name],
+                        byte_size=len(payloads[name]),
+                        media_type="application/octet-stream",
+                        kind=ArtifactKind.LOG,
+                        run_id=RunId("run-stage1"),
+                        node_id=NodeId("implement"),
+                        attempt_id=NodeAttemptId("attempt-1"),
+                        redaction=RedactionClassification.INTERNAL,
+                    )
+                    for name in payloads
+                ),
+            )
+        )
+        return digests
+    finally:
+        ledger.close()
+
+
+def _ledger_dump(database: Path) -> str:
+    ledger = LedgerService.open(database)
+    try:
+        return "\n".join(ledger.connection.iterdump())
+    finally:
+        ledger.close()
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {str(path): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def _verified_run(tmp_path: Path) -> tuple[Path, Path, dict[str, Digest]]:
+    database = tmp_path / "ledger.db"
+    _start_request(database, tmp_path)
+    artifact_root = (tmp_path / "artifacts").resolve()
+    digests = _retain_artifacts(
+        database, artifact_root, {"plan-1": b"plan bytes", "log-1": b"log bytes"}
+    )
+    return database, artifact_root, digests
+
+
+def test_evidence_verify_reports_every_retained_artifact_intact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database, artifact_root, digests = _verified_run(tmp_path)
+    assert _lifecycle(database, "evidence", "--run-id", "run-stage1") == 0
+    plain = json.loads(capsys.readouterr().out)
+
+    assert _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify") == 0
+    verified = json.loads(capsys.readouterr().out)
+
+    assert "verification" not in plain
+    assert {key: value for key, value in verified.items() if key != "verification"} == plain
+    assert verified["verification"] == {
+        "artifact_root": str(artifact_root),
+        "artifacts": [
+            {"artifact_id": "log-1", "digest": str(digests["log-1"]), "status": "intact"},
+            {"artifact_id": "plan-1", "digest": str(digests["plan-1"]), "status": "intact"},
+        ],
+        "summary": {"intact": 2, "missing": 0, "tampered": 0},
+    }
+
+
+def test_evidence_verify_reports_a_deleted_artifact_missing_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database, artifact_root, digests = _verified_run(tmp_path)
+    ArtifactStore(artifact_root).path_for(digests["plan-1"]).unlink()
+    ledger_before = _ledger_dump(database)
+    store_before = _tree(artifact_root)
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    verification = json.loads(capsys.readouterr().out)["verification"]
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    assert {
+        entry["artifact_id"]: (entry["digest"], entry["status"])
+        for entry in verification["artifacts"]
+    } == {
+        "plan-1": (str(digests["plan-1"]), "missing"),
+        "log-1": (str(digests["log-1"]), "intact"),
+    }
+    assert verification["summary"] == {"intact": 1, "missing": 1, "tampered": 0}
+    assert _ledger_dump(database) == ledger_before
+    assert _tree(artifact_root) == store_before
+
+
+def test_evidence_verify_reports_overwritten_artifact_bytes_tampered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database, artifact_root, digests = _verified_run(tmp_path)
+    ArtifactStore(artifact_root).path_for(digests["log-1"]).write_bytes(b"overwritten")
+    ledger_before = _ledger_dump(database)
+    store_before = _tree(artifact_root)
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    verification = json.loads(capsys.readouterr().out)["verification"]
+    assert code == exit_code_for(FailureClass.VALIDATION_FAILURE)
+    statuses = {entry["artifact_id"]: entry["status"] for entry in verification["artifacts"]}
+    assert statuses == {"log-1": "tampered", "plan-1": "intact"}
+    assert verification["summary"] == {"intact": 1, "missing": 0, "tampered": 1}
+    assert _ledger_dump(database) == ledger_before
+    assert _tree(artifact_root) == store_before
+
+
+def test_evidence_verify_fails_loudly_when_the_artifact_root_is_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    _start_request(database, tmp_path)
+    capsys.readouterr()
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert "intact" not in captured.out
+
 
 
 def test_stage1_cli_lease_window_exceeds_the_omp_time_budget(tmp_path: Path) -> None:

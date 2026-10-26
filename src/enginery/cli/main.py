@@ -227,6 +227,12 @@ def _add_lifecycle_parsers(
             lifecycle.add_argument("--run-id", required=True)
         if command == "next":
             lifecycle.add_argument("--advance", action="store_true")
+        if command == "evidence":
+            lifecycle.add_argument(
+                "--verify",
+                action="store_true",
+                help="Re-hash every artifact the run's records reference; read-only.",
+            )
         if command == "review":
             lifecycle.add_argument("--report", required=True, type=Path)
             lifecycle.add_argument("--repair-attempt", required=True, type=int)

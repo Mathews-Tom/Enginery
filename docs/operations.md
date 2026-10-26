@@ -1382,6 +1382,14 @@ status, request digest, source revision, every runtime node's state, and an
 `execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
 — the operator's read path for "what is this run doing and why."
 
+`engine evidence --verify` also re-hashes every artifact the run's ledger records
+reference and adds a `verification` object (`artifact_root`, per-artifact
+`artifact_id`/`digest`/`status` of `intact`, `missing` or `tampered`, and a
+`summary` count per status). It never writes to the ledger or the artifact store.
+It exits 0 only when every artifact is intact and otherwise with the
+`validation_failure` exit code, as `operator verify` does; an absent artifact
+store root fails with a `missing_prerequisite` error instead of reporting `intact`.
+
 ### Execution selection and receipts
 
 `engine build-request` accepts three optional flags that pin the run's execution
