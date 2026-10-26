@@ -512,6 +512,7 @@ def compile_effective_config(
     catalog: ExecutionCatalog | None = None,
     probe_host: HostProbe | None = None,
     behavioral_checks: tuple[BehavioralCheck, ...] | None = None,
+    admit_runner: Callable[[str], None] | None = None,
 ) -> CompiledConfig:
     """Resolve the layers into one effective configuration, or refuse with file/key context.
 
@@ -551,6 +552,8 @@ def compile_effective_config(
         )
     mode = mode_winner.values["runner_mode"]
     assert isinstance(mode, str)
+    if admit_runner is not None:
+        admit_runner(mode)
     runner = _runner(mode, value_of, winner_of)
 
     def executable_for(harness: str) -> str:
