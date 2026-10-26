@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ from enginery.adapters.oci import image
 
 _ENTRY = Path(__file__).resolve().parents[3] / "src/enginery/adapters/oci/assets/checkout_entry.py"
 _ROOT = Path(__file__).resolve().parents[3]
+_PYPROJECT = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+_VERSION = _PYPROJECT["project"]["version"]
 
 
 def test_missing_checkout_is_refused_before_importing_an_installed_enginery(tmp_path: Path) -> None:
@@ -122,7 +125,9 @@ def test_real_checkout_cli_can_start(argv: tuple[str, ...]) -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.startswith("enginery 0.7.0\n" if argv == ("--version",) else "usage:")
+    assert completed.stdout.startswith(
+        f"enginery {_VERSION}\n" if argv == ("--version",) else "usage:"
+    )
 
 
 def test_checkout_launcher_and_runtime_requirements_are_recipe_inputs() -> None:
