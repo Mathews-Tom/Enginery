@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from enginery.adapters.oci.validation import _run_launcher
+from enginery.adapters.runner_launch import worker_environment
 from enginery.application.worker_environment import LAUNCHER_KEYS
 
 
@@ -34,3 +35,8 @@ def test_the_validation_launcher_process_receives_only_the_launcher_allowlist(
     assert names <= set(LAUNCHER_KEYS) | {"LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
     assert names.isdisjoint(secrets)
     assert "DOCKER_HOST" in names, "the launcher still reaches the engine it is configured for"
+
+
+def test_worker_path_preserves_system_tools_before_the_checkout_runtime() -> None:
+    environment = dict(worker_environment(()))
+    assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin:/opt/enginery/runtime/bin"

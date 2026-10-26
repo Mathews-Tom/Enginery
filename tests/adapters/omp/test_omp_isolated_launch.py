@@ -167,6 +167,7 @@ def test_container_environment_is_an_explicit_allowlisted_set_without_credential
     assert environment["TMPDIR"] == "/tmp"
     assert environment["LANG"] == "C.UTF-8"
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin:/opt/enginery/runtime/bin"
     assert "GIT_CONFIG_NOSYSTEM" not in environment  # the image's system safe.directory must apply
     assert environment["GIT_AUTHOR_NAME"] == environment["GIT_COMMITTER_NAME"] == "Enginery Worker"
     # Git hooks are disabled with command-scoped config that a planted repository config cannot

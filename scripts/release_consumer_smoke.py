@@ -51,6 +51,10 @@ _ASSET_DIRECTORY = ("enginery", "adapters", "oci", "assets")
 _RUNNER_ASSETS = (
     "Dockerfile.worker",
     "worker_entry.py",
+    "checkout_entry.py",
+    "runtime-requirements.txt",
+    "package.json",
+    "package-lock.json",
     "omp-isolated-policy.yml",
     "Dockerfile.relay",
     "relay.py",

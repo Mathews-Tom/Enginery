@@ -53,7 +53,7 @@ MAX_OUTCOME_BYTES = 64 * 1024
 _READ_CHUNK = 1024 * 1024
 
 _WORKER_IDENTITY = ("Enginery Worker", "worker@enginery.invalid")
-_WORKER_PATH = "/usr/local/bin:/usr/bin:/bin"
+_WORKER_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/enginery/runtime/bin"
 
 
 def worker_environment(

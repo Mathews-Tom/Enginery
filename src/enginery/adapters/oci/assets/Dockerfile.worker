@@ -7,9 +7,11 @@
 #
 # The harness versions below are also the labels the image carries and must equal both the
 # package manifest and the execution catalog (checked by the recipe tests). The image is built
-# from a context containing exactly the recipe files (this file, worker_entry.py, the omp
-# permission overlay, and the npm manifest and lockfile). It runs with a read-only root
-# filesystem, no capabilities, uid/gid 65532, and tmpfs /tmp + /home/worker.
+# from a context containing exactly the recipe files (this file, worker_entry.py, checkout_entry.py,
+# runtime-requirements.txt, the omp permission overlay, and the npm manifest and lockfile).
+# enginery-checkout runs ./src/enginery with the pinned Python 3.12 runtime and locked dependencies;
+# Debian python3 remains available independently. It runs with a read-only root filesystem,
+# no capabilities, uid/gid 65532, and tmpfs /tmp + /home/worker.
 ARG NODE_BASE_IMAGE=node:22-bookworm-slim
 ARG NODE_BASE_DIGEST=sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.0
@@ -23,6 +25,7 @@ ARG DEBIAN_SNAPSHOT=20261005T000000Z
 ARG GIT_VERSION=1:2.39.5-0+deb12u3
 ARG PYTHON3_VERSION=3.11.2-1+b1
 ARG CA_CERTIFICATES_VERSION=20250419~deb12u1
+ARG CPYTHON_VERSION=3.12.15
 ARG BUN_VERSION=1.3.14
 ARG CLAUDE_CODE_VERSION=2.1.296
 ARG OMP_VERSION=18.10.3
@@ -64,6 +67,26 @@ RUN set -eu; \
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
+# uv's digest pins its interpreter download catalog (including archive hashes). Keep the
+# interpreter and runtime-only venv root-owned; do not replace Debian's python3 or put the
+# venv's unversioned python3 first on PATH. Both supported architectures use uv.lock wheel hashes.
+COPY runtime-requirements.txt /opt/enginery/
+RUN set -eu; \
+    UV_PYTHON_INSTALL_DIR=/opt/enginery-python \
+      uv python install --no-bin "${CPYTHON_VERSION}"; \
+    UV_PYTHON_INSTALL_DIR=/opt/enginery-python \
+      uv venv --python "${CPYTHON_VERSION}" /opt/enginery/runtime; \
+    uv pip install --python /opt/enginery/runtime/bin/python3.12 \
+      --require-hashes --only-binary :all: -r /opt/enginery/runtime-requirements.txt; \
+    chown -R root:root /opt/enginery-python /opt/enginery/runtime; \
+    chmod -R go-w /opt/enginery-python /opt/enginery/runtime; \
+    chmod 0444 /opt/enginery/runtime-requirements.txt; \
+    rm -rf /root/.cache /tmp/*
+
+COPY checkout_entry.py /usr/local/bin/enginery-checkout
+RUN chown root:root /usr/local/bin/enginery-checkout; \
+    chmod 0555 /usr/local/bin/enginery-checkout
+
 # Harness packages, installed as root and read-only to the worker at runtime. They are installed
 # from the lockfile shipped next to this file (`npm ci`), so every transitive package, including
 # the platform binaries, is the exact tarball whose integrity hash is recorded there; the lock and
@@ -90,7 +113,9 @@ RUN chown root:root /opt/enginery/worker_entry.py /opt/enginery/omp-isolated-pol
     chmod 0444 /opt/enginery/worker_entry.py /opt/enginery/omp-isolated-policy.yml
 
 # Harnesses must not update themselves or phone home from a worker.
+# Append the actual venv bin directory: a symlink outside it loses Python's venv detection.
 ENV HOME=/home/worker \
+    PATH="${PATH}:/opt/enginery/runtime/bin" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DISABLE_AUTOUPDATER=1 \

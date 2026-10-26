@@ -437,6 +437,10 @@ def test_a_stand_in_that_equals_the_tested_version_fails_the_pin_check(
 _ASSET_MEMBERS = (
     "Dockerfile.worker",
     "worker_entry.py",
+    "checkout_entry.py",
+    "runtime-requirements.txt",
+    "package.json",
+    "package-lock.json",
     "omp-isolated-policy.yml",
     "Dockerfile.relay",
     "relay.py",
@@ -496,6 +500,11 @@ def test_an_editable_install_is_reported_not_run_not_passed(
     ("kwargs", "message"),
     [
         ({"omit": "relay.py"}, "lacks enginery/adapters/oci/assets/relay.py"),
+        ({"omit": "checkout_entry.py"}, "lacks enginery/adapters/oci/assets/checkout_entry.py"),
+        (
+            {"omit": "runtime-requirements.txt"},
+            "lacks enginery/adapters/oci/assets/runtime-requirements.txt",
+        ),
         ({"tamper": "Dockerfile.worker"}, "differs from the source"),
     ],
 )

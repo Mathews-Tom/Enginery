@@ -1,8 +1,9 @@
 """Build and verify the isolated worker image.
 
 The recipe is the packaged ``Dockerfile.worker`` plus the files it copies in (``worker_entry.py``,
-the omp permission overlay, and the npm manifest and lockfile that pin every harness package and
-all of its transitive dependencies by integrity hash). Its digest is stamped on the image as a
+the checkout launcher and hash-locked Python runtime requirements, the omp permission overlay,
+and the npm manifest and lockfile that pin every harness package and its transitive dependencies
+by integrity hash). Its digest is stamped on the image as a
 label at build time and re-derived from the installed package at verification time, so an image
 built from a different recipe than the one this installation ships is refused.
 
@@ -28,12 +29,16 @@ from enginery.domain.runner import ImageIdentity
 
 DOCKERFILE_NAME = "Dockerfile.worker"
 WORKER_ENTRY_NAME = "worker_entry.py"
+CHECKOUT_ENTRY_NAME = "checkout_entry.py"
+RUNTIME_REQUIREMENTS_NAME = "runtime-requirements.txt"
 OMP_POLICY_NAME = "omp-isolated-policy.yml"
 PACKAGE_MANIFEST_NAME = "package.json"
 PACKAGE_LOCK_NAME = "package-lock.json"
 RECIPE_FILES: tuple[str, ...] = (
     DOCKERFILE_NAME,
     WORKER_ENTRY_NAME,
+    CHECKOUT_ENTRY_NAME,
+    RUNTIME_REQUIREMENTS_NAME,
     OMP_POLICY_NAME,
     PACKAGE_MANIFEST_NAME,
     PACKAGE_LOCK_NAME,
