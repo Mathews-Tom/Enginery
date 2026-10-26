@@ -1502,25 +1502,33 @@ class Stage1RunService:
         *,
         generation: int,
     ) -> PublishedBranch:
-        """Publish the verified head of the current attempt, expecting the previous publication.
+        """Publish against the last earlier generation durably recorded as published.
 
-        The first publication of the run, whatever the trailing number of its first attempt's id,
-        expects the remote branch to be absent. A repair generation expects it at exactly the head
-        the previous generation's verified attempt published; that attempt is mapped back to the
-        id it was really dispatched under and its head read from the ledger-recorded verified
-        result, which survives the open-pull-request node being re-registered. A remote branch
-        at any other revision is an external conflict, never overwritten.
+        Review repairs can skip publication entirely. Completion events retain published
+        revisions even after the open_pr projection is replaced by a later generation.
+        A remote branch at any other revision is an external conflict, never overwritten.
         """
         head_revision = self._verified_head_revision(
             attempt_id=_string(self._node_state(request.run.id, "implement"), "attempt_id")
         )
-        expected_remote_revision = (
-            None
-            if generation == _generation(request.implementation.attempt_id)
-            else self._verified_head_revision(
-                attempt_id=_implementation_attempt_for(request, generation - 1)
-            )
+        expected_remote_revision = None
+        publications = self.ledger.connection.execute(
+            "SELECT payload FROM events WHERE aggregate_type = ? AND aggregate_id = ? "
+            "AND event_type = ? ORDER BY aggregate_version DESC",
+            (
+                RUNTIME_NODE_AGGREGATE_TYPE,
+                f"{request.run.id}:open_pr",
+                "runtime_node.deterministic_completed",
+            ),
         )
+        for row in publications:
+            state = json.loads(row["payload"])
+            if _generation(_string(state, "attempt_id")) >= generation:
+                continue
+            revision = state.get("published_revision")
+            if isinstance(revision, str) and revision.strip():
+                expected_remote_revision = revision
+                break
         published = publisher.publish(
             BranchPublicationRequest(
                 repository_id=request.repository_id,

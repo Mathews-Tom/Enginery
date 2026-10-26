@@ -2292,6 +2292,86 @@ def _review_repair_fixture(
     return request, service, runtime, now
 
 
+@pytest.mark.parametrize(
+    "publish_initial,review_repair",
+    [(False, True), (True, False), (True, True)],
+    ids=["review-before-first-publication", "ci-after-publication", "ci-then-review"],
+)
+def test_stage1_repair_publication_expects_the_last_published_generation(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    publish_initial: bool,
+    review_repair: bool,
+) -> None:
+    request, service, _, now = _review_repair_fixture(ledger_service, tmp_path, repair_limit=2)
+    publisher = cast(RecordingBranchPublisher, service.branch_publisher)
+    pulls = cast(RecordingPullRequests, service.pull_requests)
+    heartbeat = timedelta(seconds=60)
+    approved = ReviewReport(producer="omp-agent", reviewer="independent-reviewer", findings=())
+    repairs = ReviewReport(
+        producer="omp-agent",
+        reviewer="independent-reviewer",
+        findings=(ReviewFinding("Repair the current candidate", actionable=True, blocking=False),),
+    )
+
+    def review(report: ReviewReport, generation: int) -> None:
+        service.review_implementation(
+            request, report, repair_attempt=generation, now=now, heartbeat_window=heartbeat
+        )
+
+    def publish() -> None:
+        AuthenticatedDecisions(ledger_service).approve(request)
+        service.open_pull_request(request, now=now, heartbeat_window=heartbeat)
+
+    def complete_repair() -> None:
+        service.dispatch_implementation(
+            request,
+            now=now,
+            heartbeat_window=heartbeat,
+            lease_window=heartbeat,
+            limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+        )
+        deadline = time.monotonic() + 10
+        while (
+            service.next_action(request.run.id).action
+            is not Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+        ):
+            if time.monotonic() >= deadline:
+                pytest.fail("repair worker did not finish")
+            time.sleep(0.01)
+        service.collect_implementation(request, now=now, heartbeat_window=heartbeat)
+        service.validate_implementation(request, now=now, heartbeat_window=heartbeat)
+
+    expected = None
+    if publish_initial:
+        review(approved, 0)
+        publish()
+        expected = publisher.remote
+        pulls.check_status = "completed"
+        pulls.check_conclusion = "failure"
+        service.wait_for_ci(request, now=now, heartbeat_window=heartbeat)
+    else:
+        review(repairs, 0)
+    complete_repair()
+    if publish_initial and review_repair:
+        # A CI repair has not published yet, so its own review can request another repair.
+        review(repairs, 1)
+        assert service.next_action(request.run.id).action is Stage1ProgressionAction.IMPLEMENT
+        complete_repair()
+        generation = 2
+    else:
+        generation = 1
+    review(approved, generation)
+    publish()
+
+    publication = publisher.requests[-1]
+    assert publication.expected_remote_revision == expected
+    assert publication.head_revision == _git("rev-parse", "HEAD", cwd=request.workspace_path)
+    assert publication.head_revision != expected
+    assert publisher.remote == publication.head_revision
+    assert len(publisher.requests) == (2 if publish_initial else 1)
+
+
 def test_stage1_historical_review_without_actionable_ids_still_dispatches_findings(
     ledger_service: LedgerService, tmp_path: Path
 ) -> None:

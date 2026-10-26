@@ -8,6 +8,7 @@ for the current compatibility statement.
 
 ### Fixed
 
+- Repair publication expects the last earlier generation actually published according to the durable ledger, or an absent branch when review repairs precede the first publication. Unpublished intermediate generations no longer cause false remote conflicts; unexpected remote revisions remain protected by the publication lease.
 - Before publication, actionable independent review findings and redacted `enginery feedback` now dispatch the next bounded implementation repair generation with actionable finding text in its worker task. Review repair context is deduplicated and capped at 32 KiB with an explicit truncation marker; feedback retains its 1 MiB input limit. Exhausted budgets and blocking findings still await human review; publication authority is unchanged.
 
 ### Added
