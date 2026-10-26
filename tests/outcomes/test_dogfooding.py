@@ -8,7 +8,7 @@ a separate, already-established opt-in category (see
 ``tests/provider_smoke``). This test's job is narrower and specific to
 M14a: prove the coordinator-owned Stage 1 progression service that the
 real CLI uses (``Stage1RunService`` with ``outcomes`` wired, exactly as
-``enginery.cli.stage1_composition.advancing_service`` now constructs it) actually
+``enginery.cli.run_composition.advancing_service`` now constructs it) actually
 produces a durable record the ``enginery outcome`` CLI can read back out
 of the same ledger file.
 """

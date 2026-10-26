@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from enginery.cli.stage1_composition import (
+from enginery.cli.run_composition import (
     read_only_service,
     runtime_for_run,
     start_bound_run,

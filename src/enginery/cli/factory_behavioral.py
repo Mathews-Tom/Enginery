@@ -17,7 +17,7 @@ from enginery.application.behavioral_checks import FAULT_CLASSES, BehavioralChec
 from enginery.cli.config_binding import behavioral_checks_path, read_behavioral_checks
 from enginery.cli.config_locations import private_state_directory, read_user_layer
 from enginery.cli.factory_collect import database_path, ensure_private_directory
-from enginery.cli.stage1_runner import DriftedRunnerWiring, IsolatedWiring, isolated_wiring
+from enginery.cli.runner_wiring import DriftedRunnerWiring, IsolatedWiring, isolated_wiring
 from enginery.domain.behavioral_evidence import EnvironmentFingerprint, EvaluatorIdentity
 from enginery.domain.digests import Digest
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError

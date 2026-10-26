@@ -138,7 +138,7 @@ def test_a_run_bound_to_the_relay_is_held_when_the_relay_is_not_healthy(
     request = _relay_request(tmp_path)
     unhealthy = RelayStatus(False, False, False, None, (), None, "the relay does not exist")
     monkeypatch.setattr(
-        "enginery.cli.stage1_runner.OciRunnerAdmission",
+        "enginery.cli.runner_wiring.OciRunnerAdmission",
         _relay_admission_factory(_runner_image_fake(), unhealthy),
     )
     capsys.readouterr()
@@ -156,7 +156,7 @@ def test_a_run_bound_to_the_relay_is_held_when_the_engine_fails_the_relay_questi
 ) -> None:
     request = _relay_request(tmp_path)
     monkeypatch.setattr(
-        "enginery.cli.stage1_runner.OciRunnerAdmission",
+        "enginery.cli.runner_wiring.OciRunnerAdmission",
         _relay_admission_factory(_runner_image_fake(), MissingPrerequisiteError("engine gone")),
     )
 
@@ -169,7 +169,7 @@ def test_a_run_bound_to_the_relay_starts_when_the_relay_is_healthy(
 ) -> None:
     request = _relay_request(tmp_path)
     monkeypatch.setattr(
-        "enginery.cli.stage1_runner.OciRunnerAdmission",
+        "enginery.cli.runner_wiring.OciRunnerAdmission",
         _relay_admission_factory(_runner_image_fake(), HEALTHY),
     )
 
@@ -183,7 +183,7 @@ def test_a_run_without_model_access_never_consults_the_relay(
     argv, output = _isolated(tmp_path)
     assert main(argv) == 0
     monkeypatch.setattr(
-        "enginery.cli.stage1_runner.OciRunnerAdmission",
+        "enginery.cli.runner_wiring.OciRunnerAdmission",
         _relay_admission_factory(_runner_image_fake(), RuntimeError("must not be consulted")),
     )
 

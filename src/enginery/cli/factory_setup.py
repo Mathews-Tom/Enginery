@@ -52,6 +52,7 @@ from enginery.cli.config_locations import (
     record_absent_sources,
     require_plain_path,
 )
+from enginery.cli.request_compiler import _probe_host
 from enginery.cli.setup_files import (
     OWNERSHIP_FILE,
     OwnedFile,
@@ -65,7 +66,6 @@ from enginery.cli.setup_files import (
     sha256_bytes,
     write_private_atomically,
 )
-from enginery.cli.stage1_request import _probe_host
 from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.execution_selection import SelectionLayer
 

@@ -16,7 +16,7 @@ import pytest
 from enginery.application.execution_catalog import load_execution_catalog
 from enginery.application.work_ports import PullRequestPort, WorkLedgerPort
 from enginery.cli.main import main
-from enginery.cli.stage1_composition import harness_for
+from enginery.cli.run_composition import harness_for
 from enginery.domain.digests import Digest
 from enginery.domain.errors import ExternalConflictError, MissingPrerequisiteError
 from enginery.engine.runtime import CoordinatorRuntime

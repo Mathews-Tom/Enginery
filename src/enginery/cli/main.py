@@ -202,7 +202,7 @@ def _describe_scope(parser: argparse.ArgumentParser, scope: str, synopsis: str |
 def _add_lifecycle_parsers(
     commands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    from enginery.cli.stage1_request import add_build_request_parser
+    from enginery.cli.request_compiler import add_build_request_parser
 
     for command, synopsis in (
         ("start", "Start a durable run from a request document."),
@@ -367,12 +367,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return operator_main(arguments[1:])
 
     from enginery.cli.capability import run_capability
+    from enginery.cli.engine_runs import run_stage1
     from enginery.cli.factory import run_factory
     from enginery.cli.gate import run_gate
     from enginery.cli.outcome import run_outcome
     from enginery.cli.runner import run_runner
-    from enginery.cli.stage1 import run_stage1
-    from enginery.cli.stage2 import run_stage2
+    from enginery.cli.stack_status import run_stage2
     from enginery.cli.workspace import run_workspace
 
     parser = _build_parser()

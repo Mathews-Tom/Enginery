@@ -7,8 +7,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enginery.cli.execution_diagnostics import execution_report
 from enginery.cli.factory_decisions import decide_in_ledger
-from enginery.cli.stage1_composition import (
+from enginery.cli.request_compiler import run_build_request
+from enginery.cli.run_composition import (
     HEARTBEAT_WINDOW,
     advancing_service,
     lease_window,
@@ -18,8 +20,6 @@ from enginery.cli.stage1_composition import (
     start_bound_run,
     watch_document,
 )
-from enginery.cli.stage1_execution import execution_report
-from enginery.cli.stage1_request import run_build_request
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import CoordinatorRuntime

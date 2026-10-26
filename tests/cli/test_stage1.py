@@ -18,7 +18,7 @@ from enginery.application.human_decisions import ReviewAuthority
 from enginery.application.work_ports import WorkLedgerSnapshot
 from enginery.cli import factory_decisions
 from enginery.cli.main import main
-from enginery.cli.stage1_composition import lease_window
+from enginery.cli.run_composition import lease_window
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import InvalidInputError
@@ -506,7 +506,7 @@ def _request(tmp_path: Path) -> Stage1RunRequest:
 def test_harness_for_selects_the_configured_provider_without_a_fallback(tmp_path: Path) -> None:
     from enginery.adapters.claude_code import ClaudeCodeHarness
     from enginery.adapters.omp import OmpHarness
-    from enginery.cli.stage1_composition import harness_for
+    from enginery.cli.run_composition import harness_for
 
     omp_config = replace(_request(tmp_path).execution_configuration, harness_provider="omp")
     claude_config = replace(
@@ -520,7 +520,7 @@ def test_harness_for_selects_the_configured_provider_without_a_fallback(tmp_path
 def test_harness_for_rejects_an_unconfigured_provider_instead_of_falling_back(
     tmp_path: Path,
 ) -> None:
-    from enginery.cli.stage1_composition import harness_for
+    from enginery.cli.run_composition import harness_for
 
     configuration = replace(
         _request(tmp_path).execution_configuration, harness_provider="unknown-harness"
