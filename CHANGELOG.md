@@ -6,6 +6,11 @@ for the current compatibility statement.
 
 ## [Unreleased]
 
+### Added
+
+- Self-development requires the isolated runner for Enginery's own source project, keeping the installed runtime, operator configuration, ledger and credentials outside worker mounts. The standalone `scripts/enginery_runtime.py` installs confirmed wheel hashes into retained virtual environments, lists runtime receipts, and rolls back through an external shim only when all discovered or explicit ledgers fit the previous runtime's schema. See `docs/operations.md` for pause/drain, backup, upgrade and restore procedures.
+- Trusted-local admission refuses unreadable, malformed or oversized existing `pyproject.toml` files with a project-identity diagnostic and a fix-or-use-isolated remedy; isolated admission does not read project metadata. The self-development guard also covers advancement of already-bound runs through `run`, `continue` and `engine next --advance`. Runtime rollback refusals name the previous executable's restore command, including the explicit unreadable-ledger override after operator pause/drain.
+
 ### Breaking
 
 - Python import paths for the run-workflow modules are renamed by responsibility, without aliases: `enginery.workflows.stage1` → `enginery.workflows.run_lifecycle` and `enginery.workflows.stage1_runtime` → `enginery.workflows.node_executors`. Class and function names, CLI commands, persisted `stage1` identifiers and request digests are unchanged.

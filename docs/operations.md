@@ -1778,6 +1778,132 @@ point](#operator-recovery-entry-point).
 event log; use it if a projection appears stale or inconsistent after a
 manual intervention. It never rewrites historical events.
 
+## Self-development and external runtime management
+
+An Enginery checkout (the root `pyproject.toml` declares `[project] name = "enginery"`)
+requires `isolated-oci`. `init`, `run`, `engine build-request`, and `engine start`
+refuse new `trusted-local` requests; advancing an already-bound run through `run`,
+`continue`, or `engine next --advance` rechecks the bound runner and repository too.
+A worker running as the operator can modify the installed runtime, configuration,
+ledger, and credentials. Read-only status/diagnostics do not advance a worker.
+Other projects retain their explicit `trusted-local` option. Only trusted-local
+admission reads `pyproject.toml`: if an existing file is unreadable, malformed, or
+over 1 MiB, it refuses because project identity cannot be determined, with instructions
+to fix the file or use `isolated-oci`. An absent file is allowed; isolated admission
+does not read it. Existing isolated-runner checks still apply; there is no local fallback.
+
+Build and qualify the pinned worker image as described below, then preview or apply setup:
+
+```bash
+enginery init --project /path/to/Enginery --runner isolated-oci \
+  --runner-image sha256:IMAGE_ID --validation-command "python3 -m unittest"
+# Add --apply to create the previewed project policy and private ownership record.
+```
+
+The worker's source workspace and output are tmpfs-backed container volumes populated
+by copy-in/out, not host bind mounts. The root filesystem is read-only. The installed
+runtime, user configuration, per-project ledger, and host credentials are not mounted
+into the worker. This does not change human `review`/`decide` authority.
+
+### Upgrade from outside the installed runtime
+
+`scripts/enginery_runtime.py` is a standalone Python 3.12 standard-library launcher.
+Keep an operator-controlled copy outside the worker workspace and invoke it with an
+external Python, not the runtime being replaced. It creates a fresh virtual environment
+for each wheel version/hash, retains old runtimes, and maintains a shim at
+`~/.local/bin/enginery`. Put that directory first on `PATH`; verify that you are not
+invoking an old shell alias or another installation.
+If `~/.local/bin/enginery` already exists and the launcher did not create it (for
+example a `uv tool install enginery`), `install` and `rollback` refuse (exit 5) and
+change nothing: keep that installation and pass `--bin-dir` to place the launcher's
+shim elsewhere, or remove it first (`uv tool uninstall enginery`).
+
+Before upgrading, pause and drain **every** affected project or explicit ledger.
+Proceed only after status shows no running workers. Back up each ledger (and its
+artifact store when used), and retain the backup directory:
+
+```bash
+enginery pause --project /path/to/project --reason "runtime upgrade"
+enginery drain --project /path/to/project --wait-seconds 30
+# Or: enginery drain --project /path/to/project --stop
+enginery operator status --database /path/to/ledger.db
+enginery operator backup --database /path/to/ledger.db --output /path/to/pre-upgrade-backup
+# For a ledger without project setup, use operator pause/drain --database instead.
+uv build
+python3.12 /operator/enginery_runtime.py install dist/enginery-VERSION-py3-none-any.whl
+enginery --version
+python3.12 /operator/enginery_runtime.py list --json
+```
+
+`enginery --version` checks the distribution version, not a particular build.
+For different wheels with the same version, check the **current SHA-256** with
+`python3.12 /operator/enginery_runtime.py list --json` and compare it with the
+reviewed wheel's digest.
+
+The installer privately copies the wheel, hashes that copy, prints its version and
+SHA-256, and requires typing `yes`. It installs the confirmed copy, not a later read
+of the source path.
+For unattended installation use `--yes-sha256 HEX`, matching that printed hash from
+an independently reviewed wheel; a missing confirmation or mismatch refuses without
+changing the runtime. `--find-links DIR --no-index` permits an offline wheelhouse.
+Installation verifies the new executable's `--version` before switching. A failed
+installation removes its partial runtime and leaves the current shim/state unchanged.
+
+The default runtime root is `$XDG_DATA_HOME/enginery/runtimes`
+(`~/.local/share/enginery/runtimes`); `--root` and `--bin-dir` select other locations.
+XDG paths must be absolute. Each retained runtime has a `receipt.json` recording its
+wheel, SHA-256, version, installation time, and Python. `state.json` records the current
+runtime and switch history. These operator-owned paths must remain outside the worker
+workspace. Installation downloads wheel dependencies normally unless `--no-index`
+is selected; it never installs into or modifies the running source checkout.
+
+### Roll back, including ledger schema compatibility
+
+Keep dispatch paused and workers drained during rollback:
+
+```bash
+python3.12 /operator/enginery_runtime.py rollback --ledger /path/to/ledger.db
+enginery --version
+python3.12 /operator/enginery_runtime.py list --json
+enginery operator verify --database /path/to/ledger.db --json
+enginery operator status --database /path/to/ledger.db
+# Resume only after reviewing the version, ledger health, and worker state:
+enginery resume --project /path/to/project
+```
+
+Rollback selects the previous runtime in switch history. Before switching it reads
+the schema version of every standard per-project SQLite ledger under
+`$XDG_STATE_HOME/enginery/projects/` (default `~/.local/state/enginery/projects/`)
+and each repeatable `--ledger PATH`. Always name additional custom ledger locations.
+It asks the previous runtime for its highest supported migration; it does not import
+that runtime into the launcher or migrate any ledger.
+
+If any ledger is newer than the target supports, rollback refuses with exit **5**,
+names the ledger and both versions, and leaves the current runtime/shim unchanged.
+Pause dispatch and drain workers first, using the current runtime while it can still
+read the live ledger. Restore the pre-upgrade backup using the **previous runtime's
+explicit executable path**, as printed by the refusal, then retry rollback:
+
+```bash
+/path/to/previous-runtime/venv/bin/enginery operator restore \
+  --database /path/to/ledger.db --backup /path/to/pre-upgrade-backup --force-unpaused
+python3.12 /operator/enginery_runtime.py rollback --ledger /path/to/ledger.db
+enginery --version
+python3.12 /operator/enginery_runtime.py list --json
+```
+
+The newer runtime may reject the old backup as `schema_version_stale`; using it
+for restore is not a downgrade path. The previous runtime can verify its own backup
+but cannot open the newer live ledger to prove pause state, so `--force-unpaused`
+is necessary here. It is an explicit override, not a substitute for independently
+confirming dispatch is paused and no workers remain. Include `--artifacts` if the
+backup includes the artifact store.
+
+Restore preserves the prior ledger and leaves dispatch paused. Do not edit
+`schema_migrations` to bypass the refusal: a version number is not a data downgrade.
+Launcher exits are **0** success, **2** usage, **5** refusal/hold, and **1** unexpected
+failure. Runtime switching does not automatically resume dispatch or advance a run.
+
 ## Trust modes and the isolated runner
 
 Every Stage 1 run is bound, when its request is built, to exactly one
