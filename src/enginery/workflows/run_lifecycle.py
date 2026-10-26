@@ -745,7 +745,17 @@ class Stage1RunService:
         review_state = self._node_state_optional(run_id, "review")
         if review_state is None or _generation(_string(review_state, "attempt_id")) != generation:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
-        if self._review_outcome(run_id) is not ReviewOutcome.APPROVED:
+        review_outcome = self._review_outcome(run_id)
+        if (
+            review_outcome is ReviewOutcome.REPAIR_REQUESTED
+            and generation - _generation(run.request.implementation.attempt_id)
+            < run.request.repair_limit
+            and not self._published(run_id, generation)
+        ):
+            # Review findings repair an unpublished candidate only; once a pull request exists
+            # (or merged), CI and behavioral verification own the repair edge.
+            return Stage1Progression(Stage1ProgressionAction.IMPLEMENT, run)
+        if review_outcome is not ReviewOutcome.APPROVED:
             return Stage1Progression(Stage1ProgressionAction.AWAIT_HUMAN_REVIEW, run)
 
         open_pr_state = self._node_state_optional(run_id, "open_pr")
@@ -942,9 +952,18 @@ class Stage1RunService:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair requires a terminal prior attempt"
                 )
-            wait_state = self._node_state(request.run.id, "wait_for_ci")
+            generation = _generation(_string(existing, "attempt_id"))
+            review_state = self._node_state_optional(request.run.id, "review")
+            wait_state = self._node_state_optional(request.run.id, "wait_for_ci")
             verify_state = self._node_state_optional(request.run.id, "verify")
             if (
+                review_state is not None
+                and review_state.get("review_outcome") == ReviewOutcome.REPAIR_REQUESTED.value
+                and _generation(_string(review_state, "attempt_id")) == generation
+                and not self._published(request.run.id, generation)
+            ):
+                wait_state = review_state
+            elif (
                 verify_state is not None
                 and verify_state.get("status") == "failed"
                 and verify_state.get("behavioral_findings")
@@ -953,13 +972,15 @@ class Stage1RunService:
             ):
                 wait_state = verify_state
             elif (
-                wait_state.get("status") != "failed"
+                wait_state is None
+                or wait_state.get("status") != "failed"
                 or wait_state.get("pull_request_outcome") != PullRequestOutcome.BLOCKED.value
             ):
                 raise ExternalConflictError(
-                    "Stage 1 implementation repair requires failed CI or behavioral assertions"
+                    "Stage 1 implementation repair requires actionable review findings, "
+                    "failed CI or behavioral assertions"
                 )
-            generation = _generation(_string(existing, "attempt_id")) + 1
+            generation += 1
             if generation - _generation(request.implementation.attempt_id) > request.repair_limit:
                 raise ExternalConflictError(
                     "Stage 1 implementation repair exceeds the configured repair limit"
@@ -1282,6 +1303,7 @@ class Stage1RunService:
         now: datetime,
         heartbeat_window: timedelta,
         packet_feedback_digest: str | None = None,
+        feedback_text: str | None = None,
     ) -> Stage1ReviewResult:
         """Record an independent review only after passed validation.
 
@@ -1333,6 +1355,7 @@ class Stage1RunService:
             now=now,
             heartbeat_window=heartbeat_window,
             packet_feedback=packet_feedback_digest is not None,
+            feedback_text=feedback_text,
         )
 
     def open_pull_request(
@@ -2101,6 +2124,14 @@ class Stage1RunService:
             )
         return self.outcomes
 
+    def _published(self, run_id: RunId, generation: int) -> bool:
+        """Whether this generation's publication was approved, started or completed."""
+        open_pr_state = self._node_state_optional(run_id, "open_pr")
+        return (
+            open_pr_state is not None
+            and _generation(_string(open_pr_state, "attempt_id")) == generation
+        )
+
     def _review_outcome(self, run_id: RunId) -> ReviewOutcome | None:
         projection = self.ledger.read_projection(
             aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE,
@@ -2388,6 +2419,8 @@ def _implementation_attempt_for(request: Stage1RunRequest, generation: int) -> s
 
 
 _MAX_RECORDED_PROTECTED_PATHS = 200
+# Leave room for the rest of the worker prompt beneath platform argument limits.
+_MAX_REVIEW_REPAIR_CONTEXT_BYTES = 32 * 1024
 
 
 def _implementation_result_path(request: Stage1RunRequest, *, operation_id: OperationId) -> Path:
@@ -2452,6 +2485,41 @@ def _failed_checks(
 
 
 def _repair_context(wait_state: Mapping[str, object]) -> str:
+    if wait_state.get("review_outcome") == ReviewOutcome.REPAIR_REQUESTED.value:
+        finding_ids = wait_state.get("actionable_finding_ids", wait_state.get("finding_ids", []))
+        feedback_text = wait_state.get("feedback_text")
+        review_findings = [feedback_text] if isinstance(feedback_text, str) else []
+        if isinstance(finding_ids, list):
+            for finding_id in finding_ids:
+                if not isinstance(finding_id, str):
+                    continue
+                try:
+                    payload = json.loads(finding_id)
+                except (json.JSONDecodeError, RecursionError):
+                    payload = None
+                finding = (
+                    payload["text"]
+                    if isinstance(payload, dict)
+                    and payload.get("kind") == "packet_feedback"
+                    and isinstance(payload.get("text"), str)
+                    else finding_id
+                )
+                review_findings.append(finding)
+        context = "Repair the previous candidate's actionable review findings: " + "; ".join(
+            dict.fromkeys(review_findings)
+        )
+        encoded = context.encode("utf-8")
+        if len(encoded) <= _MAX_REVIEW_REPAIR_CONTEXT_BYTES:
+            return context
+        marker = (
+            "\n[Review findings truncated to 32 KiB; inspect the recorded review for full text.]"
+        )
+        return (
+            encoded[: _MAX_REVIEW_REPAIR_CONTEXT_BYTES - len(marker.encode("utf-8"))].decode(
+                "utf-8", errors="ignore"
+            )
+            + marker
+        )
     findings = wait_state.get("behavioral_findings")
     if isinstance(findings, list) and findings:
         return "Repair the previous candidate's failing behavioral assertions: " + "; ".join(

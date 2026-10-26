@@ -4,6 +4,7 @@ import html
 import json
 import subprocess
 from dataclasses import replace
+from datetime import timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,9 +13,10 @@ from typing import Any
 import pytest
 
 from enginery.application.review_packet import MAX_PACKET_BYTES, ReviewPacket
-from enginery.cli import factory_review
+from enginery.cli import factory_review, factory_run
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
+from enginery.engine.scheduler import SchedulingLimits
 from enginery.evidence.review_rendering import (
     PACKET_MARKER,
     REVIEW_CSP,
@@ -22,7 +24,10 @@ from enginery.evidence.review_rendering import (
     render_html,
     render_terminal,
 )
+from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewOutcome, ReviewReport, route_review
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction
+from tests.workflows.test_stage1_runtime import _review_repair_fixture
 
 
 def _packet(text: str = "Change the persisted result") -> ReviewPacket:
@@ -185,6 +190,103 @@ def test_terminal_feedback_enters_existing_repair_path_and_never_approves(
     assert route_review(report, repair_attempt=2, repair_limit=2) is ReviewOutcome.REPAIR_EXHAUSTED
 
 
+def test_feedback_text_reaches_the_next_generation_worker_prompt(
+    ledger_service: LedgerService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, service, runtime, now = _review_repair_fixture(ledger_service, tmp_path)
+    packet = replace(_packet(), run_id=str(request.run.id))
+    # Keep discovery/presentation local to this fixture; review persistence and
+    # advancement use the real service, runtime, ledger and worker scheduler.
+    monkeypatch.setattr(factory_review, "_open", lambda *args, **kwargs: (ledger_service, request))
+    monkeypatch.setattr(factory_review, "build_packet", lambda *args: packet)
+    monkeypatch.setattr(factory_review, "runtime_for_run", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(factory_review, "read_only_service", lambda **kwargs: service)
+    monkeypatch.setattr(ledger_service, "close", lambda: None)
+    text = "Preserve the caller's selected format; token=ghp_" + "A" * 36
+    result = factory_review.feedback(
+        tmp_path, packet.run_id, subject_digest=packet.subject_digest, text=text
+    )
+    assert result["review_outcome"] == "repair_requested"
+    assert result["authority_granted"] is False
+    review = ledger_service.read_projection(
+        aggregate_type="runtime_node", aggregate_id=f"{request.run.id}:review"
+    )
+    assert review is not None
+    assert "Preserve the caller's selected format" in str(review.state["feedback_text"])
+    assert "ghp_" + "A" * 36 not in json.dumps(review.state)
+    assert service.next_action(request.run.id).action is Stage1ProgressionAction.IMPLEMENT
+    report = factory_run._enrich(
+        tmp_path,
+        ledger_service,
+        factory_run.watch_document(ledger_service, runtime, service.next_action(request.run.id)),
+        str(request.run.id),
+    )
+    assert report["next_action"] == "implement"
+    assert report.get("next_decision") is None
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    worker = runtime.read_node_request(run_id=str(request.run.id), node_id="implement")
+    assert worker.attempt_id == f"{request.run.id}-implement-1"
+    prompt = " ".join(worker.command)
+    assert str(review.state["feedback_text"]) in prompt
+    assert "ghp_" + "A" * 36 not in prompt
+    assert prompt.count(str(review.state["feedback_text"])) == 1
+    assert '"kind":"packet_feedback"' not in prompt
+
+
+@pytest.mark.parametrize(
+    ("extra_bytes", "multibyte"),
+    [(-1, False), (0, False), (1, False), (1, True), (612_000, False)],
+)
+def test_feedback_repair_context_is_bounded_without_changing_input_limit(
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_bytes: int,
+    multibyte: bool,
+) -> None:
+    request, service, runtime, now = _review_repair_fixture(ledger_service, tmp_path)
+    packet = replace(_packet(), run_id=str(request.run.id))
+    monkeypatch.setattr(factory_review, "_open", lambda *args, **kwargs: (ledger_service, request))
+    monkeypatch.setattr(factory_review, "build_packet", lambda *args: packet)
+    monkeypatch.setattr(factory_review, "runtime_for_run", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(factory_review, "read_only_service", lambda **kwargs: service)
+    monkeypatch.setattr(ledger_service, "close", lambda: None)
+    prefix = "Repair the previous candidate's actionable review findings: "
+    text_bytes = 32 * 1024 - len(prefix.encode("utf-8")) + extra_bytes
+    text = "é" * (text_bytes // 2) + "x" * (text_bytes % 2) if multibyte else "x" * text_bytes
+    result = factory_review.feedback(
+        tmp_path, packet.run_id, subject_digest=packet.subject_digest, text=text
+    )
+    assert result["review_outcome"] == "repair_requested"
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    worker = runtime.read_node_request(run_id=str(request.run.id), node_id="implement")
+    assert worker.attempt_id == f"{request.run.id}-implement-1"
+    prompt = worker.command[worker.command.index("-p") + 1]
+    assert len(prompt.encode("utf-8")) < 64 * 1024
+    context = prompt[prompt.index(prefix) :].split(" Commit the corrected change locally", 1)[0]
+    assert len(context.encode("utf-8")) <= 32 * 1024
+    assert ("[Review findings truncated to 32 KiB;" in context) is (extra_bytes > 0)
+    if extra_bytes <= 0:
+        assert context == prefix + text
+    assert '"kind":"packet_feedback"' not in prompt
+    assert service.next_action(request.run.id).action in {
+        Stage1ProgressionAction.WAIT,
+        Stage1ProgressionAction.COLLECT_IMPLEMENTATION,
+    }
+
+
 def test_feedback_rejects_stale_subject_and_empty_reports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -222,6 +324,27 @@ def test_existing_unresolved_feedback_is_preserved_with_its_original_subject(
     (report,) = reports
     assert report.findings[0].finding_id == old_finding
     assert json.loads(report.findings[1].finding_id)["subject_digest"] == current.subject_digest
+
+
+def test_feedback_preserves_non_actionable_review_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packet = replace(_packet(), findings_json=json.dumps(["repair this", "optional note"]))
+    reports = _feedback_setup(monkeypatch, packet)
+    monkeypatch.setattr(
+        factory_review,
+        "_projection",
+        lambda ledger, kind, aggregate_id: (
+            {"actionable_finding_ids": ["repair this"]}
+            if aggregate_id.endswith(":review")
+            else {"attempt_id": "implement-1"}
+        ),
+    )
+    factory_review.feedback(
+        tmp_path, packet.run_id, subject_digest=packet.subject_digest, text="another repair"
+    )
+    (report,) = reports
+    assert [finding.actionable for finding in report.findings] == [True, False, True]
 
 
 def test_exact_feedback_replay_is_idempotent_without_re_resolving_review(
