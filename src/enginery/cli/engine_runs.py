@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.execution_diagnostics import execution_report
 from enginery.cli.factory_decisions import decide_in_ledger
 from enginery.cli.request_compiler import run_build_request
@@ -20,10 +22,19 @@ from enginery.cli.run_composition import (
     start_bound_run,
     watch_document,
 )
-from enginery.domain.errors import InvalidInputError
+from enginery.cli.setup_files import refuse_links
+from enginery.domain.digests import Digest
+from enginery.domain.errors import (
+    FailureClass,
+    InvalidInputError,
+    MissingPrerequisiteError,
+    ValidationFailureError,
+)
 from enginery.domain.ids import RunId
-from enginery.engine.runtime import CoordinatorRuntime
+from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
+from enginery.ledger.artifact_store import ArtifactStore
+from enginery.ledger.errors import ArtifactDigestMismatchError, ArtifactMissingError
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.run_lifecycle import Stage1RunService, stage1_request_from_state
@@ -43,7 +54,7 @@ def run_stage1(args: argparse.Namespace) -> int:
     elif command == "cancel":
         _cancel(args)
     elif command == "evidence":
-        _evidence(args)
+        return _evidence(args)
     elif command == "build-request":
         return run_build_request(args)
     else:  # pragma: no cover - argparse restricts command values
@@ -196,33 +207,128 @@ def _cancel(args: argparse.Namespace) -> None:
         ledger.close()
 
 
-def _evidence(args: argparse.Namespace) -> None:
-    ledger = LedgerService.open(args.database)
+def _evidence(args: argparse.Namespace) -> int:
+    verify = bool(getattr(args, "verify", False))
+    ledger = _open_read_only(args.database) if verify else LedgerService.open(args.database)
     try:
         runtime = CoordinatorRuntime(ledger, owner=args.owner)
         run = Stage1RunService(runtime=runtime, ledger=ledger).read(RunId(args.run_id))
         progression = read_only_service(
             runtime=runtime, ledger=ledger, request=run.request
         ).next_action(RunId(args.run_id))
-        _print(
-            {
-                "run_id": str(run.request.run.id),
-                "run_status": run.status.value,
-                "request_digest": str(run.request.digest),
-                "source_revision": run.request.work_snapshot.source_revision,
-                "base_revision": run.request.run.base_revision,
-                "nodes": nodes(ledger, runtime, run_id=str(run.request.run.id)),
-                "hold": None if progression.hold is None else progression.hold.to_state(),
-                "execution": execution_report(
-                    ledger,
-                    run,
-                    hold=progression.hold,
-                    observed_at_resume=progression.observed_host_version,
-                ),
-            }
-        )
+        payload: dict[str, object] = {
+            "run_id": str(run.request.run.id),
+            "run_status": run.status.value,
+            "request_digest": str(run.request.digest),
+            "source_revision": run.request.work_snapshot.source_revision,
+            "base_revision": run.request.run.base_revision,
+            "nodes": nodes(ledger, runtime, run_id=str(run.request.run.id)),
+            "hold": None if progression.hold is None else progression.hold.to_state(),
+            "execution": execution_report(
+                ledger,
+                run,
+                hold=progression.hold,
+                observed_at_resume=progression.observed_host_version,
+            ),
+        }
+        intact = True
+        if verify:
+            verification = _verify_artifacts(
+                ledger,
+                run_id=str(run.request.run.id),
+                artifact_root=run.request.execution_configuration.artifact_root,
+            )
+            payload["verification"] = verification
+            summary = verification["summary"]
+            assert isinstance(summary, dict)
+            intact = summary["missing"] == 0 and summary["tampered"] == 0
+        _print(payload)
+        return 0 if intact else exit_code_for(FailureClass.VALIDATION_FAILURE)
     finally:
         ledger.close()
+
+
+def _open_read_only(database: Path) -> LedgerService:
+    """Open an existing ledger without any ability to write or create it."""
+    path = database.expanduser().absolute()
+    refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
+    if not path.is_file():
+        raise MissingPrerequisiteError(
+            "engine evidence --verify requires an existing engine ledger",
+            details={"path": str(path)},
+        )
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=1")
+    return LedgerService(connection)
+
+
+_NODE_DIGEST_KEYS = ("validation_artifact_digest", "evidence_artifact_digest")
+
+
+def _recorded_artifacts(ledger: LedgerService, run_id: str) -> list[tuple[str, object]]:
+    """Every ``(artifact id, recorded digest)`` the run's ledger records reference."""
+    recorded: list[tuple[str, object]] = [
+        (str(row["artifact_id"]), row["digest"])
+        for row in ledger.connection.execute(
+            "SELECT artifact_id, digest FROM artifacts WHERE run_id = ? ORDER BY artifact_id",
+            (run_id,),
+        )
+    ]
+    prefix = f"{run_id}:"
+    for projection in ledger.list_projections(aggregate_type=RUNTIME_NODE_AGGREGATE_TYPE):
+        if not projection.aggregate_id.startswith(prefix):
+            continue
+        node_id = projection.aggregate_id.removeprefix(prefix)
+        state = projection.state
+        for key in _NODE_DIGEST_KEYS:
+            if state.get(key) is not None:
+                recorded.append((f"node:{node_id}:{key}", state[key]))
+        references = state.get("artifact_references") or []
+        if not isinstance(references, list):
+            raise ValidationFailureError(
+                "recorded artifact references are malformed",
+                details={"run_id": run_id, "node_id": node_id},
+            )
+        recorded.extend(
+            (f"node:{node_id}:artifact_references:{index}", reference)
+            for index, reference in enumerate(references)
+        )
+    return recorded
+
+
+def _verify_artifacts(
+    ledger: LedgerService, *, run_id: str, artifact_root: Path
+) -> dict[str, object]:
+    """Re-hash the stored bytes of every artifact the run references; never writes."""
+    if not artifact_root.is_dir():
+        raise MissingPrerequisiteError(
+            "the run's artifact store root does not exist",
+            details={"artifact_root": str(artifact_root)},
+        )
+    store = ArtifactStore(artifact_root, create_directories=False)
+    results: list[dict[str, str]] = []
+    summary = {"intact": 0, "missing": 0, "tampered": 0}
+    for artifact_id, recorded in _recorded_artifacts(ledger, run_id):
+        text = recorded if isinstance(recorded, str) else ""
+        algorithm, _, hex_value = text.partition(":")
+        try:
+            digest = Digest(algorithm=algorithm, hex_value=hex_value)
+        except InvalidInputError as error:
+            raise ValidationFailureError(
+                "run references a malformed artifact digest",
+                details={"artifact_id": artifact_id, "digest": repr(recorded)},
+            ) from error
+        try:
+            store.read_bytes(digest)
+            status = "intact"
+        except ArtifactMissingError:
+            status = "missing"
+        except ArtifactDigestMismatchError:
+            status = "tampered"
+        summary[status] += 1
+        results.append({"artifact_id": artifact_id, "digest": str(digest), "status": status})
+    return {"artifact_root": str(artifact_root), "artifacts": results, "summary": summary}
 
 
 def _read_json(path: Path) -> dict[str, object]:

@@ -230,6 +230,12 @@ def _add_lifecycle_parsers(
         if command == "review":
             lifecycle.add_argument("--report", required=True, type=Path)
             lifecycle.add_argument("--repair-attempt", required=True, type=int)
+        if command == "evidence":
+            lifecycle.add_argument(
+                "--verify",
+                action="store_true",
+                help="Re-hash every artifact the run references; read-only.",
+            )
         if command in {"approve", "reject", "cancel"}:
             lifecycle.add_argument("--node-id", required=True)
         if command in {"approve", "reject"}:
