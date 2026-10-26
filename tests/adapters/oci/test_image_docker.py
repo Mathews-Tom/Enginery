@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import time
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -158,7 +159,12 @@ def test_checkout_cli_runs_read_only_without_network(
         extra=("--volume", f"{checkout}:/workspace:ro"),
     )
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.startswith("enginery 0.7.0\n" if argv == ("--version",) else "usage:")
+    version = tomllib.loads((checkout / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
+    assert completed.stdout.startswith(
+        f"enginery {version}\n" if argv == ("--version",) else "usage:"
+    )
 
 
 def test_checkout_cli_refuses_a_missing_candidate(engine: OciEngine, built: ImageIdentity) -> None:
