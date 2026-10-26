@@ -51,6 +51,7 @@ from enginery.cli.config_locations import (
     read_user_layer,
     record_absent_sources,
     require_plain_path,
+    require_project_runner,
 )
 from enginery.cli.request_compiler import _probe_host
 from enginery.cli.setup_files import (
@@ -125,6 +126,7 @@ def load_project_configuration(
             run=run_layer({}),
             probe_host=_probe_host,
             behavioral_checks=checks,
+            admit_runner=lambda mode: require_project_runner(project, mode),
         )
     except MissingPrerequisiteError as error:
         harness_probe_failure = str(error)
@@ -134,6 +136,7 @@ def load_project_configuration(
             run=run_layer({}),
             probe_host=None,
             behavioral_checks=checks,
+            admit_runner=lambda mode: require_project_runner(project, mode),
         )
     except ConfigError as error:
         if error.key == "runner.mode" and error.file == "<all layers>":
@@ -362,12 +365,20 @@ def plan_init(
     harness_probe_failure: str | None = None
     try:
         compiled = compile_effective_config(
-            project=document, user=user_layer, run=run_layer({}), probe_host=_probe_host
+            project=document,
+            user=user_layer,
+            run=run_layer({}),
+            probe_host=_probe_host,
+            admit_runner=lambda mode: require_project_runner(project, mode),
         )
     except MissingPrerequisiteError as error:
         harness_probe_failure = str(error)
         compiled = compile_effective_config(
-            project=document, user=user_layer, run=run_layer({}), probe_host=None
+            project=document,
+            user=user_layer,
+            run=run_layer({}),
+            probe_host=None,
+            admit_runner=lambda mode: require_project_runner(project, mode),
         )
     compiled = record_absent_sources(compiled, project, env)
 

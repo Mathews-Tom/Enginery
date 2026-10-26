@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tomllib
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -79,6 +80,35 @@ def project_policy_path(project: Path) -> Path:
 def project_identity(project: Path) -> str:
     """A stable, path-derived identity of a project for its private state directory."""
     return hashlib.sha256(str(project.resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+def require_project_runner(project: Path, runner_mode: str) -> None:
+    """Admit trusted-local only when the project can be identified safely."""
+    if runner_mode != "trusted-local":
+        return
+    path = project / "pyproject.toml"
+    try:
+        try:
+            raw = _read_config_bytes(path)
+        except FileNotFoundError:
+            if not os.path.lexists(path):
+                return
+            raise
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ConfigError) as error:
+        raise ConfigError(
+            "cannot determine whether this is Enginery's own repository; fix pyproject.toml "
+            f"or use --runner isolated-oci ({error})",
+            file=str(path),
+            key="<document>",
+        ) from error
+    metadata = document.get("project")
+    if isinstance(metadata, dict) and metadata.get("name") == "enginery":
+        raise InvalidInputError(
+            "Enginery's own repository requires --runner isolated-oci: a trusted-local "
+            "worker can write the installed runtime, config, ledger and credentials",
+            details={"project": str(project)},
+        )
 
 
 def record_absent_sources(
@@ -174,6 +204,7 @@ __all__ = [
     "read_user_layer",
     "record_absent_sources",
     "require_plain_path",
+    "require_project_runner",
     "state_home",
     "user_config_path",
 ]

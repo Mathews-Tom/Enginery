@@ -48,6 +48,7 @@ from enginery.cli.config_locations import (
     read_project_layer,
     read_user_layer,
     record_absent_sources,
+    require_project_runner,
 )
 from enginery.domain.digests import Digest
 from enginery.domain.errors import InvalidInputError
@@ -398,6 +399,7 @@ def compile_request(inputs: RequestInputs) -> BuiltRequest:
         run=_run_layer(args),
         probe_host=_probe_host,
         behavioral_checks=checks_at_base(args.repository_path.resolve(), args.base_revision),
+        admit_runner=lambda mode: require_project_runner(args.repository_path.resolve(), mode),
     )
     compiled = record_absent_sources(compiled, args.repository_path)
     config = compiled.config

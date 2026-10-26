@@ -16,6 +16,7 @@ from enginery.adapters.github import (
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.adapters.omp import probe_installed_host as probe_installed_omp
 from enginery.cli.config_binding import bind_behavioral_checks, require_bound_configuration
+from enginery.cli.config_locations import require_project_runner
 from enginery.cli.execution_diagnostics import execution_report
 from enginery.cli.factory_behavioral import verify_for_stage1
 from enginery.cli.runner_wiring import (
@@ -179,6 +180,10 @@ def read_only_service(
 def advancing_service(
     *, runtime: CoordinatorRuntime, ledger: LedgerService, request: Stage1RunRequest
 ) -> Stage1RunService:
+    require_project_runner(
+        request.repository_path,
+        "isolated-oci" if request.runner.isolated_mode else "trusted-local",
+    )
     configuration = request.execution_configuration
     wiring = isolated_wiring(request, create_directories=True)
     github = _github_config(configuration)

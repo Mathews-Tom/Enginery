@@ -42,6 +42,7 @@ from enginery.cli.config_locations import (
     project_policy_path,
     read_project_layer,
     read_user_layer,
+    require_project_runner,
     state_home,
     user_config_path,
 )
@@ -271,6 +272,10 @@ def request_values(request: Stage1RunRequest) -> dict[str, object]:
 
 def require_bound_configuration(document: object, request: Stage1RunRequest) -> EffectiveConfig:
     """Refuse unless ``request`` is exactly what its bound configuration snapshot compiles to."""
+    require_project_runner(
+        request.repository_path.resolve(),
+        "isolated-oci" if request.runner.isolated_mode else "trusted-local",
+    )
     if not isinstance(document, dict) or EFFECTIVE_CONFIG_KEY not in document:
         raise InvalidInputError(
             "this request carries no compiled configuration snapshot (it was built before "
