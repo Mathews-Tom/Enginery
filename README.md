@@ -137,7 +137,7 @@ uv sync --all-extras --dev
 The usual path takes one GitHub issue in your project to a verified, merge-ready pull request. You keep the publication decision and the merge.
 
 1. Install Enginery and run `enginery doctor`.
-2. In the project, preview setup with `enginery init --runner trusted-local` or `--runner isolated-oci`, then add `--apply`. `isolated-oci` needs a built worker image (`enginery runner build-image`) and is required for Enginery's own repository.
+2. In the project, preview setup with `enginery init --runner trusted-local`, or with `enginery init --runner isolated-oci --runner-image sha256:IMAGE_ID` using the id printed by `enginery runner build-image` (or set `image` under `[runner]` in user preferences). Then add `--apply`. Pass `--validation-command` unless the project policy already defines `[validation] commands`. `isolated-oci` is required for Enginery's own repository.
 3. Commit nonempty `[acceptance]` checks to `.enginery/project.toml` on the base branch. A run without them holds with `no_behavioral_checks`.
 4. Register yourself under `[review_authority]` in `~/.config/enginery/user.toml` so `review` can issue you decision challenges.
 5. Run `enginery preflight`, then `enginery run OWNER/REPO#N`. The worker implements the issue, and Enginery validates and checks the result.
@@ -200,7 +200,7 @@ uv run enginery gate status --gate G4 --database ledger.db --json
 uv run enginery gate record-g4-deficiency --help
 uv run enginery gate record-g4-deficiency-evidence --help
 uv run enginery runner build-image                         # pinned isolated worker image
-uv run enginery runner status
+uv run enginery runner status --image sha256:IMAGE_ID          # engine + pinned image admitted?
 uv run enginery capability lock --check
 uv run enginery capability inspect skill-a@1 --project-source .@<base-commit-sha> \
   --project-subdir capabilities --json
