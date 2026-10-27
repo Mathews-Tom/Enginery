@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** `v0.8.0` is the current release candidate, adding isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and evidence integrity verification to the existing project workflows. Releases `v0.1.0` through `v0.7.0` (2026-10-20) were published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
+- **Status:** `v0.8.0` is the current published release (2026-10-27), adding isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and evidence integrity verification to the existing project workflows. Releases `v0.1.0` through `v0.7.0` were also published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
 - **Date:** 2026-07-14 (original authoring date; the status line above reflects the current release)
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 

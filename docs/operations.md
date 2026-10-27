@@ -7,7 +7,7 @@ running real workflows.
 
 Commands shown here follow the shipped CLI definitions; examples use placeholders
 where operator-specific values are required. The current release line documented in
-[`README.md`](../README.md#status) is `v0.8.0` (release candidate). The Stage 1
+[`README.md`](../README.md#status) is `v0.8.0` (published 2026-10-27). The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `engine status` remains the only Stage 2 CLI command (a
@@ -23,7 +23,7 @@ gate-deferred — see
 
 ## Installation
 
-The current release candidate is `v0.8.0`. Releases `v0.1.0` through `v0.7.0` (2026-10-20) were published to PyPI and GitHub Releases. Install the available published package with:
+The current published release is `v0.8.0` (2026-10-27). Releases `v0.1.0` through `v0.7.0` were also published to PyPI and GitHub Releases. Install the published package with:
 
 ```bash
 pip install enginery

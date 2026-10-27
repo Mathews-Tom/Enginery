@@ -8,6 +8,44 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.8.0`
+
+Post-publication evidence for the M36b release-preparation pass on 2026-10-27 (UTC), recorded in the same session from the retained receipts.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#239](https://github.com/Mathews-Tom/Enginery/pull/239) | `build(release): prepare v0.8.0` | `5ffcac5da86c583bf96d47b311460d9521a3d625` |
+| [#240](https://github.com/Mathews-Tom/Enginery/pull/240) | `test(release): cover v0.8.0 commands in the consumer smoke` | `00a4d5b82e7a09172357b2620b41afeb57f95e4e` |
+
+The release train also carries RF1 (#225–#228), M34 (#229–#231, #233) and M36 (#234–#236, #238). In M36, the feature `engine evidence --verify` (issue #232) was delivered by Enginery's own factory run `fr-a5731e760f437c0aecca` as PR #238. After the owner's `pull_request.open` decision and merge, the owner upgraded the installed runtime through `scripts/enginery_runtime.py`.
+
+In a clean detached worktree of the tagged commit, `uv run python scripts/release_gate.py --version 0.8.0` passed (docs currency, version consistency, `uv build`, `twine check` and a clean wheel install smoke). `uv run python scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` also passed (`stage1_runs=2 stage2_evidence=yes stage3_evidence=yes`, evidence digest `sha256:7e1e6c936ee7fc87696dd47d8e2cb3e28f6595837f91fcf7dbffcd141fd50705`). The `main` CI run [40425039582](https://github.com/Mathews-Tom/Enginery/actions/runs/40425039582) for that commit concluded `success`. Before the tag, the built wheel and sdist were installed into fresh environments on macOS arm64 (Python 3.12.15) and in a Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15). `scripts/release_consumer_smoke.py` passed for each artifact on both platforms, including the 20-assertion `installed-manual-path` workflow and the new `engine evidence --verify` checks.
+
+### Tag and artifacts
+
+Annotated tag `v0.8.0` (object `558ff9c6bf26f2f72b913d93d560c0871db9f935`, created 2026-10-27T00:54:57Z) targets `00a4d5b82e7a09172357b2620b41afeb57f95e4e`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.8.0-py3-none-any.whl` | `b74b4d2326d65300828510481627ea6b409973cc005c27951ba21323f1568932` |
+| `enginery-0.8.0.tar.gz` | `bc70eedb4624a670df69aa77300c99dd9229902e0e2fff471cccb1e17b186c2e` |
+
+`release_gate.py` produced these hashes on the tagged commit. The same hashes are on the GitHub Release assets and in PyPI's record of the uploaded files.
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.8.0/>. The wheel was uploaded at 2026-10-27T00:55:17Z and the sdist at 2026-10-27T00:55:20Z, using `twine` with the `[pypi]` entry of `~/.pypirc`. An earlier `uv publish` attempt with an ambient token was rejected with `403` before any file was accepted.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.8.0>, published 2026-10-27T00:55:33Z, non-draft and not a prerelease, with exactly the wheel and the sdist as assets.
+- **Human approval:** the owner's message "Approved. Proceed with the recommended next steps." followed exposure of the exact candidate hashes and preceded the tag, PyPI upload and GitHub Release.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` independently verified the GitHub Release target and both the GitHub and PyPI artifact hashes (`PASS verify-published-release version=0.8.0 tag=v0.8.0`). No-project consumers installed `enginery==0.8.0` from PyPI on macOS arm64 (Python 3.12.15) and in the Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), and `scripts/release_consumer_smoke.py --package enginery==0.8.0` passed on both, including the 20-assertion `installed-manual-path` workflow.
+
+### Not claimed
+
+The M36 factory run delivered one small Enginery feature on Enginery's own repository, using 4 of 4 allowed worker sessions. That is one self-development delivery, not evidence of usefulness on other real projects. Both agent hosts remain `experimental`. Ubuntu consumer proof uses a Lima VM, not supported-host qualification. G4 remains fail-closed and Stage 4 self-improvement remains unimplemented with no committed date.
+
 ## `v0.7.0`
 
 Post-publication evidence for the M33b release-preparation pass on 2026-10-20 (UTC), recorded on 2026-10-26 from the receipts retained by that pass.

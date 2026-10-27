@@ -2,7 +2,7 @@
 
 - **Conversation memo**
 - **Purpose:** Test whether this is a problem worth solving with engineers, potential collaborators, and engineering leaders.
-- **Status:** `v0.8.0` is the current release candidate, adding isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and evidence integrity verification. Releases `v0.1.0` through `v0.7.0` (2026-10-20) were published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the shipped workflow surface; Stage 4 remains gate-deferred with no committed date. Both harness tiers remain experimental; synthetic qualification proves mechanics, not real-project usefulness. This memo predates the manual project layer and is retained as the historical record of the original pitch and gate-G1 pilot decision that authorized the `v0.2.0` train; see the operator guide for current behavior.
+- **Status:** `v0.8.0` is the current published release (2026-10-27), adding isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and evidence integrity verification. Releases `v0.1.0` through `v0.7.0` were also published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the shipped workflow surface; Stage 4 remains gate-deferred with no committed date. Both harness tiers remain experimental; synthetic qualification proves mechanics, not real-project usefulness. This memo predates the manual project layer and is retained as the historical record of the original pitch and gate-G1 pilot decision that authorized the `v0.2.0` train; see the operator guide for current behavior.
 
 ## The short version
 
