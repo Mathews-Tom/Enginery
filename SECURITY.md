@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-Enginery has not yet published a stable release. Security reports are accepted
-against the `main` branch until the first tagged release. This policy will
-list supported release lines once `v0.1.0` ships.
+Enginery is pre-`1.0`. Published releases are listed in the
+[README status](README.md#status). Security reports are accepted against the
+latest published release and the `main` branch. Fixes land on `main` and ship in
+a new release; published versions are never modified.
 
 ## Reporting a vulnerability
 

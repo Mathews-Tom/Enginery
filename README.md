@@ -132,6 +132,21 @@ cd Enginery
 uv sync --all-extras --dev
 ```
 
+## Quick start
+
+The usual path takes one GitHub issue in your project to a verified, merge-ready pull request. You keep the publication decision and the merge.
+
+1. Install Enginery and run `enginery doctor`.
+2. In the project, preview setup with `enginery init --runner trusted-local`, or with `enginery init --runner isolated-oci --runner-image sha256:IMAGE_ID` using the id printed by `enginery runner build-image` (or set `image` under `[runner]` in user preferences). Then add `--apply`. Pass `--validation-command` unless the project policy already defines `[validation] commands`. `isolated-oci` is required for Enginery's own repository.
+3. Commit nonempty `[acceptance]` checks to `.enginery/project.toml` on the base branch. A run without them holds with `no_behavioral_checks`.
+4. Register yourself under `[review_authority]` in `~/.config/enginery/user.toml` so `review` can issue you decision challenges.
+5. Run `enginery preflight`, then `enginery run OWNER/REPO#N`. The worker implements the issue, and Enginery validates and checks the result.
+6. Run `enginery review RUN` in a real terminal, then `enginery decide RUN --action pull_request.open --subject-digest DIGEST --challenge SECRET` to allow publication. Send repair findings with `enginery feedback` instead if the candidate needs work.
+7. Run `enginery continue RUN` until `status` reports the verify node passed (CI green and merge-ready on the current head). Merge the PR yourself; Stage 1 never merges.
+8. Inspect the run's retained evidence with `enginery engine evidence --database DB --owner factory --run-id RUN --verify`. `status RUN` prints the project ledger path.
+
+The [Manual project path](docs/operations.md#manual-project-path) and [Guided project setup](docs/operations.md#guided-project-setup) cover each step, its holds and its repairs.
+
 ## CLI
 
 Project commands use the current directory by default (`--project` selects another
@@ -147,9 +162,15 @@ uv run enginery explain
 uv run enginery collect --dry-run
 uv run enginery run OWNER/REPO#N --once
 uv run enginery status RUN
+uv run enginery check RUN                                  # behavioral acceptance verdict
+uv run enginery calibrate RUN                              # deliberate-fault calibration
+uv run enginery review RUN                                 # safe packet + terminal challenge
+uv run enginery decide RUN --action pull_request.open --subject-digest DIGEST --challenge SECRET
+uv run enginery feedback RUN --subject-digest DIGEST --text "repair finding"
 uv run enginery continue RUN                               # reconcile/advance same run
 uv run enginery pause --reason "operator maintenance"
 uv run enginery resume                                     # lift project dispatch pause
+uv run enginery drain --wait-seconds 30                    # or --stop
 uv run enginery uninstall                                  # preview; add --apply after review
 ```
 
@@ -169,6 +190,7 @@ uv run enginery engine build-request --runner trusted-local \
   --workspace-path /path/to/workspace \
   --artifact-root "${XDG_STATE_HOME:-$HOME/.local/state}/enginery/artifacts/issue-1"
 uv run enginery engine start --database ledger.db --owner operator --request request.json
+uv run enginery engine evidence --database ledger.db --owner operator --run-id issue-1 --verify
 uv run enginery engine status --database ledger.db --owner operator --stack-id ID
 uv run enginery workspace inspect --database ledger.db --owner operator --json
 uv run enginery outcome completeness --database ledger.db
@@ -177,6 +199,8 @@ uv run enginery workspace release --database ledger.db --owner operator \
 uv run enginery gate status --gate G4 --database ledger.db --json
 uv run enginery gate record-g4-deficiency --help
 uv run enginery gate record-g4-deficiency-evidence --help
+uv run enginery runner build-image                         # pinned isolated worker image
+uv run enginery runner status --image sha256:IMAGE_ID          # engine + pinned image admitted?
 uv run enginery capability lock --check
 uv run enginery capability inspect skill-a@1 --project-source .@<base-commit-sha> \
   --project-subdir capabilities --json
@@ -190,6 +214,10 @@ uv run enginery capability uninstall
 See [`docs/operations.md`](docs/operations.md) for the full command
 surface and [`docs/adapters.md`](docs/adapters.md) for the adapter/port
 contracts.
+
+### Self-development and runtime upgrades
+
+Enginery can develop its own repository only with the isolated runner, which keeps the installed runtime, configuration, ledger and credentials outside the worker. Validation and acceptance commands use the worker image's `enginery-checkout` entry point to run the candidate checkout. To upgrade or roll back the runtime you run Enginery with, use the repository-only launcher `scripts/enginery_runtime.py` (`install WHEEL --yes-sha256 HEX`, `list`, `rollback`). It installs each confirmed wheel into its own environment and switches an external shim. See [Self-development and external runtime management](docs/operations.md#self-development-and-external-runtime-management).
 
 ## Development
 
