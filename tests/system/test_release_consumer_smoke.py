@@ -38,6 +38,7 @@ def _version() -> str:
         ({"sdist": Path("dist/enginery-0.6.0.tar.gz")}, "0.6.0"),
         ({"package": "enginery==0.6.0"}, "0.6.0"),
         ({"package": "enginery==0.7.0"}, "0.7.0"),
+        ({"package": "enginery==0.8.0"}, "0.8.0"),
         ({"wheel": Path("dist/enginery-1.2.3rc1-py3-none-any.whl")}, "1.2.3rc1"),
     ],
 )
@@ -96,6 +97,8 @@ def test_real_editable_surface_is_not_installed_workflow_proof(
         "enginery doctor",
         "help",
         "consolidated project/engine/operator help",
+        "engine evidence --help lists --verify",
+        "engine evidence --verify exits 3 for a missing database without creating it or its parent",
         "unsupported pins exit 2",
         "packaged execution catalog",
         "valid pins write requests",
@@ -385,6 +388,46 @@ def test_a_g4_status_that_passes_fails_the_fail_closed_check(tmp_path: Path) -> 
     launcher = _launcher(tmp_path, 'echo \'{"overall": "pass"}\'; exit 0')
     with pytest.raises(ConsumerSmokeError, match="G4 did not remain fail-closed"):
         release_consumer_smoke._check_g4_fail_closed(launcher, root=tmp_path)
+
+
+def test_real_evidence_verification_does_not_create_a_missing_database(tmp_path: Path) -> None:
+    release_consumer_smoke._check_evidence_verify(_EXECUTABLE, root=tmp_path)
+    assert not (tmp_path / "missing-evidence").exists()
+
+
+def test_evidence_help_without_verify_is_rejected(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, 'echo "usage: engine evidence --run-id"; exit 0')
+    with pytest.raises(ConsumerSmokeError, match="does not list --verify"):
+        release_consumer_smoke._check_evidence_verify(launcher, root=tmp_path)
+
+
+@pytest.mark.parametrize("code", [0, 1, 2, 12])
+def test_missing_evidence_database_requires_the_missing_prerequisite_exit_code(
+    tmp_path: Path, code: int
+) -> None:
+    launcher = _launcher(
+        tmp_path,
+        'case "$3" in --help) echo "usage: --verify"; exit 0;; esac\n'
+        f'echo "missing_prerequisite: database does not exist" >&2; exit {code}',
+    )
+    with pytest.raises(ConsumerSmokeError, match="did not exit 3"):
+        release_consumer_smoke._check_evidence_verify(launcher, root=tmp_path)
+
+
+@pytest.mark.parametrize("create_database", [False, True])
+def test_evidence_verification_rejects_a_created_database_or_parent(
+    tmp_path: Path, create_database: bool
+) -> None:
+    launcher = _launcher(
+        tmp_path,
+        'case "$3" in --help) echo "usage: --verify"; exit 0;; esac\n'
+        'while [ "$#" -gt 0 ]; do [ "$1" = --database ] && database="$2"; shift; done\n'
+        'mkdir -p "$(dirname "$database")"\n'
+        + ('echo x > "$database"\n' if create_database else "")
+        + 'echo "missing_prerequisite: database does not exist" >&2; exit 3',
+    )
+    with pytest.raises(ConsumerSmokeError, match="created the missing database or its parent"):
+        release_consumer_smoke._check_evidence_verify(launcher, root=tmp_path)
 
 
 def test_a_help_without_the_pin_flags_fails_the_help_check(tmp_path: Path) -> None:
