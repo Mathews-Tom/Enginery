@@ -370,6 +370,7 @@ subcommand's `--help` for the full argument lists.
 | `enginery policy explain REQUEST [--json]` | Explain a policy decision for a request document without authorizing it. |
 | `enginery operator {status,pause,resume,drain,select-runner}` | Inspect and control an explicit ledger without workflow imports (see [Operator recovery entry point](#operator-recovery-entry-point)). |
 | `enginery engine {build-request,start,next,review,approve,reject,cancel,evidence}` | Build requests and run or inspect the Stage 1 lifecycle using explicit ledger/owner selection. Human-wait requeue is unsupported. |
+| `enginery engine evidence --database PATH --owner OWNER --run-id RUN [--verify]` | Print the run's retained evidence; with `--verify`, also re-hash every artifact the run references, read-only (see [Verifying a run's retained artifacts](#verifying-a-runs-retained-artifacts)). |
 | `enginery engine status --database PATH --owner OWNER --stack-id ID` | Report one Stage 2 stack's slice states and merge readiness. |
 | `enginery outcome {list,show,completeness,interventions,failures}` | Inspect raw outcome observations and completeness. |
 | `enginery gate status --gate G4 --database PATH [--floor-config PATH] [--json]` | Report fail-closed G4 readiness from classified completed runs and recorded authority evidence. |
@@ -1391,6 +1392,24 @@ request through `enginery decide` is refused with `human_wait_requeue_unsupporte
 status, request digest, source revision, every runtime node's state, and an
 `execution` block (see [Execution selection and receipts](#execution-selection-and-receipts))
 — the operator's read path for "what is this run doing and why."
+
+#### Verifying a run's retained artifacts
+
+Add `--verify` to check that the stored bytes behind a run's evidence are still intact:
+
+```bash
+uv run enginery engine evidence --database ledger.db --owner operator --run-id issue-142 --verify
+```
+
+The JSON output gains a `verification` object. It holds `artifact_root`, one entry per referenced artifact (`artifact_id`, `digest`, and a `status` of `intact`, `missing` or `tampered`), and a `summary` count per status. Referenced artifacts are the run's rows in the artifact table plus the digests its runtime nodes record: `validation_artifact_digest` and `evidence_artifact_digest` (reported as `node:NODE:KEY`), and `artifact_references` (reported as `node:NODE:artifact_references:INDEX`). `tampered` means the bytes are present but their SHA-256 differs from the recorded digest.
+
+- Exit `0` when every referenced artifact is intact; `12` (`validation_failure`) when any is missing or tampered, or when a recorded digest is malformed.
+- Exit `3` (missing prerequisite) when the ledger file or the run's artifact store root does not exist. Nothing is created.
+- The ledger is opened read-only (`mode=ro`, `query_only`). Nothing is rewritten, deleted, re-published or appended, and run state and aggregate versions are unchanged. Opening a WAL-mode ledger may still leave SQLite `-wal`/`-shm` sidecar files beside it.
+- The artifact store root is the run's own `execution_configuration.artifact_root`; there is no fallback.
+- Without `--verify`, the output is unchanged.
+
+Use `enginery operator verify --database PATH --artifacts PATH` to check a whole ledger and artifact store rather than one run's evidence. An intact artifact proves only that the retained bytes are unchanged; it is not a behavioral verdict.
 
 ### Execution selection and receipts
 
@@ -3256,8 +3275,9 @@ every required assertion ran and passed, `3` (hold) when `git` is missing.
 
 ## Release scope and gate-deferred work
 
-Earlier releases were published to PyPI and GitHub Releases: `v0.1.0` through
-`v0.4.0`, `v0.5.0` (2026-08-11) and `v0.6.0` (2026-10-13). Together they
+Releases `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11), `v0.6.0` (2026-10-13),
+`v0.7.0` (2026-10-20) and `v0.8.0` (2026-10-27) are published to PyPI and GitHub
+Releases; `v0.8.0` is the current release. Together they
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
@@ -3268,7 +3288,13 @@ reconciled public contracts, per-run execution selection with receipts, and
 queued-work and worker-liveness recovery; none of them adds a workflow stage.
 The `v0.7.0` release line added isolated runners, closure-locked capabilities,
 layered setup, manual project verbs, behavioral acceptance and authenticated decisions,
-with consolidated `engine` and `operator` namespaces. Both harness tiers remain
+with consolidated `engine` and `operator` namespaces. `v0.8.0` adds isolated
+self-development of Enginery's own repository (the `enginery-checkout` worker entry
+point), the standalone `scripts/enginery_runtime.py` upgrade/rollback launcher, bounded
+repairs driven by independent review findings before publication, and read-only
+`engine evidence --verify`. Its Python module paths are renamed by responsibility without
+aliases (see [`RELEASE_NOTES.md`](../RELEASE_NOTES.md)); CLI commands and persisted
+identifiers are unchanged. Both harness tiers remain
 experimental. Live qualification used a designated synthetic qualification repository:
 it proves factory mechanics, not usefulness on real projects or every platform/engine
 combination. G4 remains deferred.

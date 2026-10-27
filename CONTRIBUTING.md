@@ -1,8 +1,8 @@
 # Contributing to Enginery
 
-Enginery is in early, pre-`v0.1.0` development. The milestone plan and much
-of the architecture are still landing; expect the external contribution
-surface to open once Stage 1 (`v0.1.0`) ships.
+Enginery is pre-`1.0`: releases are published (see the
+[README status](README.md#status)), and Python import paths, APIs and schemas can
+still change between minor releases (see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)).
 
 ## Development setup
 
