@@ -4,7 +4,7 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
-## [Unreleased]
+## [0.8.0] - 2026-10-27
 
 ### Fixed
 
@@ -13,6 +13,7 @@ for the current compatibility statement.
 
 ### Added
 
+- `enginery engine evidence --run-id R --verify` re-hashes every artifact referenced by the run without modifying evidence. It reports intact, missing or tampered artifacts, exits 0 when intact and `validation_failure` (12) otherwise; a missing database raises a missing-prerequisite error without creating it (#238).
 - The pinned worker image includes CPython 3.12 and Enginery's hash-locked runtime dependencies alongside Debian Python 3.11.2. The Python-shebang `enginery-checkout` command runs the current candidate's `./src/enginery` for network-free isolated self-development validation and behavioral acceptance checks, without installing or modifying the checkout.
 - Self-development requires the isolated runner for Enginery's own source project, keeping the installed runtime, operator configuration, ledger and credentials outside worker mounts. The standalone `scripts/enginery_runtime.py` installs confirmed wheel hashes into retained virtual environments, lists runtime receipts, and rolls back through an external shim only when all discovered or explicit ledgers fit the previous runtime's schema. See `docs/operations.md` for pause/drain, backup, upgrade and restore procedures.
 - Trusted-local admission refuses unreadable, malformed or oversized existing `pyproject.toml` files with a project-identity diagnostic and a fix-or-use-isolated remedy; isolated admission does not read project metadata. The self-development guard also covers advancement of already-bound runs through `run`, `continue` and `engine next --advance`. Runtime rollback refusals name the previous executable's restore command, including the explicit unreadable-ledger override after operator pause/drain.
