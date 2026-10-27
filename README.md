@@ -10,7 +10,7 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.8.0` is the current release candidate. `v0.1.0`…`v0.7.0` (2026-10-20) are published on PyPI and GitHub Releases. This candidate adds isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and read-only evidence integrity verification. Enginery ships three of its four planned
+`v0.8.0` (2026-10-27) is the current published release; `v0.1.0`…`v0.7.0` are also published on PyPI and GitHub Releases. `v0.8.0` adds isolated self-development, runtime upgrade/rollback tooling, bounded review repairs and read-only evidence integrity verification. Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered
