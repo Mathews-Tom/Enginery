@@ -1403,8 +1403,8 @@ uv run enginery engine evidence --database ledger.db --owner operator --run-id i
 
 The JSON output gains a `verification` object. It holds `artifact_root`, one entry per referenced artifact (`artifact_id`, `digest`, and a `status` of `intact`, `missing` or `tampered`), and a `summary` count per status. Referenced artifacts are the run's rows in the artifact table plus the digests its runtime nodes record: `validation_artifact_digest` and `evidence_artifact_digest` (reported as `node:NODE:KEY`), and `artifact_references` (reported as `node:NODE:artifact_references:INDEX`). `tampered` means the bytes are present but their SHA-256 differs from the recorded digest.
 
-- Exit `0` when every referenced artifact is intact; `12` (`validation_failure`) when any is missing or tampered, or when a recorded digest is malformed.
-- Exit `3` (missing prerequisite) when the ledger file or the run's artifact store root does not exist. Nothing is created.
+- Exit `0` when every referenced artifact is intact; `12` (`validation_failure`) when any is missing or tampered, when a recorded digest is malformed, or when a node records `artifact_references` that is not a list (only an absent field means no references).
+- Exit `3` (missing prerequisite) when the ledger file or the run's artifact store root does not exist, or when SQLite cannot read the ledger read-only because the ledger's directory is not writable (a WAL ledger needs its shared-memory file beside it). Nothing is created.
 - The ledger is opened read-only (`mode=ro`, `query_only`). Nothing is rewritten, deleted, re-published or appended, and run state and aggregate versions are unchanged. Opening a WAL-mode ledger may still leave SQLite `-wal`/`-shm` sidecar files beside it.
 - The artifact store root is the run's own `execution_configuration.artifact_root`; there is no fallback.
 - Without `--verify`, the output is unchanged.

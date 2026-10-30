@@ -259,8 +259,20 @@ def _open_read_only(database: Path) -> LedgerService:
             details={"path": str(path)},
         )
     connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=1")
+        # Reading a WAL ledger needs its shared-memory file; SQLite creates it beside the
+        # ledger, so an unwritable directory fails on the first read, not on connect.
+        connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+    except sqlite3.OperationalError as error:
+        connection.close()
+        raise MissingPrerequisiteError(
+            "engine evidence --verify cannot read the ledger read-only; a WAL ledger can only "
+            "be read where SQLite may create its shared-memory file, so make the ledger's "
+            "directory writable",
+            details={"path": str(path), "sqlite_error": str(error)},
+        ) from error
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=1")
     return LedgerService(connection)
 
 
@@ -285,7 +297,7 @@ def _recorded_artifacts(ledger: LedgerService, run_id: str) -> list[tuple[str, o
         for key in _NODE_DIGEST_KEYS:
             if state.get(key) is not None:
                 recorded.append((f"node:{node_id}:{key}", state[key]))
-        references = state.get("artifact_references") or []
+        references = state.get("artifact_references", [])
         if not isinstance(references, list):
             raise ValidationFailureError(
                 "recorded artifact references are malformed",

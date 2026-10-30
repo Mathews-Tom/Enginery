@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -28,8 +29,16 @@ def _tree(root: Path) -> dict[str, bytes | None]:
     }
 
 
-def _setup(database: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> ArtifactStore:
-    """A started run with two artifacts-table rows and a runtime node digest."""
+def _setup(
+    database: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    node_extra: dict[str, object] | None = None,
+) -> ArtifactStore:
+    """A started run with two artifacts-table rows and a runtime node digest.
+
+    ``node_extra`` overrides fields of the completed runtime node's recorded state.
+    """
     request = _start_request(database, tmp_path)
     store = ArtifactStore(request.execution_configuration.artifact_root)
     with LedgerService.open(database, artifact_store_root=store.root) as ledger:
@@ -67,7 +76,8 @@ def _setup(database: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
             extra={
                 "validation_artifact_digest": str(
                     store.publish_bytes(b"validation report\n", media_type="text/plain")
-                )
+                ),
+                **(node_extra or {}),
             },
         )
     capsys.readouterr()
@@ -197,3 +207,56 @@ def test_verify_refuses_an_unresolvable_artifact_root(
     assert "artifact store root" in captured.err
     assert captured.out == ""
     assert not store.root.exists()
+
+
+@pytest.mark.parametrize("recorded", ["", 0, False, None, {"0": "sha256:0"}])
+def test_verify_rejects_present_artifact_references_that_are_not_a_list(
+    recorded: object, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    _setup(database, tmp_path, capsys, node_extra={"artifact_references": recorded})
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == INTEGRITY_EXIT
+    assert "recorded artifact references are malformed" in captured.err
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("recorded", ["sha256", "md5:abc", "sha256:not-hex", 7])
+def test_verify_rejects_a_malformed_recorded_digest(
+    recorded: object, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    _setup(database, tmp_path, capsys, node_extra={"validation_artifact_digest": recorded})
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == INTEGRITY_EXIT
+    assert "malformed artifact digest" in captured.err
+    assert captured.out == ""
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to any directory")
+def test_verify_names_a_ledger_whose_directory_is_not_writable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ledger_directory = tmp_path / "ledger"
+    ledger_directory.mkdir()
+    database = ledger_directory / "ledger.db"
+    _setup(database, tmp_path, capsys)
+    ledger_directory.chmod(0o555)
+    try:
+        code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+        listing = sorted(path.name for path in ledger_directory.iterdir())
+    finally:
+        ledger_directory.chmod(0o755)
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert "cannot read the ledger read-only" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
+    assert listing == ["ledger.db"]
