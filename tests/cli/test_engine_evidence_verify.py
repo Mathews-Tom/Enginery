@@ -295,3 +295,18 @@ def test_verify_names_a_ledger_that_is_not_a_database(
     assert "file is not a database" in captured.err
     assert captured.out == ""
     assert database.read_bytes() == b"not a sqlite database\n" * 64
+
+
+def test_verify_names_an_empty_file_as_no_engine_ledger(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    database.touch()
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert f"{database} has no ledger tables" in captured.err
+    assert captured.out == ""
+    assert database.read_bytes() == b""
