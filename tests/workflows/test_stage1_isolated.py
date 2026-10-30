@@ -62,14 +62,16 @@ from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
-    Stage1ImplementationDispatch,
     Stage1ImplementationRequest,
-    Stage1ProgressionAction,
     Stage1RunRequest,
-    Stage1RunService,
     stage1_request_from_state,
+)
+from enginery.workflows.run_lifecycle import (
+    Stage1ImplementationDispatch,
+    Stage1ProgressionAction,
+    Stage1RunService,
 )
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)

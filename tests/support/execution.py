@@ -14,7 +14,7 @@ from enginery.domain.execution_selection import (
     SelectionLayer,
     resolve_execution_selection,
 )
-from enginery.workflows.run_lifecycle import Stage1RunRequest
+from enginery.workflows.run_intent import Stage1RunRequest
 
 
 def selection_for(

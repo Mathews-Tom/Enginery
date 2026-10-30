@@ -31,11 +31,8 @@ from enginery.evidence.review_rendering import render_html, render_terminal
 from enginery.ledger.redaction import assert_no_raw_credentials, redact_credential_shaped_text
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
-from enginery.workflows.run_lifecycle import (
-    Stage1RunRequest,
-    Stage1RunService,
-    first_attempt_generation,
-)
+from enginery.workflows.run_intent import Stage1RunRequest
+from enginery.workflows.run_lifecycle import Stage1RunService, first_attempt_generation
 
 
 def _json(value: object) -> str:

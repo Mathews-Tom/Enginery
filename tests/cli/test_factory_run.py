@@ -24,11 +24,11 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.leases import LeaseWrite
 from enginery.ledger.process_manager import ProcessManagerStateWrite
 from enginery.ledger.service import LedgerService
+from enginery.workflows.run_intent import stage1_request_from_state
 from enginery.workflows.run_lifecycle import (
     Stage1Progression,
     Stage1ProgressionAction,
     Stage1RunService,
-    stage1_request_from_state,
 )
 from tests.cli.test_stage1_request_builder import _git, _repository
 from tests.support.github import StandInGitHub, write_stand_in_gh

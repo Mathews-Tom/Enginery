@@ -28,7 +28,8 @@ from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows import run_lifecycle
 from enginery.workflows.behavioral_acceptance import BehavioralAcceptanceService
-from enginery.workflows.run_lifecycle import Stage1ProgressionAction, Stage1RunRequest
+from enginery.workflows.run_intent import Stage1RunRequest
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction
 
 
 def _wire(

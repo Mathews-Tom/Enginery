@@ -97,7 +97,7 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.runner import RunnerSelection
 from enginery.domain.work_item import WorkItem, WorkItemState
 from enginery.workflows.issue_to_pr import issue_to_pr_manifest
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,

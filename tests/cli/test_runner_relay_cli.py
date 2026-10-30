@@ -16,7 +16,7 @@ from enginery.adapters.oci.relay import RelayStatus
 from enginery.cli.main import main
 from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.runner import ImageIdentity, RunnerProfile
-from enginery.workflows.run_lifecycle import stage1_request_from_state
+from enginery.workflows.run_intent import stage1_request_from_state
 from tests.adapters.oci.support import IMAGE_ID, FakeDocker
 from tests.cli.test_runner_cli import (
     HOLD_EXIT,

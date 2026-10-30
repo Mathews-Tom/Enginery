@@ -31,13 +31,13 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, Workflo
 from enginery.ledger.human_decisions import issue_challenge
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
-    Stage1RunService,
     stage1_request_from_state,
 )
+from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.execution import bound_document, selection_for
 

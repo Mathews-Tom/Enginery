@@ -26,7 +26,8 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.engine.supervisor import probe_host
 from enginery.ledger.service import LedgerService
-from enginery.workflows.run_lifecycle import Stage1RunService, stage1_request_from_state
+from enginery.workflows.run_intent import stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.cli.test_stage1_execution_cli import _build_argv, _Run
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
 

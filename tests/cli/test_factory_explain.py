@@ -83,7 +83,7 @@ def test_explain_shows_the_same_digest_build_request_binds(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from enginery.application.effective_config import EffectiveConfig
-    from enginery.workflows.run_lifecycle import stage1_request_from_state
+    from enginery.workflows.run_intent import stage1_request_from_state
     from tests.support.github import write_stand_in_gh
 
     repository, base = _repository(tmp_path)

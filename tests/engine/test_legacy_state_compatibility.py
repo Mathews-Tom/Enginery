@@ -39,7 +39,7 @@ from enginery.engine.workspace import (
     _reservation_state,
 )
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,

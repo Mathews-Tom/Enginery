@@ -60,12 +60,12 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.review import ReviewReport
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
-    Stage1RunService,
 )
+from enginery.workflows.run_lifecycle import Stage1RunService
 
 
 class _CommittedPullRequests(RecordingPullRequests):

@@ -22,11 +22,8 @@ from enginery.domain.errors import HumanActionRequiredError
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewReport
-from enginery.workflows.run_lifecycle import (
-    Stage1ProgressionAction,
-    Stage1RunRequest,
-    Stage1RunService,
-)
+from enginery.workflows.run_intent import Stage1RunRequest
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction, Stage1RunService
 
 
 def _ready_to_verify(

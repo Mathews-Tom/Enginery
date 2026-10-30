@@ -40,11 +40,8 @@ from enginery.workflows.evidence import Stage1EvidenceBundle
 from enginery.workflows.issue_to_pr import STAGE1_VERIFY_CHECK_ID
 from enginery.workflows.pull_request import PullRequestOutcome
 from enginery.workflows.review import ReviewReport
-from enginery.workflows.run_lifecycle import (
-    Stage1ProgressionAction,
-    Stage1RunRequest,
-    stage1_request_from_state,
-)
+from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction
 
 _WINDOW = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)

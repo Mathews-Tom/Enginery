@@ -51,7 +51,7 @@ from enginery.ledger.g4_deficiency import (
     record_g4_deficiency,
 )
 from enginery.ledger.service import LedgerService
-from enginery.workflows.run_lifecycle import Stage1RunRequest, stage1_request_from_state
+from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_state
 
 _SUPPORTED_GATES = frozenset({"G4"})
 _VERIFY_NODE_ID = "verify"

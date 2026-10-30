@@ -18,7 +18,7 @@ from enginery.application.review_packet import ReviewPacket
 from enginery.cli import factory_decisions
 from enginery.ledger.human_decisions import issue_challenge, list_decisions
 from enginery.ledger.service import LedgerService
-from enginery.workflows.run_lifecycle import Stage1RunRequest
+from enginery.workflows.run_intent import Stage1RunRequest
 
 
 @dataclass(frozen=True)
