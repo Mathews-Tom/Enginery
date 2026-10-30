@@ -20,7 +20,7 @@ from enginery.cli.request_compiler import (
 from enginery.domain.digests import Digest
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_catalog import SupportTier
-from enginery.workflows.run_lifecycle import stage1_request_from_state
+from enginery.workflows.run_intent import stage1_request_from_state
 from tests.support.behavioral import declare_behavioral_policy
 from tests.support.capabilities import lock_of, locked_entry
 from tests.support.github import (

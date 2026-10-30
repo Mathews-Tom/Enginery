@@ -69,13 +69,12 @@ from enginery.workflows.node_executors import (
     Stage1ValidationExecutor,
 )
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
-    Stage1ProgressionAction,
     Stage1RunRequest,
-    Stage1RunService,
 )
+from enginery.workflows.run_lifecycle import Stage1ProgressionAction, Stage1RunService
 
 
 def _git(*args: str, cwd: Path) -> str:

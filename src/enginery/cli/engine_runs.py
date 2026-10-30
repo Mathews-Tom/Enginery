@@ -37,7 +37,8 @@ from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.errors import ArtifactDigestMismatchError, ArtifactMissingError
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
-from enginery.workflows.run_lifecycle import Stage1RunService, stage1_request_from_state
+from enginery.workflows.run_intent import stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunService
 
 
 def run_stage1(args: argparse.Namespace) -> int:

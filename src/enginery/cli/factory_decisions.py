@@ -42,11 +42,8 @@ from enginery.ledger.service import LedgerService
 from enginery.policy.human_decisions import decision_verifier
 from enginery.policy.rules import HardRuleEnforcer, HardRuleError
 from enginery.policy.schemas import ApprovalSchema
-from enginery.workflows.run_lifecycle import (
-    Stage1RunRequest,
-    behavioral_repair_exhausted,
-    github_outcome_terminal,
-)
+from enginery.workflows.run_intent import Stage1RunRequest
+from enginery.workflows.run_lifecycle import behavioral_repair_exhausted, github_outcome_terminal
 
 _PUBLICATION = PolicyAction.PULL_REQUEST_OPEN.value
 

@@ -49,7 +49,7 @@ from enginery.cli.config_locations import (
 from enginery.cli.setup_files import refuse_links, require_private_path
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
-from enginery.workflows.run_lifecycle import Stage1RunRequest
+from enginery.workflows.run_intent import Stage1RunRequest
 
 EFFECTIVE_CONFIG_KEY = "effective_config"
 _REBUILD = "rebuild it with `enginery engine build-request`"

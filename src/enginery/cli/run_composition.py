@@ -39,13 +39,8 @@ from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.implementation import SupervisedHarness
-from enginery.workflows.run_lifecycle import (
-    Stage1ExecutionConfiguration,
-    Stage1Progression,
-    Stage1Run,
-    Stage1RunRequest,
-    Stage1RunService,
-)
+from enginery.workflows.run_intent import Stage1ExecutionConfiguration, Stage1Run, Stage1RunRequest
+from enginery.workflows.run_lifecycle import Stage1Progression, Stage1RunService
 
 HEARTBEAT_WINDOW = timedelta(seconds=60)
 

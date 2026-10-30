@@ -22,11 +22,8 @@ from enginery.domain.errors import ExternalConflictError, MissingPrerequisiteErr
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.service import LedgerService
-from enginery.workflows.run_lifecycle import (
-    Stage1RunRequest,
-    Stage1RunService,
-    stage1_request_from_state,
-)
+from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_state
+from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.adapters.oci.support import IMAGE_ID
 from tests.support.github import write_stand_in_gh
 from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger

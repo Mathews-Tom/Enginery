@@ -324,7 +324,7 @@ def test_doctor_digest_matches_build_request_without_run_overrides(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from enginery.workflows.run_lifecycle import stage1_request_from_state
+    from enginery.workflows.run_intent import stage1_request_from_state
     from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
     from tests.support.behavioral import declare_behavioral_policy
 

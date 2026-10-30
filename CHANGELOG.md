@@ -4,6 +4,12 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [Unreleased]
+
+### Breaking
+
+- The run request and its codec move out of the run lifecycle module, without aliases: import `Stage1RunRequest`, `Stage1ExecutionConfiguration`, `Stage1ImplementationRequest`, `Stage1Run` and `stage1_request_from_state` from `enginery.workflows.run_intent` instead of `enginery.workflows.run_lifecycle`. `Stage1RunService`, `Stage1ImplementationDispatch` and `implementation_attempt_id` stay in `enginery.workflows.run_lifecycle`. Class and function names, CLI commands, persisted `stage1` identifiers and request digests are unchanged.
+
 ## [0.8.0] - 2026-10-27
 
 ### Fixed

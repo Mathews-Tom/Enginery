@@ -14,7 +14,7 @@ from enginery.domain.execution_catalog import RangedHostVersion
 from enginery.domain.execution_receipt import ExecutionReceipt
 from enginery.domain.execution_selection import ExecutionHold, ExecutionSelection, RequestedControl
 from enginery.ledger.service import LedgerService
-from enginery.workflows.run_lifecycle import Stage1Run
+from enginery.workflows.run_intent import Stage1Run
 
 _HOST_DEFAULT = "host default"
 

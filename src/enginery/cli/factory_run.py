@@ -58,14 +58,13 @@ from enginery.engine.runtime import (
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.evaluation.outcomes import OutcomeCaptureService, observation_id_for
 from enginery.ledger.service import LedgerService
+from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_state
 from enginery.workflows.run_lifecycle import (
     Stage1ProgressionAction,
-    Stage1RunRequest,
     Stage1RunService,
     behavioral_repair_exhausted,
     first_attempt_generation,
     github_outcome_terminal,
-    stage1_request_from_state,
 )
 
 _TERMINAL_STATUSES = frozenset(state.value for state in RUN_TRANSITIONS.terminal_states)

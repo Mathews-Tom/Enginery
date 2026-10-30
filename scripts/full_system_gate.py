@@ -195,12 +195,12 @@ from enginery.workflows.issue_to_pr import stage1_work_manifest
 from enginery.workflows.merge_policy import MergePolicyService
 from enginery.workflows.plan_to_release import Stage2ReleaseWorkflow
 from enginery.workflows.review import ReviewFinding, ReviewOutcome, ReviewReport, route_review
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
     Stage1RunRequest,
-    Stage1RunService,
 )
+from enginery.workflows.run_lifecycle import Stage1RunService
 
 _HEARTBEAT = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)

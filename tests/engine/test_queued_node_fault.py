@@ -48,11 +48,13 @@ from enginery.engine.supervisor import probe_process
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
 from enginery.workflows.issue_to_pr import stage1_work_manifest
-from enginery.workflows.run_lifecycle import (
+from enginery.workflows.run_intent import (
     Stage1ExecutionConfiguration,
     Stage1ImplementationRequest,
-    Stage1ProgressionAction,
     Stage1RunRequest,
+)
+from enginery.workflows.run_lifecycle import (
+    Stage1ProgressionAction,
     Stage1RunService,
     _implementation_result_path,
 )
