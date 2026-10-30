@@ -258,18 +258,25 @@ def _open_read_only(database: Path) -> LedgerService:
             "engine evidence --verify requires an existing engine ledger",
             details={"path": str(path)},
         )
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection: sqlite3.Connection | None = None
     try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
         connection.execute("PRAGMA query_only=1")
         # Reading a WAL ledger needs its shared-memory file; SQLite creates it beside the
         # ledger, so an unwritable directory fails on the first read, not on connect.
         connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
-    except sqlite3.OperationalError as error:
-        connection.close()
+    except sqlite3.DatabaseError as error:
+        if connection is not None:
+            connection.close()
+        remedy = (
+            "; a WAL ledger can only be read where SQLite may create its shared-memory file, "
+            "so make the ledger's directory writable"
+            if error.sqlite_errorname == "SQLITE_READONLY_DIRECTORY"
+            else ""
+        )
         raise MissingPrerequisiteError(
-            "engine evidence --verify cannot read the ledger read-only; a WAL ledger can only "
-            "be read where SQLite may create its shared-memory file, so make the ledger's "
-            "directory writable",
+            f"engine evidence --verify cannot read the ledger read-only at {path}: {error}"
+            + remedy,
             details={"path": str(path), "sqlite_error": str(error)},
         ) from error
     connection.row_factory = sqlite3.Row
