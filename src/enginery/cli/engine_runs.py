@@ -245,6 +245,14 @@ def _evidence(args: argparse.Namespace) -> int:
             intact = summary["missing"] == 0 and summary["tampered"] == 0
         _print(payload)
         return 0 if intact else exit_code_for(FailureClass.VALIDATION_FAILURE)
+    except sqlite3.DatabaseError as error:
+        if not verify:
+            raise
+        # A file with ledger-named tables but another schema fails on the first real read.
+        raise MissingPrerequisiteError(
+            f"engine evidence --verify cannot read the ledger at {args.database}: {error}",
+            details={"path": str(args.database), "sqlite_error": str(error)},
+        ) from error
     finally:
         ledger.close()
 
@@ -252,16 +260,52 @@ def _evidence(args: argparse.Namespace) -> int:
 def _open_read_only(database: Path) -> LedgerService:
     """Open an existing ledger without any ability to write or create it."""
     path = database.expanduser().absolute()
+    # refuse_links already turns a filesystem failure into a named input error.
     refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
     if not path.is_file():
         raise MissingPrerequisiteError(
             "engine evidence --verify requires an existing engine ledger",
             details={"path": str(path)},
         )
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        connection.execute("PRAGMA query_only=1")
+        # Reading a WAL ledger needs its shared-memory file; SQLite creates it beside the
+        # ledger when it is missing, so an unwritable directory fails on the first read.
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+                _LEDGER_TABLES,
+            )
+        }
+    except sqlite3.DatabaseError as error:
+        if connection is not None:
+            connection.close()
+        remedy = (
+            "; a WAL ledger can only be read where SQLite may create its shared-memory file, "
+            "so make the ledger's directory writable"
+            if error.sqlite_errorname == "SQLITE_READONLY_DIRECTORY"
+            else ""
+        )
+        raise MissingPrerequisiteError(
+            f"engine evidence --verify cannot read the ledger read-only at {path}: {error}"
+            + remedy,
+            details={"path": str(path), "sqlite_error": str(error)},
+        ) from error
+    if tables != set(_LEDGER_TABLES):
+        connection.close()
+        raise MissingPrerequisiteError(
+            f"engine evidence --verify requires an existing engine ledger; {path} has no "
+            "ledger tables",
+            details={"path": str(path)},
+        )
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=1")
     return LedgerService(connection)
+
+
+_LEDGER_TABLES = ("projections", "artifacts")
 
 
 _NODE_DIGEST_KEYS = ("validation_artifact_digest", "evidence_artifact_digest")
@@ -285,7 +329,7 @@ def _recorded_artifacts(ledger: LedgerService, run_id: str) -> list[tuple[str, o
         for key in _NODE_DIGEST_KEYS:
             if state.get(key) is not None:
                 recorded.append((f"node:{node_id}:{key}", state[key]))
-        references = state.get("artifact_references") or []
+        references = state.get("artifact_references", [])
         if not isinstance(references, list):
             raise ValidationFailureError(
                 "recorded artifact references are malformed",
