@@ -8,7 +8,7 @@ for the current compatibility statement.
 
 ### Fixed
 
-- `enginery engine evidence --verify` reports a node whose `artifact_references` is present but not a list (including `""`, `0`, `false` and `null`) as `validation_failure` (12) instead of treating it as no references; only an absent field means none. A ledger that SQLite cannot read read-only, such as a WAL ledger in a directory that is not writable, an unreadable file or a file that is not a database, now exits `3` (missing prerequisite) with an error naming the ledger path and the SQLite error instead of a `sqlite3` traceback.
+- `enginery engine evidence --verify` reports a node whose `artifact_references` is present but not a list (including `""`, `0`, `false` and `null`) as `validation_failure` (12) instead of treating it as no references; only an absent field means none. A ledger that SQLite cannot read read-only, such as a WAL ledger in a directory that is not writable, an unreadable file or a file that is not a database, and a file without engine ledger tables now exit `3` (missing prerequisite) with an error naming the ledger path instead of a `sqlite3` traceback.
 
 ### Breaking
 

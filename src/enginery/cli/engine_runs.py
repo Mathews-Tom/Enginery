@@ -263,8 +263,14 @@ def _open_read_only(database: Path) -> LedgerService:
         connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
         connection.execute("PRAGMA query_only=1")
         # Reading a WAL ledger needs its shared-memory file; SQLite creates it beside the
-        # ledger, so an unwritable directory fails on the first read, not on connect.
-        connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        # ledger when it is missing, so an unwritable directory fails on the first read.
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+                _LEDGER_TABLES,
+            )
+        }
     except sqlite3.DatabaseError as error:
         if connection is not None:
             connection.close()
@@ -279,8 +285,18 @@ def _open_read_only(database: Path) -> LedgerService:
             + remedy,
             details={"path": str(path), "sqlite_error": str(error)},
         ) from error
+    if tables != set(_LEDGER_TABLES):
+        connection.close()
+        raise MissingPrerequisiteError(
+            f"engine evidence --verify requires an existing engine ledger; {path} has no "
+            "ledger tables",
+            details={"path": str(path)},
+        )
     connection.row_factory = sqlite3.Row
     return LedgerService(connection)
+
+
+_LEDGER_TABLES = ("projections", "artifacts")
 
 
 _NODE_DIGEST_KEYS = ("validation_artifact_digest", "evidence_artifact_digest")
