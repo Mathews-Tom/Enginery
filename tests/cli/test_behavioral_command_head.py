@@ -16,7 +16,7 @@ from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
 from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.evidence.test_behavioral_acceptance import _repository
-from tests.workflows.test_stage1_behavioral import _ready_to_verify
+from tests.workflows.test_run_lifecycle_behavioral_verdict import _ready_to_verify
 
 
 @pytest.mark.parametrize("isolated", [False, True])

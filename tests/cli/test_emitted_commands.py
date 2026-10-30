@@ -32,7 +32,7 @@ from enginery.domain.errors import HumanActionRequiredError
 from enginery.engine.runtime import CoordinatorRuntime
 from enginery.ledger.service import LedgerService
 from enginery.workflows.run_lifecycle import Stage1RunService, _exhausted_behavioral_repair
-from tests.cli.test_stage1 import _request
+from tests.cli.test_engine_runs import _request
 
 _SOURCE = Path(__file__).resolve().parents[2] / "src" / "enginery"
 _PREFIX = re.compile(r"(?<![\w./-])(?P<executable>enginery(?:-[a-z][a-z0-9-]*)?)\s+")

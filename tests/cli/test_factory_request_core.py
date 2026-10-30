@@ -13,8 +13,8 @@ from enginery.cli.request_compiler import (
     compile_request,
 )
 from enginery.domain.errors import InvalidInputError
-from tests.cli.test_stage1_layered_request import _write_project, _write_user
-from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
+from tests.cli.test_request_compiler import _minimal_argv, _repository
+from tests.cli.test_request_compiler_layers import _write_project, _write_user
 from tests.support.github import write_stand_in_gh
 
 

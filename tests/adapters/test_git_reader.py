@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.cli.test_stage1_request_builder import _git, _repository
+from tests.cli.test_request_compiler import _git, _repository
 
 from enginery.adapters.git_reader import git_bytes
 from enginery.domain.errors import InvalidInputError

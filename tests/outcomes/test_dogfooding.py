@@ -26,7 +26,7 @@ from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.behavioral import declare_behavioral_policy, fixture_behavioral_checks
 from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.execution import selection_for
-from tests.workflows.test_stage1_runtime import (
+from tests.workflows.test_run_lifecycle import (
     RecordingPullRequests,
     TerminalWorkLedger,
     _git,

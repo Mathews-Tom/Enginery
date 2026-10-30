@@ -19,7 +19,7 @@ from enginery.domain.ids import RunId
 from enginery.engine.runtime import RUN_AGGREGATE_TYPE
 from enginery.ledger.service import LedgerService
 from enginery.workflows.run_intent import stage1_request_from_state
-from tests.cli.test_stage1 import _lifecycle, _request, _start
+from tests.cli.test_engine_runs import _lifecycle, _request, _start
 from tests.support.execution import bound_document
 
 

@@ -15,7 +15,7 @@ from enginery.engine.runtime import CoordinatorRuntime, WorkflowNodeDispatch
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.artifacts import ArtifactMetadataWrite, apply_artifact_metadata
 from enginery.ledger.service import LedgerService
-from tests.cli.test_stage1 import _dispatch, _lifecycle, _start_request
+from tests.cli.test_engine_runs import _dispatch, _lifecycle, _start_request
 
 VALIDATION_ID = "node:qualify:validation_artifact_digest"
 INTEGRITY_EXIT = exit_code_for(FailureClass.VALIDATION_FAILURE)

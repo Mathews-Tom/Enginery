@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 from tests.evidence.test_behavioral_acceptance import _repository
-from tests.workflows.test_stage1_behavioral import _ready_to_verify
-from tests.workflows.test_stage1_runtime import RecordingPullRequests
+from tests.workflows.test_run_lifecycle import RecordingPullRequests
+from tests.workflows.test_run_lifecycle_behavioral_verdict import _ready_to_verify
 
 from enginery.application.behavioral_checks import (
     BehavioralAssertion,

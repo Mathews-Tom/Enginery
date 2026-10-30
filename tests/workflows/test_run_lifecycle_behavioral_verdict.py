@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 from tests.support.authenticated_decisions import AuthenticatedDecisions
-from tests.workflows.test_stage1_runtime import (
+from tests.workflows.test_run_lifecycle import (
     TerminalWorkLedger,
     _bind_publication_base,
     _check_disposition_fixture,

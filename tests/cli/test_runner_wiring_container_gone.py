@@ -11,7 +11,7 @@ from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import run_composition, runner_wiring
 from enginery.domain.runner import RunnerSelection
 from enginery.ledger.service import LedgerService
-from tests.workflows.test_stage1_isolated import (
+from tests.workflows.test_run_lifecycle_isolated import (
     HEARTBEAT,
     NOW,
     ScriptedAdmission,

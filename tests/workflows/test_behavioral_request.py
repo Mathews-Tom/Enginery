@@ -5,7 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from tests.workflows.test_stage1_runtime import _check_disposition_fixture
+from tests.workflows.test_run_lifecycle import _check_disposition_fixture
 
 from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
 from enginery.ledger.service import LedgerService

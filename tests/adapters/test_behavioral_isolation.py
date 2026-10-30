@@ -114,8 +114,8 @@ def test_isolated_request_composition_never_launches_candidate_on_host(
 ) -> None:
     from dataclasses import replace
 
-    from tests.cli.test_stage1 import _request
-    from tests.workflows.test_stage1_isolated import _isolated
+    from tests.cli.test_engine_runs import _request
+    from tests.workflows.test_run_lifecycle_isolated import _isolated
 
     from enginery.adapters.oci.admission import OciRunnerAdmission
     from enginery.adapters.oci.validation import OciValidationRunner

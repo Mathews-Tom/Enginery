@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.execution import selection_for
-from tests.workflows.test_stage1_runtime import (
+from tests.workflows.test_run_lifecycle import (
     _check_disposition_fixture,
     _check_node_dispatch,
     _complete_check_node,
