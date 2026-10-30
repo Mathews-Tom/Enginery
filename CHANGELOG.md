@@ -4,7 +4,7 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
-## [Unreleased]
+## [0.9.0] - 2026-10-30
 
 ### Fixed
 

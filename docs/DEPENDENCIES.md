@@ -15,7 +15,7 @@ release to date, so per-version duplication added no information. The
 changed, or didn't, at each release; add a new row there the next time
 a release actually changes this graph.
 
-## Current dependency graph (`v0.8.0`)
+## Current dependency graph (`v0.9.0`)
 
 ### Base install (`pip install enginery`)
 
@@ -47,7 +47,7 @@ dependencies:
 
 | Name         | Version | License                    | URL                                                 |
 |--------------|---------|----------------------------|------------------------------------------------------|
-| enginery     | 0.8.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
+| enginery     | 0.9.0   | Apache-2.0                 | https://github.com/Mathews-Tom/Enginery              |
 | cryptography | 49.0.0  | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography                 |
 | cffi         | 2.1.0   | MIT-0                      | https://cffi.readthedocs.io/en/latest/whatsnew.html  |
 | pycparser    | 3.0     | BSD-3-Clause               | https://github.com/eliben/pycparser                  |
@@ -79,3 +79,4 @@ dependency graph.
 | `v0.6.0` | None | Check contracts, the packaged acceptance baseline and execution catalog (TOML package data), execution selection, and queue-liveness and worker-identity recovery use the existing runtime dependency footprint (Python standard library and `cryptography`) |
 | `v0.7.0` | None | Isolated execution, capability closure verification, layered configuration, project workflows, behavioral checks and authenticated decisions retain the `v0.6.0` runtime, optional-extra and development dependency footprint |
 | `v0.8.0` | None | No dependency changes since `v0.7.0`; the wheel additionally includes the isolated worker's checkout entry point and hash-locked runtime requirements as OCI assets |
+| `v0.9.0` | None | No dependency changes since `v0.8.0` |
