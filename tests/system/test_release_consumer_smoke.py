@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -99,6 +100,11 @@ def test_real_editable_surface_is_not_installed_workflow_proof(
         "consolidated project/engine/operator help",
         "engine evidence --help lists --verify",
         "engine evidence --verify exits 3 for a missing database without creating it or its parent",
+        *(
+            ["engine evidence --verify names a ledger in an unwritable directory and exits 3"]
+            if os.geteuid() != 0
+            else []
+        ),
         "unsupported pins exit 2",
         "packaged execution catalog",
         "valid pins write requests",
@@ -428,6 +434,36 @@ def test_evidence_verification_rejects_a_created_database_or_parent(
     )
     with pytest.raises(ConsumerSmokeError, match="created the missing database or its parent"):
         release_consumer_smoke._check_evidence_verify(launcher, root=tmp_path)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to any directory")
+def test_real_evidence_verification_names_a_ledger_in_an_unwritable_directory(
+    tmp_path: Path,
+) -> None:
+    not_run = release_consumer_smoke._check_evidence_verify_unwritable_ledger(
+        _EXECUTABLE, root=tmp_path
+    )
+
+    assert not_run == []
+    assert sorted(path.name for path in (tmp_path / "unwritable-evidence").iterdir()) == [
+        "ledger.db"
+    ]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to any directory")
+@pytest.mark.parametrize(
+    "body",
+    [
+        'echo "Traceback (most recent call last):" >&2; exit 1',
+        'echo "missing_prerequisite: something else" >&2; exit 3',
+        'echo "cannot read the ledger read-only" >&2; exit 12',
+        'echo "Traceback: cannot read the ledger read-only" >&2; exit 3',
+    ],
+)
+def test_an_unwritable_ledger_needs_exit_3_and_a_named_error(tmp_path: Path, body: str) -> None:
+    launcher = _launcher(tmp_path, body)
+    with pytest.raises(ConsumerSmokeError, match="did not exit 3 with a named error"):
+        release_consumer_smoke._check_evidence_verify_unwritable_ledger(launcher, root=tmp_path)
 
 
 def test_a_help_without_the_pin_flags_fails_the_help_check(tmp_path: Path) -> None:
