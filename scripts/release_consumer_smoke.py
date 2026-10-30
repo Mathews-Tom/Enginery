@@ -5,7 +5,8 @@ Installs exactly one artifact -- a built wheel, a built sdist, or a published
 requirement -- into a fresh virtual environment, then drives the installed
 `enginery` entry point through the consumer surface a new release must keep
 working: the reported version, `doctor`, the G4 and engine request commands'
-help, read-only evidence verification (a missing database exits 3 and creates nothing),
+help, read-only evidence verification (a missing database exits 3 and creates nothing; a ledger
+in an unwritable directory exits 3 with a named error, not a traceback),
 execution-selection pinning (an unsupported pin and a contradictory strict
 requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged

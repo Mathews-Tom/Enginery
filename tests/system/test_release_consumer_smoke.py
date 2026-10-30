@@ -100,7 +100,11 @@ def test_real_editable_surface_is_not_installed_workflow_proof(
         "consolidated project/engine/operator help",
         "engine evidence --help lists --verify",
         "engine evidence --verify exits 3 for a missing database without creating it or its parent",
-        "engine evidence --verify names a ledger in an unwritable directory and exits 3",
+        *(
+            ["engine evidence --verify names a ledger in an unwritable directory and exits 3"]
+            if os.geteuid() != 0
+            else []
+        ),
         "unsupported pins exit 2",
         "packaged execution catalog",
         "valid pins write requests",
