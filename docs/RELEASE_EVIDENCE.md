@@ -8,6 +8,44 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.9.0`
+
+Post-publication evidence for the M37b release-preparation pass on 2026-10-30 (UTC), recorded in the same session from the retained receipts.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#246](https://github.com/Mathews-Tom/Enginery/pull/246) | `build(release): prepare v0.9.0` | `150feb20e640ee706034dfa1169858d777850baf` |
+| [#247](https://github.com/Mathews-Tom/Enginery/pull/247) | `test(release): cover evidence --verify on an unwritable ledger in the consumer smoke` | `eeb9b9d64697bc708fd6bb1ffa200a1440d6dfe0` |
+
+The release train also carries RF2 (#243, #244: the run request and its codec move to `enginery.workflows.run_intent`; stage-numbered test modules renamed) and FX1 (#245: `engine evidence --verify` rejects malformed artifact references and names ledgers it cannot read). Before and after RF2, the same disposable smoke at a fixed root produced request digest `sha256:42466fba58554f32d71b0c3a319eec1e94752d0d1c39717dea80e8ab14c5a73b`, restart aggregate version 1, tamper rejection and next action `qualify`.
+
+In a clean detached worktree of the tagged commit, `uv run python scripts/release_gate.py --version 0.9.0` passed (docs currency, version consistency, `uv build`, `twine check` and a clean wheel install smoke). `uv run python scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` also passed (`stage1_runs=2 stage2_evidence=yes stage3_evidence=yes`, evidence digest `sha256:3228d475f2dd250fe698db3ed373f78c78fb285f6a8ddadfdd377f4972607356`). The `main` CI run [41052895258](https://github.com/Mathews-Tom/Enginery/actions/runs/41052895258) for that commit concluded `success`. Before the tag, the built wheel and sdist were installed into fresh environments on macOS arm64 (Python 3.12.15) and in a Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15). `scripts/release_consumer_smoke.py` passed for both artifacts on both platforms, including the new check that `engine evidence --verify` on a WAL ledger in an unwritable directory exits 3 with a named error.
+
+### Tag and artifacts
+
+Annotated tag `v0.9.0` (object `3f52f13990139154dacc71a2b8a163f88817b6b0`, created 2026-10-30T13:05:13Z) targets `eeb9b9d64697bc708fd6bb1ffa200a1440d6dfe0`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.9.0-py3-none-any.whl` | `2d9eb18771a8812df915e74408418c2e2a2217fefd5ce9660422b217382bd618` |
+| `enginery-0.9.0.tar.gz` | `d07d90847a620f0e5f826e730a3da816be7205a6007d74a02f7e803c27706a70` |
+
+`release_gate.py` produced these hashes on the tagged commit. The same hashes are on the GitHub Release assets and in PyPI's record of the uploaded files.
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.9.0/>. The wheel was uploaded at 2026-10-30T13:05:24Z and the sdist at 2026-10-30T13:05:26Z, using `twine` with the `[pypi]` entry of `~/.pypirc`.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.9.0>, published 2026-10-30T13:05:36Z, with exactly the wheel and the sdist as assets.
+- **Human approval:** the owner's message "Approved. Proceed with the recommended next steps." followed exposure of the exact candidate hashes and preceded the tag, PyPI upload and GitHub Release.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` independently verified the GitHub Release target and both the GitHub and PyPI artifact hashes (`PASS verify-published-release version=0.9.0 tag=v0.9.0`). No-project consumers installed `enginery==0.9.0` from PyPI on macOS arm64 (Python 3.12.15) and in the Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), and `scripts/release_consumer_smoke.py --package enginery==0.9.0` passed on both, including the unwritable-ledger check and the 20-assertion `installed-manual-path` workflow.
+
+### Not claimed
+
+`v0.9.0` is a maintainability and defect-fix release: it adds no workflow capability and makes no claim of usefulness on real projects. Both agent hosts remain `experimental`. Ubuntu consumer proof uses a Lima VM, not supported-host qualification. G4 remains fail-closed and Stage 4 self-improvement remains unimplemented with no committed date.
+
 ## `v0.8.0`
 
 Post-publication evidence for the M36b release-preparation pass on 2026-10-27 (UTC), recorded in the same session from the retained receipts.

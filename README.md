@@ -10,7 +10,7 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.9.0` is the current release candidate. `v0.1.0`…`v0.8.0` (2026-10-27) are published on PyPI and GitHub Releases. This candidate moves the run request to its own module; `engine evidence --verify` rejects malformed records. Enginery ships three of its four planned
+`v0.9.0` is the current published release (2026-10-30); `v0.1.0`…`v0.8.0` are also published on PyPI and GitHub Releases. `v0.9.0` moves the run request to its own module and makes `engine evidence --verify` reject malformed records. Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered

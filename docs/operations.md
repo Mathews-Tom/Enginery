@@ -7,7 +7,7 @@ running real workflows.
 
 Commands shown here follow the shipped CLI definitions; examples use placeholders
 where operator-specific values are required. The current release line documented in
-[`README.md`](../README.md#status) is `v0.9.0` (release candidate). The Stage 1
+[`README.md`](../README.md#status) is `v0.9.0` (published 2026-10-30). The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `engine status` remains the only Stage 2 CLI command (a
@@ -23,7 +23,7 @@ gate-deferred — see
 
 ## Installation
 
-The current release candidate is `v0.9.0`. Releases `v0.1.0` through `v0.8.0` (2026-10-27) were published to PyPI and GitHub Releases. Install the available published package with:
+The current published release is `v0.9.0` (2026-10-30). Releases `v0.1.0` through `v0.8.0` were also published to PyPI and GitHub Releases. Install the published package with:
 
 ```bash
 pip install enginery
@@ -3276,8 +3276,8 @@ every required assertion ran and passed, `3` (hold) when `git` is missing.
 ## Release scope and gate-deferred work
 
 Releases `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11), `v0.6.0` (2026-10-13),
-`v0.7.0` (2026-10-20) and `v0.8.0` (2026-10-27) are published to PyPI and GitHub
-Releases; `v0.9.0` is the current release candidate. Together the published releases
+`v0.7.0` (2026-10-20), `v0.8.0` (2026-10-27) and `v0.9.0` (2026-10-30) are published to
+PyPI and GitHub Releases; `v0.9.0` is the current release. Together the published releases
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
