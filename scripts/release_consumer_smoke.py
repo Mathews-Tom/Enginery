@@ -36,11 +36,13 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import zipfile
 from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
 
 _WHEEL_NAME = re.compile(r"^enginery-(?P<version>[0-9][0-9A-Za-z.+!]*?)-py3-none-any\.whl$")
@@ -542,6 +544,59 @@ def _check_evidence_verify(executable: Path, *, root: Path) -> None:
     )
 
 
+def _check_evidence_verify_unwritable_ledger(executable: Path, *, root: Path) -> list[str]:
+    """A WAL ledger in an unwritable directory exits 3 with a named error, never a traceback."""
+    if os.geteuid() == 0:
+        item = (
+            "evidence --verify unwritable-ledger NOT RUN (running as root, so a directory "
+            "cannot be made unwritable)"
+        )
+        print(item, flush=True)
+        return [item]
+    directory = root / "unwritable-evidence"
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir()
+    database = directory / "ledger.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE marker (id INTEGER)")
+        connection.commit()
+    command = [
+        str(executable),
+        "engine",
+        "evidence",
+        "--database",
+        str(database),
+        "--owner",
+        "factory",
+        "--run-id",
+        "x",
+        "--verify",
+    ]
+    directory.chmod(0o555)
+    try:
+        result = _run(command, cwd=root)
+        listing = sorted(path.name for path in directory.iterdir())
+    finally:
+        directory.chmod(0o755)
+    if (
+        result.returncode != 3
+        or "Traceback" in result.stderr
+        or "cannot read the ledger read-only" not in result.stderr
+    ):
+        raise ConsumerSmokeError(
+            "a ledger in an unwritable directory did not exit 3 with a named error\n"
+            f"{_describe(command, result)}"
+        )
+    if listing != ["ledger.db"]:
+        raise ConsumerSmokeError(
+            f"evidence --verify left files beside a ledger in an unwritable directory: {listing}"
+        )
+    _note("engine evidence --verify names a ledger in an unwritable directory and exits 3")
+    return []
+
+
 _RECIPE_PROGRAM = (
     "import json\n"
     "from importlib import resources\n"
@@ -935,13 +990,16 @@ def exercise_surface(
     _check_help(executable, root=root)
     _check_consolidated_surface(executable, python, root=root)
     _check_evidence_verify(executable, root=root)
+    unwritable_not_run = _check_evidence_verify_unwritable_ledger(executable, root=root)
     _check_rejected_pins(executable, root=root)
     packaged = _check_packaged_data(python, root=root)
     _check_valid_pins(executable, root=root, packaged=packaged)
     _check_g4_fail_closed(executable, root=root)
     _check_runner_help(executable, root=root)
     _check_stage1_runner_flags(executable, root=root)
-    not_run = _check_runner_recipes(python, root=root, source_root=source_root, wheel=wheel)
+    not_run = unwritable_not_run + _check_runner_recipes(
+        python, root=root, source_root=source_root, wheel=wheel
+    )
     not_run += _check_installed_workflow(
         python, root=root, version=version, source_root=source_root
     )
