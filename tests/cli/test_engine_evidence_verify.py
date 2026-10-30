@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -310,3 +312,20 @@ def test_verify_names_an_empty_file_as_no_engine_ledger(
     assert f"{database} has no ledger tables" in captured.err
     assert captured.out == ""
     assert database.read_bytes() == b""
+
+
+def test_verify_names_a_database_with_a_foreign_schema(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE projections (unrelated TEXT)")
+        connection.execute("CREATE TABLE artifacts (unrelated TEXT)")
+        connection.commit()
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert f"cannot read the ledger at {database}" in captured.err
+    assert captured.out == ""

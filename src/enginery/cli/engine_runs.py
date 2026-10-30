@@ -245,6 +245,14 @@ def _evidence(args: argparse.Namespace) -> int:
             intact = summary["missing"] == 0 and summary["tampered"] == 0
         _print(payload)
         return 0 if intact else exit_code_for(FailureClass.VALIDATION_FAILURE)
+    except sqlite3.DatabaseError as error:
+        if not verify:
+            raise
+        # A file with ledger-named tables but another schema fails on the first real read.
+        raise MissingPrerequisiteError(
+            f"engine evidence --verify cannot read the ledger at {args.database}: {error}",
+            details={"path": str(args.database), "sqlite_error": str(error)},
+        ) from error
     finally:
         ledger.close()
 
@@ -252,6 +260,7 @@ def _evidence(args: argparse.Namespace) -> int:
 def _open_read_only(database: Path) -> LedgerService:
     """Open an existing ledger without any ability to write or create it."""
     path = database.expanduser().absolute()
+    # refuse_links already turns a filesystem failure into a named input error.
     refuse_links(path.parent, Path(path.name), what="Stage 1 ledger")
     if not path.is_file():
         raise MissingPrerequisiteError(
