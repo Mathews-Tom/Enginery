@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from enginery.application.branch_publication import (
     BranchPublicationPort,
@@ -101,18 +102,16 @@ from enginery.workflows.pull_request import (
     evaluate_pull_request,
 )
 from enginery.workflows.review import ReviewOutcome, ReviewReport
-from enginery.workflows.run_intent import (
-    Stage1Run,
-    Stage1RunRequest,
-    _integer,
-    _run_from_state,
-    _string,
-)
+from enginery.workflows.run_intent import _integer, _run_from_state, _string
 from enginery.workflows.verification import (
     Stage1VerificationExecutor,
     Stage1VerificationRequest,
     Stage1VerificationResult,
 )
+
+if TYPE_CHECKING:
+    # Annotation-only: the request types are imported from run_intent, never through here.
+    from enginery.workflows.run_intent import Stage1Run, Stage1RunRequest
 
 
 class Stage1ProgressionAction(StrEnum):
