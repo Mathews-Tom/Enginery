@@ -9,6 +9,6 @@
   - `src/enginery/cli/` or `docs/operations.md`: documented commands/flags or exit codes break, or a command contradicts its stated mutation/model-call boundary; distinguish ledger-content changes from disclosed SQLite WAL sidecars.
 - Do not report style, formatting, naming, or diagnostics already enforced by Ruff check/format, `mypy --strict src`, or `scripts/check_import_boundaries.py`; avoid speculative hardening beyond the documented trusted-local threat model.
 - Limit actionable findings to regressions introduced by the PR. If unchanged issues must be mentioned for context, tag them Pre-existing without requesting a fix. Do not repeat findings raised on an earlier commit of the same PR.
-- Skip routine review of generated `uv.lock` and `**/__pycache__/`; review the originating dependency configuration or Python source instead.
+- Skip routine review of `**/__pycache__/`. `uv.lock` stays in scope for dependency changes: flag packages added or version-changed without a matching `pyproject.toml` change; do not review it line by line.
 - Every finding must name `file:line`, its bug class, and a concrete failing scenario supported by the changed code and relevant callers/contracts—not an inference from a name. Identify the shared cause so the author can fix every affected instance.
 - Tag each finding Important / Nit / Pre-existing. Start the summary with the count of Important findings; when there is nothing actionable, say plainly “Nothing to fix.”
