@@ -1,4 +1,4 @@
-# Enginery v0.9.0 Release Notes
+# Enginery `v0.9.0` Release Notes
 
 ## Breaking changes and migration
 
