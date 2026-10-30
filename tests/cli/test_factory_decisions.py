@@ -43,7 +43,7 @@ from enginery.ledger.service import LedgerService
 from enginery.policy.rules import HardRuleError
 from enginery.workflows.run_intent import Stage1RunRequest
 from enginery.workflows.run_lifecycle import Stage1RunService
-from tests.cli.test_stage1 import _dispatch, _start_request
+from tests.cli.test_engine_runs import _dispatch, _start_request
 
 ACTION = "pull_request.open"
 RUN = "run-stage1"

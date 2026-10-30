@@ -12,8 +12,8 @@ from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
 from enginery.domain.execution_selection import SelectionLayer, SelectionMode
 from enginery.workflows.run_intent import stage1_request_from_state
-from tests.cli.test_stage1_request_builder import _minimal_argv
-from tests.cli.test_stage1_request_builder import _repository as _empty_repository
+from tests.cli.test_request_compiler import _minimal_argv
+from tests.cli.test_request_compiler import _repository as _empty_repository
 from tests.support.behavioral import declare_behavioral_policy
 
 INVALID = exit_code_for(FailureClass.INVALID_INPUT)

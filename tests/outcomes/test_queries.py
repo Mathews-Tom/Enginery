@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tests.workflows.test_stage1_runtime import _request
+from tests.workflows.test_run_lifecycle import _request
 
 from enginery.domain.ids import RunId
 from enginery.engine.runtime import (

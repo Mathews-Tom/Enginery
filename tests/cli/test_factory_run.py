@@ -30,7 +30,7 @@ from enginery.workflows.run_lifecycle import (
     Stage1ProgressionAction,
     Stage1RunService,
 )
-from tests.cli.test_stage1_request_builder import _git, _repository
+from tests.cli.test_request_compiler import _git, _repository
 from tests.support.github import StandInGitHub, write_stand_in_gh
 
 

@@ -24,7 +24,7 @@ from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
 from enginery.ledger.service import LedgerService
-from tests.workflows.test_stage1_isolated import _isolated
+from tests.workflows.test_run_lifecycle_isolated import _isolated
 
 _IMAGE = "sha256:" + "ab" * 32
 _LIMITS = SchedulingLimits(global_concurrency=2, per_repository_concurrency=2)

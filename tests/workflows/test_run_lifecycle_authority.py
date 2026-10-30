@@ -24,7 +24,8 @@ import pytest
 from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.verified_implementation import git
-from tests.workflows.test_stage1_isolated import (
+from tests.workflows.test_run_lifecycle import RecordingPullRequests
+from tests.workflows.test_run_lifecycle_isolated import (
     HEARTBEAT,
     NOW,
     RUN_ID,
@@ -40,7 +41,6 @@ from tests.workflows.test_stage1_isolated import (
     _reap,
     _verify_implementation,
 )
-from tests.workflows.test_stage1_runtime import RecordingPullRequests
 
 from enginery.adapters.git_publication import GitBranchPublisher
 from enginery.application import branch_publication

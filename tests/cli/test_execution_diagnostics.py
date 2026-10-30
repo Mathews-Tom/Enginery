@@ -26,7 +26,7 @@ from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_
 from enginery.workflows.run_lifecycle import Stage1RunService
 from tests.adapters.oci.support import IMAGE_ID
 from tests.support.github import write_stand_in_gh
-from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
+from tests.workflows.test_run_lifecycle import RecordingPullRequests, TerminalWorkLedger
 
 OMP_MODEL = "openai/gpt-5.2"
 CLAUDE_MODEL = "claude-opus-4-8"

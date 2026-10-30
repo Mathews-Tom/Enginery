@@ -35,7 +35,7 @@ from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_selection import SelectionLayer
 from enginery.domain.ids import RunId
 from enginery.workflows.run_intent import Stage1RunRequest, stage1_request_from_state
-from tests.cli.test_stage1_request_builder import _git, _minimal_argv, _repository
+from tests.cli.test_request_compiler import _git, _minimal_argv, _repository
 
 
 def _check(*, expected: str = "persisted") -> dict[str, object]:

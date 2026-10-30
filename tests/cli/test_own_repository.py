@@ -8,8 +8,8 @@ import pytest
 from enginery.cli import factory_run
 from enginery.cli.main import main
 from tests.cli.test_factory_run import bound_project  # noqa: F401
+from tests.cli.test_request_compiler import _git, _minimal_argv, _repository
 from tests.cli.test_runner_cli import _admission_factory, _runner_image_fake
-from tests.cli.test_stage1_request_builder import _git, _minimal_argv, _repository
 from tests.support.behavioral import declare_behavioral_policy
 from tests.support.github import StandInGitHub
 

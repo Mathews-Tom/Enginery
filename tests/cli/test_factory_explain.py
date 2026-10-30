@@ -10,7 +10,7 @@ import pytest
 from enginery.cli._exit_codes import exit_code_for
 from enginery.cli.main import main
 from enginery.domain.errors import FailureClass
-from tests.cli.test_stage1_request_builder import _minimal_argv, _repository
+from tests.cli.test_request_compiler import _minimal_argv, _repository
 
 HOLD = exit_code_for(FailureClass.HUMAN_ACTION_REQUIRED)
 

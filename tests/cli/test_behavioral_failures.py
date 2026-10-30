@@ -12,7 +12,7 @@ from enginery.cli.config_locations import private_state_directory
 from enginery.domain.errors import HumanActionRequiredError
 from enginery.domain.node_attempt import EvidenceResult
 from enginery.ledger.service import LedgerService
-from tests.cli.test_stage1 import _request
+from tests.cli.test_engine_runs import _request
 
 
 def test_stage1_verifier_creates_missing_calibration_without_sidecar(tmp_path: Path) -> None:

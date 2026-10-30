@@ -143,7 +143,7 @@ def test_stage1_restart_is_idempotent_and_rejects_changed_intent(
 
     changed_request = replace(
         request,
-        validation_commands=(("uv", "run", "pytest", "tests/cli/test_stage1.py", "-q"),),
+        validation_commands=(("uv", "run", "pytest", "tests/cli/test_engine_runs.py", "-q"),),
     )
     request_path.write_text(
         json.dumps(bound_document(changed_request)),

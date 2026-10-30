@@ -17,7 +17,7 @@ from enginery.ledger.service import LedgerService
 from enginery.workflows import run_lifecycle
 from enginery.workflows.review import ReviewOutcome
 from enginery.workflows.run_lifecycle import Stage1RunService
-from tests.cli.test_stage1 import _request
+from tests.cli.test_engine_runs import _request
 
 
 @pytest.fixture

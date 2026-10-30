@@ -27,7 +27,7 @@ from enginery.evidence.review_rendering import (
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewOutcome, ReviewReport, route_review
 from enginery.workflows.run_lifecycle import Stage1ProgressionAction
-from tests.workflows.test_stage1_runtime import _review_repair_fixture
+from tests.workflows.test_run_lifecycle import _review_repair_fixture
 
 
 def _packet(text: str = "Change the persisted result") -> ReviewPacket:
@@ -415,7 +415,7 @@ def test_packet_reads_durable_observation_projection_and_verified_head(
     monkeypatch: pytest.MonkeyPatch,
     node_id: str,
 ) -> None:
-    from tests.cli.test_stage1 import _request
+    from tests.cli.test_engine_runs import _request
 
     request = _request(tmp_path)
     run_id = str(request.run.id)
@@ -526,7 +526,7 @@ def test_isolated_packet_reads_bare_intake_not_worker_replace_refs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from enginery.domain.runner import TrustMode
-    from tests.cli.test_stage1 import _request
+    from tests.cli.test_engine_runs import _request
 
     request = _request(tmp_path)
     workspace = request.workspace_path

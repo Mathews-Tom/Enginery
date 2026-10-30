@@ -28,8 +28,8 @@ from enginery.engine.supervisor import probe_host
 from enginery.ledger.service import LedgerService
 from enginery.workflows.run_intent import stage1_request_from_state
 from enginery.workflows.run_lifecycle import Stage1RunService
-from tests.cli.test_stage1_execution_cli import _build_argv, _Run
-from tests.workflows.test_stage1_runtime import RecordingPullRequests, TerminalWorkLedger
+from tests.cli.test_execution_diagnostics import _build_argv, _Run
+from tests.workflows.test_run_lifecycle import RecordingPullRequests, TerminalWorkLedger
 
 _WINDOW = timedelta(seconds=60)
 _LIMITS = SchedulingLimits(global_concurrency=1, per_repository_concurrency=1)

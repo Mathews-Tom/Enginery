@@ -5,8 +5,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from tests.workflows.test_stage1_behavioral import _ready_to_verify
-from tests.workflows.test_stage1_runtime import RecordingPullRequests
+from tests.workflows.test_run_lifecycle import RecordingPullRequests
+from tests.workflows.test_run_lifecycle_behavioral_verdict import _ready_to_verify
 
 from enginery.application.work_ports import PullRequestCheck, PullRequestEvidence, PullRequestReview
 from enginery.domain.errors import StaleEvidenceError, TransientProviderFailureError
