@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** `v0.9.0` is the current release candidate, moving the run request to its own module and making `engine evidence --verify` reject malformed records. `v0.1.0`…`v0.8.0` (2026-10-27) are published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
+- **Status:** `v0.9.0` is the current published release (2026-10-30), moving the run request to its own module and making `engine evidence --verify` reject malformed records. Releases `v0.1.0` through `v0.8.0` were also published on PyPI and GitHub Releases. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
 - **Date:** 2026-07-14 (original authoring date; the status line above reflects the current release)
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 
