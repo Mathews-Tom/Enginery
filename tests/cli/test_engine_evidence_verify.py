@@ -256,7 +256,42 @@ def test_verify_names_a_ledger_whose_directory_is_not_writable(
 
     captured = capsys.readouterr()
     assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
-    assert "cannot read the ledger read-only" in captured.err
+    assert f"cannot read the ledger read-only at {database}" in captured.err
+    assert "make the ledger's directory writable" in captured.err
     assert "Traceback" not in captured.err
     assert captured.out == ""
     assert listing == ["ledger.db"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
+def test_verify_names_a_ledger_file_it_cannot_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    _setup(database, tmp_path, capsys)
+    database.chmod(0o000)
+    try:
+        code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+    finally:
+        database.chmod(0o644)
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert f"cannot read the ledger read-only at {database}" in captured.err
+    assert captured.out == ""
+
+
+def test_verify_names_a_ledger_that_is_not_a_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    database.write_bytes(b"not a sqlite database\n" * 64)
+
+    code = _lifecycle(database, "evidence", "--run-id", "run-stage1", "--verify")
+
+    captured = capsys.readouterr()
+    assert code == exit_code_for(FailureClass.MISSING_PREREQUISITE)
+    assert f"cannot read the ledger read-only at {database}" in captured.err
+    assert "file is not a database" in captured.err
+    assert captured.out == ""
+    assert database.read_bytes() == b"not a sqlite database\n" * 64
