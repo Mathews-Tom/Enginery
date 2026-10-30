@@ -32,12 +32,14 @@ Annotated tag `v0.9.0` (object `3f52f13990139154dacc71a2b8a163f88817b6b0`, creat
 | `enginery-0.9.0-py3-none-any.whl` | `2d9eb18771a8812df915e74408418c2e2a2217fefd5ce9660422b217382bd618` |
 | `enginery-0.9.0.tar.gz` | `d07d90847a620f0e5f826e730a3da816be7205a6007d74a02f7e803c27706a70` |
 
-`release_gate.py` produced these hashes on the tagged commit. The same hashes are on the GitHub Release assets and in PyPI's record of the uploaded files.
+`release_gate.py` produced these hashes on the tagged commit. The same hashes are on the GitHub Release's uploaded assets and in PyPI's record of the uploaded files.
+
+The tagged README is the PyPI long description, so the published 0.9.0 metadata and the tagged tree still read "`v0.9.0` is the current release candidate". Status lines change to "published" only in this later documentation commit on `main`, because the tagged artifacts had to exist before publication could be recorded.
 
 ### Publication and consumer verification
 
 - **PyPI:** <https://pypi.org/project/enginery/0.9.0/>. The wheel was uploaded at 2026-10-30T13:05:24Z and the sdist at 2026-10-30T13:05:26Z, using `twine` with the `[pypi]` entry of `~/.pypirc`.
-- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.9.0>, published 2026-10-30T13:05:36Z, with exactly the wheel and the sdist as assets.
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.9.0>, published 2026-10-30T13:05:36Z, non-draft and not a prerelease, with exactly the wheel and the sdist as uploaded assets. GitHub also lists its own generated source-code archives, which were not uploaded and are not covered by these hashes.
 - **Human approval:** the owner's message "Approved. Proceed with the recommended next steps." followed exposure of the exact candidate hashes and preceded the tag, PyPI upload and GitHub Release.
 
 `uv run python scripts/verify_published_release.py --confirm-published ...` independently verified the GitHub Release target and both the GitHub and PyPI artifact hashes (`PASS verify-published-release version=0.9.0 tag=v0.9.0`). No-project consumers installed `enginery==0.9.0` from PyPI on macOS arm64 (Python 3.12.15) and in the Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), and `scripts/release_consumer_smoke.py --package enginery==0.9.0` passed on both, including the unwritable-ledger check and the 20-assertion `installed-manual-path` workflow.
