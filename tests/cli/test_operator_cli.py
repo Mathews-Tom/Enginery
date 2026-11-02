@@ -271,7 +271,7 @@ def _logical_ledger(path: Path) -> dict[str, list[tuple[object, ...]]]:
     connection = sqlite3.connect(path)
     try:
         return {
-            table: connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
+            table: connection.execute(f"SELECT * FROM {table}").fetchall()
             for table in ("events", "outbox", "command_inbox", "process_manager_state")
         }
     finally:
@@ -287,7 +287,9 @@ def test_drain_wait_rejects_invalid_durations_without_mutation(
 ) -> None:
     before = _logical_ledger(ledger_path)
 
-    code, out, err = _run(capsys, "drain", "--database", str(ledger_path), f"--wait-seconds={value}")
+    code, out, err = _run(
+        capsys, "drain", "--database", str(ledger_path), f"--wait-seconds={value}"
+    )
 
     assert code == 2 and out == {}
     error = err["error"]
