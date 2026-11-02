@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -17,9 +19,9 @@ from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import runner_wiring
 from enginery.cli.operator import main
-from enginery.domain.errors import HumanActionRequiredError
+from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
 from enginery.domain.runner import EngineIdentity, ImageIdentity
-from enginery.engine.operator_control import PAUSED_MESSAGE
+from enginery.engine.operator_control import PAUSED_MESSAGE, drain_wait, read_control_state
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
@@ -263,6 +265,59 @@ def test_drain_requires_an_explicit_mode(ledger_service: LedgerService, ledger_p
     assert raised.value.code == 2
     with pytest.raises(SystemExit):
         main(["drain", "--database", str(ledger_path), "--stop", "--wait-seconds", "5"])
+
+
+def _logical_ledger(path: Path) -> dict[str, list[tuple[object, ...]]]:
+    connection = sqlite3.connect(path)
+    try:
+        return {
+            table: connection.execute(f"SELECT * FROM {table}").fetchall()
+            for table in ("events", "outbox", "command_inbox", "process_manager_state")
+        }
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1"])
+def test_drain_wait_rejects_invalid_durations_without_mutation(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    before = _logical_ledger(ledger_path)
+
+    code, out, err = _run(
+        capsys, "drain", "--database", str(ledger_path), f"--wait-seconds={value}"
+    )
+
+    assert code == 2 and out == {}
+    error = err["error"]
+    assert isinstance(error, dict) and error["failure_class"] == "invalid_input"
+    assert "finite non-negative" in error["message"]
+    assert _logical_ledger(ledger_path) == before
+    assert not read_control_state(ledger_service).paused
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -1.0])
+def test_drain_wait_operation_rejects_invalid_durations_before_pausing(
+    ledger_service: LedgerService, ledger_path: Path, value: float
+) -> None:
+    before = _logical_ledger(ledger_path)
+
+    with pytest.raises(InvalidInputError):
+        drain_wait(ledger_service, now=datetime.now(UTC), wait_seconds=value)
+
+    assert _logical_ledger(ledger_path) == before
+
+
+def test_drain_wait_accepts_zero_on_an_idle_ledger(
+    ledger_path: Path, ledger_service: LedgerService, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, report, _ = _run(capsys, "drain", "--database", str(ledger_path), "--wait-seconds=0")
+
+    assert code == 0 and report["paused"] is True and report["drained"] is True
+    assert read_control_state(ledger_service).paused
 
 
 def test_drain_wait_returns_once_the_real_worker_exits(

@@ -2482,7 +2482,9 @@ uv run enginery operator resume --database ledger.db
   launched stays queued. `resume` clears the flag. Both are idempotent.
 - **`drain`** pauses, then needs an explicit mode (there is no default).
   `--wait-seconds N` waits up to `N` seconds for the running workers to exit on
-  their own and exits `13` if any is still running; it signals nothing.
+  their own and exits `13` if any is still running; it signals nothing. `N` must be
+  a finite non-negative number: NaN, infinity and negative values exit `2` with a
+  JSON `invalid_input` error on stderr, before pausing or writing anything.
   `--stop` stops each running worker through the existing supervisor cancel path
   (the same one `engine cancel` uses): exact-identity process-group termination,
   durable cancellation of the node and release of its workspace. Because it is
