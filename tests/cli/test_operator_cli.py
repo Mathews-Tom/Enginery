@@ -304,7 +304,6 @@ def test_drain_wait_operation_rejects_invalid_wait_without_pausing(
     assert not OperatorControl(ledger_service).state().paused
 
 
-
 def test_drain_wait_returns_once_the_real_worker_exits(
     ledger_service: LedgerService,
     ledger_path: Path,
