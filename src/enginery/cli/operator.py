@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -86,6 +87,17 @@ def add_operator_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     _add_operator_commands(parser)
 
 
+def _wait_seconds(value: str) -> float:
+    message = "--wait-seconds must be a finite non-negative number"
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(message) from None
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError(message)
+    return seconds
+
+
 def _add_operator_commands(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest="operator_command")
 
@@ -107,7 +119,7 @@ def _add_operator_commands(parser: argparse.ArgumentParser) -> None:
     mode = drain.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--wait-seconds",
-        type=float,
+        type=_wait_seconds,
         metavar="N",
         help="Wait up to N seconds for running workers to exit on their own.",
     )

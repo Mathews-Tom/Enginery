@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -17,9 +19,9 @@ from enginery.adapters.oci.engine import OciEngine
 from enginery.adapters.oci.launch import container_name_for
 from enginery.cli import runner_wiring
 from enginery.cli.operator import main
-from enginery.domain.errors import HumanActionRequiredError
+from enginery.domain.errors import HumanActionRequiredError, InvalidInputError
 from enginery.domain.runner import EngineIdentity, ImageIdentity
-from enginery.engine.operator_control import PAUSED_MESSAGE
+from enginery.engine.operator_control import PAUSED_MESSAGE, OperatorControl, drain_wait
 from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch
 from enginery.engine.scheduler import SchedulingLimits
 from enginery.ledger.artifact_store import ArtifactStore
@@ -263,6 +265,44 @@ def test_drain_requires_an_explicit_mode(ledger_service: LedgerService, ledger_p
     assert raised.value.code == 2
     with pytest.raises(SystemExit):
         main(["drain", "--database", str(ledger_path), "--stop", "--wait-seconds", "5"])
+
+
+def _event_count(path: Path) -> int:
+    with contextlib.closing(sqlite3.connect(path)) as connection:
+        return int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+
+
+@pytest.mark.parametrize("value", ("-1", "nan", "inf", "-inf", "abc"))
+def test_drain_rejects_invalid_wait_without_mutating_the_ledger(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    before = _event_count(ledger_path)
+
+    with pytest.raises(SystemExit) as raised:
+        main(["drain", "--database", str(ledger_path), f"--wait-seconds={value}"])
+
+    assert raised.value.code == 2
+    assert "finite non-negative number" in capsys.readouterr().err
+    assert _event_count(ledger_path) == before
+    _, status, _ = _run(capsys, "status", "--database", str(ledger_path))
+    assert status["paused"] is False
+
+
+@pytest.mark.parametrize("value", (-1.0, math.nan, math.inf, -math.inf))
+def test_drain_wait_operation_rejects_invalid_wait_without_pausing(
+    ledger_service: LedgerService, ledger_path: Path, value: float
+) -> None:
+    before = _event_count(ledger_path)
+
+    with pytest.raises(InvalidInputError):
+        drain_wait(ledger_service, now=datetime.now(UTC), wait_seconds=value)
+
+    assert _event_count(ledger_path) == before
+    assert not OperatorControl(ledger_service).state().paused
+
 
 
 def test_drain_wait_returns_once_the_real_worker_exits(

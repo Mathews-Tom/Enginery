@@ -16,6 +16,7 @@ This module imports no workflow code and no runtime scheduler, so the runtime ca
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import sqlite3
 import time
@@ -461,8 +462,8 @@ def drain_wait(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> DrainReport:
     """Pause, then wait up to ``wait_seconds`` for every running worker to exit on its own."""
-    if wait_seconds < 0:
-        raise InvalidInputError("the drain wait cannot be negative")
+    if not math.isfinite(wait_seconds) or wait_seconds < 0:
+        raise InvalidInputError("the drain wait must be a finite non-negative number")
     control = OperatorControl(ledger).pause(now=now, reason="drain").state
     before = live_workers(ledger)
     started = monotonic()
