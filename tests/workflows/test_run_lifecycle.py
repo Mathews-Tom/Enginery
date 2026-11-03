@@ -3049,3 +3049,4 @@ def test_reported_usage_flows_from_omp_output_through_fenced_results_into_the_sc
         ("input", "output", "cache_read", "cache_write", "total"), 0.0
     )
     assert samples[request.implementation.attempt_id]["cost"]["cache_write"] == 0.000125
+    assert samples[request.implementation.attempt_id]["cost"]["cache_read"] == 0.0005

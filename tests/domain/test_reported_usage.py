@@ -94,7 +94,10 @@ def test_counts_stay_complete_while_kept_lines_are_bounded() -> None:
 @pytest.mark.parametrize(
     "damage",
     (
-        lambda state: state.update(state="reported", unreported_lines=[16]),
+        lambda state: (
+            state["messages"].update(unreported=1),
+            state.update(state="reported", unreported_lines=[16]),
+        ),
         lambda state: state.update(extra=True),
         lambda state: state.update(schema_version=True),
         lambda state: state.update(reported_by="provider"),
