@@ -1825,8 +1825,9 @@ Build and qualify the pinned worker image as described below, then preview or ap
 
 ```bash
 enginery init --project /path/to/Enginery --runner isolated-oci \
-  --runner-image sha256:IMAGE_ID --validation-command "enginery-checkout engine --help"
-# Add --apply to create the previewed project policy and private ownership record.
+  --runner-image sha256:IMAGE_ID
+# The tracked .enginery/project.toml supplies validation and behavioral acceptance.
+# Add --apply to create a previewed policy only when setup has not already been applied.
 ```
 
 The worker's source workspace and output are tmpfs-backed container volumes populated
@@ -1834,15 +1835,11 @@ by copy-in/out, not host bind mounts. The root filesystem is read-only. The inst
 runtime, user configuration, per-project ledger, and host credentials are not mounted
 into the worker. This does not change human `review`/`decide` authority.
 
-For Enginery self-development, use `enginery-checkout` in validation commands (for
-example `--validation-command "enginery-checkout engine --help"`) and in committed
-`[acceptance]` command checks (for example `argv = ["enginery-checkout", "--version"]`
-with a stdout assertion). It invokes the candidate checkout's `./src/enginery` and
-reads its version metadata from `pyproject.toml`, using the image's pinned Python 3.12
-and hash-locked runtime dependencies without installation or network access; it refuses
-a working directory without `./src/enginery`. Debian `python3` remains 3.11.2; use
-`python3.12` for other candidate Python commands. The image does not include development
-tools such as pytest, ruff or mypy.
+For Enginery self-development, `enginery-checkout` invokes the candidate checkout's `./src/enginery` and reads its version metadata from `pyproject.toml`, using the image's pinned Python 3.12 and hash-locked runtime dependencies without installation or network access. It refuses a working directory without `./src/enginery`. Debian `python3` remains 3.11.2; use `python3.12` for other candidate Python commands. The image also carries hash-pinned Ruff for offline lint and format checks; pytest and mypy remain host/CI prerequisites.
+
+The tracked project validation commands run `ruff check . .enginery/checks`, `ruff format --check . .enginery/checks`, and the stdlib-only `.enginery/checks/operator_drain.py` acceptance smoke. The smoke exercises the candidate's CLI in subprocesses and its direct drain operation against disposable current-schema ledgers: four invalid numeric waits must preserve structured JSON errors and all logical ledger contents, while valid zero, positive, and stop modes still drain an idle ledger. The independent behavioral checks retain both this drain contract and the evidence-verification guard; they do not establish acceptance for unrelated future issues. Bind issue-specific checks before qualification.
+
+`engine --help` is a startup probe, not behavioral acceptance. The coding worker's shell remains Git-only; do not ask it to run smoke commands that its task constraints prohibit. The coordinator executes validation without model access in separate network-disabled containers against the collected, verified head, and records that revision and the runner receipts. A missing executable blocks validation explicitly; unavailable modules or a failed smoke/lint/format command fail the gate rather than being skipped. Build and qualify the new recipe before binding a new run; an older runtime-only image is stale, not a reason to install dependencies during validation. Existing requests, approvals, repair limits, and historical evidence are not rewritten. Host/CI tests, strict typing, and import-boundary checks remain separate requirements.
 
 ### Upgrade from outside the installed runtime
 

@@ -184,12 +184,13 @@ def test_python_runtime_and_checkout_entry_are_root_owned_and_not_worker_writabl
         "paths = [p for root in roots for p in (root, *root.rglob('*'))];"
         "assert all(p.stat().st_uid == 0 and p.stat().st_gid == 0 "
         "and not p.stat().st_mode & 0o022 for p in paths);"
-        "assert all(importlib.util.find_spec(name) is None for name in ('pytest', 'ruff', 'mypy'));"
-        "print('runtime root-owned, read-only, no development tools')"
+        "assert all(importlib.util.find_spec(name) is None for name in ('pytest', 'mypy'));"
+        "import ruff;"
+        "print('runtime and linter root-owned, read-only')"
     )
     completed = hardened_run(engine, built, ["python3.12", "-c", script])
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == "runtime root-owned, read-only, no development tools\n"
+    assert completed.stdout == "runtime and linter root-owned, read-only\n"
 
 
 def test_only_the_scratch_filesystems_are_writable_and_no_capability_remains(
