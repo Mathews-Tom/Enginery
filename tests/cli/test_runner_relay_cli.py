@@ -18,6 +18,7 @@ from enginery.domain.errors import MissingPrerequisiteError
 from enginery.domain.runner import ImageIdentity, RunnerProfile
 from enginery.workflows.run_intent import stage1_request_from_state
 from tests.adapters.oci.support import IMAGE_ID, FakeDocker
+from tests.adapters.oci.test_relay_manager import FakeRelayDocker
 from tests.cli.test_runner_cli import (
     HOLD_EXIT,
     INVALID_EXIT,
@@ -366,3 +367,55 @@ def test_relay_requires_a_subcommand(
 
     assert exit_code != 0
     assert "up, down or status" in capsys.readouterr().err
+
+
+def _real_relay_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, duration: str
+) -> tuple[FakeRelayDocker, int]:
+    fake = FakeRelayDocker()
+    monkeypatch.setattr("enginery.cli.runner_relay.OciEngine", lambda *, context: fake.engine())
+    token = tmp_path / "token"
+    token.write_text("dummy\n", encoding="utf-8")
+    token.chmod(0o600)
+    code = main(
+        [
+            "runner",
+            "relay",
+            "up",
+            "--relay-image",
+            RELAY_IMAGE,
+            "--upstream",
+            "http://host.docker.internal:47400",
+            "--token-file",
+            str(token),
+            f"--wait-seconds={duration}",
+        ]
+    )
+    return fake, code
+
+
+@pytest.mark.parametrize("duration", ["nan", "inf", "-inf", "-1", "-0.5"])
+def test_relay_up_rejects_invalid_wait_before_any_engine_call(
+    duration: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake, code = _real_relay_up(monkeypatch, tmp_path, duration)
+
+    captured = capsys.readouterr()
+    assert code == INVALID_EXIT
+    assert captured.out == ""
+    assert "--wait-seconds must be a finite non-negative number" in captured.err
+    assert "Traceback" not in captured.err
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("duration", ["0", "-0.0", "0.01", "30"])
+def test_relay_up_accepts_zero_and_positive_finite_waits(
+    duration: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake, code = _real_relay_up(monkeypatch, tmp_path, duration)
+
+    assert code == 0
+    assert fake.calls_of("create")

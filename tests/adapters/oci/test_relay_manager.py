@@ -296,6 +296,31 @@ def _up(manager: RelayManager, token: Path, **kwargs: Any) -> RelayStatus:
     return manager.up(**{**options, **kwargs})
 
 
+@pytest.mark.parametrize("wait", [float("nan"), float("inf"), float("-inf"), -1, -0.5])
+def test_up_rejects_an_invalid_wait_before_any_effect(
+    fake: FakeRelayDocker, tmp_path: Path, wait: float
+) -> None:
+    slept: list[float] = []
+    manager = RelayManager(fake.engine(), sleep=slept.append)
+
+    # The token file does not exist: validation must precede even its inspection.
+    with pytest.raises(InvalidInputError, match="finite non-negative"):
+        _up(manager, tmp_path / "missing-token", wait_seconds=wait)
+
+    assert fake.calls == []
+    assert slept == []
+
+
+@pytest.mark.parametrize("wait", [0, -0.0, 0.01, 2])
+def test_up_accepts_zero_and_positive_finite_waits(
+    fake: FakeRelayDocker, token: Path, wait: float
+) -> None:
+    status = _up(_manager(fake), token, wait_seconds=wait)
+
+    assert status.healthy
+    assert len(fake.calls_of("create")) == 1
+
+
 # --- creation ---------------------------------------------------------------------------------
 
 

@@ -2340,6 +2340,10 @@ your gateway's endpoint. Add `--recreate` to `relay up` when replacing an existi
   reads the content itself, again on every request, and nothing ever logs,
   prints or records it. The mount follows the file's inode, so after
   regenerating the gateway token run `relay up --recreate`.
+- **Wait.** `--wait-seconds N` (default 30) bounds how long `relay up` waits for
+  the relay's health answer. `N` must be a finite non-negative number: NaN,
+  infinity and negative values exit `2` with a plain-text message on stderr,
+  before the token file is inspected or any engine command runs.
 - **Hardening.** The relay container carries the worker profile's flags: no
   capabilities, `no-new-privileges`, a read-only root filesystem, tmpfs scratch,
   and small memory/CPU/pids limits. It publishes no port, mounts nothing but the
