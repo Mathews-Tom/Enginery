@@ -102,6 +102,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     outcome_failures_parser.add_argument("--database", required=True, type=Path)
     outcome_failures_parser.add_argument("--run-id", required=True)
+    outcome_summary_parser = outcome_subparsers.add_parser(
+        "summary", help="Inspect one run's evidence-backed scorecard without changing the ledger."
+    )
+    outcome_summary_parser.add_argument("--database", required=True, type=Path)
+    outcome_summary_parser.add_argument("--run-id", required=True)
 
     gate_parser = subparsers.add_parser(
         "gate", help="Engine ledger: Report decision-gate readiness."

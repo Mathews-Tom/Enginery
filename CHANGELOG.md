@@ -4,6 +4,12 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
+## [Unreleased]
+
+### Added
+
+- `enginery outcome summary --database PATH --run-id RUN` emits a read-only, evidence-backed JSON scorecard for one Stage 1 run. It separates native publication and completion from downstream outcomes, deduplicates resumed attempts, and reports recorded assistance and timing/cost/effective-control coverage without treating missing measurements or external human effort as zero. No new telemetry, schema migration or provider calls are introduced.
+
 ## [0.9.0] - 2026-10-30
 
 ### Fixed

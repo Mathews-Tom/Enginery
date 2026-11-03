@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
-from enginery.domain.errors import InvalidInputError
+from enginery.cli.outcome_summary import summarize_run
+from enginery.cli.setup_files import refuse_links
+from enginery.domain.errors import InvalidInputError, MissingPrerequisiteError
 from enginery.domain.ids import ObservationId, RunId
 from enginery.domain.observation import ObservationRequest, ObservationState
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE
@@ -39,9 +43,34 @@ def run_outcome(args: argparse.Namespace) -> int:
         _interventions(args)
     elif command == "failures":
         _failures(args)
+    elif command == "summary":
+        _summary(args)
     else:  # pragma: no cover - argparse restricts command values
         raise AssertionError(f"unhandled outcome command: {command}")
     return 0
+
+
+def _summary(args: argparse.Namespace) -> None:
+    path = args.database.expanduser().absolute()
+    refuse_links(path.parent, Path(path.name), what="outcome summary ledger")
+    if not path.is_file():
+        raise MissingPrerequisiteError(
+            f"outcome summary requires an existing ledger at {path}", details={"path": str(path)}
+        )
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=1")
+        _print(summarize_run(LedgerService(connection), RunId(args.run_id)))
+    except sqlite3.DatabaseError as error:
+        raise MissingPrerequisiteError(
+            f"outcome summary cannot read the ledger read-only at {path}: {error}",
+            details={"path": str(path), "sqlite_error": str(error)},
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _list(args: argparse.Namespace) -> None:
