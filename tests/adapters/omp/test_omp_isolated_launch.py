@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.omp_usage import omp_transcript, omp_usage, render
 from tests.support.runner_context import (
     harness_task,
     isolated_context,
@@ -536,6 +537,38 @@ def test_an_isolated_workers_model_id_is_labelled_as_worker_reported(tmp_path: P
     assert receipt.effective_model.reported_by == "worker"
     assert receipt.to_state()["effective_model"]["reported_by"] == "worker"  # type: ignore[index]
     assert receipt.effective_effort.reported_by is None  # an unknown control asserts nothing
+
+
+def test_an_isolated_workers_usage_is_labelled_as_its_own_claim_even_when_failed(
+    tmp_path: Path,
+) -> None:
+    runner = isolated_context(tmp_path / "receipts")
+    harness, _ = _harness(tmp_path, runner=runner)
+    task = harness_task(tmp_path / "workspace", "omp", operation_id="op-usage-1")
+    result_path = tmp_path / "out" / "result.json"
+    usage = omp_usage(input_tokens=90, output_tokens=12, cost=(0.0009, 0.00012, 0.0, 0.0))
+    write_worker_result(
+        result_path,
+        operation_id="op-usage-1",
+        output=render(omp_transcript(usage, terminal=False)),
+        terminal_status="failed",
+    )
+    write_runner_receipt(runner, "op-usage-1", "omp")
+    write_launch_outcome(runner, "op-usage-1", exit_code=1)
+
+    _, result = harness.collect_supervised(task, result_path=result_path)
+
+    assert result.terminal_status == "failed"
+    assert result.reported_usage is not None
+    assert result.reported_usage.reported_by == "worker"
+    assert result.reported_usage.source_artifact == result.outputs[0].digest
+    assert result.reported_usage.to_state()["tokens"] == {
+        "input": 90,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "total": 102,
+    }
 
 
 def test_a_trusted_local_models_receipt_is_unlabelled_and_unchanged(tmp_path: Path) -> None:

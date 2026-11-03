@@ -29,6 +29,12 @@ from enginery.domain.ids import (
 )
 from enginery.domain.node_attempt import NodeAttempt, NodeAttemptState
 from enginery.domain.outcome import OutcomeKind
+from enginery.domain.reported_usage import (
+    ReportedUsage,
+    UsageCost,
+    UsageReportBuilder,
+    UsageTokens,
+)
 from enginery.domain.run import Run, RunState
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.serialization import node_attempt_to_dict
@@ -163,6 +169,47 @@ def _node(
         "runtime_node.deterministic_human_wait"
         if status == "awaiting_human"
         else "runtime_node.deterministic_completed",
+    )
+
+
+_USAGE_ARTIFACT = Digest.of_bytes(b"retained omp output")
+
+
+def _usage_report(
+    *, unreported: tuple[int, ...] = (), malformed: tuple[tuple[int, str], ...] = ()
+) -> ReportedUsage:
+    builder = UsageReportBuilder()
+    builder.add_report(
+        4,
+        UsageTokens(1200, 300, 5000, 100, 6600),
+        UsageCost(0.0012, 0.003, 0.0005, 0.000125, 0.004825),
+    )
+    for line in unreported:
+        builder.add_unreported(line)
+    for line, reason in malformed:
+        builder.add_malformed(line, reason)
+    report = builder.build(source_artifact=_USAGE_ARTIFACT, reported_by="worker")
+    assert report is not None
+    return report
+
+
+def _persist_usage(
+    ledger: LedgerService, usage: dict[str, object], *, references: list[str] | None = None
+) -> None:
+    """Append implement-1's fenced result as the collector writes it, carrying ``usage``."""
+    _persist(
+        ledger,
+        "node_attempt",
+        "implement-1",
+        {
+            "run_id": _RUN,
+            "node_id": "implement",
+            "attempt_id": "implement-1",
+            "terminal_result": "passed",
+            "artifact_references": [str(_USAGE_ARTIFACT)] if references is None else references,
+            "result": {"harness_status": "succeeded", "reported_usage": usage},
+        },
+        "node_attempt.result_ingested",
     )
 
 
@@ -460,7 +507,16 @@ def test_summary_reports_partial_legacy_measurements_and_observed_receipt_contro
         assert measurement["samples"][0]["evidence"]["aggregate_type"] == "node_attempt"
     assert measurements["timing"]["total_duration_seconds"] is None
     assert measurements["cost"]["total_cost_amount"] is None
+    # Historical results predate the producer: both attempts stay explicitly unmeasured.
     assert measurements["usage"]["state"] == "unknown"
+    assert measurements["usage"]["samples"] == []
+    assert measurements["usage"]["coverage"] == {
+        "implementation_attempts": 2,
+        "measured_attempts": 0,
+        "complete_attempts": 0,
+        "malformed_attempts": 0,
+        "unmeasured_attempt_ids": ["implement-0", "implement-1"],
+    }
     controls = measurements["effective_controls"]
     assert controls["coverage"] == {"implementation_attempts": 2, "receipts": 1}
     receipt = controls["receipts"][0]
@@ -472,6 +528,66 @@ def test_summary_reports_partial_legacy_measurements_and_observed_receipt_contro
     assert receipt["effective_effort"]["state"] == "unknown"
     assert receipt["effective_effort"]["value"] is None
     assert receipt["evidence"]["aggregate_id"] == "implement-1"
+
+
+@pytest.mark.parametrize(
+    ("report", "state", "measured", "complete", "malformed"),
+    [
+        (_usage_report(), "partial", 1, 1, 0),
+        (_usage_report(unreported=(9,)), "partial", 1, 0, 0),
+        (
+            _usage_report(malformed=((9, "usage.cost must be an object"),)),
+            "malformed",
+            0,
+            0,
+            1,
+        ),
+    ],
+    ids=["one-historical-attempt", "unreported-message", "malformed-report"],
+)
+def test_summary_usage_coverage_is_per_attempt_and_never_hides_gaps(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    report: ReportedUsage,
+    state: str,
+    measured: int,
+    complete: int,
+    malformed: int,
+) -> None:
+    database = tmp_path / "ledger.db"
+    seed_summary_fixture(database, "success")
+    with LedgerService.open(database) as ledger:
+        _persist_usage(ledger, report.to_state())
+        commit_seq = ledger.connection.execute("SELECT MAX(commit_seq) FROM events").fetchone()[0]
+
+    usage = _summary(database, capsys)["measurements"]["usage"]
+
+    assert usage["state"] == state
+    assert usage["coverage"] == {
+        "implementation_attempts": 2,
+        "measured_attempts": measured,
+        "complete_attempts": complete,
+        "malformed_attempts": malformed,
+        "unmeasured_attempt_ids": ["implement-0"],
+    }
+    [sample] = usage["samples"]
+    assert sample["attempt_id"] == "implement-1"
+    assert (sample["terminal_result"], sample["harness_status"]) == ("passed", "succeeded")
+    assert sample["reported_by"] == "worker"
+    assert sample["source"]["artifact_digest"] == str(_USAGE_ARTIFACT)
+    assert sample["cost_currency"] is None
+    assert sample["evidence"]["commit_seq"] == commit_seq
+    expected = report.to_state()
+    for key in (
+        "state",
+        "messages",
+        "tokens",
+        "cost",
+        "reported_lines",
+        "unreported_lines",
+        "malformed",
+    ):
+        assert sample[key] == expected[key]
 
 
 def test_summary_missing_measurements_are_unknown_not_requested_values_or_zero(
@@ -545,7 +661,9 @@ def test_summary_unknown_run_reports_named_error_without_mutating_ledger(
     assert ledger_snapshot(database) == before
 
 
-@pytest.mark.parametrize("malformation", ["receipt", "timestamp", "cost", "event_json"])
+@pytest.mark.parametrize(
+    "malformation", ["receipt", "timestamp", "cost", "event_json", "usage", "usage_artifact"]
+)
 def test_summary_malformed_evidence_fails_visibly_with_source_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], malformation: str
 ) -> None:
@@ -559,6 +677,11 @@ def test_summary_malformed_evidence_fails_visibly_with_source_identity(
                 ("{not-json", "node_attempt", "implement-1"),
             )
             ledger.connection.commit()
+        elif malformation in {"usage", "usage_artifact"}:
+            usage = _usage_report().to_state()
+            if malformation == "usage":
+                usage["tokens"] = {**usage["tokens"], "input": -1}  # type: ignore[dict-item]
+            _persist_usage(ledger, usage, references=[] if malformation != "usage" else None)
         elif malformation == "receipt":
             _persist(
                 ledger,

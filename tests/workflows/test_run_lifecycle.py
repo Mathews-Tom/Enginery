@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from tests.support.authenticated_decisions import AuthenticatedDecisions
 from tests.support.behavioral import fixture_behavioral_checks
 from tests.support.branch_publication import RecordingBranchPublisher
 from tests.support.execution import selection_for
+from tests.support.omp_usage import message_end_lines, omp_transcript, omp_usage, render
 
 from enginery.adapters.omp import OmpAdapterConfig, OmpHarness
 from enginery.application.work_ports import (
@@ -26,6 +30,7 @@ from enginery.application.work_ports import (
     WorkLedgerPort,
     WorkLedgerSnapshot,
 )
+from enginery.cli.main import main
 from enginery.domain.digests import Digest
 from enginery.domain.enums import RiskClass, WorkKind
 from enginery.domain.errors import (
@@ -2213,8 +2218,14 @@ def _check_disposition_fixture(
 
 
 def _review_repair_fixture(
-    ledger_service: LedgerService, tmp_path: Path, *, repair_limit: int = 1
+    ledger_service: LedgerService,
+    tmp_path: Path,
+    *,
+    repair_limit: int = 1,
+    transcript: str | None = None,
 ) -> tuple[Stage1RunRequest, Stage1RunService, CoordinatorRuntime, datetime]:
+    """Drive generation 0 through validation; ``transcript`` replaces the minimal omp output."""
+
     def agent_implementation(manifest: WorkflowManifest) -> WorkflowManifest:
         return replace(
             manifest,
@@ -2247,8 +2258,12 @@ def _review_repair_fixture(
         "path.write_text(path.read_text() + 'implemented\\n')\n"
         "subprocess.run(['git', 'commit', '-am', 'implement candidate'], "
         "check=True, capture_output=True)\n"
-        "for event in ('session', 'agent_start', 'agent_end'):\n"
-        "    print(json.dumps({'type': event}))\n",
+        + (
+            f"print({transcript!r})\n"
+            if transcript is not None
+            else "for event in ('session', 'agent_start', 'agent_end'):\n"
+            "    print(json.dumps({'type': event}))\n"
+        ),
         encoding="utf-8",
     )
     fake_omp.chmod(0o755)
@@ -2901,3 +2916,136 @@ def test_a_new_stage1_run_rejects_a_request_validation_command_that_runs_a_shell
 
     with pytest.raises(InvalidInputError, match="shell interpreter"):
         service.start(request, now=now, heartbeat_window=timedelta(seconds=60))
+
+
+def _ledger_contents(path: Path) -> tuple[str, ...]:
+    with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        return tuple(connection.iterdump())
+
+
+def test_reported_usage_flows_from_omp_output_through_fenced_results_into_the_scorecard(
+    ledger_service: LedgerService,
+    ledger_path: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Producer -> supervised collection -> fenced persistence -> ``outcome summary`` CLI."""
+    first = omp_usage(
+        input_tokens=1200,
+        output_tokens=300,
+        cache_read=5000,
+        cache_write=100,
+        cost=(0.0012, 0.003, 0.0005, 0.000125),
+    )
+    second = omp_usage(
+        input_tokens=40, output_tokens=7, cache_read=6200, cost=(0.00004, 0.0, 0.0, 0.0)
+    )
+    zero = omp_usage(input_tokens=0, output_tokens=0)
+    request, service, _, now = _review_repair_fixture(
+        ledger_service, tmp_path, transcript=render(omp_transcript(first, second))
+    )
+    service.review_implementation(
+        request,
+        ReviewReport(
+            producer="omp-agent",
+            reviewer="independent-reviewer",
+            findings=(ReviewFinding("Handle the empty input", actionable=True, blocking=False),),
+        ),
+        repair_attempt=0,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+    )
+    # The repair attempt reports an explicit zero call, then fails before agent_end.
+    (tmp_path / "fake-omp").write_text(
+        f"#!{sys.executable}\n"
+        f"print({render(omp_transcript(zero, terminal=False))!r})\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    service.advance(
+        request.run.id,
+        now=now,
+        heartbeat_window=timedelta(seconds=60),
+        lease_window=timedelta(seconds=60),
+        limits=SchedulingLimits(global_concurrency=1, per_repository_concurrency=1),
+    )
+    deadline = time.monotonic() + 10
+    while (
+        service.next_action(request.run.id).action
+        is not Stage1ProgressionAction.COLLECT_IMPLEMENTATION
+    ):
+        if time.monotonic() >= deadline:
+            pytest.fail(f"repair worker not collectable: {service.next_action(request.run.id)}")
+        time.sleep(0.01)
+    repaired = service.collect_implementation(
+        request, now=now, heartbeat_window=timedelta(seconds=60)
+    )
+    assert repaired.terminal_status == "failed"
+    arguments = ["outcome", "summary", "--database", str(ledger_path)]
+
+    def scorecard() -> dict[str, Any]:
+        before = _ledger_contents(ledger_path)
+        assert main([*arguments, "--run-id", str(request.run.id)]) == 0
+        assert _ledger_contents(ledger_path) == before  # inspection writes no ledger content
+        document: dict[str, Any] = json.loads(capsys.readouterr().out)
+        return document
+
+    collected = scorecard()
+    attempts = ledger_service.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE aggregate_type = 'node_attempt'"
+    ).fetchone()[0]
+    # A repeated collection is refused; the coordinator epoch it claimed first is not usage.
+    with pytest.raises(ExternalConflictError):
+        service.collect_implementation(request, now=now, heartbeat_window=timedelta(seconds=60))
+    payload = scorecard()
+    assert payload["measurements"]["usage"] == collected["measurements"]["usage"]
+    assert (
+        attempts
+        == ledger_service.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE aggregate_type = 'node_attempt'"
+        ).fetchone()[0]
+    )
+    assert payload["accounting"]["task_count"] == 1
+    assert payload["accounting"]["recorded_repair_count"] == 1
+    usage = payload["measurements"]["usage"]
+    repair_id = f"{request.run.id}-implement-1"
+    assert usage["state"] == "observed"
+    assert usage["coverage"] == {
+        "implementation_attempts": 2,
+        "measured_attempts": 2,
+        "complete_attempts": 2,
+        "malformed_attempts": 0,
+        "unmeasured_attempt_ids": [],
+    }
+    samples = {sample["attempt_id"]: sample for sample in usage["samples"]}
+    assert set(samples) == {request.implementation.attempt_id, repair_id}
+    store = ArtifactStore(tmp_path / "artifacts")
+    for attempt_id, terminal, harness, calls in (
+        (request.implementation.attempt_id, "passed", "succeeded", (first, second)),
+        (repair_id, "failed", "failed", (omp_usage(input_tokens=0, output_tokens=0),)),
+    ):
+        sample = samples[attempt_id]
+        assert (sample["terminal_result"], sample["harness_status"]) == (terminal, harness)
+        assert sample["state"] == "reported"
+        assert sample["reported_by"] == "harness"
+        assert sample["cost_currency"] is None
+        artifact = sample["source"]["artifact_digest"]
+        source_event = ledger_service.connection.execute(
+            "SELECT payload FROM events WHERE commit_seq = ?",
+            (sample["evidence"]["commit_seq"],),
+        ).fetchone()
+        assert artifact in json.loads(source_event["payload"])["artifact_references"]
+        algorithm, _, hex_value = artifact.partition(":")
+        text = store.read_bytes(Digest(algorithm=algorithm, hex_value=hex_value)).decode()
+        assert sample["reported_lines"] == message_end_lines(text)
+        assert sample["tokens"] == {
+            "input": sum(call["input"] for call in calls),  # type: ignore[misc]
+            "output": sum(call["output"] for call in calls),  # type: ignore[misc]
+            "cache_read": sum(call["cacheRead"] for call in calls),  # type: ignore[misc]
+            "cache_write": sum(call["cacheWrite"] for call in calls),  # type: ignore[misc]
+            "total": sum(call["totalTokens"] for call in calls),  # type: ignore[misc]
+        }
+    assert samples[repair_id]["cost"] == dict.fromkeys(
+        ("input", "output", "cache_read", "cache_write", "total"), 0.0
+    )
+    assert samples[request.implementation.attempt_id]["cost"]["cache_write"] == 0.000125

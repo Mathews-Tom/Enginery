@@ -15,6 +15,7 @@ from datetime import datetime
 from enginery.domain.errors import InvalidInputError
 from enginery.domain.execution_receipt import ExecutionReceipt
 from enginery.domain.ids import NodeId, ObservationId, OperationId, RunId
+from enginery.domain.reported_usage import ReportedUsage, UsageReportState
 from enginery.domain.serialization import (
     node_attempt_from_dict,
     observation_from_dict,
@@ -279,11 +280,71 @@ def _assistance(ledger: LedgerService, run_id: RunId, history: list[_Event]) -> 
     }
 
 
+def _usage_sample(
+    samples: dict[str, dict[str, object]], event: _Event, result: Mapping[str, object]
+) -> None:
+    """Record one attempt's persisted usage claim, bound to an artifact it retained."""
+    report = ReportedUsage.from_state(result["reported_usage"])
+    references = event.state.get("artifact_references")
+    if not isinstance(references, list) or str(report.source_artifact) not in references:
+        raise ValueError("reported usage cites an artifact the attempt did not retain")
+    state = report.to_state()
+    del state["schema_version"]
+    sample: dict[str, object] = {
+        "attempt_id": event.aggregate_id,
+        "terminal_result": event.state.get("terminal_result"),
+        "harness_status": result.get("harness_status"),
+        **state,
+        "cost_currency": None,
+        "evidence": event.evidence(),
+    }
+    prior = samples.get(event.aggregate_id)
+    if prior is None:
+        samples[event.aggregate_id] = sample
+    elif {**prior, "evidence": None} != {**sample, "evidence": None}:
+        raise ValueError("one attempt retains conflicting usage reports")
+
+
+def _usage_measurement(
+    samples: dict[str, dict[str, object]], implementation_ids: set[str]
+) -> dict[str, object]:
+    """Per-attempt harness claims with coverage; never a run total or a billed amount."""
+    attempt_ids = implementation_ids | samples.keys()
+    states = [sample["state"] for sample in samples.values()]
+    complete = states.count(UsageReportState.REPORTED.value)
+    malformed = states.count(UsageReportState.MALFORMED.value)
+    if not samples:
+        state = "unknown"
+    elif malformed:
+        state = "malformed"
+    elif complete == len(attempt_ids):
+        state = "observed"
+    else:
+        state = "partial"
+    return {
+        "state": state,
+        "samples": list(samples.values()),
+        "coverage": {
+            "implementation_attempts": len(attempt_ids),
+            "measured_attempts": len(samples) - malformed,
+            "complete_attempts": complete,
+            "malformed_attempts": malformed,
+            "unmeasured_attempt_ids": sorted(attempt_ids - samples.keys()),
+        },
+        "reason": (
+            "harness-reported usage of finalized assistant messages, per attempt; worker or "
+            "harness claims, not verified billing; cost has no currency; unfinalized calls, "
+            "unreporting harnesses and earlier records are not represented; no run total"
+        ),
+    }
+
+
 def _measurements(attempt_events: list[_Event], implementation_ids: set[str]) -> dict[str, object]:
     latest: dict[str, _Event] = {}
     timing: dict[str, dict[str, object]] = {}
     costs: dict[str, dict[str, object]] = {}
     receipts: dict[str, dict[str, object]] = {}
+    usage: dict[str, dict[str, object]] = {}
     for event in attempt_events:
         latest[event.aggregate_id] = event
         state = event.state
@@ -332,6 +393,8 @@ def _measurements(attempt_events: list[_Event], implementation_ids: set[str]) ->
                     **receipt.to_state(),
                     "evidence": event.evidence(),
                 }
+            if isinstance(result, dict) and "reported_usage" in result:
+                _usage_sample(usage, event, result)
         except (InvalidInputError, ValueError, TypeError, KeyError, OverflowError) as error:
             raise _malformed(event.evidence(), error) from error
     count = len(latest.keys() | implementation_ids)
@@ -353,10 +416,7 @@ def _measurements(attempt_events: list[_Event], implementation_ids: set[str]) ->
 
     return {
         "timing": measurement(timing, "total_duration_seconds"),
-        "usage": {
-            **_unknown("no structured token-usage producer in retained attempt records"),
-            "coverage": {"attempts": count, "measured_attempts": 0},
-        },
+        "usage": _usage_measurement(usage, implementation_ids),
         "cost": measurement(costs, "total_cost_amount"),
         "effective_controls": {
             "state": (
