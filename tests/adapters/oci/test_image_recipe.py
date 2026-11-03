@@ -223,10 +223,13 @@ def test_the_lock_assets_are_part_of_the_recipe(name: str) -> None:
     assert name in image.load_recipe()
 
 
-def test_runtime_requirements_match_the_locked_runtime_closure_on_both_architectures() -> None:
+def test_runtime_and_linter_requirements_match_the_lock_on_both_architectures() -> None:
     lock = tomllib.loads((Path(__file__).resolve().parents[3] / "uv.lock").read_text())
     packages = {package["name"]: package for package in lock["package"]}
-    pending = [dependency["name"] for dependency in packages["enginery"]["dependencies"]]
+    pending = [
+        *(dependency["name"] for dependency in packages["enginery"]["dependencies"]),
+        "ruff",
+    ]
     closure: set[str] = set()
     while pending:
         name = pending.pop()

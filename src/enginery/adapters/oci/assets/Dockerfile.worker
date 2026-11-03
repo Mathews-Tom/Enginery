@@ -68,7 +68,7 @@ RUN set -eu; \
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 # uv's digest pins its interpreter download catalog (including archive hashes). Keep the
-# interpreter and runtime-only venv root-owned; do not replace Debian's python3 or put the
+# interpreter and runtime/linter venv root-owned; do not replace Debian's python3 or put the
 # venv's unversioned python3 first on PATH. Both supported architectures use uv.lock wheel hashes.
 COPY runtime-requirements.txt /opt/enginery/
 RUN set -eu; \

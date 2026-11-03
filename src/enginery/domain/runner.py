@@ -1188,8 +1188,8 @@ _TRUSTED_LOCAL_PERMISSIONS: dict[str, PermissionMapping] = {
 # Bash is allowed only for local version control: pushing, remotes, config, fetching and network
 # tools are denied outright and the web tools are not offered. No entry runs a test runner or a
 # linter: those execute code from the workspace (conftest, plugins, config), which a deny entry
-# for publishing would not stop, and the worker image does not carry them. Git hooks are disabled
-# for the worker through command-scoped configuration in its environment.
+# for publishing would not stop. Validation runs separately, offline, under the coordinator.
+# Git hooks are disabled for the worker through command-scoped configuration in its environment.
 #
 # These lists narrow the tool surface; they are not the security boundary. Allowed git commands
 # still honour repository-local configuration (diff drivers, fsmonitor) that the worker can write.

@@ -1,5 +1,5 @@
-# Enginery's runtime closure from uv.lock, CPython 3.12 on linux/amd64 and linux/arm64.
-# Only the manylinux wheels below are admitted; no source builds or development tools.
+# Runtime closure plus the offline validation linter from uv.lock, CPython 3.12 on Linux.
+# Only hashed manylinux/pure Python wheels for amd64 and arm64 are admitted; no source builds.
 cffi==2.1.0 \
     --hash=sha256:b6422532152adf4e59b110cb2808cee7a033800952f5c036b4af047ee43199e7 \
     --hash=sha256:1e9f50d192a3e525b15a75ab5114e442d83d657b7ec29182a991bc9a88fd3a66
@@ -12,3 +12,6 @@ cryptography==49.0.0 \
     --hash=sha256:cbc77da8c523d5abd028635ba850a6966fcee2c82e2bf65a41d1d8afe0f98be9
 pycparser==3.0 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+ruff==0.15.22 \
+    --hash=sha256:742a29cf29bddb7c8327895d6a10e0e6c5b38a96dd407af9b5d0857f809c0576 \
+    --hash=sha256:365523eb91d9224e1bcb03b022fbf0facb8f9e23792a2c53d9d4b3924bdbdebb
