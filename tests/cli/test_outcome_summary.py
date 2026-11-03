@@ -33,6 +33,7 @@ from enginery.domain.run import Run, RunState
 from enginery.domain.runner import LEGACY_RUNNER_SELECTION, RunnerSelection
 from enginery.domain.serialization import node_attempt_to_dict
 from enginery.domain.work_item import WorkItem, WorkItemState
+from enginery.engine.runtime import CoordinatorRuntime, FixtureDispatch, WorkflowNodeDispatch
 from enginery.evaluation.outcomes import OutcomeCaptureService
 from enginery.ledger.events import AppendCommand, EventWrite
 from enginery.ledger.service import LedgerService
@@ -847,3 +848,62 @@ def test_summary_does_not_infer_a_repair_from_an_additional_attempt_suffix(
     assert accounting["implementation_attempt_count"] == 3
     assert accounting["recorded_repair_count"] == 1
     assert "implement-2" in accounting["unclassified_implementation_attempt_ids"]
+
+
+def test_summary_accepts_real_review_resolution_without_counting_it_as_authority(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "ledger.db"
+    seed_summary_fixture(database, "incomplete")
+    request = _request(tmp_path)
+    with LedgerService.open(database) as ledger:
+        _node(ledger, "validate", "passed", generation=0)
+        runtime = CoordinatorRuntime(ledger, owner="review-fixture")
+        epoch = runtime.register_node(
+            dispatch=WorkflowNodeDispatch(
+                request=FixtureDispatch(
+                    run_id=_RUN,
+                    node_id="review",
+                    attempt_id="review-independent-0",
+                    repository_id=request.repository_id,
+                    repository_path=request.repository_path,
+                    workspace_path=request.workspace_path,
+                    base_revision=_BASE,
+                    command=("record-review",),
+                    expected_attempt_version=0,
+                    operation_id="independent-review",
+                    dependencies=((_RUN, "validate"),),
+                    workflow_definition_id=request.manifest.id.value,
+                ),
+                manifest=request.manifest,
+            ),
+            now=_NOW,
+            heartbeat_window=timedelta(minutes=1),
+        )
+        runtime.await_human_node(
+            run_id=_RUN,
+            node_id="review",
+            epoch=epoch.epoch,
+            now=_NOW,
+            reason="independent review required",
+        )
+        runtime.resolve_human_wait(
+            run_id=_RUN,
+            node_id="review",
+            epoch=epoch.epoch,
+            now=_NOW,
+            outcome="passed",
+            extra={"review_outcome": "approved", "reviewer": "reviewer", "producer": "worker"},
+        )
+    before = ledger_snapshot(database)
+
+    payload = _summary(database, capsys)
+
+    assert payload["accounting"]["native_completed_task_count"] == 0
+    assert any(
+        node["node_id"] == "review" and node["status"] == "passed"
+        for node in payload["lifecycle"]["nodes"]
+    )
+    assert payload["assistance"]["recorded_decision_count"] == 0
+    assert payload["assistance"]["total_human_effort"]["value"] is None
+    assert ledger_snapshot(database) == before

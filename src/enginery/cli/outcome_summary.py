@@ -257,7 +257,8 @@ def _assistance(ledger: LedgerService, run_id: RunId, history: list[_Event]) -> 
             continue
         action = event.state.get("decision_action", event.state.get("operator_decision"))
         if not isinstance(action, str):
-            raise _malformed(event.evidence(), "human decision is missing its action")
+            # Review findings use the same transition but grant no decision authority.
+            continue
         decisions.append(
             {
                 "decision_id": decision_id,
