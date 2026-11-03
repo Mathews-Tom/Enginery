@@ -28,7 +28,10 @@ from enginery.domain.ids import NodeId, RunId
 from enginery.engine.runtime import RUNTIME_NODE_AGGREGATE_TYPE, CoordinatorRuntime
 from enginery.engine.task_repository import intake_path_for
 from enginery.evidence.review_rendering import render_html, render_terminal
-from enginery.ledger.redaction import assert_no_raw_credentials, redact_credential_shaped_text
+from enginery.ledger.redaction import (
+    assert_mapping_has_no_raw_credentials,
+    redact_credential_shaped_text,
+)
 from enginery.ledger.service import LedgerService
 from enginery.workflows.review import ReviewFinding, ReviewReport
 from enginery.workflows.run_intent import Stage1RunRequest
@@ -307,8 +310,8 @@ def build_packet(project: Path, ledger: LedgerService, request: Stage1RunRequest
         protected_publication_digest=protected_digest,
         preimplementation_waits=early_waits if preimplementation else (),
     )
-    # No packet, even a display-only one, may leak credential-shaped worker text.
-    assert_no_raw_credentials(_json(packet.to_state()))
+    # Scan string leaves before JSON transport escaping can hide a quoted credential.
+    assert_mapping_has_no_raw_credentials(packet.to_state())
     return packet
 
 
