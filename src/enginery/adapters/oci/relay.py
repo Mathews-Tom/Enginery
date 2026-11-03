@@ -358,7 +358,11 @@ class RelayManager:
         unless ``recreate`` is set (recreate after the gateway token was regenerated, because a
         single-file bind mount follows the file's inode). Anything else is replaced.
         """
-        if not math.isfinite(wait_seconds) or wait_seconds < 0:
+        try:
+            finite = math.isfinite(wait_seconds)
+        except OverflowError:
+            finite = False
+        if not finite or wait_seconds < 0:
             raise InvalidInputError("--wait-seconds must be a finite non-negative number")
         _, host, _ = validate_upstream(upstream)
         token = check_token_file(token_file)

@@ -296,7 +296,18 @@ def _up(manager: RelayManager, token: Path, **kwargs: Any) -> RelayStatus:
     return manager.up(**{**options, **kwargs})
 
 
-@pytest.mark.parametrize("wait", [float("nan"), float("inf"), float("-inf"), -1, -0.5])
+@pytest.mark.parametrize(
+    "wait",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -1,
+        -0.5,
+        pytest.param(-(10**400), id="negative-int-overflow"),
+        pytest.param(10**400, id="positive-int-overflow"),
+    ],
+)
 def test_up_rejects_an_invalid_wait_before_any_effect(
     fake: FakeRelayDocker, tmp_path: Path, wait: float
 ) -> None:

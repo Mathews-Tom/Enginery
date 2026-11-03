@@ -2344,6 +2344,7 @@ your gateway's endpoint. Add `--recreate` to `relay up` when replacing an existi
   the relay's health answer. `N` must be a finite non-negative number: NaN,
   infinity and negative values exit `2` with a plain-text message on stderr,
   before the token file is inspected or any engine command runs.
+  Direct Python callers also receive `InvalidInputError` for integers outside the float range, before token inspection or engine effects.
 - **Hardening.** The relay container carries the worker profile's flags: no
   capabilities, `no-new-privileges`, a read-only root filesystem, tmpfs scratch,
   and small memory/CPU/pids limits. It publishes no port, mounts nothing but the
