@@ -9,6 +9,7 @@ for the current compatibility statement.
 ### Added
 
 - `enginery outcome summary --database PATH --run-id RUN` emits a read-only, evidence-backed JSON scorecard for one Stage 1 run. It separates native publication and completion from downstream outcomes, deduplicates resumed attempts, and reports recorded assistance and timing/cost/effective-control coverage without treating missing measurements or external human effort as zero. No new telemetry, schema migration or provider calls are introduced.
+- OMP implementation attempts now retain the token usage and cost components the harness reported on each finalized assistant message, for direct and supervised collection and for failed as well as successful attempts, inside the existing fenced attempt result (no schema migration). `enginery outcome summary` reports these per attempt under `measurements.usage` with the source artifact, message counts, counted artifact lines, `harness`/`worker` attribution and explicit coverage. Streaming snapshots and repeated collection do not inflate counts; earlier records and other harnesses remain unmeasured; malformed or out-of-range reports stay visible as `malformed` without failing collection, and retained line lists are bounded so untrusted output cannot inflate the ledger. The figures are harness claims: no currency, price, invoice verification or run total is derived. `measurements.usage.coverage` now counts `implementation_attempts`, `measured_attempts`, `complete_attempts`, `malformed_attempts` and `unmeasured_attempt_ids`.
 
 ### Fixed
 

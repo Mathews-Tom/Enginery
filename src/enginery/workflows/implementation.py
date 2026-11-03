@@ -88,6 +88,9 @@ class Stage1ImplementationExecutor:
         result_details: dict[str, object] = {"harness_status": result.terminal_status}
         if receipt is not None:
             result_details["execution_receipt"] = receipt.to_state()
+        if result.reported_usage is not None:
+            # Omitted when nothing was reported, so absence stays unknown rather than zero.
+            result_details["reported_usage"] = result.reported_usage.to_state()
         if not task.selection.legacy:
             result_details["execution_selection_digest"] = str(task.selection.digest)
         if hold is not None:

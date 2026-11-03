@@ -47,11 +47,20 @@ from enginery.application.work_ports import (
     HarnessTask,
 )
 from enginery.domain.artifact import RedactionClassification
+from enginery.domain.digests import Digest
 from enginery.domain.errors import CancellationError, InvalidInputError, WorkerFailureError
 from enginery.domain.execution_catalog import ExecutionCatalog, InstalledHost
-from enginery.domain.execution_receipt import ExecutionReceipt, RunnerReceiptRef
+from enginery.domain.execution_receipt import WORKER_REPORTED, ExecutionReceipt, RunnerReceiptRef
 from enginery.domain.ids import OperationId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.reported_usage import (
+    HARNESS_REPORTED,
+    MAX_REPORTED_VALUE,
+    ReportedUsage,
+    UsageCost,
+    UsageReportBuilder,
+    UsageTokens,
+)
 from enginery.domain.runner import (
     WORKER_HOME,
     WORKSPACE_MOUNT,
@@ -298,6 +307,9 @@ class OmpHarness:
                 self._commands[session.session_id],
                 observed_at_launch=self._launch_versions.get(session.session_id),
             ),
+            reported_usage=_reported_usage(
+                redacted, source_artifact=digest, reported_by=HARNESS_REPORTED
+            ),
         )
         collected = (events, result)
         self._collected[session.session_id] = collected
@@ -488,6 +500,13 @@ class OmpHarness:
                     observed_at_launch=observed_at_launch,
                     runner=runner_ref,
                 ),
+                # Usage is read for every terminal status: a failed attempt's finalized model
+                # calls were still made. Only the success path is held to the full protocol.
+                reported_usage=_reported_usage(
+                    result.output,
+                    source_artifact=digest,
+                    reported_by=HARNESS_REPORTED if self.runner is None else WORKER_REPORTED,
+                ),
             ),
         )
 
@@ -603,6 +622,75 @@ def _assistant_model(payload: dict[str, object]) -> str | None:
     if not provider.strip() or not model.strip():
         return None
     return f"{provider}/{model}"
+
+
+_OMP_USAGE_COMPONENTS = (
+    ("input", "input"),
+    ("output", "output"),
+    ("cache_read", "cacheRead"),
+    ("cache_write", "cacheWrite"),
+)
+"""Enginery component names and their omp ``Usage`` keys; ``total`` is listed per section."""
+
+
+def _reported_usage(
+    output: str, *, source_artifact: Digest, reported_by: str
+) -> ReportedUsage | None:
+    """Read the usage omp reported for each finalized assistant message in one artifact.
+
+    Only an assistant ``message_end`` is one finalized model call. Streaming
+    ``message_update`` snapshots and the ``turn_end``/``agent_end`` copies of the same
+    message would count it again; user and tool-result messages are not model calls. A line
+    that is not JSON (a failed process's diagnostics, a truncated final line, an unparseable
+    number or nesting) is counted as unparsed rather than read; the success path's strict
+    normalization already rejects one. Nothing a worker prints here can fail the collection.
+    """
+    builder = UsageReportBuilder()
+    for number, line in enumerate(output.splitlines(), start=1):
+        try:
+            payload = json.loads(line)
+        except (ValueError, RecursionError):
+            builder.add_unparsed()
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "message_end":
+            continue
+        message = payload.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if "usage" not in message:
+            builder.add_unreported(number)
+            continue
+        try:
+            tokens, cost = _omp_usage(message["usage"])
+        except InvalidInputError as error:
+            builder.add_malformed(number, str(error))
+            continue
+        builder.add_report(number, tokens, cost)
+    return builder.build(source_artifact=source_artifact, reported_by=reported_by)
+
+
+def _omp_usage(usage: object) -> tuple[UsageTokens, UsageCost]:
+    """Validate one omp ``Usage`` object exactly as reported; nothing is defaulted or coerced."""
+    if not isinstance(usage, dict):
+        raise InvalidInputError("usage must be an object")
+    cost = usage.get("cost")
+    if not isinstance(cost, dict):
+        raise InvalidInputError("usage.cost must be an object")
+    token_keys = {**dict(_OMP_USAGE_COMPONENTS), "total": "totalTokens"}
+    cost_keys = {**dict(_OMP_USAGE_COMPONENTS), "total": "total"}
+    missing = [f"usage.{key}" for key in token_keys.values() if key not in usage] + [
+        f"usage.cost.{key}" for key in cost_keys.values() if key not in cost
+    ]
+    if missing:
+        raise InvalidInputError(f"usage is missing {', '.join(missing)}")
+    return (
+        UsageTokens.from_state(
+            {name: usage[key] for name, key in token_keys.items()}, limit=MAX_REPORTED_VALUE
+        ),
+        UsageCost.from_state(
+            {name: cost[key] for name, key in cost_keys.items()}, limit=MAX_REPORTED_VALUE
+        ),
+    )
 
 
 __all__ = ["OmpAdapterConfig", "OmpHarness"]

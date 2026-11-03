@@ -15,6 +15,7 @@ from enginery.domain.execution_receipt import ExecutionReceipt
 from enginery.domain.execution_selection import ExecutionSelection
 from enginery.domain.ids import NodeAttemptId, NodeId, OperationId, RunId
 from enginery.domain.node_attempt import ReconciliationResult
+from enginery.domain.reported_usage import ReportedUsage
 from enginery.domain.work_item import WorkItem
 
 
@@ -187,16 +188,25 @@ class HarnessOutput:
 
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    """A terminal harness outcome with redacted artifact-backed evidence."""
+    """A terminal harness outcome with redacted artifact-backed evidence.
+
+    ``reported_usage`` is the harness's own usage claim, read from one of ``outputs``;
+    ``None`` means no usage was reported, never zero usage.
+    """
 
     session_id: str
     terminal_status: str
     outputs: tuple[HarnessOutput, ...]
     execution_receipt: ExecutionReceipt | None = None
+    reported_usage: ReportedUsage | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.terminal_status.strip():
             raise ValueError("harness result identity and terminal_status must be non-blank")
+        if self.reported_usage is not None and self.reported_usage.source_artifact not in {
+            output.digest for output in self.outputs
+        }:
+            raise ValueError("reported usage must cite one of the harness result's outputs")
 
 
 class HarnessPort(Protocol):
