@@ -17,6 +17,7 @@ commands = [
   "ruff check . .enginery/checks",
   "ruff format --check . .enginery/checks",
   "python3.12 .enginery/checks/operator_drain.py",
+  "python3.12 .enginery/checks/relay_wait.py",
 ]
 required_checks = ["gate (ubuntu-latest)", "gate (macos-latest)"]
 # One initial implementation plus at most one repair (CI or behavioural).
@@ -26,4 +27,5 @@ repair_limit = 1
 checks = [
   { name = "evidence-verify", observer = "command", argv = ["python3.12", ".enginery/checks/evidence_verify.py"], assertions = [{ kind = "stdout", equals = "PASS legacy\nPASS intact\nPASS missing\nPASS tampered\nPASS read-only\nevidence-verify: ok\n" }], fault_classes = ["constant_result"] },
   { name = "operator-drain", observer = "command", argv = ["python3.12", ".enginery/checks/operator_drain.py"], assertions = [{ kind = "stdout", equals = "PASS CLI numeric rejection and JSON without mutation\nPASS operation rejection without mutation\nPASS valid zero, positive and stop\noperator-drain: ok\n" }], fault_classes = ["constant_result"] },
+  { name = "relay-wait", observer = "command", argv = ["python3.12", ".enginery/checks/relay_wait.py"], assertions = [{ kind = "stdout", equals = "PASS CLI invalid waits before effects\nPASS manager invalid waits before effects\nPASS finite nonnegative waits reach engine admission\nrelay-wait: ok\n" }], fault_classes = ["constant_result"] },
 ]
