@@ -1052,6 +1052,8 @@ DEL and bidi controls. The HTML has a restrictive CSP with scripts and remote
 loads disabled. Worker HTML is never served as executable packet content.
 Packets and captures stay local; nothing is uploaded or shared.
 
+Credential-shaped literals are refused before packet rendering, including quoted assignments in unchanged diff context. The shared scanner distinguishes unquoted function calls such as `token = check_token_file(...)` from literal assignments; it does not exempt quoted values, later credentials on the same line, or recognized vendor-token prefixes. Packet string leaves are scanned before JSON transport escaping. A refusal remains `validation_failure` (12), without printing the credential value; it does not change the reviewed head, diff context, evidence digests or approval requirements.
+
 ### Authoritative GitHub evidence and optional display
 
 The active Stage 1 `evidence()` call collects GitHub API evidence through `gh`

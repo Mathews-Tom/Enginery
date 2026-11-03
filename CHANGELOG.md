@@ -10,6 +10,10 @@ for the current compatibility statement.
 
 - `enginery outcome summary --database PATH --run-id RUN` emits a read-only, evidence-backed JSON scorecard for one Stage 1 run. It separates native publication and completion from downstream outcomes, deduplicates resumed attempts, and reports recorded assistance and timing/cost/effective-control coverage without treating missing measurements or external human effort as zero. No new telemetry, schema migration or provider calls are introduced.
 
+### Fixed
+
+- Review packets no longer mistake an unquoted call such as `token = check_token_file(...)` in unchanged source context for a generic secret assignment. Quoted and unquoted credential-shaped literals and known token prefixes remain refused. Packet string leaves are scanned before JSON escaping so double-quoted credentials cannot bypass refusal; head/evidence bindings and terminal approval protections are unchanged.
+
 ## [0.9.0] - 2026-10-30
 
 ### Fixed

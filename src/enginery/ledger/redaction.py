@@ -33,7 +33,10 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "generic_secret_assignment",
         re.compile(
             r"(?i)\b(api[_-]?key|secret|password|token)\b\s*[:=]\s*"
-            r"['\"]?[A-Za-z0-9+/=_\-]{16,}['\"]?"
+            # Quoted literals remain credentials even when followed by a call.
+            # Reject an entire unquoted call name, not a backtracked prefix of it.
+            r"(?:['\"][A-Za-z0-9+/=_\-]{16,}['\"]?"
+            r"|(?!(?:[A-Za-z_][A-Za-z0-9_]*)[ \t]*\()[A-Za-z0-9+/=_\-]{16,})"
         ),
     ),
 )

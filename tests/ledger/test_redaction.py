@@ -21,6 +21,14 @@ from enginery.ledger.redaction import (
         "Authorization: Bearer abcdefghijklmnopqrstuvwx",
         'api_key = "sk-abcdefghijklmnopqrstuvwx"',
         "password: 'hunter2hunter2hunter2'",
+        "token=abcdefghijklmnop",
+        "token=abcdefghijklmnop-qrstuvwxyz()",
+        "token=1234567890123456()",
+        "token='abcdefghijklmnop'()",
+        'token="abcdefghijklmnop"()',
+        "token='abcdefghijklmnop",
+        'token="abcdefghijklmnop',
+        "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789()",
     ],
 )
 def test_credential_shaped_text_is_detected(text: str) -> None:
@@ -72,3 +80,26 @@ def test_findings_report_matched_pattern_names() -> None:
     names = {finding.pattern_name for finding in findings}
     assert "aws_access_key_id" in names
     assert "github_token" in names
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token = check_token_file('fixture')",
+        "token = a_very_long_credential_reader_name()",
+        "password: read_password_file \t('fixture')",
+    ],
+)
+def test_unquoted_call_names_are_preserved_instead_of_redacted(text: str) -> None:
+    assert scan_for_credentials(text) == ()
+    assert redact_credential_shaped_text(text) == text
+
+
+def test_call_exception_does_not_hide_later_credentials() -> None:
+    text = "token=check_token_file(); password='abcdefghijklmnopqrstuvwx'"
+    assert {finding.pattern_name for finding in scan_for_credentials(text)} == {
+        "generic_secret_assignment"
+    }
+    assert redact_credential_shaped_text(text) == (
+        "token=check_token_file(); [REDACTED:generic_secret_assignment]"
+    )
