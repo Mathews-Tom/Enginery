@@ -7,7 +7,7 @@ running real workflows.
 
 Commands shown here follow the shipped CLI definitions; examples use placeholders
 where operator-specific values are required. The current release line documented in
-[`README.md`](../README.md#status) is `v0.9.0` (published 2026-10-30). The Stage 1
+[`README.md`](../README.md#status) is `v0.10.0` (current release candidate). The Stage 1
 (issue-to-merge-ready-pull-request) and Stage 2 (plan to verified
 release) command surfaces are supported, documented features of this
 release; `engine status` remains the only Stage 2 CLI command (a
@@ -23,7 +23,7 @@ gate-deferred — see
 
 ## Installation
 
-The current published release is `v0.9.0` (2026-10-30). Releases `v0.1.0` through `v0.8.0` were also published to PyPI and GitHub Releases. Install the published package with:
+`v0.10.0` is the current release candidate. `v0.1.0`…`v0.9.0` (2026-10-30) are published on PyPI and GitHub Releases. Install the available published package with:
 
 ```bash
 pip install enginery
@@ -53,7 +53,7 @@ uv run enginery doctor
 
 ```text
 [ok] python_version: running Python 3.12.8; requires >= 3.12
-[ok] package_metadata: enginery 0.9.0 installed
+[ok] package_metadata: enginery 0.10.0 installed
 ```
 
 `enginery doctor --json` emits the same host report as a machine-readable
@@ -3309,7 +3309,7 @@ every required assertion ran and passed, `3` (hold) when `git` is missing.
 
 Releases `v0.1.0` through `v0.4.0`, `v0.5.0` (2026-08-11), `v0.6.0` (2026-10-13),
 `v0.7.0` (2026-10-20), `v0.8.0` (2026-10-27) and `v0.9.0` (2026-10-30) are published to
-PyPI and GitHub Releases; `v0.9.0` is the current release. Together the published releases
+PyPI and GitHub Releases; `v0.10.0` is the current release candidate. Together the published releases
 cover Stage 1 (issue to merge-ready pull request), Stage 2 (plan to verified
 release, second-harness neutrality, capability provenance), and Stage 3
 (incident to hotfix and rollback), plus the raw outcome-observation schema and
@@ -3325,7 +3325,7 @@ self-development of Enginery's own repository (the `enginery-checkout` worker en
 point), the standalone `scripts/enginery_runtime.py` upgrade/rollback launcher, bounded
 repairs driven by independent review findings before publication, and read-only
 `engine evidence --verify`. Its Python module paths were renamed by responsibility without
-aliases; CLI commands and persisted identifiers were unchanged. `v0.9.0` moves the run request and its codec to `enginery.workflows.run_intent` without aliases and makes `engine evidence --verify` reject malformed artifact-reference records and report unreadable read-only ledgers with a named error (see [`RELEASE_NOTES.md`](../RELEASE_NOTES.md)). Both harness tiers remain
+aliases; CLI commands and persisted identifiers were unchanged. `v0.9.0` moved the run request and its codec to `enginery.workflows.run_intent` without aliases and made `engine evidence --verify` reject malformed artifact-reference records and report unreadable read-only ledgers with a named error. `v0.10.0` adds a read-only outcome scorecard and per-attempt harness-reported usage, fixes review-packet credential false positives and invalid drain/relay waits, and runs offline factory validation gates (see [`RELEASE_NOTES.md`](../RELEASE_NOTES.md)). Both harness tiers remain
 experimental. Live qualification used a designated synthetic qualification repository:
 it proves factory mechanics, not usefulness on real projects or every platform/engine
 combination. G4 remains deferred.

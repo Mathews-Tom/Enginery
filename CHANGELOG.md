@@ -4,7 +4,7 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
-## [Unreleased]
+## [0.10.0] - 2026-11-04
 
 ### Added
 
@@ -13,7 +13,10 @@ for the current compatibility statement.
 
 ### Fixed
 
-- Review packets no longer mistake an unquoted call such as `token = check_token_file(...)` in unchanged source context for a generic secret assignment. Quoted and unquoted credential-shaped literals and known token prefixes remain refused. Packet string leaves are scanned before JSON escaping so double-quoted credentials cannot bypass refusal; head/evidence bindings and terminal approval protections are unchanged.
+- The shared credential-shaped detector no longer treats an unquoted call such as `token = check_token_file(...)` as a generic secret assignment. This fixes the review-packet refusal that blocked native publication, and it applies everywhere that detector redacts output or refuses ledger and artifact writes. Quoted and unquoted credential-shaped literals and known token prefixes remain refused. Packet string leaves are scanned before JSON escaping so double-quoted credentials cannot bypass refusal; head/evidence bindings and terminal approval protections are unchanged.
+- `enginery operator drain --wait-seconds` rejects non-finite (`nan`, `inf`, `--wait-seconds=-inf`) and negative durations with exit 2 and a JSON `invalid_input` error before pausing dispatch; previously `nan` and `inf` were accepted and paused dispatch. A space-separated `-inf` is refused by argument parsing, also with exit 2 (#252).
+- `enginery runner relay up --wait-seconds` rejects non-finite and negative waits before any engine call; zero and positive finite waits are unchanged (#255).
+- Enginery's factory runs execute offline Ruff lint and format checks and an operator-drain acceptance smoke instead of only `enginery-checkout engine --help`. The locked Ruff version is baked hash-pinned into the worker image, so its recipe digest changes: rebuild it with `enginery runner build-image` after upgrading; isolated runs bound to an older image are held as `runner_fingerprint_drift`. The drain observer is bound in the acceptance configuration, and failing checks are not skipped (#253).
 
 ## [0.9.0] - 2026-10-30
 
