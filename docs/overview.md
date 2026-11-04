@@ -1,6 +1,6 @@
 # Enginery System Overview
 
-- **Status:** `v0.10.0` is the current release candidate. `v0.1.0`…`v0.9.0` (2026-10-30) are published on PyPI and GitHub Releases. This candidate adds a read-only outcome scorecard and per-attempt harness-reported usage, fixes review-packet credential false positives and invalid drain/relay waits, and runs offline factory validation gates. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
+- **Status:** `v0.10.0` is the current published release (2026-11-04). Releases `v0.1.0` through `v0.9.0` were also published on PyPI and GitHub Releases. `v0.10.0` adds a read-only outcome scorecard and per-attempt harness-reported usage, fixes review-packet credential false positives and invalid drain/relay waits, and runs offline factory validation gates. Stages 1, 2, and 3 remain the workflow surface; Stage 4 is gate-deferred with no committed date.
 - **Date:** 2026-07-14 (original authoring date; the status line above reflects the current release)
 - **Audience:** Engineers, prospective collaborators, and engineering leaders
 

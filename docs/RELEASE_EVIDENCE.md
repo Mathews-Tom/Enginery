@@ -8,6 +8,48 @@ Consolidated into one file, newest first, replacing the previous
 per-version files — each version's own evidence is fully preserved
 below, not summarized away.
 
+## `v0.10.0`
+
+Post-publication evidence for the R10 release-preparation pass on 2026-11-04 (UTC), recorded in the same session from the retained receipts.
+
+### Release-prep PR stack
+
+| PR | Title | Merged commit |
+|---|---|---|
+| [#260](https://github.com/Mathews-Tom/Enginery/pull/260) | `test(release): smoke the installed outcome summary scorecard` | `7dcc16b06cfb91cd043db0d55b986fcce81d526b` |
+| [#259](https://github.com/Mathews-Tom/Enginery/pull/259) | `build(release): prepare v0.10.0` | `9252e50cb964726b045d2a9a17e04194558a3255` |
+
+Both PRs were squash-merged. After #260 landed, #259 was updated with `main` and re-passed CI on head `783085b6` before merging. Independent review of #259 found one Important issue (missing worker-image rebuild migration), fixed in `a271cdc7`; re-review found nothing to fix. CodeRabbit was neutral on both PRs because its free quota was rate limited. The owner selected "Advisory for the R10 release PRs"; this is advisory status, not a CodeRabbit pass.
+
+The release train carries OL1 (#256: `enginery outcome summary`), OL2 (#257: credential detector call-expression fix), OL3 (#258: harness-reported usage per attempt), #252 (drain wait validation), #253 (offline factory validation gates) and #255 (relay wait validation). The worker recipe digest changed in #253; operators must rebuild the worker image.
+
+In a clean detached worktree of the tagged commit, `uv run python scripts/release_gate.py --version 0.10.0` passed (docs currency, version consistency, `uv build`, `twine check` and a clean wheel install smoke). `uv run python scripts/full_system_gate.py --stages 1,2,3 --restart-between-stages` also passed (`stage1_runs=2 stage2_evidence=yes stage3_evidence=yes`, evidence digest `sha256:2fa1651eedc634821c066568aed2b1c039b0dd4487f8faf28fc982b8c91e9b27`). The `main` CI run [41765958143](https://github.com/Mathews-Tom/Enginery/actions/runs/41765958143) for that commit concluded `success` on Ubuntu and macOS. Before publication, the exact wheel and sdist passed `scripts/release_consumer_smoke.py` on macOS arm64 (Python 3.12.15) and in a Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), with 0 NOT RUN, including the new outcome summary checks and the reachable-engine runner status check.
+
+### Tag and artifacts
+
+Annotated tag `v0.10.0` (object `2cdca07470694856da5759b585f1c89b2046dccf`, created 2026-11-04T03:58:13Z) targets `9252e50cb964726b045d2a9a17e04194558a3255`.
+
+| Artifact | `sha256` |
+|---|---|
+| `enginery-0.10.0-py3-none-any.whl` | `27d453f8804562a020b27af92e377adc3112926efa9152d6acbd313276c9e9ad` |
+| `enginery-0.10.0.tar.gz` | `43fa265e91d942ff989ce226941b8232d190092ef756c7757106311f2431550c` |
+
+The same hashes are on the GitHub Release's uploaded assets and in PyPI's record of the uploaded files.
+
+The tagged README is the PyPI long description, so the published 0.10.0 metadata and the tagged tree still read "`v0.10.0` is the current release candidate". Status lines change to "published" only in this later documentation commit on `main`, because the tagged artifacts had to exist before publication could be recorded.
+
+### Publication and consumer verification
+
+- **PyPI:** <https://pypi.org/project/enginery/0.10.0/>. The wheel was uploaded at 2026-11-04T03:58:23Z and the sdist at 2026-11-04T03:58:25Z, using `twine` with the `[pypi]` entry of `~/.pypirc` (ambient environment credentials unset).
+- **GitHub Release:** <https://github.com/Mathews-Tom/Enginery/releases/tag/v0.10.0>, published 2026-11-04T03:58:34Z, with exactly the wheel and the sdist as uploaded assets. GitHub also lists its own generated source-code archives, which were not uploaded and are not covered by these hashes.
+- **Human approval:** the owner selected "Approve these hashes and publish" after exposure of the exact wheel and sdist `sha256` values and before the tag, PyPI upload and GitHub Release.
+
+`uv run python scripts/verify_published_release.py --confirm-published ...` passed (`PASS verify-published-release version=0.10.0 tag=v0.10.0`). `scripts/release_consumer_smoke.py --package enginery==0.10.0` passed on macOS arm64 (Python 3.12.15) and in the Lima Ubuntu 24.04.5 aarch64 VM (Python 3.12.15), with 0 NOT RUN, including the 20-assertion `installed-manual-path` workflow.
+
+### Not claimed
+
+No live pilot has exercised OL2's packet fix end to end or produced OL3 usage records. Usage is harness/worker-reported, not verified billing; no timing or coordination attribution is claimed. Both agent hosts remain `experimental`. Ubuntu consumer proof uses a Lima VM, not supported-host qualification. G4 remains fail-closed and Stage 4 self-improvement remains unimplemented with no committed date.
+
 ## `v0.9.0`
 
 Post-publication evidence for the M37b release-preparation pass on 2026-10-30 (UTC), recorded in the same session from the retained receipts.
