@@ -4,7 +4,7 @@ All notable changes to Enginery are documented in this file. Enginery does
 not yet claim `1.0` API/schema stability; see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 for the current compatibility statement.
 
-## [Unreleased]
+## [0.10.0] - 2026-11-04
 
 ### Added
 
@@ -14,6 +14,9 @@ for the current compatibility statement.
 ### Fixed
 
 - Review packets no longer mistake an unquoted call such as `token = check_token_file(...)` in unchanged source context for a generic secret assignment. Quoted and unquoted credential-shaped literals and known token prefixes remain refused. Packet string leaves are scanned before JSON escaping so double-quoted credentials cannot bypass refusal; head/evidence bindings and terminal approval protections are unchanged.
+- `enginery operator drain --wait-seconds` rejects non-finite (`nan`, `inf`, `-inf`) and negative durations with exit 2 and a JSON `invalid_input` error before pausing dispatch; previously `nan` and `inf` were accepted and paused dispatch (#252).
+- `enginery runner relay up --wait-seconds` rejects non-finite and negative waits before any engine call; zero and positive finite waits are unchanged (#255).
+- Enginery's factory runs execute offline Ruff lint and format checks and an operator-drain acceptance smoke instead of only `enginery-checkout engine --help`. The locked Ruff version is baked hash-pinned into the runner image; the drain observer is bound in the acceptance configuration, and failing checks are not skipped (#253).
 
 ## [0.9.0] - 2026-10-30
 
