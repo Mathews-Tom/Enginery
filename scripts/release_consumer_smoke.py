@@ -6,7 +6,9 @@ requirement -- into a fresh virtual environment, then drives the installed
 `enginery` entry point through the consumer surface a new release must keep
 working: the reported version, `doctor`, the G4 and engine request commands'
 help, read-only evidence verification (a missing database exits 3 and creates nothing; a ledger
-in an unwritable directory exits 3 with a named error, not a traceback),
+in an unwritable directory exits 3 with a named error, not a traceback), the read-only run
+scorecard (`outcome summary` refuses a missing database with exit 3 and creates nothing, and names
+an unknown run with exit 2 without changing the ledger),
 execution-selection pinning (an unsupported pin and a contradictory strict
 requirement are rejected with exit code 2 and write nothing; valid pins write a
 request whose execution selection is bound to the packaged catalog), the packaged
@@ -598,6 +600,67 @@ def _check_evidence_verify_unwritable_ledger(executable: Path, *, root: Path) ->
     return []
 
 
+def _ledger_contents(database: Path) -> tuple[str, ...]:
+    with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        return tuple(connection.iterdump())
+
+
+def _check_outcome_summary(executable: Path, python: Path, *, root: Path) -> None:
+    """The read-only run scorecard: refuses a missing ledger and names an unknown run."""
+    help_command = [str(executable), "outcome", "summary", "--help"]
+    result = _require_success(help_command, cwd=root)
+    if "--database" not in result.stdout or "--run-id" not in result.stdout:
+        raise ConsumerSmokeError("`outcome summary --help` does not list --database and --run-id")
+    _note("outcome summary --help lists --database and --run-id")
+
+    database = root / "missing-summary" / "ledger.db"
+    command = [str(executable), "outcome", "summary", "--database", str(database)]
+    command += ["--run-id", "absent-run"]
+    result = _run(command, cwd=root)
+    if result.returncode != 3:
+        raise ConsumerSmokeError(
+            f"missing summary database did not exit 3 (missing prerequisite)\n"
+            f"{_describe(command, result)}"
+        )
+    if database.exists() or database.parent.exists():
+        raise ConsumerSmokeError(
+            f"outcome summary created the missing database or its parent: {database}"
+        )
+    _note("outcome summary exits 3 for a missing database without creating it or its parent")
+
+    ledger = root / "summary-ledger" / "ledger.db"
+    shutil.rmtree(ledger.parent, ignore_errors=True)  # re-runnable in the same root
+    ledger.parent.mkdir()
+    _require_success(
+        [
+            str(python),
+            "-c",
+            "import sys\nfrom pathlib import Path\n"
+            "from enginery.ledger.service import LedgerService\n"
+            "LedgerService.open(Path(sys.argv[1])).close()\n",
+            str(ledger),
+        ],
+        cwd=root,
+    )
+    before = _ledger_contents(ledger)
+    command = [str(executable), "outcome", "summary", "--database", str(ledger)]
+    command += ["--run-id", "absent-run"]
+    result = _run(command, cwd=root)
+    if (
+        result.returncode != 2
+        or result.stdout
+        or "absent-run" not in result.stderr
+        or "Traceback" in result.stderr
+    ):
+        raise ConsumerSmokeError(
+            f"outcome summary did not refuse an unknown run with a named exit-2 error\n"
+            f"{_describe(command, result)}"
+        )
+    if _ledger_contents(ledger) != before:
+        raise ConsumerSmokeError("outcome summary changed the ledger it inspected")
+    _note("outcome summary names an unknown run with exit 2 and leaves the ledger unchanged")
+
+
 _RECIPE_PROGRAM = (
     "import json\n"
     "from importlib import resources\n"
@@ -992,6 +1055,7 @@ def exercise_surface(
     _check_consolidated_surface(executable, python, root=root)
     _check_evidence_verify(executable, root=root)
     unwritable_not_run = _check_evidence_verify_unwritable_ledger(executable, root=root)
+    _check_outcome_summary(executable, python, root=root)
     _check_rejected_pins(executable, root=root)
     packaged = _check_packaged_data(python, root=root)
     _check_valid_pins(executable, root=root, packaged=packaged)
