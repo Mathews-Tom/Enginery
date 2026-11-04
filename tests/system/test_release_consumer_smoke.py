@@ -105,6 +105,9 @@ def test_real_editable_surface_is_not_installed_workflow_proof(
             if os.geteuid() != 0
             else []
         ),
+        "outcome summary --help lists --database and --run-id",
+        "outcome summary exits 3 for a missing database without creating it or its parent",
+        "outcome summary names an unknown run with exit 2 and leaves the ledger unchanged",
         "unsupported pins exit 2",
         "packaged execution catalog",
         "valid pins write requests",
@@ -394,6 +397,66 @@ def test_a_g4_status_that_passes_fails_the_fail_closed_check(tmp_path: Path) -> 
     launcher = _launcher(tmp_path, 'echo \'{"overall": "pass"}\'; exit 0')
     with pytest.raises(ConsumerSmokeError, match="G4 did not remain fail-closed"):
         release_consumer_smoke._check_g4_fail_closed(launcher, root=tmp_path)
+
+
+def test_real_outcome_summary_refuses_missing_ledgers_and_unknown_runs(tmp_path: Path) -> None:
+    release_consumer_smoke._check_outcome_summary(_EXECUTABLE, Path(sys.executable), root=tmp_path)
+    assert not (tmp_path / "missing-summary").exists()
+
+
+def _summary_launcher(tmp_path: Path, *, missing: str, unknown: str) -> Path:
+    """A stand-in whose help is correct; the two refusal cases are scripted per mutant."""
+    return _launcher(
+        tmp_path,
+        'case "$*" in *--help*) echo "usage: --database DB --run-id RUN"; exit 0;; esac\n'
+        f'case "$*" in *missing-summary*) {missing};; esac\n'
+        f"{unknown}",
+    )
+
+
+def test_outcome_summary_help_without_run_id_is_rejected(tmp_path: Path) -> None:
+    launcher = _launcher(tmp_path, 'echo "usage: outcome summary --database DB"; exit 0')
+    with pytest.raises(ConsumerSmokeError, match="does not list --database and --run-id"):
+        release_consumer_smoke._check_outcome_summary(launcher, Path(sys.executable), root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("missing", "match"),
+    [
+        ("exit 2", "did not exit 3"),
+        ('mkdir -p "$(dirname "$4")"; exit 3', "created the missing database"),
+    ],
+    ids=["wrong-exit", "creates-parent"],
+)
+def test_a_summary_that_mishandles_a_missing_database_is_rejected(
+    tmp_path: Path, missing: str, match: str
+) -> None:
+    launcher = _summary_launcher(tmp_path, missing=missing, unknown="exit 2")
+    with pytest.raises(ConsumerSmokeError, match=match):
+        release_consumer_smoke._check_outcome_summary(launcher, Path(sys.executable), root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("unknown", "match"),
+    [
+        ("echo '{}'; exit 0", "named exit-2 error"),
+        ("echo unrelated >&2; exit 2", "named exit-2 error"),
+        ("echo 'Traceback: absent-run' >&2; exit 2", "named exit-2 error"),
+        (
+            f'{sys.executable} -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); '
+            'c.execute(\'create table written(x)\'); c.commit()" "$4"\n'
+            "echo absent-run >&2; exit 2",
+            "changed the ledger",
+        ),
+    ],
+    ids=["success", "unnamed", "traceback", "mutates-ledger"],
+)
+def test_a_summary_that_mishandles_an_unknown_run_is_rejected(
+    tmp_path: Path, unknown: str, match: str
+) -> None:
+    launcher = _summary_launcher(tmp_path, missing="exit 3", unknown=unknown)
+    with pytest.raises(ConsumerSmokeError, match=match):
+        release_consumer_smoke._check_outcome_summary(launcher, Path(sys.executable), root=tmp_path)
 
 
 def test_real_evidence_verification_does_not_create_a_missing_database(tmp_path: Path) -> None:
