@@ -2,7 +2,9 @@
 
 ## Breaking changes and migration
 
-None. No CLI commands/options or Python import paths are removed or renamed relative to `v0.9.0`. Invalid non-finite drain/relay waits are now refused as described below; zero and positive finite waits retain their behavior. Existing runs need no schema migration or rebuild for these additions. Enginery does not promise `1.0` API/schema stability.
+No CLI commands/options or Python import paths are removed or renamed relative to `v0.9.0`, and no schema migration is needed. Invalid non-finite drain/relay waits are now refused as described below; zero and positive finite waits retain their behavior. Enginery does not promise `1.0` API/schema stability.
+
+**Rebuild the isolated worker image.** The worker recipe now includes the locked Ruff for offline validation (see below), so its recipe digest changes. After upgrading, a worker image built by `v0.9.0` or earlier is stale: run `enginery runner build-image`, qualify it, and bind new isolated runs to the new image. An isolated run already bound to an older image is held as `runner_fingerprint_drift` rather than launched on a different image. The relay image recipe is unchanged.
 
 ## What's new
 
@@ -13,9 +15,9 @@ None. No CLI commands/options or Python import paths are removed or renamed rela
 
 ### Fixed
 
-- Review packets no longer mistake an unquoted call such as `token = check_token_file(...)` in unchanged source context for a generic secret assignment. Credential-shaped literals and known token prefixes remain refused; scanning string leaves before JSON escaping also prevents quoted credentials from bypassing refusal. Head/evidence bindings and terminal approval protections are unchanged.
-- `enginery operator drain --wait-seconds` rejects non-finite (`nan`, `inf`, `-inf`) and negative durations with exit 2 and a JSON `invalid_input` error before pausing dispatch. Previously `nan` and `inf` were accepted and paused dispatch. `enginery runner relay up --wait-seconds` likewise rejects non-finite and negative waits before any engine call; zero and positive finite waits are unchanged.
-- Enginery's factory validation runs offline Ruff lint and format checks and an operator-drain acceptance smoke instead of only `enginery-checkout engine --help`. The locked Ruff version is baked hash-pinned into the runner image. The drain observer is bound in the acceptance configuration; failed checks are not skipped.
+- The shared credential-shaped detector no longer treats an unquoted call such as `token = check_token_file(...)` as a generic secret assignment. This fixes the review-packet refusal that blocked native publication. The same narrowing applies everywhere that detector redacts output or refuses ledger and artifact writes. Quoted and unquoted credential-shaped literals and known token prefixes remain redacted and refused. Packet string leaves are scanned before JSON escaping, so double-quoted credentials cannot bypass refusal. Head/evidence bindings and terminal approval protections are unchanged.
+- `enginery operator drain --wait-seconds` rejects non-finite (`nan`, `inf`, and `-inf` written as `--wait-seconds=-inf`) and negative durations with exit 2 and a JSON `invalid_input` error before pausing dispatch. Previously `nan` and `inf` were accepted and paused dispatch. A space-separated `--wait-seconds -inf` is parsed as an option and refused by argument parsing, also with exit 2. `enginery runner relay up --wait-seconds` likewise rejects non-finite and negative waits before any engine call; zero and positive finite waits are unchanged.
+- Enginery's factory validation runs offline Ruff lint and format checks and an operator-drain acceptance smoke instead of only `enginery-checkout engine --help`. The locked Ruff version is baked hash-pinned into the worker image, which therefore needs a rebuild (see above). The drain observer is bound in the acceptance configuration; failed checks are not skipped.
 
 ## Explicitly not shipped
 
@@ -26,7 +28,7 @@ None. No CLI commands/options or Python import paths are removed or renamed rela
 - No new workflow stage, G4 passage or Stage 4 implementation. Stage 4/G4 remains deferred/fail-closed with **no committed date**.
 - No hosted or multi-tenant service, organization RBAC, browser dashboard, interactive TUI, scheduled collection or unattended publication authority. Merge, release and deployment remain separate decisions.
 - No claim that synthetic qualification proves usefulness on real projects, or that all platform/engine combinations are qualified. Both harness tiers remain experimental; effective effort remains unknown. Trusted-local execution is not hostile-code containment.
-- No dependency changes since `v0.9.0`. Runtime, optional-extra and development dependency requirements and lock resolutions are unchanged; the isolated runner image now includes the already-locked Ruff for offline validation.
+- No dependency changes since `v0.9.0`. Runtime, optional-extra and development dependency requirements and lock resolutions are unchanged; the isolated worker image now includes the already-locked Ruff for offline validation, which changes its recipe digest.
 
 ## Compatibility and installation
 
