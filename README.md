@@ -10,7 +10,7 @@ software outcomes, and improve the system that produces them.
 
 ## Status
 
-`v0.10.0` is the current release candidate. `v0.1.0`…`v0.9.0` (2026-10-30) are published on PyPI and GitHub Releases. This candidate adds a read-only outcome scorecard and per-attempt harness-reported usage, fixes review-packet credential false positives and invalid drain/relay waits, and runs offline factory validation gates. Enginery ships three of its four planned
+`v0.10.0` is the current published release (2026-11-04); `v0.1.0`…`v0.9.0` are also published on PyPI and GitHub Releases. `v0.10.0` adds a read-only outcome scorecard and per-attempt harness-reported usage, fixes review-packet credential false positives and invalid drain/relay waits, and runs offline factory validation gates. Enginery ships three of its four planned
 workflow stages: a coordinator-owned issue-to-merge-ready-pull-request
 workflow (Stage 1, proven against a real GitHub repository and a real
 OMP/Claude Code coding-agent harness), a dependency-ordered
